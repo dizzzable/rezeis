@@ -1,5 +1,7 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import {
+  AddOnEntitlementState,
+  AddOnType,
   ArchivedPlanRenewMode,
   Currency,
   PaymentGatewayType,
@@ -10,12 +12,11 @@ import {
   Subscription,
   SubscriptionEffectiveProjection,
   SubscriptionStatus,
-  SubscriptionTermStatus,
   User,
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
-import { resolveAddOnRolloutFlags } from '../../add-on-entitlements/add-on-rollout.config';
+import { GIB_BYTES } from '../../add-on-entitlements/domain/cutover-baseline';
 import { recordedAddOnContributionOf } from '../../add-on-entitlements/services/configured-baseline.util';
 import { PlanCatalogService } from '../../plans/services/plan-catalog.service';
 import { PricingService } from '../../plans/services/pricing.service';
@@ -28,6 +29,7 @@ import { SubscriptionActionPolicyDto } from '../dto/subscription-action-policy.d
 import { SubscriptionQuoteAction, SubscriptionQuoteDto } from '../dto/subscription-quote.dto';
 import {
   SubscriptionActionPolicyInterface,
+  SubscriptionQuoteActiveAddOnInterface,
   SubscriptionQuoteCarriedLimitsInterface,
   SubscriptionQuoteDurationInterface,
   SubscriptionQuoteInterface,
@@ -39,7 +41,16 @@ import {
   pickBestDiscount,
   type PendingDiscountGrant,
 } from '../../../common/utils/pending-discount.util';
-import { resolvePlanChangeLimitCarry } from './plan-inherited-limits.util';
+import {
+  readPaidRemainderCandidates,
+  resolvePaidRemainderConversion,
+} from './paid-remainder-conversion.util';
+import {
+  resolvePlanChangeLimitCarry,
+  withRecordedDevices,
+  withRecordedTraffic,
+  type PlanChangeLimitCarry,
+} from './plan-inherited-limits.util';
 import { countCommittedTrialClaimUnits, findResumablePaidTrialClaim } from './trial-claim-ledger.util';
 
 type UserRecord = Pick<User, 'id' | 'maxSubscriptions' | 'purchaseDiscount' | 'personalDiscount'> & {
@@ -61,7 +72,16 @@ type UserRecord = Pick<User, 'id' | 'maxSubscriptions' | 'purchaseDiscount' | 'p
 };
 type SubscriptionRecord = Pick<
   Subscription,
-  'id' | 'userId' | 'status' | 'isTrial' | 'planSnapshot' | 'createdAt' | 'trafficLimit' | 'deviceLimit'
+  | 'id'
+  | 'userId'
+  | 'status'
+  | 'isTrial'
+  | 'planSnapshot'
+  | 'createdAt'
+  | 'trafficLimit'
+  | 'deviceLimit'
+  | 'expiresAt'
+  | 'startedAt'
 > & {
   /**
    * The add-on share the last projection recompute recorded, read beside the
@@ -241,6 +261,8 @@ export const TRANSITION_TARGET_WHERE = {
 
 @Injectable()
 export class SubscriptionQuoteService {
+  private readonly logger = new Logger(SubscriptionQuoteService.name);
+
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly planCatalogService: PlanCatalogService,
@@ -431,12 +453,34 @@ export class SubscriptionQuoteService {
     ) {
       quoteWarnings.push(GATEWAY_NOT_AVAILABLE);
     }
-    const carriedAbovePlan =
+    const upgradeCarry =
       input.purchaseType === PurchaseType.UPGRADE &&
       selectedPlan !== null &&
       context.sourceSubscription !== null
-        ? await this.resolveCarriedAbovePlan(context.sourceSubscription, selectedPlan)
+        ? { source: context.sourceSubscription, plan: selectedPlan }
         : null;
+    const carry =
+      upgradeCarry === null ? null : resolveUpgradeLimitCarry(upgradeCarry.source, upgradeCarry.plan);
+    const carriedAbovePlan =
+      upgradeCarry === null || carry === null ? null : describeCarriedAbovePlan(upgradeCarry.source, carry);
+    const paidRemainderDays =
+      upgradeCarry === null
+        ? null
+        : await this.estimatePaidRemainderDays(
+            upgradeCarry.source,
+            upgradeCarry.plan,
+            selectedDuration?.days ?? null,
+          );
+    const activeAddOns =
+      upgradeCarry === null || carry === null
+        ? null
+        : await this.resolveActiveAddOns({
+            source: upgradeCarry.source,
+            plan: upgradeCarry.plan,
+            carry,
+            durationDays: selectedDuration?.days ?? null,
+            paidRemainderDays,
+          });
     return {
       userId,
       purchaseType: input.purchaseType,
@@ -453,56 +497,117 @@ export class SubscriptionQuoteService {
       price,
       warnings: dedupeWarnings(quoteWarnings),
       carriedAbovePlan,
+      paidRemainderDays,
+      activeAddOns,
     };
   }
 
   /**
-   * What an UPGRADE onto `plan` keeps above it, told before the customer pays
-   * — computed by the SAME rule the fulfilment writes with
-   * (`resolvePlanChangeLimitCarry`), from the same three inputs: the columns,
-   * the stored snapshot and the recorded add-on share.
+   * How many whole days the old plan's paid remainder would add to an UPGRADE
+   * onto `plan` if it were paid now — by the function fulfilment converts with
+   * (`paid-remainder-conversion.util.ts`), over the same payments, so the two
+   * cannot disagree about the rule. They differ only in `now`: fulfilment
+   * counts again at payment, when a little less may be left.
    *
-   * It is data BESIDE the warnings rather than an informational warning code:
-   * the cabinet's BFF flattens an unpriced quote to its FIRST warning code, and
-   * a code no client knows yet would read there as the reason the upgrade
-   * cannot be bought. Beside them it cannot reach `isEligible` at all.
-   *
-   * `null` when nothing carries — and whenever a durable term backs the
-   * subscription. There the add-ons stay on their own entitlements until their
-   * own end dates, and an operator's value is kept as it stands rather than
-   * carried; neither is "kept on the new plan" in the sense this line promises,
-   * so it promises nothing.
+   * It describes the purchase and never decides it: data beside the warnings,
+   * like `carriedAbovePlan`, and a failure to work it out is `null` — the
+   * review then says what it always said — never a quote that fails.
    */
-  private async resolveCarriedAbovePlan(
+  private async estimatePaidRemainderDays(
     source: SubscriptionRecord,
     plan: PlanRecord,
-  ): Promise<SubscriptionQuoteCarriedLimitsInterface | null> {
-    if (resolveAddOnRolloutFlags().entitlementShadow) {
-      const activeTerm = await this.prismaService.subscriptionTerm.findFirst({
-        where: { subscriptionId: source.id, status: SubscriptionTermStatus.ACTIVE },
-        select: { id: true },
+    durationDays: number | null,
+  ): Promise<number | null> {
+    try {
+      const conversion = resolvePaidRemainderConversion({
+        now: new Date(),
+        subscription: {
+          id: source.id,
+          status: source.status,
+          expiresAt: source.expiresAt,
+          startedAt: source.startedAt,
+        },
+        candidates: await readPaidRemainderCandidates(this.prismaService, source.id),
+        targetPlanDurations: plan.durations,
+        purchasedDurationDays: durationDays,
       });
-      if (activeTerm !== null) return null;
+      return conversion.days;
+    } catch (error: unknown) {
+      this.logger.warn(
+        `Paid remainder estimate failed for subscription ${source.id} onto plan ${plan.id}: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
     }
-    const { carried } = resolvePlanChangeLimitCarry({
-      current: { trafficLimit: source.trafficLimit, deviceLimit: source.deviceLimit },
-      planSnapshot: source.planSnapshot,
-      plan: { trafficLimit: plan.trafficLimit, deviceLimit: plan.deviceLimit },
-      recorded: recordedAddOnContributionOf(source.effectiveProjection),
-    });
-    const carriesAnything =
-      carried.deviceLimit > 0 ||
-      carried.trafficLimitGb > 0 ||
-      carried.unlimitedDevices ||
-      carried.unlimitedTraffic;
-    return carriesAnything
-      ? {
-          deviceLimit: carried.deviceLimit,
-          trafficLimitGb: carried.trafficLimitGb,
-          unlimitedDevices: carried.unlimitedDevices,
-          unlimitedTraffic: carried.unlimitedTraffic,
-        }
-      : null;
+  }
+
+  /**
+   * The live durable add-ons an UPGRADE onto `plan` keeps, each with the end it
+   * will have: its own date, never later than the subscription's new end —
+   * the rule fulfilment applies (`PaymentSubscriptionMutationService`,
+   * `carryLiveAddOnsAcrossUpgradeInTransaction`; owner, 24.09.2026).
+   *
+   * The new end is ESTIMATED as fulfilment will compute it — the chosen
+   * duration plus the paid remainder's days — from now; fulfilment counts both
+   * again at payment. With no remainder estimate it is taken as 0, which can
+   * only put a clamp EARLIER than the real one: the review never promises a
+   * later date than the customer gets.
+   *
+   * An add-on the new plan makes meaningless is left out: one on a resource the
+   * plan leaves unlimited, or one an operator's unlimited setting absorbs (the
+   * carry keeps that setting). The panel would add nothing with it.
+   *
+   * Data beside the warnings, like `carriedAbovePlan`: `null` when there is
+   * nothing to list, and when it could not be read — logged, never a quote
+   * that fails.
+   */
+  private async resolveActiveAddOns(input: {
+    readonly source: SubscriptionRecord;
+    readonly plan: PlanRecord;
+    readonly carry: PlanChangeLimitCarry;
+    readonly durationDays: number | null;
+    readonly paidRemainderDays: number | null;
+  }): Promise<readonly SubscriptionQuoteActiveAddOnInterface[] | null> {
+    if (input.durationDays === null) return null;
+    try {
+      const rows = await this.prismaService.addOnEntitlement.findMany({
+        where: {
+          subscriptionId: input.source.id,
+          state: AddOnEntitlementState.ACTIVE,
+          type: { in: [AddOnType.EXTRA_TRAFFIC, AddOnType.EXTRA_DEVICES] },
+        },
+        orderBy: [{ expiresAt: 'asc' }, { id: 'asc' }],
+        select: { type: true, totalValue: true, expiresAt: true },
+      });
+      const newEnd =
+        input.durationDays <= 0 ? null : addUtcDays(new Date(), input.durationDays + (input.paidRemainderDays ?? 0));
+      const trafficAbsorbed = input.plan.trafficLimit === null || input.carry.carried.unlimitedTraffic;
+      const devicesAbsorbed = input.plan.deviceLimit <= 0 || input.carry.carried.unlimitedDevices;
+      const kept = rows.flatMap((row): SubscriptionQuoteActiveAddOnInterface[] => {
+        const isTraffic = row.type === AddOnType.EXTRA_TRAFFIC;
+        if (isTraffic ? trafficAbsorbed : devicesAbsorbed) return [];
+        const end =
+          newEnd === null
+            ? row.expiresAt
+            : row.expiresAt === null || row.expiresAt.getTime() > newEnd.getTime()
+              ? newEnd
+              : row.expiresAt;
+        return [
+          {
+            type: isTraffic ? 'EXTRA_TRAFFIC' : 'EXTRA_DEVICES',
+            value: isTraffic ? Number(row.totalValue / GIB_BYTES) : Number(row.totalValue),
+            expiresAt: end === null ? null : end.toISOString(),
+          },
+        ];
+      });
+      return kept.length === 0 ? null : kept;
+    } catch (error: unknown) {
+      this.logger.warn(
+        `Active add-ons could not be read for the upgrade quote of subscription ${input.source.id}: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
+    }
   }
 
   private async buildContext(input: {
@@ -556,6 +661,8 @@ export class SubscriptionQuoteService {
         createdAt: true,
         trafficLimit: true,
         deviceLimit: true,
+        expiresAt: true,
+        startedAt: true,
         effectiveProjection: {
           select: { activeTrafficContributionBytes: true, activeDeviceContribution: true },
         },
@@ -1082,4 +1189,66 @@ function readJsonRecord(value: unknown): Record<string, unknown> {
     return value as Record<string, unknown>;
   }
   return {};
+}
+
+/**
+ * What an UPGRADE onto `plan` writes into the two limit columns — the SAME
+ * rule fulfilment writes with (`resolvePlanChangeLimitCarry`), from the same
+ * three inputs: the columns, the stored snapshot and the recorded add-on share.
+ * Fulfilment carries it on BOTH paths since the durable one writes the carry
+ * before its recompute, so the quote no longer answers differently under a
+ * durable term.
+ */
+function resolveUpgradeLimitCarry(source: SubscriptionRecord, plan: PlanRecord): PlanChangeLimitCarry {
+  return resolvePlanChangeLimitCarry({
+    current: { trafficLimit: source.trafficLimit, deviceLimit: source.deviceLimit },
+    planSnapshot: source.planSnapshot,
+    plan: { trafficLimit: plan.trafficLimit, deviceLimit: plan.deviceLimit },
+    recorded: recordedAddOnContributionOf(source.effectiveProjection),
+  });
+}
+
+/**
+ * What an UPGRADE keeps above the OLD PLAN, told before the customer pays:
+ * an operator's raise, a bonus, an add-on bought before the durable model
+ * (grandfathered into the term's base). `null` when nothing carries.
+ *
+ * WITHOUT THE LIVE DURABLE ADD-ONS. The carry adds their recorded share back
+ * onto the columns (they mirror `desired`), but those add-ons keep their own
+ * end dates and are listed on their own (`activeAddOns`); counted here too,
+ * the review would name every one of them twice. The share is taken off
+ * exactly as `withRecordedTraffic` / `withRecordedDevices` put it on.
+ *
+ * It is data BESIDE the warnings rather than an informational warning code:
+ * the cabinet's BFF flattens an unpriced quote to its FIRST warning code, and a
+ * code no client knows yet would read there as the reason the upgrade cannot
+ * be bought. Beside them it cannot reach `isEligible` at all.
+ */
+function describeCarriedAbovePlan(
+  source: SubscriptionRecord,
+  carry: PlanChangeLimitCarry,
+): SubscriptionQuoteCarriedLimitsInterface | null {
+  const recorded = recordedAddOnContributionOf(source.effectiveProjection);
+  const recordedGb = withRecordedTraffic(0, recorded.activeTrafficContributionBytes) ?? 0;
+  const recordedDevices = withRecordedDevices(1, recorded.activeDeviceContribution) - 1;
+  const { carried } = carry;
+  const trafficLimitGb = carried.trafficLimitGb > 0 ? Math.max(0, carried.trafficLimitGb - recordedGb) : 0;
+  const deviceLimit = carried.deviceLimit > 0 ? Math.max(0, carried.deviceLimit - recordedDevices) : 0;
+  const carriesAnything =
+    deviceLimit > 0 || trafficLimitGb > 0 || carried.unlimitedDevices || carried.unlimitedTraffic;
+  return carriesAnything
+    ? {
+        deviceLimit,
+        trafficLimitGb,
+        unlimitedDevices: carried.unlimitedDevices,
+        unlimitedTraffic: carried.unlimitedTraffic,
+      }
+    : null;
+}
+
+/** `from` plus whole days, on the UTC calendar — as fulfilment's `calculateExpiry` counts them. */
+function addUtcDays(from: Date, days: number): Date {
+  const at = new Date(from);
+  at.setUTCDate(at.getUTCDate() + days);
+  return at;
 }

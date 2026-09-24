@@ -274,10 +274,12 @@ describe('SubscriptionQuoteService', () => {
       );
     });
 
-    it('reads the recorded add-on share as the fulfilment does, not the column’s raw excess', async () => {
-      // A base cut below the plan with live add-ons on top: only the add-ons
-      // carry. Read without the recorded share, the column's raw excess —
-      // 26 GB and 1 device — would be announced instead of what was paid for.
+    it('reads the recorded add-on share as the fulfilment does — and tells those add-ons apart, not twice', async () => {
+      // A base cut below the plan with live add-ons on top. Read without the
+      // recorded share, the column's raw excess — 26 GB and 1 device — would be
+      // announced. With it, nothing sits above the OLD plan (a cut does not
+      // carry), and the live add-ons are listed with their own end dates
+      // instead of being named a second time in this line.
       const service = createService({
         user: createUser({ maxSubscriptions: 1 }),
         subscriptions: [
@@ -291,14 +293,48 @@ describe('SubscriptionQuoteService', () => {
           },
         ],
         plans: PLANS,
+        activeAddOns: [
+          { type: 'EXTRA_TRAFFIC', totalValue: 50n * 1024n * 1024n * 1024n, expiresAt: new Date(Date.now() + 10 * 86_400_000) },
+          { type: 'EXTRA_DEVICES', totalValue: 2n, expiresAt: new Date(Date.now() + 12 * 86_400_000) },
+        ],
       });
 
-      assert.deepStrictEqual((await quote(service)).carriedAbovePlan, {
-        deviceLimit: 2,
-        trafficLimitGb: 50,
+      const actualQuote = await quote(service);
+
+      assert.equal(actualQuote.carriedAbovePlan, null);
+      assert.deepStrictEqual(
+        actualQuote.activeAddOns?.map((addOn) => [addOn.type, addOn.value]),
+        [
+          ['EXTRA_TRAFFIC', 50],
+          ['EXTRA_DEVICES', 2],
+        ],
+      );
+    });
+
+    it('keeps an above-plan raise and a live add-on apart: each told once', async () => {
+      // 1 device above the old plan (an operator's raise) under a live +2.
+      const service = createService({
+        user: createUser({ maxSubscriptions: 1 }),
+        subscriptions: [
+          {
+            ...holderOfExtras({ trafficLimit: 1024, deviceLimit: 6 }),
+            planSnapshot: { id: 'plan-a', trafficLimit: 1024, deviceLimit: 3 },
+            effectiveProjection: { activeTrafficContributionBytes: 0n, activeDeviceContribution: 2 },
+          },
+        ],
+        plans: PLANS,
+        activeAddOns: [{ type: 'EXTRA_DEVICES', totalValue: 2n, expiresAt: new Date(Date.now() + 5 * 86_400_000) }],
+      });
+
+      const actualQuote = await quote(service);
+
+      assert.deepStrictEqual(actualQuote.carriedAbovePlan, {
+        deviceLimit: 1,
+        trafficLimitGb: 0,
         unlimitedDevices: false,
         unlimitedTraffic: false,
       });
+      assert.deepStrictEqual(actualQuote.activeAddOns?.map((addOn) => [addOn.type, addOn.value]), [['EXTRA_DEVICES', 2]]);
     });
 
     it('says nothing when nothing carries, and nothing on any other action', async () => {
@@ -319,7 +355,7 @@ describe('SubscriptionQuoteService', () => {
       assert.equal(renewal.carriedAbovePlan, null);
     });
 
-    it('promises nothing when a durable term backs the subscription — and still does without one', async () => {
+    it('names what carries under a durable term as well: the durable upgrade carries it too', async () => {
       const previous = process.env.ADDON_ENTITLEMENT_SHADOW;
       process.env.ADDON_ENTITLEMENT_SHADOW = 'true';
       try {
@@ -329,7 +365,7 @@ describe('SubscriptionQuoteService', () => {
           plans: PLANS,
           activeTerm: { id: 'term-1' },
         });
-        assert.equal((await quote(durable)).carriedAbovePlan, null);
+        assert.equal((await quote(durable)).carriedAbovePlan?.deviceLimit, 2);
 
         const cutOverLater = createService({
           user: createUser({ maxSubscriptions: 1 }),
@@ -342,6 +378,245 @@ describe('SubscriptionQuoteService', () => {
         if (previous === undefined) delete process.env.ADDON_ENTITLEMENT_SHADOW;
         else process.env.ADDON_ENTITLEMENT_SHADOW = previous;
       }
+    });
+  });
+
+  describe('the live add-ons an UPGRADE keeps, each with the end it will have', () => {
+    const DAY = 24 * 60 * 60 * 1000;
+    function holder(): Record<string, unknown> {
+      return {
+        ...createSubscription({ id: 'paid-sub', isTrial: false, planId: 'plan-a' }),
+        planSnapshot: { id: 'plan-a', trafficLimit: 1024, deviceLimit: 1 },
+        trafficLimit: 1074,
+        deviceLimit: 3,
+        effectiveProjection: { activeTrafficContributionBytes: 50n * 1024n * 1024n * 1024n, activeDeviceContribution: 2 },
+      };
+    }
+    const plans = (target: { readonly trafficLimit: number | null; readonly deviceLimit: number }) => [
+      createPlan({ id: 'plan-a', availability: PlanAvailability.ALL, upgradeToPlanIds: ['plan-b'] }),
+      { ...createPlan({ id: 'plan-b', availability: PlanAvailability.ALL }), ...target },
+    ];
+    const upgradeQuote = (service: SubscriptionQuoteService, purchaseType: PurchaseType = PurchaseType.UPGRADE) =>
+      service.getQuote({
+        userId: 'user-1',
+        subscriptionId: 'paid-sub',
+        purchaseType,
+        planId: purchaseType === PurchaseType.UPGRADE ? 'plan-b' : 'plan-a',
+        durationDays: 30,
+        channel: PurchaseChannel.WEB,
+      });
+
+    it('keeps each one’s own date, never later than the new end — `now` plus the 30 days bought', async () => {
+      const ownEarly = new Date(Date.now() + 10 * DAY);
+      const service = createService({
+        user: createUser({ maxSubscriptions: 1 }),
+        subscriptions: [holder()],
+        plans: plans({ trafficLimit: 2048, deviceLimit: 5 }),
+        activeAddOns: [
+          { type: 'EXTRA_TRAFFIC', totalValue: 50n * 1024n * 1024n * 1024n, expiresAt: ownEarly },
+          { type: 'EXTRA_DEVICES', totalValue: 2n, expiresAt: new Date(Date.now() + 90 * DAY) },
+        ],
+      });
+
+      const before = Date.now();
+      const actualQuote = await upgradeQuote(service);
+      const after = Date.now();
+
+      assert.equal(actualQuote.isEligible, true, 'informational only');
+      const [traffic, devices] = actualQuote.activeAddOns ?? [];
+      assert.deepStrictEqual(traffic, { type: 'EXTRA_TRAFFIC', value: 50, expiresAt: ownEarly.toISOString() });
+      assert.equal(devices?.type, 'EXTRA_DEVICES');
+      assert.equal(devices?.value, 2);
+      const clamped = Date.parse(devices?.expiresAt ?? '');
+      assert.ok(clamped >= before + 30 * DAY && clamped <= after + 30 * DAY, 'clamped to the new end');
+    });
+
+    it('leaves out an add-on the new plan makes meaningless: unlimited on its resource', async () => {
+      const service = createService({
+        user: createUser({ maxSubscriptions: 1 }),
+        subscriptions: [holder()],
+        plans: plans({ trafficLimit: null, deviceLimit: 5 }),
+        activeAddOns: [
+          { type: 'EXTRA_TRAFFIC', totalValue: 50n * 1024n * 1024n * 1024n, expiresAt: new Date(Date.now() + 10 * DAY) },
+          { type: 'EXTRA_DEVICES', totalValue: 2n, expiresAt: new Date(Date.now() + 10 * DAY) },
+        ],
+      });
+
+      assert.deepStrictEqual(
+        (await upgradeQuote(service)).activeAddOns?.map((addOn) => addOn.type),
+        ['EXTRA_DEVICES'],
+      );
+    });
+
+    it('is null with none, on any other action, and when they cannot be read — never a failed quote', async () => {
+      const none = createService({ user: createUser({ maxSubscriptions: 1 }), subscriptions: [holder()], plans: plans({ trafficLimit: 2048, deviceLimit: 5 }) });
+      assert.equal((await upgradeQuote(none)).activeAddOns, null);
+
+      const renewing = createService({
+        user: createUser({ maxSubscriptions: 1 }),
+        subscriptions: [holder()],
+        plans: plans({ trafficLimit: 2048, deviceLimit: 5 }),
+        activeAddOns: [{ type: 'EXTRA_DEVICES', totalValue: 2n, expiresAt: new Date(Date.now() + 10 * DAY) }],
+      });
+      assert.equal((await upgradeQuote(renewing, PurchaseType.RENEW)).activeAddOns, null);
+
+      const broken = createService({
+        user: createUser({ maxSubscriptions: 1 }),
+        subscriptions: [holder()],
+        plans: plans({ trafficLimit: 2048, deviceLimit: 5 }),
+        activeAddOns: new Error('connection reset'),
+      });
+      const quoted = await upgradeQuote(broken);
+      assert.equal(quoted.activeAddOns, null);
+      assert.equal(quoted.isEligible, true);
+    });
+  });
+
+  describe('the paid remainder of an UPGRADE, estimated before the customer pays', () => {
+    const DAY = 24 * 60 * 60 * 1000;
+    /** A target priced per day in roubles for the remainder, and at 10 USD for the gateway the quote prices with. */
+    function target(id: string, roublesFor30Days: string): Record<string, unknown> {
+      return {
+        ...createPlan({ id, availability: PlanAvailability.ALL }),
+        durations: [
+          {
+            id: `${id}-duration-30`,
+            planId: id,
+            days: 30,
+            isActive: true,
+            prices: [
+              { id: `${id}-rub`, currency: Currency.RUB, price: { toString: () => roublesFor30Days } },
+              { id: `${id}-usd`, currency: Currency.USD, price: { toString: () => '10' } },
+            ],
+          },
+        ],
+      };
+    }
+    const PLANS = [
+      createPlan({ id: 'plan-a', availability: PlanAvailability.ALL, upgradeToPlanIds: ['plan-b', 'plan-c'] }),
+      target('plan-b', '650'),
+      target('plan-c', '300'),
+    ];
+    /** 200 ₽ for 30 days, ten days ago: twenty left. */
+    const PAID = {
+      id: 'tx-a',
+      subscriptionId: 'paid-sub',
+      purchaseType: PurchaseType.NEW,
+      status: 'COMPLETED',
+      fulfilledAt: new Date(Date.now() - 10 * DAY),
+      amount: '200',
+      currency: Currency.RUB,
+      planSnapshot: { id: 'plan-a', selectedDurationDays: 30 },
+      gatewayData: {},
+      items: [],
+    };
+    const holder = () =>
+      createSubscription({
+        id: 'paid-sub',
+        isTrial: false,
+        planId: 'plan-a',
+        expiresAt: new Date(Date.now() + 20 * DAY),
+      });
+    const quote = (service: SubscriptionQuoteService, input: { planId?: string; purchaseType?: PurchaseType } = {}) =>
+      service.getQuote({
+        userId: 'user-1',
+        subscriptionId: 'paid-sub',
+        purchaseType: input.purchaseType ?? PurchaseType.UPGRADE,
+        planId: input.planId,
+        durationDays: 30,
+        channel: PurchaseChannel.WEB,
+      });
+
+    it('names the days for the chosen target — beside the warnings, never blocking eligibility', async () => {
+      const service = createService({
+        user: createUser({ maxSubscriptions: 1 }),
+        subscriptions: [holder()],
+        plans: PLANS,
+        payments: [PAID],
+      });
+
+      const actualQuote = await quote(service, { planId: 'plan-b' });
+
+      // 133.33 ₽ at 650 / 30 ₽ a day.
+      assert.equal(actualQuote.paidRemainderDays, 6);
+      assert.equal(actualQuote.isEligible, true);
+      // Kept for a cabinet that predates the field.
+      assert.deepStrictEqual(
+        actualQuote.warnings.map((warning) => warning.code),
+        ['UPGRADE_RESETS_EXPIRY'],
+      );
+    });
+
+    it('is counted against each target’s own dearest day', async () => {
+      const service = createService({
+        user: createUser({ maxSubscriptions: 1 }),
+        subscriptions: [holder()],
+        plans: PLANS,
+        payments: [PAID],
+      });
+
+      // 133.33 ₽ at 10 ₽ a day.
+      assert.equal((await quote(service, { planId: 'plan-c' })).paidRemainderDays, 13);
+    });
+
+    it('leaves out a plan change only claimed since the subscription started, as fulfilment does', async () => {
+      const service = createService({
+        user: createUser({ maxSubscriptions: 1 }),
+        subscriptions: [{ ...holder(), startedAt: new Date(Date.now() - 10 * DAY) }],
+        plans: PLANS,
+        payments: [
+          PAID,
+          // Another tab's upgrade: claimed a second ago, not applied.
+          {
+            ...PAID,
+            id: 'tx-claimed',
+            purchaseType: PurchaseType.UPGRADE,
+            fulfilledAt: new Date(Date.now() - 1000),
+            amount: '650',
+            planSnapshot: { id: 'plan-b', selectedDurationDays: 30 },
+          },
+        ],
+      });
+
+      // Read as applied, its 650 ₽ would price all twenty days: 19, not 6.
+      assert.equal((await quote(service, { planId: 'plan-b' })).paidRemainderDays, 6);
+    });
+
+    it('says 0 when nothing paid is left, and nothing at all on another action or with no target chosen', async () => {
+      const service = createService({
+        user: createUser({ maxSubscriptions: 1 }),
+        subscriptions: [holder()],
+        plans: PLANS,
+        payments: [],
+      });
+      assert.equal((await quote(service, { planId: 'plan-b' })).paidRemainderDays, 0);
+
+      const paid = createService({
+        user: createUser({ maxSubscriptions: 1 }),
+        subscriptions: [holder()],
+        plans: PLANS,
+        payments: [PAID],
+      });
+      assert.equal((await quote(paid)).paidRemainderDays, null, 'no target chosen');
+      assert.equal(
+        (await quote(paid, { planId: 'plan-a', purchaseType: PurchaseType.RENEW })).paidRemainderDays,
+        null,
+      );
+    });
+
+    it('turns a failure to estimate into no estimate — the quote itself still prices and stays eligible', async () => {
+      const service = createService({
+        user: createUser({ maxSubscriptions: 1 }),
+        subscriptions: [holder()],
+        plans: PLANS,
+        payments: new Error('database went away'),
+      });
+
+      const actualQuote = await quote(service, { planId: 'plan-b' });
+
+      assert.equal(actualQuote.paidRemainderDays, null);
+      assert.equal(actualQuote.isEligible, true);
+      assert.equal(actualQuote.price?.price, '10');
     });
   });
 
@@ -1086,10 +1361,23 @@ function createService(input: {
   readonly multiSubscriptionSettings?: Record<string, unknown> | null;
   /** The ACTIVE durable term an upgrade quote looks for when the durable model is on. */
   readonly activeTerm?: { readonly id: string } | null;
+  /**
+   * The fulfilled payments an upgrade quote weighs for the paid remainder —
+   * or an error the read fails with.
+   */
+  readonly payments?: readonly Record<string, unknown>[] | Error;
+  /** The live durable add-ons an upgrade quote lists — or an error the read fails with. */
+  readonly activeAddOns?: readonly Record<string, unknown>[] | Error;
 }): SubscriptionQuoteService {
   const prismaService = {
     subscriptionTerm: {
       findFirst: async () => input.activeTerm ?? null,
+    },
+    addOnEntitlement: {
+      findMany: async () => {
+        if (input.activeAddOns instanceof Error) throw input.activeAddOns;
+        return input.activeAddOns ?? [];
+      },
     },
     settings: {
       findFirst: async () => ({
@@ -1129,6 +1417,10 @@ function createService(input: {
         input.resumableTrialTransactionId === undefined
           ? null
           : { id: input.resumableTrialTransactionId },
+      findMany: async () => {
+        if (input.payments instanceof Error) throw input.payments;
+        return input.payments ?? [];
+      },
     },
     paymentGateway: {
       findMany: async () => [
@@ -1218,6 +1510,7 @@ function createSubscription(input: {
   readonly isTrial: boolean;
   readonly planId: string | null;
   readonly status?: SubscriptionStatus;
+  readonly expiresAt?: Date | null;
 }): Record<string, unknown> {
   return {
     id: input.id,
@@ -1226,6 +1519,7 @@ function createSubscription(input: {
     isTrial: input.isTrial,
     planSnapshot: input.planId === null ? {} : { id: input.planId },
     createdAt: new Date('2026-04-19T12:00:00.000Z'),
+    expiresAt: input.expiresAt ?? null,
   };
 }
 

@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException, ConflictException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, ConflictException, Optional } from '@nestjs/common';
 import {
   AddOnLifetime,
   AddOnType,
@@ -42,8 +42,17 @@ import {
   resolveRecordedAddOnContribution,
 } from '../../add-on-entitlements/services/configured-baseline.util';
 import { ensureLiveResetEpoch } from '../../add-on-entitlements/services/reset-epoch.util';
-import { EffectiveProjectionService } from '../../add-on-entitlements/services/effective-projection.service';
+import {
+  EffectiveProjectionService,
+  type RecomputeProjectionResult,
+} from '../../add-on-entitlements/services/effective-projection.service';
+import { EntitlementCutoverService } from '../../add-on-entitlements/services/entitlement-cutover.service';
 import { SubscriptionTermService } from '../../add-on-entitlements/services/subscription-term.service';
+import {
+  carryTermLimitBonusesAcrossUpgradeInTransaction,
+  readLiveTermLimitBonusesInTransaction,
+} from '../../add-on-entitlements/services/term-limit-bonus.util';
+import { LAPSED_TERM_WINDOW_MS } from '../../add-on-entitlements/domain/term-window';
 import { displayPlanName } from '../../plans/utils/plan-deletion.util';
 import { readTrialSettings } from '../../plans/utils/trial-settings.util';
 import {
@@ -51,6 +60,23 @@ import {
   resolveInheritedPlanLimitRefresh,
   type PlanInheritedLimitUpdate,
 } from '../../subscriptions/services/plan-inherited-limits.util';
+import {
+  convertRenewalPricedBeforeUpgrade,
+  describeRenewalPricedBeforeUpgrade,
+  PAID_REMAINDER_CONVERSION_KEY,
+  paidRemainderProvenance,
+  readRenewalPricedBeforePlanChange,
+  readRenewalPricedBeforeUpgrade,
+  RENEWAL_PRICED_BEFORE_UPGRADE_KEY,
+  renewalPricedBeforeUpgradeCode,
+  renewalPricedBeforeUpgradeCompletionMetadata,
+  renewalPricedBeforeUpgradeMessage,
+  renewalPricedBeforeUpgradeMetadata,
+  renewalPricedBeforeUpgradeProvenance,
+  resolvePaidRemainderConversionInTransaction,
+  type PaidRemainderConversion,
+  type RenewalPricedBeforeUpgrade,
+} from '../../subscriptions/services/paid-remainder-conversion.util';
 import {
   consumePaidTrialClaim,
   countCommittedTrialClaimUnits,
@@ -75,6 +101,7 @@ import {
   LATE_PLAN_MIGRATION_RENEWAL_MESSAGE,
   latePlanMigrationRenewalMetadata,
   type LatePlanMigrationRenewal,
+  resolvePlanMigrationGuardCandidate,
   withPaidRenewalDuration,
 } from './payment-renewal-plan-migration-guard.util';
 
@@ -128,8 +155,10 @@ interface DormantRenewalAddOnLine {
 }
 
 /**
- * An upgrade that kept the previous term baseline because a SCHEDULED term
- * carries paid entitlements — buffered past the commit for exactly the reason
+ * An upgrade whose new end falls at or before the start of a queued SCHEDULED
+ * term that carries paid add-ons: the term survives the upgrade (re-based onto
+ * the new plan), but the add-ons bought for it cannot be delivered inside the
+ * subscription any more. Buffered past the commit for exactly the reason
  * {@link DormantRenewalAddOnLine} is.
  */
 interface UpgradeTermDeferral {
@@ -150,6 +179,8 @@ type UpgradeOutcome =
       readonly kind: 'APPLIED';
       readonly subscription: Subscription;
       readonly syncJob: ProfileSyncJob;
+      /** What was left of the old plan, added to the new term as days. */
+      readonly paidRemainder: PaidRemainderConversion;
     }
   | {
       readonly kind: 'WITHHELD';
@@ -203,6 +234,9 @@ export class PaymentSubscriptionMutationService {
    */
   private readonly dormantAddOnCardWindow = new Map<string, number>();
 
+  /** Brings a subscription into the term model: see {@link enterTermModelInTransaction}. */
+  private readonly entitlementCutoverService: EntitlementCutoverService;
+
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly events: SystemEventsService,
@@ -210,7 +244,43 @@ export class PaymentSubscriptionMutationService {
     private readonly effectiveProjectionService: EffectiveProjectionService,
     private readonly subscriptionTermService: SubscriptionTermService,
     private readonly trafficResetService: TrafficResetService,
-  ) {}
+    // `AddOnEntitlementsModule` exports it and `PaymentsModule` imports that
+    // module, so Nest always injects the shared instance. `@Optional()` only
+    // keeps the hand-built fulfilments of the unit specs compiling; the
+    // fallback is the same stateless service over the same collaborators.
+    @Optional() entitlementCutoverService?: EntitlementCutoverService,
+  ) {
+    this.entitlementCutoverService =
+      entitlementCutoverService ??
+      new EntitlementCutoverService(prismaService, subscriptionTermService, effectiveProjectionService);
+  }
+
+  /**
+   * THE ONE PLACE A PAYMENT BRINGS A SUBSCRIPTION INTO THE TERM MODEL: its
+   * first term (generation 1, ACTIVE) and a SHADOW projection, minted from its
+   * own columns by `EntitlementCutoverService.ensureTermInTransaction`, which
+   * takes the row lock and is idempotent — a subscription that has a term
+   * keeps it.
+   *
+   * GATED BY STAGE 1 (`ADDON_ENTITLEMENT_SHADOW`) AND BY NOTHING ELSE. Only
+   * ENTERING the model reads the flag; what a renewal, an upgrade or an add-on
+   * does once a subscription is in it follows the term ROW, whatever the flags
+   * say now — so turning stage 1 off stops new entrants and strands nobody.
+   * `force` is for goods that cannot exist outside the model: paid
+   * renewal add-on lines, sold under stage 5, have no other place to live.
+   *
+   * Called at creation (NEW, ADDITIONAL, a paid trial) and lazily wherever a
+   * payment needs the model: the add-on ledger, the renewal term, the upgrade
+   * term. The background cutover brings in the rest.
+   */
+  private async enterTermModelInTransaction(
+    tx: Prisma.TransactionClient,
+    subscriptionId: string,
+    options: { readonly force?: boolean } = {},
+  ): Promise<void> {
+    if (options.force !== true && !resolveAddOnRolloutFlags().entitlementShadow) return;
+    await this.entitlementCutoverService.ensureTermInTransaction(tx, subscriptionId);
+  }
 
   public async applyCompletedTransaction(
     transaction: Transaction,
@@ -245,7 +315,9 @@ export class PaymentSubscriptionMutationService {
         transaction.userId,
         null,
         items,
-        combined.latePlanMigrationRenewals,
+        // Lines kept on their current plan — by a migration, or priced before
+        // an upgrade — were still priced with the plan they paid for.
+        [...combined.latePlanMigrationRenewals, ...combined.renewalsPricedBeforeUpgrade],
       );
       return { syncJobs: combined.syncJobs };
     }
@@ -267,6 +339,10 @@ export class PaymentSubscriptionMutationService {
       readonly syncJob: ProfileSyncJob;
       /** Set by the RENEW path only; see {@link findLatePlanMigrationRenewal}. */
       readonly latePlanMigrationRenewal?: LatePlanMigrationRenewal | null;
+      /** Set by the RENEW path only; see `readRenewalPricedBeforeUpgrade`. */
+      readonly renewalPricedBeforeUpgrade?: RenewalPricedBeforeUpgrade | null;
+      /** Set by the UPGRADE path only; see `paid-remainder-conversion.util.ts`. */
+      readonly paidRemainder?: PaidRemainderConversion;
     };
 
     switch (transaction.purchaseType) {
@@ -350,7 +426,10 @@ export class PaymentSubscriptionMutationService {
     // already wears «Платёж получен, нужна проверка» when raised above INFO.
     // `planName` and the limits above stay the PAID plan's: they describe what
     // was bought; the note and the keys below say where the period went.
+    // A renewal priced for the plan an upgrade left is told the same way: the
+    // payment's plan above, and where its money went in the keys and the note.
     const latePlanMigrationRenewal = result.latePlanMigrationRenewal ?? null;
+    const renewalPricedBeforeUpgrade = result.renewalPricedBeforeUpgrade ?? null;
     const completedMetadata = {
       userId: transaction.userId,
       paymentId: transaction.paymentId,
@@ -370,9 +449,16 @@ export class PaymentSubscriptionMutationService {
       ...(latePlanMigrationRenewal === null
         ? {}
         : latePlanMigrationRenewalMetadata(latePlanMigrationRenewal)),
+      ...(renewalPricedBeforeUpgrade === null
+        ? {}
+        : renewalPricedBeforeUpgradeCompletionMetadata(renewalPricedBeforeUpgrade)),
     };
     const latePlanMigrationNote =
-      latePlanMigrationRenewal === null ? null : describeLatePlanMigrationRenewal(latePlanMigrationRenewal);
+      latePlanMigrationRenewal !== null
+        ? describeLatePlanMigrationRenewal(latePlanMigrationRenewal)
+        : renewalPricedBeforeUpgrade !== null
+          ? describeRenewalPricedBeforeUpgrade(renewalPricedBeforeUpgrade)
+          : null;
     if (purchaserBlocked) {
       // In Russian, both of them: the operator reads the message in the event
       // feed and the note on the card («📝 Заметка»), and this one asks them
@@ -397,7 +483,9 @@ export class PaymentSubscriptionMutationService {
       this.events.warn(
         EVENT_TYPES.PAYMENT_COMPLETED,
         'PAYMENT',
-        LATE_PLAN_MIGRATION_RENEWAL_MESSAGE,
+        latePlanMigrationRenewal !== null || renewalPricedBeforeUpgrade === null
+          ? LATE_PLAN_MIGRATION_RENEWAL_MESSAGE
+          : renewalPricedBeforeUpgradeMessage([renewalPricedBeforeUpgrade]),
         { ...completedMetadata, note: latePlanMigrationNote },
       );
     } else {
@@ -416,12 +504,24 @@ export class PaymentSubscriptionMutationService {
     // types an automation rule or an outbound webhook binds to when it cares
     // about the subscription rather than the till. An operator who finds two
     // cards per renewal too many unticks one of them in «Уведомления».
-    this.announceSubscriptionLifecycle(transaction.purchaseType, {
-      subscription: result.subscription,
-      paymentId: transaction.paymentId,
-      planName: displayPlanName(purchasedPlan),
-      durationDays: selectedDurationDays,
-    });
+    //
+    // Not for a renewal priced before a plan change that bought no day: it
+    // renewed nothing, and the completion above asks for the refund.
+    if (renewalPricedBeforeUpgrade?.conversion.days !== 0) {
+      this.announceSubscriptionLifecycle(transaction.purchaseType, {
+        subscription: result.subscription,
+        paymentId: transaction.paymentId,
+        // A renewal priced for the plan an upgrade left renewed the plan the
+        // subscription is on, for the days its money bought there.
+        planName:
+          renewalPricedBeforeUpgrade === null
+            ? displayPlanName(purchasedPlan)
+            : (renewalPricedBeforeUpgrade.currentPlanName ?? renewalPricedBeforeUpgrade.currentPlanId),
+        durationDays: renewalPricedBeforeUpgrade?.conversion.days ?? selectedDurationDays,
+        paidRemainder: result.paidRemainder,
+        renewalPricedBeforeUpgrade,
+      });
+    }
 
     // Consume the one-time "next purchase" discount (PURCHASE_DISCOUNT promo
     // reward) now that a plan purchase has completed. Without this it kept
@@ -444,9 +544,10 @@ export class PaymentSubscriptionMutationService {
      * snapshot was deliberately NOT replaced with the paid plan, so it names
      * the plan a migration moved them to — which is not the plan the line was
      * priced with. The paid plan is what a normal renewal of the line leaves
-     * in the snapshot, so it is what they contribute here.
+     * in the snapshot, so it is what they contribute here. The same for a
+     * line priced before an upgrade.
      */
-    latePlanMigrationRenewals: readonly LatePlanMigrationRenewal[] = [],
+    latePlanMigrationRenewals: ReadonlyArray<Pick<LatePlanMigrationRenewal, 'subscriptionId' | 'paidPlanId'>> = [],
   ): Promise<string[]> {
     const ids = items
       .map((item) => item.subscriptionId)
@@ -630,6 +731,18 @@ export class PaymentSubscriptionMutationService {
       readonly paymentId: string;
       readonly planName: string;
       readonly durationDays: number | null;
+      /**
+       * An upgrade's conversion of what was left of the old plan. On the card
+       * as «Остаток прежнего тарифа: +N дн.» when it added days, and in the
+       * metadata — the audit row — whenever a paid chunk was weighed, with
+       * what each source payment contributed.
+       */
+      readonly paidRemainder?: PaidRemainderConversion;
+      /**
+       * A renewal priced for the plan an upgrade left: on the card as what it
+       * was priced for and the days it bought on the plan it renewed.
+       */
+      readonly renewalPricedBeforeUpgrade?: RenewalPricedBeforeUpgrade | null;
     },
   ): void {
     const type =
@@ -651,6 +764,15 @@ export class PaymentSubscriptionMutationService {
           status: input.subscription.status,
           paymentId: input.paymentId,
           ...(input.durationDays === null ? {} : { durationDays: input.durationDays }),
+          ...(input.paidRemainder === undefined || input.paidRemainder.sources.length === 0
+            ? {}
+            : {
+                paidRemainderDays: input.paidRemainder.days,
+                paidRemainderSources: input.paidRemainder.sources.map((source) => ({ ...source })),
+              }),
+          ...(input.renewalPricedBeforeUpgrade === undefined || input.renewalPricedBeforeUpgrade === null
+            ? {}
+            : renewalPricedBeforeUpgradeMetadata(input.renewalPricedBeforeUpgrade)),
           ...(input.subscription.expiresAt === null
             ? {}
             : { expireAt: input.subscription.expiresAt.toISOString() }),
@@ -699,7 +821,7 @@ export class PaymentSubscriptionMutationService {
      */
     combinedItems: readonly { readonly subscriptionId: string | null }[] = [],
     /** See {@link resolveCombinedRenewalPlanIds}. */
-    latePlanMigrationRenewals: readonly LatePlanMigrationRenewal[] = [],
+    latePlanMigrationRenewals: ReadonlyArray<Pick<LatePlanMigrationRenewal, 'subscriptionId' | 'paidPlanId'>> = [],
   ): Promise<void> {
     // Best-effort: this runs AFTER the subscription has been committed. It must
     // never throw out of `applyCompletedTransaction`, otherwise the reconciler's
@@ -788,10 +910,12 @@ export class PaymentSubscriptionMutationService {
     readonly syncJobs: readonly ProfileSyncJob[];
     /** Lines kept on their subscription's current plan; see the completion below. */
     readonly latePlanMigrationRenewals: readonly LatePlanMigrationRenewal[];
+    /** Lines priced for the plan an upgrade left; see `readRenewalPricedBeforeUpgrade`. */
+    readonly renewalsPricedBeforeUpgrade: readonly RenewalPricedBeforeUpgrade[];
   }> {
     const pending = items.filter((item) => item.appliedAt === null);
     if (pending.length === 0) {
-      return { syncJobs: [], latePlanMigrationRenewals: [] };
+      return { syncJobs: [], latePlanMigrationRenewals: [], renewalsPricedBeforeUpgrade: [] };
     }
 
     const committed = await this.prismaService.$transaction(async (transactionClient) => {
@@ -801,8 +925,10 @@ export class PaymentSubscriptionMutationService {
       // lines of an attempt that was rolled back.
       const dormantAddOnLines: DormantRenewalAddOnLine[] = [];
       // The same holds for the lines a plan migration keeps on the current
-      // plan: announced once, on the completion, and only for a commit.
+      // plan: announced once, on the completion, and only for a commit. And
+      // for the lines priced for the plan an upgrade has since left.
       const latePlanMigrationRenewals: LatePlanMigrationRenewal[] = [];
+      const renewalsPricedBeforeUpgrade: RenewalPricedBeforeUpgrade[] = [];
       // What the operator's card calls this renewal. Collected from the plan
       // each line actually renewed on, not from the line's stored snapshot: an
       // autopay charge deliberately carries no snapshot so that it renews on
@@ -816,6 +942,7 @@ export class PaymentSubscriptionMutationService {
         readonly subscription: Subscription;
         readonly planName: string;
         readonly durationDays: number | null;
+        readonly renewalPricedBeforeUpgrade: RenewalPricedBeforeUpgrade | null;
       }> = [];
       // Lock the transaction items inside the fulfillment transaction and claim
       // each row conditionally. The caller's pre-transaction snapshot is only
@@ -832,7 +959,14 @@ export class PaymentSubscriptionMutationService {
         }
       }
       if (claimedItems.length === 0) {
-        return { jobs: [] as ProfileSyncJob[], dormantAddOnLines, latePlanMigrationRenewals, paidPlanNames, renewedLines };
+        return {
+          jobs: [] as ProfileSyncJob[],
+          dormantAddOnLines,
+          latePlanMigrationRenewals,
+          renewalsPricedBeforeUpgrade,
+          paidPlanNames,
+          renewedLines,
+        };
       }
       const jobs: ProfileSyncJob[] = [];
       const now = new Date();
@@ -862,26 +996,73 @@ export class PaymentSubscriptionMutationService {
         // under the row lock just taken — see `findLatePlanMigrationRenewal`.
         // `plan.id` is `item.planId`: the parsed snapshot is verified against
         // it and the live row is looked up by it.
-        const latePlanMigrationRenewal = await findLatePlanMigrationRenewal(transactionClient, {
-          subscription: currentSubscription,
-          paidPlan: plan,
-          transactionId: transaction.id,
-        });
+        //
+        // Priced for the plan an UPGRADE has since left? Then the line stays on
+        // the plan the subscription is on, for the days its money buys there
+        // (`readRenewalPricedBeforeUpgrade`), and the migration question does
+        // not arise: the upgrade came after this payment's draft. Any other
+        // move since the draft — «Назначить план», a bulk assignment — is asked
+        // last, by plan identity, once the migration guard has said no.
+        const planChange = await this.resolveRenewalPricedBeforePlanChangeInTransaction(
+          transactionClient,
+          {
+            subscription: currentSubscription,
+            paidPlan: plan,
+            draftedAt: transaction.createdAt,
+            amount: item.amount,
+            currency: item.currency,
+            paidDays: item.durationDays,
+            gatewayData: transaction.gatewayData,
+            paymentAmount: transaction.amount,
+          },
+          () =>
+            findLatePlanMigrationRenewal(transactionClient, {
+              subscription: currentSubscription,
+              paidPlan: plan,
+              transactionId: transaction.id,
+            }),
+        );
+        const latePlanMigrationRenewal = planChange.latePlanMigrationRenewal;
         if (latePlanMigrationRenewal !== null) {
           latePlanMigrationRenewals.push(latePlanMigrationRenewal);
         }
+        const pricedBeforeUpgrade = planChange.priced;
+        if (pricedBeforeUpgrade !== null) {
+          renewalsPricedBeforeUpgrade.push(pricedBeforeUpgrade.line);
+        }
+        const renewedDays = pricedBeforeUpgrade?.line.conversion.days ?? item.durationDays;
 
         const addOnLines = readRenewalAddOnLines(item.addOnLines);
-        const durableTermRequired =
-          resolveAddOnRolloutFlags().entitlementShadow || addOnLines.length > 0;
-        const term = durableTermRequired
-          ? await this.scheduleFulfilledRenewalTermInTransaction(transactionClient, {
-              subscriptionId: currentSubscription.id,
-              paidPlan: plan,
-              durationDays: item.durationDays,
-              latePlanMigrationRenewal,
-            })
-          : null;
+        // ── DECIDED BY THE TERM ROW ───────────────────────────────────────
+        //
+        // Appending the renewal's term follows the ROW: a subscription with an
+        // ACTIVE term gets one whatever the flags say now, and one without
+        // stays on the columns (`scheduleRenewalTermInTransaction`, which
+        // first brings it into the model while stage 1 is on — or always, for
+        // paid add-on lines, which cannot live anywhere but on a term). Gated
+        // by the flag instead, a rollback left the renewal on the columns while
+        // the old term's base stayed in force for the next recompute.
+        const forceEntry = addOnLines.length > 0;
+        const correlationId = `payment:${transaction.paymentId}`;
+        const term =
+          pricedBeforeUpgrade === null
+            ? await this.scheduleFulfilledRenewalTermInTransaction(transactionClient, {
+                subscriptionId: currentSubscription.id,
+                paidPlan: plan,
+                durationDays: item.durationDays,
+                latePlanMigrationRenewal,
+                forceEntry,
+                correlationId,
+              })
+            : pricedBeforeUpgrade.currentPlan !== null && renewedDays > 0
+              ? await this.scheduleRenewalTermInTransaction(transactionClient, {
+                  subscriptionId: currentSubscription.id,
+                  plan: pricedBeforeUpgrade.currentPlan,
+                  durationDays: renewedDays,
+                  forceEntry,
+                  correlationId,
+                })
+              : null;
         if (addOnLines.length > 0 && term === null) {
           throw new ConflictException(
             `Renewal add-ons require a durable term for subscription ${currentSubscription.id}`,
@@ -964,8 +1145,12 @@ export class PaymentSubscriptionMutationService {
         // Everything else a renewal does is unchanged: status, expiry, the
         // sync job with its traffic reset, the `appliedAt` claim, add-on
         // capture and the payment's `fulfilledAt`.
+        //
+        // Nor for a line priced for the plan an upgrade left: the subscription
+        // keeps the plan it paid the upgrade for, and its snapshot is not
+        // touched at all — the upgrade's duration stays the one autopay renews.
         const inheritedLimitRefresh =
-          latePlanMigrationRenewal !== null
+          latePlanMigrationRenewal !== null || pricedBeforeUpgrade !== null
             ? null
             : resolveInheritedPlanLimitRefresh({
                 current: lockedSubscription,
@@ -992,32 +1177,49 @@ export class PaymentSubscriptionMutationService {
         // mirror the LIVE plan through `PlanSnapshotSyncService` and are not
         // part of the override comparison.
         const planSnapshotWrite =
-          inheritedLimitRefresh === null
-            ? term === null
-              ? withPaidRenewalDuration(lockedSubscription.planSnapshot, item.durationDays)
-              : undefined
-            : term === null
-              ? buildItemPlanSnapshot({ item, plan, gatewayType: transaction.gatewayType })
-              : patchSnapshotInheritedLimits(
-                  lockedSubscription.planSnapshot,
-                  inheritedLimitRefresh.snapshot,
-                );
+          pricedBeforeUpgrade !== null
+            ? undefined
+            : inheritedLimitRefresh === null
+              ? term === null
+                ? withPaidRenewalDuration(lockedSubscription.planSnapshot, item.durationDays)
+                : undefined
+              : term === null
+                ? buildItemPlanSnapshot({ item, plan, gatewayType: transaction.gatewayType })
+                : patchSnapshotInheritedLimits(
+                    lockedSubscription.planSnapshot,
+                    inheritedLimitRefresh.snapshot,
+                  );
+        // A line priced before a plan change whose money buys no day on the
+        // plan it is on (no price in its currency, or less than a day's worth)
+        // renews NOTHING: its status and expiry stay exactly as they are. Set
+        // ACTIVE anyway, it revived an expired subscription until now and
+        // lifted a LIMITED one with no traffic reset. The operator is asked to
+        // refund it (the completion's note and card line).
+        const boughtNothing = pricedBeforeUpgrade !== null && renewedDays === 0;
         const renewedSubscription = await transactionClient.subscription.update({
           where: { id: currentSubscription.id },
           data: {
-            status: SubscriptionStatus.ACTIVE,
-            expiresAt: calculateExpiry(renewalBase, item.durationDays),
+            ...(boughtNothing
+              ? {}
+              : { status: SubscriptionStatus.ACTIVE, expiresAt: calculateExpiry(renewalBase, renewedDays) }),
             ...(planSnapshotWrite === undefined
               ? {}
               : { planSnapshot: planSnapshotWrite as Prisma.InputJsonValue }),
             ...(inheritedLimitRefresh === null ? {} : inheritedLimitRefresh.columns),
           },
         });
-        renewedLines.push({
-          subscription: renewedSubscription,
-          planName: displayPlanName(plan),
-          durationDays: item.durationDays,
-        });
+        // «Подписка продлена» only for a line that renewed something.
+        if (!boughtNothing) {
+          renewedLines.push({
+            subscription: renewedSubscription,
+            planName:
+              pricedBeforeUpgrade === null
+                ? displayPlanName(plan)
+                : (pricedBeforeUpgrade.line.currentPlanName ?? pricedBeforeUpgrade.line.currentPlanId),
+            durationDays: renewedDays,
+            renewalPricedBeforeUpgrade: pricedBeforeUpgrade?.line ?? null,
+          });
+        }
         const syncJob = await transactionClient.profileSyncJob.create({
           data: {
             subscriptionId: renewedSubscription.id,
@@ -1032,8 +1234,10 @@ export class PaymentSubscriptionMutationService {
               // same rule: a combined payment renews several subscriptions at
               // once, and each of them bought a fresh period. Omitting it here
               // would make "renew three at once" behave differently from
-              // renewing the same three one by one.
-              ...(renewedSubscription.remnawaveId === null ? {} : { resetTraffic: true }),
+              // renewing the same three one by one. A line that bought no day
+              // (priced before an upgrade, in a currency the plan has no price
+              // in) starts no period.
+              ...(renewedSubscription.remnawaveId === null || boughtNothing ? {} : { resetTraffic: true }),
             } as Prisma.InputJsonObject,
           },
         });
@@ -1179,6 +1383,16 @@ export class PaymentSubscriptionMutationService {
           }
         }
       }
+      // What the lines priced before an upgrade bought instead, on the payment's
+      // own row and in this transaction: the provenance a refund or an
+      // operator's question reads.
+      if (renewalsPricedBeforeUpgrade.length > 0) {
+        await writeTransactionGatewayData(transactionClient, transaction.id, {
+          merge: {
+            [RENEWAL_PRICED_BEFORE_UPGRADE_KEY]: renewalPricedBeforeUpgradeProvenance(renewalsPricedBeforeUpgrade, now),
+          },
+        });
+      }
       // Stamp the transaction-level idempotency flag atomically
       // applications so the webhook reconciler treats the combined renewal as
       // fulfilled (its per-item `appliedAt` still guards partial re-runs).
@@ -1186,7 +1400,14 @@ export class PaymentSubscriptionMutationService {
         where: { id: transaction.id },
         data: { fulfilledAt: now },
       });
-      return { jobs, dormantAddOnLines, latePlanMigrationRenewals, paidPlanNames, renewedLines };
+      return {
+        jobs,
+        dormantAddOnLines,
+        latePlanMigrationRenewals,
+        renewalsPricedBeforeUpgrade,
+        paidPlanNames,
+        renewedLines,
+      };
     });
 
     const completedMetadata = {
@@ -1204,14 +1425,14 @@ export class PaymentSubscriptionMutationService {
       currency: transaction.currency,
       gatewayType: transaction.gatewayType,
     };
-    if (committed.latePlanMigrationRenewals.length === 0) {
+    if (committed.latePlanMigrationRenewals.length === 0 && committed.renewalsPricedBeforeUpgrade.length === 0) {
       this.events.info(
         EVENT_TYPES.PAYMENT_COMPLETED,
         'PAYMENT',
         `Payment completed: RENEW x${pending.length}`,
         completedMetadata,
       );
-    } else {
+    } else if (committed.renewalsPricedBeforeUpgrade.length === 0) {
       // ONE announcement for the payment, however many of its lines a plan
       // migration kept on their current plan: the completion itself, raised as
       // WARNING, exactly as the single renewal does. The list is metadata for
@@ -1223,6 +1444,36 @@ export class PaymentSubscriptionMutationService {
         planMigrationRenewals: committed.latePlanMigrationRenewals.map((renewal) => ({ ...renewal })),
         note: describeLatePlanMigrationRenewals(committed.latePlanMigrationRenewals),
       });
+    } else {
+      // Lines priced for the plan an upgrade left are told the same way, on
+      // the same one completion; a payment with both kinds names both.
+      const migrated = committed.latePlanMigrationRenewals;
+      this.events.warn(
+        EVENT_TYPES.PAYMENT_COMPLETED,
+        'PAYMENT',
+        migrated.length > 0
+          ? LATE_PLAN_MIGRATION_RENEWAL_MESSAGE
+          : renewalPricedBeforeUpgradeMessage(committed.renewalsPricedBeforeUpgrade),
+        {
+          ...completedMetadata,
+          code:
+            migrated.length > 0
+              ? LATE_PLAN_MIGRATION_RENEWAL_CODE
+              : renewalPricedBeforeUpgradeCode(committed.renewalsPricedBeforeUpgrade),
+          ...(migrated.length > 0 ? { planMigrationRenewals: migrated.map((renewal) => ({ ...renewal })) } : {}),
+          renewalsPricedBeforeUpgrade: committed.renewalsPricedBeforeUpgrade.map((line) => ({
+            subscriptionId: line.subscriptionId,
+            paidPlanId: line.paidPlanId,
+            currentPlanId: line.currentPlanId,
+            ...line.conversion,
+            ...(line.cause === 'PLAN_CHANGE' ? { cause: line.cause } : {}),
+          })),
+          note: [
+            ...(migrated.length > 0 ? [describeLatePlanMigrationRenewals(migrated)] : []),
+            ...committed.renewalsPricedBeforeUpgrade.map(describeRenewalPricedBeforeUpgrade),
+          ].join(' '),
+        },
+      );
     }
 
     // What happened to each SUBSCRIPTION the payment renewed — one card per
@@ -1234,6 +1485,7 @@ export class PaymentSubscriptionMutationService {
         paymentId: transaction.paymentId,
         planName: line.planName,
         durationDays: line.durationDays,
+        renewalPricedBeforeUpgrade: line.renewalPricedBeforeUpgrade,
       });
     }
 
@@ -1244,6 +1496,7 @@ export class PaymentSubscriptionMutationService {
     return {
       syncJobs: committed.jobs,
       latePlanMigrationRenewals: committed.latePlanMigrationRenewals,
+      renewalsPricedBeforeUpgrade: committed.renewalsPricedBeforeUpgrade,
     };
   }
 
@@ -1418,13 +1671,27 @@ export class PaymentSubscriptionMutationService {
       // profile-sync keeps applying the ledger-backed limit until versioned
       // sync (T-009) takes over. Falls back to the legacy increment when the
       // entitlement cannot be fully materialized here.
+      //
+      // LIMITED as well as ACTIVE. The offer and the checkout both sell
+      // to a LIMITED subscription — "out of traffic, buy +50 GB" is the
+      // typical purchase — so refusing it here sent exactly that sale to the
+      // PERMANENT legacy increment, with no entitlement row and no expiry.
+      //
+      // A marker drafted by the previous checkout carries no `lifetime` or
+      // `sourceLineKey`; `withLedgerMarkerDefaults` gives it the v2 checkout's
+      // own values (`UNTIL_SUBSCRIPTION_END`, the add-on id), so a draft in
+      // flight across the deploy is ledgered too instead of becoming permanent.
       if (
         flags.directPurchase &&
-        subscription.status === SubscriptionStatus.ACTIVE &&
-        marker.lifetime !== undefined &&
-        marker.sourceLineKey !== undefined
+        (subscription.status === SubscriptionStatus.ACTIVE ||
+          subscription.status === SubscriptionStatus.LIMITED)
       ) {
-        const ledgered = await this.applyAddOnViaLedger(tx, transaction, marker, subscription);
+        const ledgered = await this.applyAddOnViaLedger(
+          tx,
+          transaction,
+          withLedgerMarkerDefaults(marker),
+          subscription,
+        );
         if (ledgered !== null) {
           return ledgered;
         }
@@ -1572,7 +1839,7 @@ export class PaymentSubscriptionMutationService {
     tx: Prisma.TransactionClient,
     transaction: Transaction,
     marker: AddOnMarker,
-    subscription: Subscription,
+    unlockedSubscription: Subscription,
   ): Promise<{ readonly subscription: Subscription; readonly syncJob: ProfileSyncJob } | null> {
     if (marker.lifetime === undefined || marker.sourceLineKey === undefined) return null;
     // An incoherent value cannot be turned into a ledger row at all — the
@@ -1582,6 +1849,22 @@ export class PaymentSubscriptionMutationService {
     // recompute. Falling back to the legacy path instead keeps the outcome to
     // ONE shape: the guard there records fulfillment and touches no column.
     if (!isCoherentAddOnValue(marker.addOnValue)) return null;
+
+    // ── INTO THE MODEL, AND ONTO THE SUBSCRIPTION'S REAL END ───────────────
+    //
+    // A subscription the background cutover has not reached yet enters the
+    // model here (stage 1), so the purchase is ledgered instead of becoming a
+    // permanent increment. Then its tail term is ALIGNED with `expiresAt`:
+    // bonus days, an operator's edit or a pull from Remnawave move the
+    // expiry without the term, and an ACTIVE term whose `endsAt` had already
+    // passed sent the purchase to the legacy increment below — permanently.
+    // Both take the row lock, so everything read after this is current.
+    await this.enterTermModelInTransaction(tx, unlockedSubscription.id);
+    await this.subscriptionTermService.alignTailToExpiryInTransaction(tx, unlockedSubscription.id, {
+      correlationId: `payment:${transaction.paymentId}`,
+    });
+    const subscription =
+      (await tx.subscription.findUnique({ where: { id: unlockedSubscription.id } })) ?? unlockedSubscription;
 
     const term = await tx.subscriptionTerm.findFirst({
       where: { subscriptionId: subscription.id, status: SubscriptionTermStatus.ACTIVE },
@@ -1826,6 +2109,12 @@ export class PaymentSubscriptionMutationService {
           expiresAt: calculateExpiry(now, input.selectedDurationDays),
         },
       });
+      // Its first term, in this transaction, while stage 1 is on: the columns
+      // are the plan's, so the baseline is MATCHED and the SHADOW projection
+      // equals them, and an add-on bought a minute later is ledgered with an
+      // end date rather than falling back to the permanent increment. A paid
+      // trial is the same NEW purchase and gets one too.
+      await this.enterTermModelInTransaction(transactionClient, createdSubscription.id);
       if (isTrialPurchase) {
         // `TrialGrant.userId` is unique — upsert so a paid trial records the
         // claim without colliding with a prior (free or paid) grant. The
@@ -1941,6 +2230,7 @@ export class PaymentSubscriptionMutationService {
     readonly subscription: Subscription;
     readonly syncJob: ProfileSyncJob;
     readonly latePlanMigrationRenewal: LatePlanMigrationRenewal | null;
+    readonly renewalPricedBeforeUpgrade: RenewalPricedBeforeUpgrade | null;
   }> {
     if (input.transaction.subscriptionId === null) {
       throw new NotFoundException('Source subscription not found');
@@ -1954,6 +2244,18 @@ export class PaymentSubscriptionMutationService {
         currentSubscription,
         readPersistedPlanAvailability(input.transaction.planSnapshot),
       );
+      // ── PRICED FOR THE PLAN AN UPGRADE HAS SINCE LEFT ─────────────────────
+      //
+      // Drafted on the old plan, paid after the subscription was upgraded: as
+      // it stood, fulfilment re-applied the old plan's snapshot, limits and
+      // squads — the upgrade the customer paid for undone by a cheaper payment
+      // — or, on a durable term, sold the dearer plan's days at the old price.
+      // Now the subscription keeps the plan it is on, and the payment buys the
+      // days its money buys there (`readRenewalPricedBeforeUpgrade`, the money
+      // rule of `convertRenewalPricedBeforeUpgrade`), never the whole period.
+      // Asked under the row lock, like the migration question below, which it
+      // settles: the upgrade came after this payment's draft.
+      //
       // ── MOVED BY A PLAN MIGRATION AFTER THE CHECKOUT PRICED IT ───────────
       //
       // A renewal checkout priced before a plan migration moved this
@@ -1966,19 +2268,62 @@ export class PaymentSubscriptionMutationService {
       // on NOW: the term below is that plan's, and neither the paid plan's
       // snapshot nor its limits or squads are applied. The completion event
       // tells the operator.
-      const latePlanMigrationRenewal = await findLatePlanMigrationRenewal(transactionClient, {
-        subscription: currentSubscription,
-        paidPlan: input.purchasedPlan,
-        transactionId: input.transaction.id,
-      });
-      const term = resolveAddOnRolloutFlags().entitlementShadow
-        ? await this.scheduleFulfilledRenewalTermInTransaction(transactionClient, {
-            subscriptionId: currentSubscription.id,
+      //
+      // ── MOVED BY ANYTHING ELSE SINCE THE DRAFT ───────────────────────────
+      //
+      // «Назначить план» and the bulk assignment leave `startedAt` alone and
+      // record no migration, so neither question above sees them, and the
+      // renewal put the plan it paid for back — the operator's assignment
+      // undone by a payment drafted before it. Asked last, by plan identity
+      // (`readRenewalPricedBeforePlanChange`), and answered with the upgrade's
+      // money rule.
+      const planChange = await this.resolveRenewalPricedBeforePlanChangeInTransaction(
+        transactionClient,
+        {
+          subscription: currentSubscription,
+          paidPlan: input.purchasedPlan,
+          draftedAt: input.transaction.createdAt,
+          amount: input.transaction.amount,
+          currency: input.transaction.currency,
+          paidDays: input.selectedDurationDays,
+          gatewayData: input.transaction.gatewayData,
+        },
+        () =>
+          findLatePlanMigrationRenewal(transactionClient, {
+            subscription: currentSubscription,
             paidPlan: input.purchasedPlan,
-            durationDays: input.selectedDurationDays,
-            latePlanMigrationRenewal,
-          })
-        : null;
+            transactionId: input.transaction.id,
+          }),
+      );
+      const pricedBeforeUpgrade = planChange.priced;
+      const latePlanMigrationRenewal = planChange.latePlanMigrationRenewal;
+      const renewedDays = pricedBeforeUpgrade?.line.conversion.days ?? input.selectedDurationDays;
+      // ── DECIDED BY THE TERM ROW ─────────────────────────────────────────
+      //
+      // Appending the renewal's term follows the ROW — a subscription with an
+      // ACTIVE term gets one whatever the flags say now, and one without stays
+      // on the columns (`scheduleRenewalTermInTransaction`, which first brings
+      // it into the model while stage 1 is on). Gated by the flag instead,
+      // turning stage 1 off left a renewal on the columns while the old term's
+      // base stayed in force for the next recompute.
+      const correlationId = `payment:${input.transaction.paymentId}`;
+      const term =
+        pricedBeforeUpgrade === null
+          ? await this.scheduleFulfilledRenewalTermInTransaction(transactionClient, {
+              subscriptionId: currentSubscription.id,
+              paidPlan: input.purchasedPlan,
+              durationDays: input.selectedDurationDays,
+              latePlanMigrationRenewal,
+              correlationId,
+            })
+          : pricedBeforeUpgrade.currentPlan !== null && renewedDays > 0
+            ? await this.scheduleRenewalTermInTransaction(transactionClient, {
+                subscriptionId: currentSubscription.id,
+                plan: pricedBeforeUpgrade.currentPlan,
+                durationDays: renewedDays,
+                correlationId,
+              })
+            : null;
       const now = new Date();
       const lockedSubscription =
         term !== null
@@ -2015,9 +2360,11 @@ export class PaymentSubscriptionMutationService {
       // current plan, exactly as at the combined call site above: the columns
       // stay as the move left them, and the snapshot below records only the
       // paid duration, where a normal renewal records it
-      // (`withPaidRenewalDuration`).
+      // (`withPaidRenewalDuration`). Skipped too for a renewal priced before
+      // an upgrade, whose snapshot is not touched at all: the upgrade's
+      // duration stays the one autopay renews.
       const inheritedLimitRefresh =
-        latePlanMigrationRenewal !== null
+        latePlanMigrationRenewal !== null || pricedBeforeUpgrade !== null
           ? null
           : resolveInheritedPlanLimitRefresh({
               current: lockedSubscription,
@@ -2034,25 +2381,34 @@ export class PaymentSubscriptionMutationService {
       // `patchSnapshotInheritedLimits` for which keys move and which are
       // deliberately left mirroring the live plan.
       const planSnapshotWrite =
-        inheritedLimitRefresh === null
-          ? term === null
-            ? withPaidRenewalDuration(lockedSubscription.planSnapshot, input.selectedDurationDays)
-            : undefined
-          : term === null
-            ? buildPlanSnapshot({
-                transaction: input.transaction,
-                purchasedPlan: input.purchasedPlan,
-                selectedDurationDays: input.selectedDurationDays,
-              })
-            : patchSnapshotInheritedLimits(
-                lockedSubscription.planSnapshot,
-                inheritedLimitRefresh.snapshot,
-              );
+        pricedBeforeUpgrade !== null
+          ? undefined
+          : inheritedLimitRefresh === null
+            ? term === null
+              ? withPaidRenewalDuration(lockedSubscription.planSnapshot, input.selectedDurationDays)
+              : undefined
+            : term === null
+              ? buildPlanSnapshot({
+                  transaction: input.transaction,
+                  purchasedPlan: input.purchasedPlan,
+                  selectedDurationDays: input.selectedDurationDays,
+                })
+              : patchSnapshotInheritedLimits(
+                  lockedSubscription.planSnapshot,
+                  inheritedLimitRefresh.snapshot,
+                );
+      // A renewal priced before a plan change whose money buys no day on the
+      // plan the subscription is on renews NOTHING: status and expiry stay as
+      // they are. Set ACTIVE anyway, it revived an expired subscription until
+      // now and lifted a LIMITED one with no traffic reset. The operator is
+      // asked to refund it (the completion's note and card line).
+      const boughtNothing = pricedBeforeUpgrade !== null && renewedDays === 0;
       const renewedSubscription = await transactionClient.subscription.update({
         where: { id: currentSubscription.id },
         data: {
-          status: SubscriptionStatus.ACTIVE,
-          expiresAt: calculateExpiry(renewalBase, input.selectedDurationDays),
+          ...(boughtNothing
+            ? {}
+            : { status: SubscriptionStatus.ACTIVE, expiresAt: calculateExpiry(renewalBase, renewedDays) }),
           ...(planSnapshotWrite === undefined
             ? {}
             : { planSnapshot: planSnapshotWrite as Prisma.InputJsonValue }),
@@ -2078,10 +2434,18 @@ export class PaymentSubscriptionMutationService {
             // profile whose counter is already zero, and an add-on top-up
             // RAISES the limit rather than starting a period — resetting there
             // would hand out the traffic already used this period for free.
-            ...(renewedSubscription.remnawaveId === null ? {} : { resetTraffic: true }),
+            // Nor for a renewal priced before a plan change that bought no day.
+            ...(renewedSubscription.remnawaveId === null || boughtNothing ? {} : { resetTraffic: true }),
           },
         },
       });
+      if (pricedBeforeUpgrade !== null) {
+        await writeTransactionGatewayData(transactionClient, input.transaction.id, {
+          merge: {
+            [RENEWAL_PRICED_BEFORE_UPGRADE_KEY]: renewalPricedBeforeUpgradeProvenance([pricedBeforeUpgrade.line], now),
+          },
+        });
+      }
       await transactionClient.transaction.update({
         where: { id: input.transaction.id },
         data: { fulfilledAt: now, status: TransactionStatus.COMPLETED },
@@ -2090,10 +2454,141 @@ export class PaymentSubscriptionMutationService {
         subscription: renewedSubscription,
         syncJob,
         latePlanMigrationRenewal,
+        renewalPricedBeforeUpgrade: pricedBeforeUpgrade?.line ?? null,
       };
     });
 
     return result;
+  }
+
+  /**
+   * Whether a renewal line was priced for a plan its subscription has LEFT
+   * since the draft, and what its money buys on the plan it is on — asked in
+   * the one order that keeps each rule's own answer. Under the subscription's
+   * row lock, which the caller holds.
+   *
+   *  1. A paid UPGRADE since the draft (`readRenewalPricedBeforeUpgrade`, by
+   *     `startedAt`): converted by money onto the current plan.
+   *  2. A plan MIGRATION since the draft (`askMigration`, the caller's
+   *     `findLatePlanMigrationRenewal`): owner's decision 10, the whole period
+   *     on the current plan — answered as `latePlanMigrationRenewal`.
+   *  3. ANY OTHER MOVE since the draft — «Назначить план», a bulk assignment
+   *     (`readRenewalPricedBeforePlanChange`, by plan identity): converted
+   *     like 1. Before it, such a renewal re-applied the plan it paid for and
+   *     undid the operator's assignment.
+   *
+   * A renewal for the plan its subscription is on is none of them and costs no
+   * query at all (`resolvePlanMigrationGuardCandidate`), which is nearly every
+   * renewal. The current plan is read from its live row, as the migration guard
+   * reads it; a plan deleted since has no prices left, and the payment then
+   * buys no day and says so to the operator.
+   */
+  private async resolveRenewalPricedBeforePlanChangeInTransaction(
+    tx: Prisma.TransactionClient,
+    input: {
+      readonly subscription: Subscription;
+      readonly paidPlan: Plan;
+      readonly draftedAt: Date;
+      readonly amount: Prisma.Decimal;
+      readonly currency: string;
+      readonly paidDays: number;
+      readonly gatewayData: Prisma.JsonValue | null;
+      /** The whole payment's amount, for one line of a renewal of several subscriptions. */
+      readonly paymentAmount?: Prisma.Decimal;
+    },
+    askMigration: () => Promise<LatePlanMigrationRenewal | null>,
+  ): Promise<{
+    readonly priced: { readonly line: RenewalPricedBeforeUpgrade; readonly currentPlan: Plan | null } | null;
+    readonly latePlanMigrationRenewal: LatePlanMigrationRenewal | null;
+  }> {
+    const candidatePlanId = resolvePlanMigrationGuardCandidate(input.subscription.planSnapshot, input.paidPlan.id);
+    if (candidatePlanId === null) return { priced: null, latePlanMigrationRenewal: null };
+    const upgraded = readRenewalPricedBeforeUpgrade({
+      subscription: input.subscription,
+      paidPlanId: input.paidPlan.id,
+      draftedAt: input.draftedAt,
+    });
+    if (upgraded !== null) {
+      const currentPlan = await tx.plan.findUnique({ where: { id: upgraded.currentPlanId } });
+      return {
+        priced: await this.priceRenewalOnCurrentPlanInTransaction(tx, input, {
+          currentPlanId: upgraded.currentPlanId,
+          currentPlan,
+          cause: 'UPGRADE',
+        }),
+        latePlanMigrationRenewal: null,
+      };
+    }
+    const latePlanMigrationRenewal = await askMigration();
+    if (latePlanMigrationRenewal !== null) return { priced: null, latePlanMigrationRenewal };
+    const currentPlan = await tx.plan.findUnique({ where: { id: candidatePlanId } });
+    const moved = readRenewalPricedBeforePlanChange({
+      subscription: input.subscription,
+      paidPlanId: input.paidPlan.id,
+      currentPlan,
+    });
+    if (moved === null) return { priced: null, latePlanMigrationRenewal: null };
+    return {
+      priced: await this.priceRenewalOnCurrentPlanInTransaction(tx, input, {
+        currentPlanId: moved.currentPlanId,
+        currentPlan,
+        cause: 'PLAN_CHANGE',
+      }),
+      latePlanMigrationRenewal: null,
+    };
+  }
+
+  /** The line for {@link resolveRenewalPricedBeforePlanChangeInTransaction}: the money rule on the current plan. */
+  private async priceRenewalOnCurrentPlanInTransaction(
+    tx: Prisma.TransactionClient,
+    input: {
+      readonly subscription: Subscription;
+      readonly paidPlan: Plan;
+      readonly amount: Prisma.Decimal;
+      readonly currency: string;
+      readonly paidDays: number;
+      readonly gatewayData: Prisma.JsonValue | null;
+      readonly paymentAmount?: Prisma.Decimal;
+    },
+    current: {
+      readonly currentPlanId: string;
+      readonly currentPlan: Plan | null;
+      readonly cause: 'UPGRADE' | 'PLAN_CHANGE';
+    },
+  ): Promise<{ readonly line: RenewalPricedBeforeUpgrade; readonly currentPlan: Plan | null }> {
+    const { currentPlan } = current;
+    const durations =
+      currentPlan === null
+        ? []
+        : await tx.planDuration.findMany({
+            where: { planId: currentPlan.id },
+            select: { days: true, isActive: true, prices: { select: { currency: true, price: true } } },
+          });
+    const snapshotName = readJsonObject(input.subscription.planSnapshot)['name'];
+    return {
+      line: {
+        subscriptionId: input.subscription.id,
+        paidPlanId: input.paidPlan.id,
+        paidPlanName: displayPlanName(input.paidPlan),
+        currentPlanId: current.currentPlanId,
+        currentPlanName:
+          currentPlan !== null
+            ? displayPlanName(currentPlan)
+            : typeof snapshotName === 'string' && snapshotName.length > 0
+              ? snapshotName
+              : null,
+        conversion: convertRenewalPricedBeforeUpgrade({
+          amount: input.amount,
+          currency: input.currency,
+          paidDays: input.paidDays,
+          currentPlanDurations: durations,
+          gatewayData: input.gatewayData,
+          ...(input.paymentAmount === undefined ? {} : { paymentAmount: input.paymentAmount }),
+        }),
+        ...(current.cause === 'PLAN_CHANGE' ? { cause: current.cause } : {}),
+      },
+      currentPlan,
+    };
   }
 
   /**
@@ -2136,7 +2631,15 @@ export class PaymentSubscriptionMutationService {
    */
   private async scheduleRenewalTermInTransaction(
     tx: Prisma.TransactionClient,
-    input: { readonly subscriptionId: string; readonly plan: Plan; readonly durationDays: number },
+    input: {
+      readonly subscriptionId: string;
+      readonly plan: Plan;
+      readonly durationDays: number;
+      /** Enter the model whatever stage 1 says: paid renewal add-on lines need a term. */
+      readonly forceEntry?: boolean;
+      /** Written on the alignment's add-on events: the payment this renewal fulfils. */
+      readonly correlationId?: string;
+    },
   ): Promise<ScheduledRenewalTerm | null> {
     const parent = await tx.$queryRaw<Array<{ id: string; status: SubscriptionStatus }>>(Prisma.sql`
       SELECT "id", "status"::text AS "status"
@@ -2148,6 +2651,10 @@ export class PaymentSubscriptionMutationService {
       throw new ConflictException('Cannot append a renewal term to a missing or deleted subscription');
     }
 
+    // A subscription the background cutover has not reached yet enters the
+    // model here — only once a plan to mint the renewal's term from is in hand,
+    // so a renewal that cannot mint one stays where it was.
+    await this.enterTermModelInTransaction(tx, input.subscriptionId, { force: input.forceEntry === true });
     const activeTerm = await tx.subscriptionTerm.findFirst({
       where: { subscriptionId: input.subscriptionId, status: SubscriptionTermStatus.ACTIVE },
       orderBy: { generation: 'desc' },
@@ -2155,25 +2662,59 @@ export class PaymentSubscriptionMutationService {
     });
     if (activeTerm === null) return null; // durable model not applicable (no cutover)
 
+    // ── THE TAIL CATCHES UP BEFORE THE RENEWAL IS APPENDED ─────────────────
+    //
+    // Referral days, bulk «Продлить подписку», a webhook or a re-import move
+    // `expiresAt` and leave the term to the hourly drift sweep. Appended as it
+    // stood, the renewal's term began at the tail's OLD end while the renewal
+    // extends `expiresAt` from the new one — and once a successor is queued,
+    // alignment never touches the ACTIVE term under it again: its add-ons sold
+    // "until the end" ended those days early for good, and the renewed plan's
+    // limits began that much early. Aligned first, the tail ends where the
+    // subscription does, its add-ons move with it, and the renewal follows.
+    // All three renewals come through here: the single one, each line of a
+    // combined one, and one a plan migration keeps on the current plan.
+    await this.subscriptionTermService.alignTailToExpiryInTransaction(tx, input.subscriptionId, {
+      correlationId: input.correlationId ?? `renewal:${input.subscriptionId}`,
+    });
     const tail = await tx.subscriptionTerm.findFirst({
       where: {
         subscriptionId: input.subscriptionId,
         status: { in: [SubscriptionTermStatus.ACTIVE, SubscriptionTermStatus.SCHEDULED] },
       },
       orderBy: { generation: 'desc' },
-      select: { id: true, status: true, generation: true, endsAt: true },
+      select: { id: true, status: true, generation: true, startsAt: true, endsAt: true },
     });
     if (tail === null) return null;
-    if (tail.endsAt === null) {
-      throw new ConflictException('Cannot append a renewal term after an open-ended term');
-    }
 
     const now = new Date();
+    // ── AN OPEN-ENDED TAIL: A LIFETIME SUBSCRIPTION BEING RENEWED ──────────
+    //
+    // A lifetime subscription's term never ends (`endsAt = null`), and a
+    // renewal of one — the quote offers RENEW on its plan, and the column path
+    // restarts it from the payment — has nowhere to append after it. It used to
+    // throw here: the money taken, the webhook FAILED, nothing fulfilled. The
+    // open tail is closed instead, at the payment (never before its own start:
+    // a term's window cannot close before it opened), and the renewal's term
+    // follows it — exactly what the renewal does to `expiresAt`.
+    const closedTailAt =
+      tail.endsAt === null
+        ? new Date(Math.max(now.getTime(), tail.startsAt.getTime() + LAPSED_TERM_WINDOW_MS))
+        : null;
+    const tailEndsAt = tail.endsAt ?? closedTailAt!;
     const startsAt =
-      tail.status === SubscriptionTermStatus.SCHEDULED || tail.endsAt.getTime() > now.getTime()
-        ? tail.endsAt
+      tail.status === SubscriptionTermStatus.SCHEDULED || tailEndsAt.getTime() > now.getTime()
+        ? tailEndsAt
         : now;
     const endsAt = calculateExpiry(startsAt, input.durationDays);
+    if (closedTailAt !== null) {
+      await this.closeOpenTailForRenewalInTransaction(tx, {
+        subscriptionId: input.subscriptionId,
+        tailId: tail.id,
+        closedAt: closedTailAt,
+        renewalEndsAt: endsAt,
+      });
+    }
     const baseTrafficLimitBytes =
       input.plan.trafficLimit === null ? null : BigInt(input.plan.trafficLimit) * GIB_BYTES;
     const baseDeviceLimit = input.plan.deviceLimit <= 0 ? null : input.plan.deviceLimit;
@@ -2203,6 +2744,73 @@ export class PaymentSubscriptionMutationService {
       resetAnchorAt: provisionalResetAnchor(input.plan.trafficLimitStrategy, startsAt),
     });
     return { id: created.id, startsAt, endsAt, baseTrafficLimitBytes, baseDeviceLimit };
+  }
+
+  /**
+   * Closes a lifetime subscription's open-ended tail term for the renewal that
+   * follows it, under the row lock the caller holds.
+   *
+   * THE ADD-ONS WITH NO END FOLLOW THE SUBSCRIPTION'S NEW ONE. An
+   * UNTIL_SUBSCRIPTION_END add-on on a lifetime subscription has no date
+   * (`expiresAt = null` — the subscription was made lifetime after it was
+   * bought, and alignment opened it with the tail). Left so, it would count for
+   * ever on an ENDED term: nothing expires a row with no date, and the drift
+   * sweep compares only the tail. It ends where the subscription now does — at
+   * the end of the renewal's term, which is what "until the end of the
+   * subscription" means once the subscription has one; a renewal that is
+   * itself lifetime leaves it open. Each move is audited as an alignment is: a
+   * version bump under a version guard, and an event carrying both dates.
+   */
+  private async closeOpenTailForRenewalInTransaction(
+    tx: Prisma.TransactionClient,
+    input: {
+      readonly subscriptionId: string;
+      readonly tailId: string;
+      readonly closedAt: Date;
+      readonly renewalEndsAt: Date | null;
+    },
+  ): Promise<void> {
+    await tx.subscriptionTerm.update({ where: { id: input.tailId }, data: { endsAt: input.closedAt } });
+    if (input.renewalEndsAt === null) return;
+    const renewalEndsAt = input.renewalEndsAt;
+    const open = await tx.addOnEntitlement.findMany({
+      where: {
+        subscriptionId: input.subscriptionId,
+        lifetime: AddOnLifetime.UNTIL_SUBSCRIPTION_END,
+        state: { in: [AddOnEntitlementState.PENDING_ACTIVATION, AddOnEntitlementState.ACTIVE] },
+        expiresAt: null,
+      },
+      orderBy: { id: 'asc' },
+      select: { id: true, state: true, version: true, scheduledActivationAt: true },
+    });
+    for (const entitlement of open) {
+      // Never at or before its own activation (`add_on_entitlements_boundary_check`).
+      const expiresAt = new Date(
+        Math.max(renewalEndsAt.getTime(), entitlement.scheduledActivationAt.getTime() + LAPSED_TERM_WINDOW_MS),
+      );
+      const claimed = await tx.addOnEntitlement.updateMany({
+        where: { id: entitlement.id, state: entitlement.state, version: entitlement.version },
+        data: { expiresAt, version: { increment: 1 } },
+      });
+      if (claimed.count !== 1) continue;
+      await tx.addOnEntitlementEvent.create({
+        data: {
+          entitlementId: entitlement.id,
+          fromState: entitlement.state,
+          toState: entitlement.state,
+          reason: 'LIFETIME_TERM_CLOSED_BY_RENEWAL',
+          actorType: AddOnEntitlementActorType.SYSTEM,
+          correlationId: `renewal-close:${input.subscriptionId}`,
+          commandKey: `lifetime-close:v${entitlement.version + 1}`,
+          metadata: {
+            termId: input.tailId,
+            termEndsAt: input.closedAt.toISOString(),
+            previousExpiresAt: null,
+            expiresAt: expiresAt.toISOString(),
+          },
+        },
+      });
+    }
   }
 
   /**
@@ -2240,6 +2848,10 @@ export class PaymentSubscriptionMutationService {
       readonly paidPlan: Plan;
       readonly durationDays: number;
       readonly latePlanMigrationRenewal: LatePlanMigrationRenewal | null;
+      /** See {@link scheduleRenewalTermInTransaction}. */
+      readonly forceEntry?: boolean;
+      /** See {@link scheduleRenewalTermInTransaction}. */
+      readonly correlationId?: string;
     },
   ): Promise<ScheduledRenewalTerm | null> {
     if (input.latePlanMigrationRenewal === null) {
@@ -2247,6 +2859,8 @@ export class PaymentSubscriptionMutationService {
         subscriptionId: input.subscriptionId,
         plan: input.paidPlan,
         durationDays: input.durationDays,
+        forceEntry: input.forceEntry,
+        correlationId: input.correlationId,
       });
     }
     const currentPlan = await tx.plan.findUnique({
@@ -2257,6 +2871,8 @@ export class PaymentSubscriptionMutationService {
         subscriptionId: input.subscriptionId,
         plan: currentPlan,
         durationDays: input.durationDays,
+        forceEntry: input.forceEntry,
+        correlationId: input.correlationId,
       });
     }
     const activeTerm = await tx.subscriptionTerm.findFirst({
@@ -2296,10 +2912,43 @@ export class PaymentSubscriptionMutationService {
    * the tail, so its term is SCHEDULED at `tail.endsAt`. An upgrade resets the
    * window to `now` (the `UPGRADE_RESETS_EXPIRY` quote warning), so its term
    * starts NOW and is activated immediately — `activateInTransaction` ends the
-   * outgoing ACTIVE term as part of the same claim.
+   * outgoing ACTIVE term as part of the same claim. Its `endsAt` is the
+   * upgrade's expiry as the caller computed it, the converted paid remainder of
+   * the old plan already in it; nothing here adds it a second time.
    *
-   * Returns `null` when the durable model does not apply (no ACTIVE term, i.e.
-   * no cutover has run), leaving the caller on the legacy column-only path.
+   * ── A QUEUED TERM THAT CARRIES PAID ADD-ONS SURVIVES, RE-BASED ──────────
+   *
+   * A queued SCHEDULED term was allocated inside the expiry window this upgrade
+   * has just discarded, and it blocks the new term's activation outright
+   * (`activateInTransaction` activates only the LOWEST scheduled generation).
+   * One that carries nothing is CANCELED: its days are already converted into
+   * `endsAt` (`paid-remainder-conversion.util.ts`).
+   *
+   * One that carries add-ons bought for it (stage 5) cannot be cancelled — the
+   * entitlement state machine has no CANCEL, and they are paid for. It used to
+   * keep the upgrade off the model altogether: the old ACTIVE term's base
+   * stayed in force, and the queued term brought the old plan's snapshot,
+   * squads and limits back when it began. Now it survives RE-BASED onto
+   * the new plan, and after the new term:
+   *
+   *  - the new ACTIVE term runs from now to that term's start (a second when it
+   *    is already due, so the sweep activates it at once);
+   *  - the survivors move above it in the chain (their generations are
+   *    renumbered, so activation order stays the chain's order);
+   *  - the tail survivor ends where the subscription now does. It has NO DAYS
+   *    OF ITS OWN: they were converted into `endsAt` with the rest, so terms
+   *    follow `expiresAt` and never the reverse. Its add-ons still begin at its
+   *    start, as sold, and keep their own end dates — clamped to the new end by
+   *    the caller ({@link carryLiveAddOnsAcrossUpgradeInTransaction}).
+   *
+   * A survivor that would START at or after the new end can deliver nothing
+   * inside the subscription: its window is left alone, and the operator is told
+   * after the commit (`deferrals`) — the add-ons bought for it are a refund
+   * decision.
+   *
+   * Returns `null` when the durable model does not apply (no ACTIVE term):
+   * the caller stays on the column path. Decided by that ROW and never by a
+   * rollout flag.
    */
   private async startUpgradeTermInTransaction(
     tx: Prisma.TransactionClient,
@@ -2312,7 +2961,7 @@ export class PaymentSubscriptionMutationService {
       readonly startsAt: Date;
       readonly endsAt: Date | null;
     },
-  ): Promise<{ readonly id: string } | null> {
+  ): Promise<{ readonly id: string; readonly survivingTermIds: readonly string[] } | null> {
     const parent = await tx.$queryRaw<Array<{ id: string; status: SubscriptionStatus }>>(Prisma.sql`
       SELECT "id", "status"::text AS "status"
       FROM "subscriptions"
@@ -2328,64 +2977,44 @@ export class PaymentSubscriptionMutationService {
       orderBy: { generation: 'desc' },
       select: { id: true },
     });
-    if (activeTerm === null) return null; // durable model not applicable (no cutover)
+    if (activeTerm === null) return null; // not in the durable model: the column path
 
-    // A queued SCHEDULED tail was allocated inside the expiry window this
-    // upgrade has just discarded, so its window is already void — and it also
-    // blocks activation outright, because `activateInTransaction` only ever
-    // activates the LOWEST scheduled generation while the term minted below is
-    // always the highest. Left alone it would activate later and reinstate a
-    // superseded plan's baseline: the very reversion this method exists to
-    // stop, merely deferred. So cancel it.
-    //
-    // Never when it carries entitlements, though. Stranding goods the customer
-    // has already paid for is worse than a stale baseline, and the entitlement
-    // state machine has no CANCEL command to retire them with (`REVERSE` is a
-    // compensating financial reversal, not a cancellation). That case keeps
-    // today's behaviour and is reported rather than silently resolved.
     const scheduled = await tx.subscriptionTerm.findMany({
       where: { subscriptionId: input.subscriptionId, status: SubscriptionTermStatus.SCHEDULED },
-      select: { id: true },
+      orderBy: { generation: 'asc' },
+      select: { id: true, startsAt: true, endsAt: true },
     });
-    if (scheduled.length > 0) {
-      const scheduledIds = scheduled.map((term) => term.id);
-      const boundEntitlements = await tx.addOnEntitlement.count({
-        where: {
-          termId: { in: scheduledIds },
-          state: {
-            in: [
-              AddOnEntitlementState.PENDING_ACTIVATION,
-              AddOnEntitlementState.ACTIVE,
-              AddOnEntitlementState.EXPIRING,
-            ],
-          },
-        },
-      });
-      if (boundEntitlements > 0) {
-        // Buffered past the commit for the same reason the renewal's
-        // dead-line card is (see {@link DormantRenewalAddOnLine}): this runs
-        // inside `upgradeSubscriptionFromPayment`'s `$transaction`, so a card
-        // raised here reports an upgrade outcome that a rollback further down
-        // erases — and the webhook then retries into the identical
-        // deterministic condition and reports it again.
-        input.deferrals.push({
-          subscriptionId: input.subscriptionId,
-          planId: input.plan.id,
-          scheduledTermIds: scheduledIds,
-          boundEntitlements,
-        });
-        return null;
-      }
+    const bound =
+      scheduled.length === 0
+        ? []
+        : await tx.addOnEntitlement.findMany({
+            where: {
+              termId: { in: scheduled.map((term) => term.id) },
+              state: {
+                in: [
+                  AddOnEntitlementState.PENDING_ACTIVATION,
+                  AddOnEntitlementState.ACTIVE,
+                  AddOnEntitlementState.EXPIRING,
+                ],
+              },
+            },
+            select: { termId: true },
+          });
+    const boundTermIds = new Set(bound.map((entitlement) => entitlement.termId));
+    const unbound = scheduled.filter((term) => !boundTermIds.has(term.id)).map((term) => term.id);
+    const survivors = scheduled.filter((term) => boundTermIds.has(term.id));
+    if (unbound.length > 0) {
       await tx.subscriptionTerm.updateMany({
-        where: { id: { in: scheduledIds }, status: SubscriptionTermStatus.SCHEDULED },
+        where: { id: { in: unbound }, status: SubscriptionTermStatus.SCHEDULED },
         data: { status: SubscriptionTermStatus.CANCELED, endedAt: input.startsAt },
       });
     }
 
-    const created = await this.subscriptionTermService.createScheduledInTransaction(tx, {
-      subscriptionId: input.subscriptionId,
-      planId: input.plan.id,
-      planSnapshot: {
+    const baseTrafficLimitBytes =
+      input.plan.trafficLimit === null ? null : BigInt(input.plan.trafficLimit) * GIB_BYTES;
+    const baseDeviceLimit = input.plan.deviceLimit <= 0 ? null : input.plan.deviceLimit;
+    const planSnapshot = (snapshotSource: string): Prisma.InputJsonValue =>
+      ({
         id: input.plan.id,
         name: displayPlanName(input.plan),
         description: input.plan.description,
@@ -2398,18 +3027,178 @@ export class PaymentSubscriptionMutationService {
         internalSquads: input.plan.internalSquads,
         externalSquad: input.plan.externalSquad,
         selectedDurationDays: input.durationDays,
-        snapshotSource: 'UPGRADE_TERM',
-      } as Prisma.InputJsonValue,
+        snapshotSource,
+      }) as Prisma.InputJsonValue;
+
+    // The new ACTIVE term's window: to the upgrade's end, or to where the first
+    // survivor begins — never past the subscription's end, and never shorter
+    // than a second (`subscription_terms_generation_check`).
+    const firstSurvivor = survivors[0];
+    const activeEndsAt =
+      firstSurvivor === undefined
+        ? input.endsAt
+        : new Date(
+            Math.max(
+              input.startsAt.getTime() + LAPSED_TERM_WINDOW_MS,
+              input.endsAt === null
+                ? firstSurvivor.startsAt.getTime()
+                : Math.min(firstSurvivor.startsAt.getTime(), input.endsAt.getTime()),
+            ),
+          );
+    const created = await this.subscriptionTermService.createScheduledInTransaction(tx, {
+      subscriptionId: input.subscriptionId,
+      planId: input.plan.id,
+      planSnapshot: planSnapshot('UPGRADE_TERM'),
       startsAt: input.startsAt,
-      endsAt: input.endsAt,
-      baseTrafficLimitBytes:
-        input.plan.trafficLimit === null ? null : BigInt(input.plan.trafficLimit) * GIB_BYTES,
-      baseDeviceLimit: input.plan.deviceLimit <= 0 ? null : input.plan.deviceLimit,
+      endsAt: activeEndsAt,
+      baseTrafficLimitBytes,
+      baseDeviceLimit,
       trafficResetStrategy: input.plan.trafficLimitStrategy,
       resetAnchorAt: provisionalResetAnchor(input.plan.trafficLimitStrategy, input.startsAt),
     });
+
+    const endsAt = input.endsAt;
+    const startsInside = (term: { readonly startsAt: Date }): boolean =>
+      endsAt === null || term.startsAt.getTime() < endsAt.getTime();
+    // The last survivor that begins inside the subscription is where the chain
+    // now ends; any after it begin at or past the end and deliver nothing.
+    const lastInside = survivors.reduce((last, term, index) => (startsInside(term) ? index : last), -1);
+    const undeliverable: string[] = [];
+    for (const [index, survivor] of survivors.entries()) {
+      if (index > lastInside) undeliverable.push(survivor.id);
+      await tx.subscriptionTerm.update({
+        where: { id: survivor.id },
+        data: {
+          // Above the new term, in the chain's own order.
+          generation: created.generation + 1 + index,
+          planId: input.plan.id,
+          planSnapshot: planSnapshot('UPGRADE_REBASED_TERM'),
+          baseTrafficLimitBytes,
+          baseDeviceLimit,
+          trafficResetStrategy: input.plan.trafficLimitStrategy,
+          resetAnchorAt: provisionalResetAnchor(input.plan.trafficLimitStrategy, survivor.startsAt),
+          // The chain ends where the subscription does; the days are in it.
+          ...(index === lastInside ? { endsAt } : {}),
+        },
+      });
+    }
     await this.subscriptionTermService.activateInTransaction(tx, created.id, input.startsAt);
-    return { id: created.id };
+
+    if (undeliverable.length > 0) {
+      // Buffered past the commit for the same reason the renewal's dead-line
+      // card is (see {@link DormantRenewalAddOnLine}): this runs inside
+      // `upgradeSubscriptionFromPayment`'s `$transaction`.
+      input.deferrals.push({
+        subscriptionId: input.subscriptionId,
+        planId: input.plan.id,
+        scheduledTermIds: undeliverable,
+        boundEntitlements: bound.filter((entitlement) => undeliverable.includes(entitlement.termId)).length,
+      });
+    }
+    return { id: created.id, survivingTermIds: survivors.map((term) => term.id) };
+  }
+
+  /**
+   * THE LIVE ADD-ONS ACROSS A PAID UPGRADE (owner, 24.09.2026): each keeps its
+   * own end date, but never later than the subscription's new end — and is
+   * re-bound to the new ACTIVE term, the one it now counts on.
+   *
+   *  - ACTIVE add-ons: clamped to `endsAt`, and moved onto the new term. One
+   *    tied to a reset epoch stays on the term that epoch belongs to (the
+   *    foreign key pairs them), and is only clamped.
+   *  - PENDING add-ons on a queued term that survived the upgrade
+   *    (`survivingTermIds`): clamped only; they stay on their term and still
+   *    begin at its start. One that would end at or before its own activation
+   *    cannot be delivered and is left for the operator, whom the upgrade's
+   *    deferral card tells (`add_on_entitlements_boundary_check` forbids the
+   *    write anyway).
+   *  - EXPIRING add-ons are already past their end; nothing to keep.
+   *
+   * An add-on is never moved LATER: a clamp only ever shortens, and the new
+   * term's longer window does not lengthen what was sold. Each change is a
+   * version bump under a version guard (a transition that won the row is left
+   * alone) and an `AddOnEntitlementEvent` carrying both terms and both dates.
+   * No recompute here: neither a date nor a term binding is part of `desired`,
+   * and the caller recomputes next.
+   */
+  private async carryLiveAddOnsAcrossUpgradeInTransaction(
+    tx: Prisma.TransactionClient,
+    input: {
+      readonly subscriptionId: string;
+      readonly termId: string;
+      readonly endsAt: Date | null;
+      readonly survivingTermIds: readonly string[];
+      readonly correlationId: string;
+    },
+  ): Promise<void> {
+    const live = await tx.addOnEntitlement.findMany({
+      where: {
+        subscriptionId: input.subscriptionId,
+        OR: [
+          { state: AddOnEntitlementState.ACTIVE },
+          ...(input.survivingTermIds.length === 0
+            ? []
+            : [
+                {
+                  state: AddOnEntitlementState.PENDING_ACTIVATION,
+                  termId: { in: [...input.survivingTermIds] },
+                },
+              ]),
+        ],
+      },
+      orderBy: { id: 'asc' },
+      select: {
+        id: true,
+        state: true,
+        version: true,
+        termId: true,
+        expiresAt: true,
+        expiryEpochId: true,
+        scheduledActivationAt: true,
+      },
+    });
+    for (const entitlement of live) {
+      const rebind =
+        entitlement.state === AddOnEntitlementState.ACTIVE &&
+        entitlement.termId !== input.termId &&
+        entitlement.expiryEpochId === null;
+      const clampTo =
+        input.endsAt !== null &&
+        (entitlement.expiresAt === null || entitlement.expiresAt.getTime() > input.endsAt.getTime()) &&
+        input.endsAt.getTime() > entitlement.scheduledActivationAt.getTime()
+          ? input.endsAt
+          : null;
+      if (!rebind && clampTo === null) continue;
+      const expiresAt = clampTo ?? entitlement.expiresAt;
+      const claimed = await tx.addOnEntitlement.updateMany({
+        where: { id: entitlement.id, state: entitlement.state, version: entitlement.version },
+        data: {
+          ...(rebind ? { termId: input.termId } : {}),
+          ...(clampTo === null ? {} : { expiresAt: clampTo }),
+          version: { increment: 1 },
+        },
+      });
+      if (claimed.count !== 1) continue;
+      await tx.addOnEntitlementEvent.create({
+        data: {
+          entitlementId: entitlement.id,
+          fromState: entitlement.state,
+          toState: entitlement.state,
+          reason: 'UPGRADE_KEPT_OWN_END',
+          actorType: AddOnEntitlementActorType.SYSTEM,
+          correlationId: input.correlationId,
+          // The version the change produced: unique per add-on by construction.
+          commandKey: `upgrade-carry:v${entitlement.version + 1}`,
+          metadata: {
+            previousTermId: entitlement.termId,
+            termId: rebind ? input.termId : entitlement.termId,
+            subscriptionEndsAt: input.endsAt?.toISOString() ?? null,
+            previousExpiresAt: entitlement.expiresAt?.toISOString() ?? null,
+            expiresAt: expiresAt?.toISOString() ?? null,
+          },
+        },
+      });
+    }
   }
 
   private async upgradeSubscriptionFromPayment(input: {
@@ -2423,17 +3212,18 @@ export class PaymentSubscriptionMutationService {
     const deferrals: UpgradeTermDeferral[] = [];
     const convertsTrial = isTrialConversionSnapshot(input.transaction.planSnapshot);
     const committed = await this.prismaService.$transaction(async (transactionClient): Promise<UpgradeOutcome> => {
-      // A conversion reads its trial under the row lock: two conversions paid
-      // together otherwise both read it as a trial, and the second restarts the
-      // term the first one paid for.
-      const currentSubscription = convertsTrial
-        ? await this.lockRenewalSubscriptionInTransaction(transactionClient, input.transaction.subscriptionId!)
-        : await transactionClient.subscription.findUnique({
-            where: { id: input.transaction.subscriptionId! },
-          });
-      if (currentSubscription === null) {
-        throw new NotFoundException('Source subscription not found');
-      }
+      // Every upgrade reads its subscription under the row lock. A conversion
+      // of a trial: two conversions paid together otherwise both read it as a
+      // trial, and the second restarts the term the first one paid for. And
+      // every plan change: the paid remainder below is counted from this row's
+      // expiry and its payments, and a renewal applied between that read and
+      // the write would be counted against an expiry it had already moved. The
+      // limit carry and the durable term further down lock the same row again
+      // in this transaction, which PostgreSQL grants at once.
+      const currentSubscription = await this.lockRenewalSubscriptionInTransaction(
+        transactionClient,
+        input.transaction.subscriptionId!,
+      );
       // ── A TRIAL CONVERTS ONCE ──────────────────────────────────────────────
       //
       // This payment was drafted as the conversion of a trial, and another
@@ -2498,64 +3288,77 @@ export class PaymentSubscriptionMutationService {
         }
       }
       const now = new Date();
-      const expiresAt = calculateExpiry(now, input.selectedDurationDays);
-      // Move the term baseline onto the purchased plan BEFORE the column write.
-      // Without this the ACTIVE term keeps the superseded plan's baseline, and
-      // any later versioned job recomputes `old_base + active add-ons` and
-      // pushes it to the panel — silently undoing the plan change the customer
-      // just paid for. Same gate as the renewal path, so a deployment with the
-      // durable model off is untouched.
-      const term = resolveAddOnRolloutFlags().entitlementShadow
-        ? await this.startUpgradeTermInTransaction(transactionClient, {
-            subscriptionId: currentSubscription.id,
-            plan: input.purchasedPlan,
-            durationDays: input.selectedDurationDays,
-            startsAt: now,
-            endsAt: expiresAt,
-            deferrals,
-          })
-        : null;
-      // With a durable term the projection owns the effective limits, so the
-      // legacy columns mirror it instead of the raw plan — otherwise add-on
-      // entitlements still ACTIVE across the plan change would be dropped from
-      // the columns and taken back by the legacy sync path. Matches every other
-      // projection-aware writer (`applyAddOnViaLedger`, the boundary sweep,
-      // `forceReconcile`). Renewal defers instead because its term is SCHEDULED,
-      // not active yet; an upgrade's term starts now.
-      const projection =
-        term === null
-          ? null
-          : await this.effectiveProjectionService.recomputeInTransaction(transactionClient, {
-              subscriptionId: currentSubscription.id,
-              mode: 'ACTIVE',
-            });
-      // Without a projection the COLUMNS are what the panel receives, and
-      // writing the new plan's raw values over them took back everything the
-      // subscription held above its old plan: a paid add-on (the legacy path
-      // records it nowhere else), an operator's raise, a bonus — paid for, then
-      // pushed off the panel by the upgrade. They carry instead, by the rule
-      // renewal already uses (`resolvePlanChangeLimitCarry`). That covers a
-      // trial's conversion and the queued-term fallback above as well; both
-      // reach here with no projection. Never on the projection branch: there
-      // the ACTIVE entitlements are already layered onto the new term, and
-      // carrying them into the columns too would count every add-on twice.
-      const limits =
-        projection === null
-          ? (
-              await resolvePlanChangeLimitCarryInTransaction(
-                transactionClient,
-                currentSubscription.id,
-                input.purchasedPlan,
-              )
-            ).columns
-          : {
-              trafficLimit:
-                projection.desiredTrafficLimitBytes === null
-                  ? null
-                  : Number(projection.desiredTrafficLimitBytes / GIB_BYTES),
-              deviceLimit: projection.desiredDeviceLimit === null ? 0 : projection.desiredDeviceLimit,
-            };
-      const upgradedSubscription = await transactionClient.subscription.update({
+      // ── WHAT WAS LEFT OF THE OLD PLAN, AS DAYS ON THE NEW ONE ─────────────
+      //
+      // The term restarts at the payment, and what the customer had paid for
+      // beyond it used to be lost. It is converted instead — by money actually
+      // paid, never by calendar days × list price, and never in the customer's
+      // favour (`paid-remainder-conversion.util.ts` has the rule and why). The
+      // quote shows the same function's estimate before the customer pays;
+      // this is the number that counts, with this `now`, under the lock above.
+      //
+      // Added ONCE, here, to the one expiry everything below uses: the column,
+      // and the durable term's `endsAt`. A term never adds it again.
+      const paidRemainder = await resolvePaidRemainderConversionInTransaction(transactionClient, {
+        now,
+        subscription: currentSubscription,
+        excludeTransactionId: input.transaction.id,
+        planId: input.purchasedPlan.id,
+        purchasedDurationDays: input.selectedDurationDays,
+      });
+      const expiresAt = calculateExpiry(
+        now,
+        // An unlimited term (-1) has no end to add days to; the conversion
+        // already gives 0 there, and the -1 has to reach `calculateExpiry` as is.
+        input.selectedDurationDays <= 0
+          ? input.selectedDurationDays
+          : input.selectedDurationDays + paidRemainder.days,
+      );
+      // A subscription the background cutover has not reached yet enters the
+      // term model here, while stage 1 is on — minted from its columns as they
+      // stand, before anything below changes them.
+      await this.enterTermModelInTransaction(transactionClient, currentSubscription.id);
+      // …and its tail catches up with the expiry it has NOW, before the upgrade
+      // writes the new one. An add-on sold "until the end of the subscription"
+      // whose date bonus days left behind moves to that end first — and is then
+      // clamped to the new end below, keeping its own date (owner, 24.09).
+      // Aligning AFTER the new expiry instead would move every such add-on to
+      // the new end: the plan-change rotation's rule, not a paid upgrade's.
+      await this.subscriptionTermService.alignTailToExpiryInTransaction(transactionClient, currentSubscription.id, {
+        correlationId: `payment:${input.transaction.paymentId}`,
+      });
+      // The free limit bonuses on the live terms, with their own ends — read
+      // now, before the upgrade ends, cancels and re-bases those terms, and
+      // carried onto the new ones below (`term-limit-bonus.ts`).
+      const liveBonuses = await readLiveTermLimitBonusesInTransaction(transactionClient, currentSubscription.id);
+      // ── WHAT SAT ABOVE THE OLD PLAN CARRIES — ON BOTH PATHS ──────────────
+      //
+      // Writing the new plan's raw values over the columns took back everything
+      // the subscription held above its old plan: a paid add-on (the legacy
+      // path records it nowhere else), an operator's raise, a bonus, a
+      // grandfathered add-on folded into a term's base by the cutover — paid
+      // for, then pushed off the panel by the upgrade. They carry instead, by
+      // the rule renewal already uses (`resolvePlanChangeLimitCarry`), read
+      // under the row lock from the OLD columns, the OLD snapshot and the
+      // recorded add-on share.
+      //
+      // THE SNAPSHOT AND THE CARRIED COLUMNS ARE WRITTEN BEFORE ANY RECOMPUTE.
+      // The recompute below decides what the subscription owns by comparing the
+      // columns, less the recorded share, with the stored snapshot. Run first,
+      // it compared the OLD columns with the OLD snapshot, read a raise or a
+      // grandfathered add-on as an absolute operator value, and froze it: a 3 +
+      // 2 legacy subscription upgraded to a 10-device plan stayed at 5, not 12.
+      // Written first, `column − recorded` is the new plan plus what carried:
+      // OVERRIDDEN by exactly that delta, or INHERITED so the new term's base
+      // stands. Live entitlements are then summed on top ONCE — the carried
+      // columns include their recorded share, which the recompute subtracts
+      // again before it compares.
+      const carry = await resolvePlanChangeLimitCarryInTransaction(
+        transactionClient,
+        currentSubscription.id,
+        input.purchasedPlan,
+      );
+      let upgradedSubscription = await transactionClient.subscription.update({
         where: { id: currentSubscription.id },
         data: {
           status: SubscriptionStatus.ACTIVE,
@@ -2568,14 +3371,74 @@ export class PaymentSubscriptionMutationService {
             purchasedPlan: input.purchasedPlan,
             selectedDurationDays: input.selectedDurationDays,
           }) as Prisma.InputJsonValue,
-          trafficLimit: limits.trafficLimit,
-          deviceLimit: limits.deviceLimit,
+          trafficLimit: carry.columns.trafficLimit,
+          deviceLimit: carry.columns.deviceLimit,
           internalSquads: input.purchasedPlan.internalSquads,
           externalSquad: input.purchasedPlan.externalSquad,
           startedAt: now,
           expiresAt,
         },
       });
+      // ── THE TERM: DECIDED BY THE ROW, NEVER BY A FLAG ────────────────────
+      //
+      // With an ACTIVE term the baseline moves onto the purchased plan: the old
+      // term ends, a term on the new plan starts now and ends at `expiresAt`,
+      // the paid remainder already in it. Without that, any later recompute
+      // took `old_base + active add-ons` and pushed it to the panel — the plan
+      // change the customer paid for silently undone, and after a rollback of
+      // stage 1 by the next add-on expiry. No ACTIVE term: the column path, and
+      // the carried columns above are what the panel receives.
+      const term = await this.startUpgradeTermInTransaction(transactionClient, {
+        subscriptionId: currentSubscription.id,
+        plan: input.purchasedPlan,
+        durationDays: input.selectedDurationDays,
+        startsAt: now,
+        endsAt: expiresAt,
+        deferrals,
+      });
+      let projection: RecomputeProjectionResult | null = null;
+      if (term !== null) {
+        // The live add-ons keep their own end dates, clamped to the new end,
+        // and count on the new term (owner, 24.09.2026).
+        await this.carryLiveAddOnsAcrossUpgradeInTransaction(transactionClient, {
+          subscriptionId: currentSubscription.id,
+          termId: term.id,
+          endsAt: expiresAt,
+          survivingTermIds: term.survivingTermIds,
+          correlationId: `payment:${input.transaction.paymentId}`,
+        });
+        // A free limit bonus follows the same rule: it keeps its own end, the
+        // end of the period it was given in, clamped to the new end. Outside
+        // the model an upgrade ends it, as it always has.
+        await carryTermLimitBonusesAcrossUpgradeInTransaction(transactionClient, {
+          subscriptionId: currentSubscription.id,
+          bonuses: liveBonuses,
+          endsAt: expiresAt,
+          now,
+        });
+        // With a durable term the projection owns the effective limits, and the
+        // columns mirror it — as every projection-aware writer leaves them.
+        projection = await this.effectiveProjectionService.recomputeInTransaction(transactionClient, {
+          subscriptionId: currentSubscription.id,
+          mode: 'ACTIVE',
+        });
+        const mirrored = {
+          trafficLimit:
+            projection.desiredTrafficLimitBytes === null
+              ? null
+              : Number(projection.desiredTrafficLimitBytes / GIB_BYTES),
+          deviceLimit: projection.desiredDeviceLimit === null ? 0 : projection.desiredDeviceLimit,
+        };
+        if (
+          mirrored.trafficLimit !== upgradedSubscription.trafficLimit ||
+          mirrored.deviceLimit !== upgradedSubscription.deviceLimit
+        ) {
+          upgradedSubscription = await transactionClient.subscription.update({
+            where: { id: currentSubscription.id },
+            data: mirrored,
+          });
+        }
+      }
       const syncJob = await transactionClient.profileSyncJob.create({
         data: {
           subscriptionId: upgradedSubscription.id,
@@ -2597,6 +3460,15 @@ export class PaymentSubscriptionMutationService {
           },
         },
       });
+      // Where the extra days came from, on the upgrade's own row and in this
+      // same transaction: the days, and per source payment its overlap, value
+      // and currency. Whenever a paid chunk was weighed, including one that
+      // came to 0 — «checked, nothing» is not «never checked».
+      if (paidRemainder.sources.length > 0) {
+        await writeTransactionGatewayData(transactionClient, input.transaction.id, {
+          merge: { [PAID_REMAINDER_CONVERSION_KEY]: paidRemainderProvenance(paidRemainder, now) },
+        });
+      }
       await transactionClient.transaction.update({
         where: { id: input.transaction.id },
         data: { fulfilledAt: now, status: TransactionStatus.COMPLETED },
@@ -2605,12 +3477,13 @@ export class PaymentSubscriptionMutationService {
         kind: 'APPLIED',
         subscription: upgradedSubscription,
         syncJob,
+        paidRemainder,
       };
     });
 
     for (const deferral of deferrals) {
       this.logger.warn(
-        `UPGRADE_TERM_DEFERRED_SCHEDULED_ENTITLEMENTS subscription=${deferral.subscriptionId} ` +
+        `UPGRADE_ENDS_BEFORE_PAID_SCHEDULED_TERM subscription=${deferral.subscriptionId} ` +
           `scheduledTerms=${deferral.scheduledTermIds.length} entitlements=${deferral.boundEntitlements}`,
       );
       // `system.error` is drawn as an incident card whatever the severity, and
@@ -2618,22 +3491,22 @@ export class PaymentSubscriptionMutationService {
       this.events.warn(
         EVENT_TYPES.SYSTEM_ERROR,
         'SYSTEM',
-        'Upgrade kept the previous term baseline: a scheduled term carries paid entitlements',
+        'Upgrade ends the subscription before a paid scheduled term with add-ons begins',
         {
-          code: 'UPGRADE_TERM_DEFERRED_SCHEDULED_ENTITLEMENTS',
+          code: 'UPGRADE_ENDS_BEFORE_PAID_SCHEDULED_TERM',
           subscriptionId: deferral.subscriptionId,
           userId: input.transaction.userId,
           planId: deferral.planId,
           scheduledTermIds: [...deferral.scheduledTermIds],
           boundEntitlements: deferral.boundEntitlements,
-          reason: 'upgrade_baseline_kept',
+          reason: 'upgrade_addons_after_end',
           why:
-            'Подписку перевели на другой тариф, но у неё уже оплачен следующий период с дополнениями. ' +
-            'Отменить такой период панель не может — дополнения оплачены, — поэтому оставила прежнюю ' +
-            'основу периода. Когда он начнётся, у подписки могут снова оказаться лимиты прежнего тарифа.',
+            'Подписку улучшили до другого тарифа. Оплаченный следующий период перенесён в срок нового ' +
+            'тарифа днями, но дополнения, купленные к этому периоду, начинаются уже после конца подписки ' +
+            'и не будут действовать.',
           nextSteps:
-            'Откройте «Пользователи» → этого пользователя → вкладку «Подписки» и, когда начнётся следующий ' +
-            'период, проверьте лимиты подписки. Если они вернулись к прежнему тарифу, поправьте их вручную.',
+            'Откройте «Пользователи» → этого пользователя → вкладку «Операции», найдите платёж за продление ' +
+            'с дополнениями и решите, вернуть ли за них деньги («Вернуть» или «Отметить возврат»).',
         },
       );
     }
@@ -2883,6 +3756,23 @@ function readAddOnMarker(transaction: Transaction): AddOnMarker | null {
     addOnRevision: typeof addOnRevision === 'number' ? addOnRevision : undefined,
     lifetime,
     sourceLineKey: typeof sourceLineKey === 'string' && sourceLineKey.length > 0 ? sourceLineKey : undefined,
+  };
+}
+
+/**
+ * A marker as the ledger reads it: the v1 checkout wrote neither `lifetime`
+ * nor `sourceLineKey`, and a draft it made can still be paid after the deploy.
+ * The values the v2 checkout writes for the same purchase stand in for them —
+ * `UNTIL_SUBSCRIPTION_END`, the add-on id as its one line key
+ * (`AddOnPurchaseService.checkout`) — so that draft becomes an entitlement that
+ * ends with the subscription, not a permanent increment. A marker that carries
+ * its own values keeps them.
+ */
+function withLedgerMarkerDefaults(marker: AddOnMarker): AddOnMarker {
+  return {
+    ...marker,
+    lifetime: marker.lifetime ?? AddOnLifetime.UNTIL_SUBSCRIPTION_END,
+    sourceLineKey: marker.sourceLineKey ?? marker.addOnId,
   };
 }
 

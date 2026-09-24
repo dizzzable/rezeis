@@ -103,6 +103,23 @@ export interface SubscriptionQuoteCarriedLimitsInterface {
   readonly unlimitedTraffic: boolean;
 }
 
+/**
+ * A live add-on bought through the durable ledger, as an UPGRADE keeps it: its
+ * own end date, never later than the subscription's new end (owner,
+ * 24.09.2026). Informational, like `carriedAbovePlan`.
+ */
+export interface SubscriptionQuoteActiveAddOnInterface {
+  readonly type: 'EXTRA_TRAFFIC' | 'EXTRA_DEVICES';
+  /** Gigabytes for traffic, devices for devices. */
+  readonly value: number;
+  /**
+   * When it ends after the upgrade (ISO): its own date, clamped to the new end
+   * as the quote estimates it (the paid remainder included). `null` — it ends
+   * with a subscription that has no end.
+   */
+  readonly expiresAt: string | null;
+}
+
 export interface SubscriptionQuoteInterface {
   readonly userId: string;
   readonly purchaseType: SubscriptionQuoteAction;
@@ -118,6 +135,29 @@ export interface SubscriptionQuoteInterface {
    * UPGRADE with a plan chosen only; `null` everywhere else and whenever
    * nothing carries. Beside `warnings`, not one of them: it can never count
    * towards `isEligible`, and a client that predates it never reads it.
+   *
+   * What sits above the OLD PLAN — an operator's raise, a bonus, an add-on
+   * bought before the durable model (grandfathered) — and never a live durable
+   * add-on: those are listed in `activeAddOns`, with their own end dates, so
+   * nothing is told twice.
    */
   readonly carriedAbovePlan: SubscriptionQuoteCarriedLimitsInterface | null;
+  /**
+   * UPGRADE with a plan chosen only: the live durable add-ons the upgrade
+   * keeps, each with the end it will have (see
+   * {@link SubscriptionQuoteActiveAddOnInterface}). `null` everywhere else,
+   * when there are none, and when they could not be read; one the new plan
+   * makes meaningless (unlimited on that resource) is left out. Informational:
+   * it never reaches `isEligible`.
+   */
+  readonly activeAddOns: readonly SubscriptionQuoteActiveAddOnInterface[] | null;
+  /**
+   * UPGRADE with a plan chosen only: the whole days the old plan's paid
+   * remainder would add to the new term if paid NOW
+   * (`paid-remainder-conversion.util.ts`). An estimate — fulfilment counts it
+   * again at payment, when a little less may be left. `null` everywhere else,
+   * and when it could not be worked out; `0` when nothing converts.
+   * Informational like `carriedAbovePlan`: it never reaches `isEligible`.
+   */
+  readonly paidRemainderDays: number | null;
 }

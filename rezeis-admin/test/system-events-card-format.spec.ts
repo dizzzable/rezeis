@@ -283,6 +283,59 @@ describe('SystemEventsService card formatting (enriched)', () => {
     assert.ok(text.includes('1 месяц'));
   });
 
+  it('says on «Подписка улучшена» how many days the old plan’s paid remainder added — and nothing when none', async () => {
+    const { service, getLastText } = buildService();
+    const upgraded = {
+      subscriptionId: 'sub_abcdef123456',
+      planName: 'Премиум',
+      durationDays: 30,
+      expireAt: '2026-10-30T12:00:00.000Z',
+    };
+    service.info('subscription.upgraded', 'SUBSCRIPTION', 'Подписка улучшена', {
+      ...upgraded,
+      paidRemainderDays: 6,
+      paidRemainderSources: [{ transactionId: 'tx-1', overlapDays: '20.0000', value: '133.33', currency: 'RUB' }],
+    });
+    await flush();
+    const text = getLastText()!;
+    assert.ok(text.includes('📥 Остаток прежнего тарифа: +6 дн.'), text);
+    // Inside the plan block, beside the term it lengthens.
+    assert.ok(text.indexOf('Длительность') < text.indexOf('Остаток прежнего тарифа'), text);
+
+    service.info('subscription.upgraded', 'SUBSCRIPTION', 'Подписка улучшена', {
+      ...upgraded,
+      paidRemainderDays: 0,
+    });
+    await flush();
+    assert.ok(!getLastText()!.includes('Остаток прежнего тарифа'), getLastText()!);
+  });
+
+  it('says on «Подписка продлена» what a renewal priced before an upgrade paid for and what it bought — escaped', async () => {
+    const { service, getLastText } = buildService();
+    service.info('subscription.renewed', 'SUBSCRIPTION', 'Подписка продлена', {
+      subscriptionId: 'sub_abcdef123456',
+      planName: 'Премиум',
+      durationDays: 9,
+      renewalPricedForPlan: 'Базовый <old>',
+      renewalPricedDays: 30,
+      renewalConvertedDays: 9,
+    });
+    await flush();
+    const text = getLastText()!;
+    assert.ok(
+      text.includes('📥 Оплачено по цене «Базовый &lt;old&gt;» за 30 дн. — на этом тарифе это +9 дн.'),
+      text,
+    );
+
+    service.info('subscription.renewed', 'SUBSCRIPTION', 'Подписка продлена', {
+      subscriptionId: 'sub_abcdef123456',
+      planName: 'Премиум',
+      durationDays: 30,
+    });
+    await flush();
+    assert.ok(!getLastText()!.includes('Оплачено по цене'), getLastText()!);
+  });
+
   it('renders a backup block with human-readable size', async () => {
     const { service, getLastText } = buildService();
     service.info('system.backup_completed', 'SYSTEM', 'backup done', {

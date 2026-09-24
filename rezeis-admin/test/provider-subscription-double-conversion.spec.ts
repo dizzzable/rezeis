@@ -16,6 +16,7 @@ import {
 } from '@prisma/client';
 import { of } from 'rxjs';
 
+import { SubscriptionTermService } from '../src/modules/add-on-entitlements/services/subscription-term.service';
 import { PaymentSubscriptionMutationService } from '../src/modules/payments/services/payment-subscription-mutation.service';
 import { PaymentsTransactionsService } from '../src/modules/payments/services/payments-transactions.service';
 import { ProviderSubscriptionService } from '../src/modules/payments/services/provider-subscription.service';
@@ -23,12 +24,18 @@ import { readProviderSubscriptionTerms } from '../src/modules/payments/utils/pro
 import { describeGatewayDataStatement } from '../src/modules/payments/utils/transaction-gateway-data.util';
 import { PricingService } from '../src/modules/plans/services/pricing.service';
 import { SubscriptionQuoteService } from '../src/modules/subscriptions/services/subscription-quote.service';
+import { pinAddOnStagesOffForThisFile } from './helpers/rollout-flags';
+
+// Written against every `ADDON_*` stage off (the legacy path): these fakes
+// do not stage the durable model's reads. Stages 1, 2 and 6 default ON since
+// 24.09.2026, so the file says so instead of relying on the default.
+pinAddOnStagesOffForThisFile();
 
 /**
  * A trial converts once.
  *
- * The money review (R-money F1) found two provider sign-ups on one trial both
- * admitted: the checkout guard counted ACTIVE rows only, so a second
+ * Two provider sign-ups on one trial were both admitted: the checkout guard
+ * counted ACTIVE rows only, so a second
  * «для автоматического списания» started while the first still waited for its
  * payer. Confirmed together, each first charge converted the trial — the second
  * restarting the term the first had paid for — and both kept renewing it.
@@ -36,8 +43,8 @@ import { SubscriptionQuoteService } from '../src/modules/subscriptions/services/
  * Closed twice over: a conversion sign-up is refused while another one for the
  * same trial waits; and fulfilment does not restart the term of a trial another
  * payment converted first. That payment is withheld — received, settled, applied
- * to nothing, the operator told once to refund it (R2-support-money M1: it used
- * to fail the notification instead, and a default install told nobody). A trial
+ * to nothing, the operator told once to refund it (it used to fail the
+ * notification instead, and a default install told nobody). A trial
  * that stopped being one without a payment (a plan migration) is converted as
  * it always was.
  */
@@ -291,6 +298,13 @@ describe('fulfilling a conversion', () => {
   interface Upgrade {
     readonly paymentId: string;
     readonly gatewayData?: Record<string, unknown>;
+    /**
+     * Its `fulfilledAt`: when it was applied — at the trial's start, `T0`,
+     * unless told — or, later than the subscription's `startedAt`, the stamp
+     * of a claim whose fulfilment has not run yet.
+     */
+    readonly fulfilledAt?: number;
+    readonly amount?: string;
   }
 
   interface RaisedEvent {
@@ -320,6 +334,7 @@ describe('fulfilling a conversion', () => {
       status: SubscriptionStatus.ACTIVE,
       isTrial: options.isTrial,
       remnawaveId: 'rw-1',
+      startedAt: new Date(T0),
       expiresAt: new Date(T0 + 40 * DAY),
       planSnapshot: { id: options.isTrial ? 'trial-plan' : 'plan-b' },
     };
@@ -345,6 +360,12 @@ describe('fulfilling a conversion', () => {
         },
       },
       subscriptionEffectiveProjection: { findUnique: async () => null },
+      // Not in the term model: the upgrade stays on the columns.
+      subscriptionTerm: { findFirst: async () => null },
+      // Plan B's prices, for the paid remainder: 799 ₽ for 90 days.
+      planDuration: {
+        findMany: async () => [{ days: 90, isActive: true, prices: [{ currency: Currency.RUB, price: '799' }] }],
+      },
       profileSyncJob: {
         create: async ({ data }: { data: Record<string, unknown> }) => {
           writes.push({ syncJob: data });
@@ -357,10 +378,30 @@ describe('fulfilling a conversion', () => {
           return data;
         },
         findMany: async ({ where }: { where: Record<string, unknown> }) => {
-          converterQueries.push(where);
-          return (options.otherUpgrades ?? []).map((upgrade) => ({
-            paymentId: upgrade.paymentId,
+          // Fulfilment's look for the payment that converted the trial — the
+          // lookup these tests count — names the purchase type.
+          if (where.purchaseType !== undefined) {
+            converterQueries.push(where);
+            return (options.otherUpgrades ?? []).map((upgrade) => ({
+              paymentId: upgrade.paymentId,
+              gatewayData: upgrade.gatewayData ?? {},
+            }));
+          }
+          // The paid remainder's two reads: renewal lines (none here), and the
+          // subscription's own fulfilled payments — the other upgrades, as a
+          // row of `transactions` holds them, applied or only claimed.
+          if ('items' in where) return [];
+          return (options.otherUpgrades ?? []).map((upgrade, index) => ({
+            id: `tx-other-${index}`,
+            subscriptionId: subscription.id,
+            purchaseType: PurchaseType.UPGRADE,
+            status: TransactionStatus.COMPLETED,
+            fulfilledAt: new Date(upgrade.fulfilledAt ?? T0),
+            amount: upgrade.amount ?? '799',
+            currency: Currency.RUB,
+            planSnapshot: { id: 'plan-b', selectedDurationDays: 90 },
             gatewayData: upgrade.gatewayData ?? {},
+            items: [],
           }));
         },
         findUnique: async () => ({ gatewayData: options.gatewayData ?? {} }),
@@ -392,7 +433,9 @@ describe('fulfilling a conversion', () => {
       { info: record('INFO'), warn: record('WARNING'), error: record('ERROR') } as never,
       {} as never,
       {} as never,
-      {} as never,
+      // The real one: an upgrade aligns the term row it would rotate — and
+      // this subscription has none, which it finds under the row lock.
+      new SubscriptionTermService(),
       {} as never,
     );
     const transaction = {
@@ -561,9 +604,11 @@ describe('fulfilling a conversion', () => {
 
     await f.run();
 
-    // The trial is read under the lock first; the second lock is the plan
-    // change reading the limits it carries onto the new plan.
-    assert.deepEqual(f.locks, ['subscriptions', 'subscriptions']);
+    // The trial is read under the lock first; then the term row is aligned
+    // with the expiry it has now; the plan change reads the limits it carries
+    // onto the new plan; and the upgrade reads the term row its term follows —
+    // every one of them the same row, in the same transaction.
+    assert.deepEqual(f.locks, ['subscriptions', 'subscriptions', 'subscriptions', 'subscriptions']);
     const written = f.writes.find((write) => 'subscription' in write)?.subscription as Record<string, unknown>;
     assert.equal(written.isTrial, false);
     assert.equal(
@@ -573,14 +618,38 @@ describe('fulfilling a conversion', () => {
     );
   });
 
+  it('does not convert a second conversion another worker has only claimed: two paid together, one applies', async () => {
+    // Payment 3 is COMPLETED and stamped by its claim a second ago, and waits
+    // for this row's lock — to be withheld once it gets it. Read as applied, it
+    // restarted the chain now and turned its own 799 ₽ into days of this term.
+    const f = fulfilment({
+      isTrial: true,
+      convertsTrial: true,
+      otherUpgrades: [{ paymentId: 'payment-3', fulfilledAt: Date.now() - 1000 }],
+    });
+
+    await f.run();
+
+    const written = f.writes.find((write) => 'subscription' in write)?.subscription as Record<string, unknown>;
+    assert.equal(
+      Math.round(((written.expiresAt as Date).getTime() - Date.now()) / DAY),
+      90,
+      'the conversion buys its own term and nothing of the claimed payment',
+    );
+    assert.equal(f.writes.some((write) => 'gatewayData' in write), false, 'no paid chunk was weighed');
+  });
+
   it('applies a change of a paid plan as it always has', async () => {
     const f = fulfilment({ isTrial: false, convertsTrial: false, otherUpgrades: [FIRST_PAYMENT] });
 
     await f.run();
 
-    // No trial lock and no converter lookup; the one lock is the plan change
-    // reading the limits it carries onto the new plan.
-    assert.deepEqual(f.locks, ['subscriptions']);
+    // No converter lookup. The first lock is the upgrade reading the row its
+    // paid remainder is counted from; the second aligns the term row with the
+    // expiry it has now; the third is the plan change reading the limits it
+    // carries onto the new plan; the fourth is the term row the upgrade's term
+    // follows — all in the same transaction.
+    assert.deepEqual(f.locks, ['subscriptions', 'subscriptions', 'subscriptions', 'subscriptions']);
     assert.deepEqual(f.converterQueries, []);
     assert.ok(f.writes.some((write) => 'subscription' in write));
   });
