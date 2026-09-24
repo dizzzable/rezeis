@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Pencil, Trash2, Puzzle, Loader2, BarChart3, List, Activity, Info } from 'lucide-react'
+import { Plus, Pencil, Trash2, Puzzle, Loader2, BarChart3, List, Activity, Info, SlidersHorizontal } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { api } from '@/lib/api'
@@ -38,6 +38,7 @@ import { EmojiTextInput } from '@/features/broadcast/emoji-text-input'
 import { PageTitle } from '@/components/layout/page-title'
 import { AddOnsStatsTab } from './add-ons-stats-tab'
 import { AddOnEntitlementsTab } from './add-on-entitlements-tab'
+import { AddOnSwitchesCard } from './add-on-switches-card'
 
 const CURRENCIES = ['RUB', 'USD', 'USDT', 'TON', 'XTR', 'EUR'] as const
 const ADD_ON_TYPES = ['EXTRA_TRAFFIC', 'EXTRA_DEVICES', 'RESET_TRAFFIC'] as const
@@ -180,6 +181,11 @@ export default function AddOnsPage() {
           </TabsTrigger>
           <TabsTrigger value="entitlements" className="gap-2">
             <Activity className="h-4 w-4" /> {t('addOnsPage.tabs.entitlements')}
+          </TabsTrigger>
+          {/* The words of this tab live in the lazy `addOns` bundle the route
+              loads (`withFeatureBundle`), not in the core dictionary. */}
+          <TabsTrigger value="settings" className="gap-2">
+            <SlidersHorizontal className="h-4 w-4" /> {t('addOnSwitches.tab')}
           </TabsTrigger>
         </TabsList>
 
@@ -332,6 +338,10 @@ export default function AddOnsPage() {
 
         <TabsContent value="entitlements">
           <AddOnEntitlementsTab />
+        </TabsContent>
+
+        <TabsContent value="settings">
+          <AddOnSwitchesCard />
         </TabsContent>
       </Tabs>
 

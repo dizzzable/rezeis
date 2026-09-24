@@ -740,7 +740,7 @@ describe('replacementOrphans', () => {
       subscriptions: [subscription({ id: 'sub-legacy', planSnapshot: { id: 'plan-legacy' } })],
     });
     const guard = new PlanReferenceGuardService(db.client as never);
-    const renewal = new SubscriptionRenewalService(db.client as never, {} as never, {} as never);
+    const renewal = new SubscriptionRenewalService(db.client as never, {} as never);
     assert.equal(await renewal.requiresPlanSelection('sub-legacy'), false, 'anti-vacuity: it renews onto X today');
 
     const warned = (await guard.countReferences([X], { now: NOW })).get(X)?.replacementOrphans;

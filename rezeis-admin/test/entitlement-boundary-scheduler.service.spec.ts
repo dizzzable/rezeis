@@ -46,7 +46,7 @@ function build(options: {
   const boundary = {
     activateDueScheduledTerm: async (subscriptionId: string) => {
       activated.push(subscriptionId);
-      return { activated: false, termId: null, activatedEntitlements: 0, desiredRevision: null, syncJobIds: [] };
+      return { activated: false, termId: null, desiredRevision: null, syncJobIds: [] };
     },
     expireDueForSubscription: async (subscriptionId: string) => {
       processed.push(subscriptionId);

@@ -8,7 +8,6 @@ import {
   buildRenewalCheckoutFingerprint,
   canonicalJson,
   fingerprint,
-  findDuplicateAddOnSelection,
 } from '../src/modules/payments/utils/checkout-fingerprint.util';
 
 const base: AddOnCheckoutFingerprintInput = {
@@ -85,104 +84,56 @@ const renewalBase: RenewalCheckoutFingerprintInput = {
   channel: 'WEB',
   currency: 'USD',
   lines: [
-    {
-      subscriptionId: 'sub-a',
-      planId: 'plan-a',
-      durationDays: 30,
-      termId: 'term-a',
-      addOns: [
-        { addOnId: 'addon-1', addOnRevision: 2, type: 'EXTRA_TRAFFIC', value: 50, lifetime: 'UNTIL_SUBSCRIPTION_END', activation: 'TERM_START' },
-      ],
-    },
-    {
-      subscriptionId: 'sub-b',
-      planId: 'plan-b',
-      durationDays: 90,
-      termId: 'term-b',
-      addOns: [],
-    },
+    { subscriptionId: 'sub-a', planId: 'plan-a', durationDays: 30, termId: 'term-a' },
+    { subscriptionId: 'sub-b', planId: 'plan-b', durationDays: 90, termId: 'term-b' },
   ],
 };
 
 describe('renewal checkout fingerprint (T-007)', () => {
-  it('is stable regardless of line and add-on ordering', () => {
+  it('is stable regardless of line ordering', () => {
     const reordered: RenewalCheckoutFingerprintInput = {
       ...renewalBase,
-      lines: [
-        renewalBase.lines[1]!,
-        {
-          ...renewalBase.lines[0]!,
-          addOns: [...renewalBase.lines[0]!.addOns].reverse(),
-        },
-      ],
+      lines: [renewalBase.lines[1]!, renewalBase.lines[0]!],
     };
     assert.equal(buildRenewalCheckoutFingerprint(renewalBase), buildRenewalCheckoutFingerprint(reordered));
   });
 
-  it('differs for the same total but different products', () => {
+  it('differs for the same total but a different plan', () => {
     const swapped: RenewalCheckoutFingerprintInput = {
       ...renewalBase,
-      lines: [
-        {
-          ...renewalBase.lines[0]!,
-          addOns: [
-            { addOnId: 'addon-9', addOnRevision: 1, type: 'EXTRA_DEVICES', value: 2, lifetime: 'UNTIL_SUBSCRIPTION_END', activation: 'TERM_START' },
-          ],
-        },
-        renewalBase.lines[1]!,
-      ],
+      lines: [{ ...renewalBase.lines[0]!, planId: 'plan-z' }, renewalBase.lines[1]!],
     };
     assert.notEqual(buildRenewalCheckoutFingerprint(renewalBase), buildRenewalCheckoutFingerprint(swapped));
   });
 
-  it('changes when any composition field changes (revision/lifetime/duration/term/activation)', () => {
+  it('changes when any composition field changes (plan/duration/term)', () => {
     const original = buildRenewalCheckoutFingerprint(renewalBase);
-    const mutate = (line0: Partial<RenewalCheckoutFingerprintInput['lines'][number]['addOns'][number]>): string => {
-      const l0 = renewalBase.lines[0]!;
-      return buildRenewalCheckoutFingerprint({
+    const withLine0 = (patch: Partial<RenewalCheckoutFingerprintInput['lines'][number]>): string =>
+      buildRenewalCheckoutFingerprint({
         ...renewalBase,
-        lines: [{ ...l0, addOns: [{ ...l0.addOns[0]!, ...line0 }] }, renewalBase.lines[1]!],
+        lines: [{ ...renewalBase.lines[0]!, ...patch }, renewalBase.lines[1]!],
       });
-    };
-    assert.notEqual(mutate({ addOnRevision: 3 }), original);
-    assert.notEqual(mutate({ lifetime: 'UNTIL_NEXT_RESET' }), original);
-    assert.notEqual(mutate({ activation: 'NOW' }), original);
-    assert.notEqual(mutate({ value: 100 }), original);
-    // Line-level fields
-    assert.notEqual(
-      buildRenewalCheckoutFingerprint({ ...renewalBase, lines: [{ ...renewalBase.lines[0]!, durationDays: 365 }, renewalBase.lines[1]!] }),
-      original,
+    assert.notEqual(withLine0({ durationDays: 365 }), original);
+    assert.notEqual(withLine0({ termId: 'term-x' }), original);
+    assert.notEqual(withLine0({ termId: null }), original);
+  });
+
+  it('keeps the fingerprint every renewal draft stored before renewal add-ons were deleted carries', () => {
+    // Computed with the code as it stood before 24.09.2026, for a renewal
+    // without add-ons — the only kind that was ever sold, stage 5 having never
+    // been on by default. A keyed replay or a draft reuse finds its draft by
+    // this value, so the lines still hash `addOns: []`.
+    assert.equal(
+      buildRenewalCheckoutFingerprint(renewalBase),
+      'fb8b26d559098b04af33db20b7743cf53c07663f6d67e2f5db855b2935c1947d',
     );
-    assert.notEqual(
-      buildRenewalCheckoutFingerprint({ ...renewalBase, lines: [{ ...renewalBase.lines[0]!, termId: 'term-x' }, renewalBase.lines[1]!] }),
-      original,
+    assert.equal(
+      buildRenewalCheckoutFingerprint({ ...renewalBase, savedPaymentMethodId: 'spm-1', providerSubscription: true }),
+      'a352a99408d035d1afe4a31a20c776dad52baf20eff1e2fbad5eb0c664aa546e',
     );
   });
 
   it('is a 64-char hex sha256', () => {
     assert.match(buildRenewalCheckoutFingerprint(renewalBase), /^[0-9a-f]{64}$/);
-  });
-
-  it('detects a duplicate add-on selection within a line', () => {
-    const dup: RenewalCheckoutFingerprintInput = {
-      ...renewalBase,
-      lines: [
-        {
-          ...renewalBase.lines[0]!,
-          addOns: [
-            renewalBase.lines[0]!.addOns[0]!,
-            { ...renewalBase.lines[0]!.addOns[0]! },
-          ],
-        },
-      ],
-    };
-    const found = findDuplicateAddOnSelection(dup);
-    assert.notEqual(found, null);
-    assert.equal(found!.addOnId, 'addon-1');
-    assert.equal(found!.subscriptionId, 'sub-a');
-  });
-
-  it('returns null when every line has unique add-on picks', () => {
-    assert.equal(findDuplicateAddOnSelection(renewalBase), null);
   });
 });

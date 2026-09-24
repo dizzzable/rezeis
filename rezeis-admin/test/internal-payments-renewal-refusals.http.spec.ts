@@ -95,7 +95,7 @@ const EXPECTED_FP = buildRenewalCheckoutFingerprint({
   channel: 'WEB',
   currency: 'USD',
   savedPaymentMethodId: null,
-  lines: [{ subscriptionId: 'sub-1', planId: 'plan-1', durationDays: 30, termId: null, addOns: [] }],
+  lines: [{ subscriptionId: 'sub-1', planId: 'plan-1', durationDays: 30, termId: null }],
 });
 
 const EXPECTED_REQUEST_FP = fingerprint({
@@ -454,6 +454,29 @@ describe('POST internal/payments/renewal-checkout — the refusal labels on the 
       'the lifetime refusal reached reiwa without a code: keep the label in SAFE_PRODUCT_CODES.',
     );
     assert.equal(response.status, 400);
+  });
+
+  it('refuses a renewal that still asks for add-ons at the door: renewal add-ons were deleted', async () => {
+    // The owner, 24.09.2026: renewal add-ons (stage 5) are gone with their
+    // code. A cabinet sent `addOns` only while the panel offered them, which it
+    // no longer does; a request that still carries them is refused by the
+    // validation before anything is priced or drafted — never renewed with its
+    // add-ons quietly left out.
+    let priced = false;
+    const app = await boot({
+      existing: null,
+      priceRenewalItems: async () => {
+        priced = true;
+        throw new Error('a renewal asking for add-ons must not reach pricing');
+      },
+    });
+
+    const response = await request(app.getHttpServer())
+      .post('/api/internal/payments/renewal-checkout')
+      .send({ ...BASE_BODY, addOns: [{ subscriptionId: 'sub-1', addOnIds: ['addon-1'] }] });
+
+    assert.equal(response.status, 400);
+    assert.equal(priced, false);
   });
 
   it('still strips a non-allowlisted product code at the same 503', async () => {

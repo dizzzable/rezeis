@@ -6,189 +6,379 @@ import { describe, it, mock } from 'node:test';
 import { Logger } from '@nestjs/common';
 
 import {
-  ADD_ON_ROLLOUT_FLAG_DEFAULTS,
-  type AddOnRolloutFlagDefaults,
-  type AddOnRolloutFlagName,
-  parseFlag,
+  ADD_ON_ROLLOUT_FLAG_NAMES,
+  ADD_ON_SWITCH_DEFAULTS,
+  ADD_ON_SWITCH_NAMES,
+  type AddOnRolloutFlags,
+  describeAddOnSwitches,
+  planAddOnSwitchUpdate,
+  readAddOnRolloutFlags,
+  readEnvOverride,
+  readStoredAddOnSwitches,
   resolveAddOnRolloutFlags,
+  resolveIntakeResetCapabilities,
   resolveResetCapabilities,
 } from '../src/modules/add-on-entitlements/add-on-rollout.config';
 
-/**
- * The defaults table with every stage ON, and with every stage OFF. Passed to
- * the REAL resolver, so what is proved here is what `resolveAddOnRolloutFlags`
- * does with an ON or an OFF default, whatever the shipped table holds — not
- * what `parseFlag` does on its own.
- */
-const ALL_ON = Object.fromEntries(
-  Object.keys(ADD_ON_ROLLOUT_FLAG_DEFAULTS).map((name) => [name, true]),
-) as AddOnRolloutFlagDefaults;
-const ALL_OFF = Object.fromEntries(
-  Object.keys(ADD_ON_ROLLOUT_FLAG_DEFAULTS).map((name) => [name, false]),
-) as AddOnRolloutFlagDefaults;
+/** No `ADDON_*` line at all: what an install has once it follows the notes. */
+const NO_ENV: NodeJS.ProcessEnv = {};
 
-/** The owner's decision of 24.09.2026: stages 1, 2 and 6 ON, 3, 4 and 5 OFF. */
-const SHIPPED: AddOnRolloutFlagDefaults = {
-  ADDON_ENTITLEMENT_SHADOW: true,
-  ADDON_ENTITLEMENT_DIRECT_PURCHASE: true,
-  ADDON_PROJECTION_SYNC: false,
-  ADDON_RENEWAL_ADDONS: false,
-  ADDON_DEVICE_CLEANUP_AUTO: true,
-  ADDON_RESET_EXPIRY_DAY: false,
-  ADDON_RESET_EXPIRY_WEEK: false,
-  ADDON_RESET_EXPIRY_MONTH: false,
-  ADDON_RESET_EXPIRY_MONTH_ROLLING: false,
-};
+const RESET_VARIABLES = [
+  'ADDON_RESET_EXPIRY_DAY',
+  'ADDON_RESET_EXPIRY_WEEK',
+  'ADDON_RESET_EXPIRY_MONTH',
+  'ADDON_RESET_EXPIRY_MONTH_ROLLING',
+] as const;
 
-describe('add-on rollout flags', () => {
-  it('ships stages 1, 2 and 6 ON and every other stage OFF', () => {
-    // The whole table, keys included: a missing or an extra variable fails
-    // here as surely as a flipped value.
-    assert.deepEqual({ ...ADD_ON_ROLLOUT_FLAG_DEFAULTS }, SHIPPED);
+describe('add-on switches — the defaults', () => {
+  it('ship «Новый учёт докупок» and «Удалять лишние устройства автоматически» ON, «Докупка трафика до сброса» OFF', () => {
+    // The whole table, keys included: a missing or an extra switch fails here
+    // as surely as a flipped default.
+    assert.deepEqual(
+      { ...ADD_ON_SWITCH_DEFAULTS },
+      { durableAccounting: true, deviceCleanupAuto: true, trafficResetExpiry: false },
+    );
+    assert.deepEqual([...ADD_ON_SWITCH_NAMES], ['durableAccounting', 'deviceCleanupAuto', 'trafficResetExpiry']);
   });
 
-  it('resolves an empty environment to exactly that', () => {
-    const flags = resolveAddOnRolloutFlags({});
-    assert.equal(flags.entitlementShadow, true);
-    assert.equal(flags.directPurchase, true);
-    assert.equal(flags.projectionSync, false);
-    assert.equal(flags.renewalAddOns, false);
-    assert.equal(flags.deviceCleanupAuto, true);
-    assert.deepEqual(flags.resetExpiry, { DAY: false, WEEK: false, MONTH: false, MONTH_ROLLING: false });
-  });
-
-  it('switches the shipped ON stages off with one explicit line each', () => {
-    const flags = resolveAddOnRolloutFlags({
-      ADDON_ENTITLEMENT_SHADOW: 'false',
-      ADDON_ENTITLEMENT_DIRECT_PURCHASE: '0',
-      ADDON_DEVICE_CLEANUP_AUTO: 'off',
+  it('run stages 1, 2 and 6 and no reset strategy while nothing is set, on the page or in .env', () => {
+    assert.deepEqual(resolveAddOnRolloutFlags({}, NO_ENV), {
+      entitlementShadow: true,
+      directPurchase: true,
+      deviceCleanupAuto: true,
+      resetExpiry: { DAY: false, WEEK: false, MONTH: false, MONTH_ROLLING: false },
     });
+  });
+
+  it('read the seven variables of the three switches and nothing else: a line for a deleted stage decides nothing', () => {
+    assert.deepEqual(
+      [...ADD_ON_ROLLOUT_FLAG_NAMES],
+      ['ADDON_ENTITLEMENT_SHADOW', 'ADDON_ENTITLEMENT_DIRECT_PURCHASE', 'ADDON_DEVICE_CLEANUP_AUTO', ...RESET_VARIABLES],
+    );
+    // Stages 3 and 5 were deleted with their code: an install whose .env still
+    // carries their lines runs exactly like one without them.
+    const leftovers = resolveAddOnRolloutFlags({}, { ADDON_PROJECTION_SYNC: 'true', ADDON_RENEWAL_ADDONS: 'true' });
+    assert.deepEqual(leftovers, resolveAddOnRolloutFlags({}, NO_ENV));
+    assert.deepEqual(Object.keys(leftovers).sort(), ['deviceCleanupAuto', 'directPurchase', 'entitlementShadow', 'resetExpiry']);
+  });
+});
+
+describe('add-on switches — the stored switch decides while .env is silent', () => {
+  it('«Новый учёт докупок» OFF stops stages 1 and 2, and nothing else', () => {
+    const flags = resolveAddOnRolloutFlags({ durableAccounting: false }, NO_ENV);
     assert.equal(flags.entitlementShadow, false);
     assert.equal(flags.directPurchase, false);
+    assert.equal(flags.deviceCleanupAuto, true);
+  });
+
+  it('«Удалять лишние устройства автоматически» OFF stops stage 6, and nothing else', () => {
+    const flags = resolveAddOnRolloutFlags({ deviceCleanupAuto: false }, NO_ENV);
     assert.equal(flags.deviceCleanupAuto, false);
-  });
-
-  it('states every default where an operator reads it: .env.example and docs/environment.md', () => {
-    // `.env.example` is copied into every install's `.env`, so each variable
-    // is there COMMENTED OUT, spelled with its default — an uncommented line
-    // would pin the value and the install would never see a later default.
-    const example = readFileSync(join(__dirname, '..', '.env.example'), 'utf8');
-    const environment = readFileSync(join(__dirname, '..', 'docs', 'environment.md'), 'utf8');
-    for (const [name, value] of Object.entries(ADD_ON_ROLLOUT_FLAG_DEFAULTS) as Array<[AddOnRolloutFlagName, boolean]>) {
-      assert.match(example, new RegExp(`^# ${name}=${value}\\r?$`, 'm'), `.env.example: # ${name}=${value}`);
-      assert.doesNotMatch(example, new RegExp(`^${name}=`, 'm'), `.env.example must not set ${name}`);
-      // The reference table names the stage flags one per row with the default
-      // in the next cell; the reset strategies share one row.
-      const row = name.startsWith('ADDON_RESET_EXPIRY_')
-        ? /^\| `ADDON_RESET_EXPIRY_DAY` \/ `_WEEK` \/ `_MONTH` \/ `_MONTH_ROLLING` \| `(true|false)` \|/m
-        : new RegExp(`^\\| \`${name}\` \\| \`(true|false)\` \\|`, 'm');
-      assert.equal(environment.match(row)?.[1], String(value), `docs/environment.md: ${name} defaults to ${value}`);
-    }
-  });
-
-  it('turns an OFF default ON for "true", "1", "on" or "yes", whatever the case or padding', () => {
-    const flags = resolveAddOnRolloutFlags(
-      {
-        ADDON_ENTITLEMENT_SHADOW: 'true',
-        ADDON_ENTITLEMENT_DIRECT_PURCHASE: '1',
-        ADDON_PROJECTION_SYNC: 'yes',
-        ADDON_RENEWAL_ADDONS: 'false',
-        ADDON_DEVICE_CLEANUP_AUTO: '',
-        ADDON_RESET_EXPIRY_DAY: ' TRUE ',
-        ADDON_RESET_EXPIRY_WEEK: 'On',
-        ADDON_RESET_EXPIRY_MONTH: 'enabled',
-      },
-      ALL_OFF,
-    );
     assert.equal(flags.entitlementShadow, true);
     assert.equal(flags.directPurchase, true);
-    assert.equal(flags.projectionSync, true, '"yes" is ON');
-    assert.equal(flags.renewalAddOns, false);
-    assert.equal(flags.deviceCleanupAuto, false);
-    assert.equal(flags.resetExpiry.DAY, true);
-    assert.equal(flags.resetExpiry.WEEK, true, '"On" is ON');
-    assert.equal(flags.resetExpiry.MONTH, false, 'an unrecognised "enabled" keeps the OFF default');
   });
 
-  it('turns an ON default OFF for an explicit "false", "0", "off" or "no", whatever the case or padding', () => {
-    // Non-vacuity first: with nothing set, the ON defaults really are in force.
-    const untouched = resolveAddOnRolloutFlags({}, ALL_ON);
-    assert.equal(untouched.entitlementShadow, true);
-    assert.equal(untouched.directPurchase, true);
-    assert.equal(untouched.deviceCleanupAuto, true);
-    assert.equal(untouched.resetExpiry.MONTH, true);
+  it('«Докупка трафика до сброса» ON opens every reset strategy at once', () => {
+    const flags = resolveAddOnRolloutFlags({ trafficResetExpiry: true }, NO_ENV);
+    assert.deepEqual(flags.resetExpiry, { DAY: true, WEEK: true, MONTH: true, MONTH_ROLLING: true });
+  });
 
-    // `off` and `no` too: after the flip, an operator who writes the stage off
-    // in their own words must get it OFF, not the ON default.
+  it('takes only real booleans of known switches out of the column', () => {
+    assert.deepEqual(readStoredAddOnSwitches(null), {});
+    assert.deepEqual(readStoredAddOnSwitches([true]), {});
+    assert.deepEqual(readStoredAddOnSwitches('{"durableAccounting":false}'), {});
+    assert.deepEqual(
+      readStoredAddOnSwitches({
+        durableAccounting: false,
+        // Not what the writer stores: treated as never set, not guessed at.
+        deviceCleanupAuto: 'false',
+        trafficResetExpiry: true,
+        projectionSync: true,
+      }),
+      { durableAccounting: false, trafficResetExpiry: true },
+    );
+  });
+});
+
+describe('add-on switches — an explicit .env value wins', () => {
+  it('over the stored switch, in both directions', () => {
+    const offOverOn = resolveAddOnRolloutFlags(
+      { durableAccounting: true, deviceCleanupAuto: true },
+      {
+        ADDON_ENTITLEMENT_SHADOW: 'false',
+        ADDON_ENTITLEMENT_DIRECT_PURCHASE: 'false',
+        ADDON_DEVICE_CLEANUP_AUTO: 'false',
+      },
+    );
+    assert.equal(offOverOn.entitlementShadow, false);
+    assert.equal(offOverOn.directPurchase, false);
+    assert.equal(offOverOn.deviceCleanupAuto, false);
+
+    const onOverOff = resolveAddOnRolloutFlags(
+      { trafficResetExpiry: false, deviceCleanupAuto: false },
+      { ADDON_RESET_EXPIRY_MONTH: 'true', ADDON_DEVICE_CLEANUP_AUTO: 'true' },
+    );
+    assert.equal(onOverOff.resetExpiry.MONTH, true);
+    assert.equal(onOverOff.deviceCleanupAuto, true);
+    // The strategies .env does not name stay with the switch.
+    assert.equal(onOverOff.resetExpiry.DAY, false);
+  });
+
+  it('one variable at a time: a lone ADDON_ENTITLEMENT_SHADOW decides stage 1 and leaves stage 2 to the switch', () => {
+    const flags = resolveAddOnRolloutFlags({ durableAccounting: false }, { ADDON_ENTITLEMENT_SHADOW: 'true' });
+    assert.equal(flags.entitlementShadow, true);
+    assert.equal(flags.directPurchase, false);
+  });
+
+  it('means ON for "true", "1", "on" or "yes" and OFF for "false", "0", "off" or "no", whatever the case or padding', () => {
+    for (const on of ['true', '1', 'TRUE', ' True ', 'on', 'On', 'yes', ' YES\t']) {
+      assert.equal(readEnvOverride(on, 'ADDON_RESET_EXPIRY_DAY'), true, JSON.stringify(on));
+      const flags = resolveAddOnRolloutFlags({ trafficResetExpiry: false }, { ADDON_RESET_EXPIRY_DAY: on });
+      assert.equal(flags.resetExpiry.DAY, true, JSON.stringify(on));
+    }
+    // `off` and `no` too: the 0.9.7.69 notes told operators to write the
+    // stages off, and a line in their own words must keep them OFF now.
     for (const off of ['false', '0', 'FALSE', ' False ', '0\t', 'off', ' OFF ', 'no', 'No']) {
-      const flags = resolveAddOnRolloutFlags(
-        {
-          ADDON_ENTITLEMENT_SHADOW: off,
-          ADDON_ENTITLEMENT_DIRECT_PURCHASE: off,
-          ADDON_DEVICE_CLEANUP_AUTO: off,
-          ADDON_RESET_EXPIRY_MONTH: off,
-        },
-        ALL_ON,
-      );
+      assert.equal(readEnvOverride(off, 'ADDON_ENTITLEMENT_SHADOW'), false, JSON.stringify(off));
+      const flags = resolveAddOnRolloutFlags({ durableAccounting: true }, { ADDON_ENTITLEMENT_SHADOW: off });
       assert.equal(flags.entitlementShadow, false, JSON.stringify(off));
-      assert.equal(flags.directPurchase, false, JSON.stringify(off));
-      assert.equal(flags.deviceCleanupAuto, false, JSON.stringify(off));
-      assert.equal(flags.resetExpiry.MONTH, false, JSON.stringify(off));
-      // The variables left unset keep their ON default: the explicit value
-      // turned off exactly what it named.
-      assert.equal(flags.projectionSync, true);
-      assert.equal(flags.renewalAddOns, true);
     }
   });
 
-  it('keeps an ON default ON for unset, empty and unrecognised values', () => {
-    for (const value of [undefined, '', '   ', 'enabled', 'disabled', 'offf', 'nope']) {
-      const flags = resolveAddOnRolloutFlags({ ADDON_ENTITLEMENT_SHADOW: value }, ALL_ON);
-      assert.equal(flags.entitlementShadow, true, JSON.stringify(value));
+  it('leaves the stage to the switch for unset, empty and unrecognised values', () => {
+    mock.method(Logger.prototype, 'warn', () => undefined);
+    try {
+      for (const value of [undefined, '', '   ', 'enabled', 'disabled', 'offf', 'nope']) {
+        assert.equal(readEnvOverride(value, 'ADDON_ENTITLEMENT_SHADOW'), null, JSON.stringify(value));
+        const off = resolveAddOnRolloutFlags({ durableAccounting: false }, { ADDON_ENTITLEMENT_SHADOW: value });
+        assert.equal(off.entitlementShadow, false, `stored OFF, ${JSON.stringify(value)}`);
+        const untouched = resolveAddOnRolloutFlags({}, { ADDON_ENTITLEMENT_SHADOW: value });
+        assert.equal(untouched.entitlementShadow, true, `default ON, ${JSON.stringify(value)}`);
+      }
+    } finally {
+      mock.restoreAll();
     }
   });
 
-  it('warns once for each unrecognised value, and never for one it knows', () => {
+  it('warns once for each unrecognised value, naming the variable and the page that decides instead', () => {
     const warned: string[] = [];
     mock.method(Logger.prototype, 'warn', (message: unknown) => void warned.push(String(message)));
     try {
       // A value no other test reads: the "once" is kept per process.
       const odd = `maybe-${process.pid}-${Date.now()}`;
       for (let read = 0; read < 3; read += 1) {
-        resolveAddOnRolloutFlags({ ADDON_ENTITLEMENT_SHADOW: odd, ADDON_DEVICE_CLEANUP_AUTO: 'off' }, ALL_ON);
+        resolveAddOnRolloutFlags({}, { ADDON_ENTITLEMENT_SHADOW: odd, ADDON_DEVICE_CLEANUP_AUTO: 'off' });
       }
       assert.equal(warned.length, 1, warned.join('\n'));
       assert.match(warned[0]!, new RegExp(`ADDON_ENTITLEMENT_SHADOW="${odd}" is not a recognised value`));
-      assert.match(warned[0]!, /using the default, ON/);
+      assert.match(warned[0]!, /«Доп\. услуги»/);
     } finally {
       mock.restoreAll();
     }
   });
+});
 
-  it('parseFlag answers against the default it is given', () => {
-    assert.equal(parseFlag(undefined, true), true);
-    assert.equal(parseFlag(undefined, false), false);
-    assert.equal(parseFlag('0', true), false);
-    assert.equal(parseFlag('1', false), true);
-    assert.equal(parseFlag('maybe', true), true);
-    assert.equal(parseFlag('maybe', false), false);
-    assert.equal(parseFlag('yes', false), true);
-    assert.equal(parseFlag('no', true), false);
+describe('add-on switches — what the page shows', () => {
+  it('each switch in page order, with what it runs as, its default, the stored choice and no lock', () => {
+    assert.deepEqual(describeAddOnSwitches({ deviceCleanupAuto: false }, NO_ENV), [
+      { name: 'durableAccounting', enabled: true, defaultEnabled: true, stored: null, env: [] },
+      { name: 'deviceCleanupAuto', enabled: false, defaultEnabled: true, stored: false, env: [] },
+      { name: 'trafficResetExpiry', enabled: false, defaultEnabled: false, stored: null, env: [] },
+    ]);
   });
 
-  it('derives reset capabilities only for enabled strategies', () => {
-    const capabilities = resolveResetCapabilities({
-      ADDON_RESET_EXPIRY_MONTH: 'true',
-      ADDON_RESET_EXPIRY_DAY: '1',
-    });
-    assert.equal(capabilities.MONTH, 'ENABLED');
-    assert.equal(capabilities.DAY, 'ENABLED');
-    assert.equal(capabilities.WEEK, undefined);
-    assert.equal(capabilities.MONTH_ROLLING, undefined);
-    assert.equal(capabilities.NO_RESET, undefined);
+  it('names the .env lines that decide a switch, and shows the switch as the stages actually run', () => {
+    mock.method(Logger.prototype, 'warn', () => undefined);
+    try {
+      const [durable, cleanup, reset] = describeAddOnSwitches(
+        { durableAccounting: true, trafficResetExpiry: false },
+        {
+          ADDON_ENTITLEMENT_DIRECT_PURCHASE: 'false',
+          ADDON_RESET_EXPIRY_WEEK: 'yes',
+          ADDON_DEVICE_CLEANUP_AUTO: 'nonsense',
+        },
+      );
+      // Stage 2 is off by .env: the switch shows OFF although stored ON, and is locked.
+      assert.equal(durable!.enabled, false, 'a switch is ON only while every stage it carries is');
+      assert.equal(durable!.stored, true);
+      assert.deepEqual(durable!.env, [{ variable: 'ADDON_ENTITLEMENT_DIRECT_PURCHASE', enabled: false }]);
+      // A value the panel does not recognise locks nothing.
+      assert.deepEqual(cleanup!.env, []);
+      assert.equal(cleanup!.enabled, true);
+      // One strategy ON by .env, the rest with the switch (OFF): shown OFF, locked.
+      assert.equal(reset!.enabled, false);
+      assert.deepEqual(reset!.env, [{ variable: 'ADDON_RESET_EXPIRY_WEEK', enabled: true }]);
+    } finally {
+      mock.restoreAll();
+    }
+  });
+});
+
+describe('add-on switches — a change from the page', () => {
+  it('is refused whole for a switch .env decides, naming its variables', () => {
+    assert.deepEqual(
+      planAddOnSwitchUpdate({
+        stored: {},
+        // The first change alone would be allowed; the request is refused whole.
+        changes: { deviceCleanupAuto: false, trafficResetExpiry: true },
+        confirmOff: true,
+        env: { ADDON_RESET_EXPIRY_DAY: 'false', ADDON_RESET_EXPIRY_MONTH_ROLLING: '0' },
+      }),
+      {
+        kind: 'SET_IN_ENV',
+        switchName: 'trafficResetExpiry',
+        variables: ['ADDON_RESET_EXPIRY_DAY', 'ADDON_RESET_EXPIRY_MONTH_ROLLING'],
+      },
+    );
+    // Even to the value .env already gives it: storing a value the panel
+    // cannot apply would only surprise whoever later removes the line.
+    assert.deepEqual(
+      planAddOnSwitchUpdate({
+        stored: {},
+        changes: { deviceCleanupAuto: true },
+        confirmOff: false,
+        env: { ADDON_DEVICE_CLEANUP_AUTO: 'true' },
+      }),
+      { kind: 'SET_IN_ENV', switchName: 'deviceCleanupAuto', variables: ['ADDON_DEVICE_CLEANUP_AUTO'] },
+    );
   });
 
-  it('returns an empty capability map by default (all reset expiry disabled)', () => {
-    assert.deepEqual(resolveResetCapabilities({}), {});
+  it('asks for confirmation to turn a switch OFF — from its default ON and from a stored ON', () => {
+    assert.deepEqual(
+      planAddOnSwitchUpdate({ stored: {}, changes: { durableAccounting: false }, confirmOff: false, env: NO_ENV }),
+      { kind: 'OFF_NOT_CONFIRMED', switchName: 'durableAccounting' },
+    );
+    assert.deepEqual(
+      planAddOnSwitchUpdate({
+        stored: { trafficResetExpiry: true },
+        changes: { trafficResetExpiry: false },
+        confirmOff: false,
+        env: NO_ENV,
+      }),
+      { kind: 'OFF_NOT_CONFIRMED', switchName: 'trafficResetExpiry' },
+    );
+  });
+
+  it('turns a switch OFF once confirmed, keeping the other stored choices', () => {
+    assert.deepEqual(
+      planAddOnSwitchUpdate({
+        stored: { trafficResetExpiry: true },
+        changes: { deviceCleanupAuto: false },
+        confirmOff: true,
+        env: NO_ENV,
+      }),
+      { kind: 'WRITE', next: { trafficResetExpiry: true, deviceCleanupAuto: false }, changed: ['deviceCleanupAuto'] },
+    );
+  });
+
+  it('never asks to turn a switch ON, or to keep an OFF switch OFF', () => {
+    assert.deepEqual(
+      planAddOnSwitchUpdate({ stored: {}, changes: { trafficResetExpiry: true }, confirmOff: false, env: NO_ENV }),
+      { kind: 'WRITE', next: { trafficResetExpiry: true }, changed: ['trafficResetExpiry'] },
+    );
+    assert.deepEqual(
+      planAddOnSwitchUpdate({
+        stored: { deviceCleanupAuto: false },
+        changes: { deviceCleanupAuto: false },
+        confirmOff: false,
+        env: NO_ENV,
+      }),
+      { kind: 'WRITE', next: { deviceCleanupAuto: false }, changed: [] },
+    );
+  });
+
+  it('lists as changed only the switches whose value moves', () => {
+    assert.deepEqual(
+      planAddOnSwitchUpdate({
+        stored: { deviceCleanupAuto: false },
+        changes: { durableAccounting: true, deviceCleanupAuto: true, trafficResetExpiry: true },
+        confirmOff: false,
+        env: NO_ENV,
+      }),
+      {
+        kind: 'WRITE',
+        next: { durableAccounting: true, deviceCleanupAuto: true, trafficResetExpiry: true },
+        changed: ['deviceCleanupAuto', 'trafficResetExpiry'],
+      },
+    );
+  });
+});
+
+describe('add-on switches — the reader', () => {
+  it('asks the reader it is given, and falls back to .env and the defaults without one', async () => {
+    const fromReader: AddOnRolloutFlags = resolveAddOnRolloutFlags(
+      { durableAccounting: false, deviceCleanupAuto: false },
+      NO_ENV,
+    );
+    let asked = 0;
+    const reader = {
+      flags: async (): Promise<AddOnRolloutFlags> => {
+        asked += 1;
+        return fromReader;
+      },
+    };
+    assert.deepEqual(await readAddOnRolloutFlags(reader), fromReader);
+    assert.equal(asked, 1);
+
+    const saved = new Map(ADD_ON_ROLLOUT_FLAG_NAMES.map((name) => [name, process.env[name]]));
+    try {
+      for (const name of ADD_ON_ROLLOUT_FLAG_NAMES) delete process.env[name];
+      assert.deepEqual(await readAddOnRolloutFlags(undefined), resolveAddOnRolloutFlags({}, NO_ENV));
+      process.env['ADDON_DEVICE_CLEANUP_AUTO'] = 'off';
+      assert.equal((await readAddOnRolloutFlags(undefined)).deviceCleanupAuto, false);
+    } finally {
+      for (const [name, value] of saved) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  });
+});
+
+describe('reset capabilities', () => {
+  it('open a strategy only while its stage-4 flag is on', () => {
+    const flags = resolveAddOnRolloutFlags({}, { ADDON_RESET_EXPIRY_MONTH: 'true', ADDON_RESET_EXPIRY_DAY: '1' });
+    assert.deepEqual(resolveResetCapabilities(flags), { DAY: 'ENABLED', MONTH: 'ENABLED' });
+    assert.deepEqual(resolveResetCapabilities(resolveAddOnRolloutFlags({}, NO_ENV)), {});
+  });
+
+  it('sell nothing «до следующего сброса» while direct purchase is off, and exactly the flag-pure map while it is on', () => {
+    const open = resolveAddOnRolloutFlags({ trafficResetExpiry: true }, NO_ENV);
+    assert.equal(Object.keys(resolveResetCapabilities(open)).length, 4);
+    assert.deepEqual(resolveIntakeResetCapabilities(open), resolveResetCapabilities(open));
+
+    const intakeClosed = resolveAddOnRolloutFlags({ trafficResetExpiry: true, durableAccounting: false }, NO_ENV);
+    assert.deepEqual(resolveIntakeResetCapabilities(intakeClosed), {});
+    // Expiry and anchoring of goods already sold do not depend on intake.
+    assert.equal(Object.keys(resolveResetCapabilities(intakeClosed)).length, 4);
+  });
+});
+
+describe('where an operator reads about the switches', () => {
+  const root = join(__dirname, '..');
+
+  it('.env.example and docs/environment.md no longer offer a stage variable', () => {
+    for (const file of ['.env.example', join('docs', 'environment.md')]) {
+      const text = readFileSync(join(root, file), 'utf8');
+      for (const name of [...ADD_ON_ROLLOUT_FLAG_NAMES, 'ADDON_PROJECTION_SYNC', 'ADDON_RENEWAL_ADDONS']) {
+        assert.equal(text.includes(name), false, `${file} must not name ${name}`);
+      }
+    }
+  });
+
+  it('the runbook names the page and every switch as the page renders it, and no deleted stage variable', () => {
+    const runbook = readFileSync(join(root, 'docs', 'operator-add-on-entitlements-rollout.md'), 'utf8');
+    const page = readFileSync(join(root, 'web', 'src', 'i18n', 'features', 'addOns.ru.ts'), 'utf8');
+    for (const label of ['Новый учёт докупок', 'Удалять лишние устройства автоматически', 'Докупка трафика до сброса']) {
+      assert.ok(page.includes(`label: '${label}'`), `the page renders «${label}»`);
+      assert.ok(runbook.includes(`«${label}»`), `the runbook names «${label}»`);
+    }
+    assert.ok(page.includes("tab: 'Настройки'"));
+    assert.ok(runbook.includes('«Доп. услуги» → tab «Настройки»'));
+    assert.ok(page.includes("setInEnv: 'Задано в .env: {{variables}}'"));
+    assert.ok(runbook.replace(/\s+/g, ' ').includes('«Задано в .env»'));
+    for (const name of ['ADDON_PROJECTION_SYNC', 'ADDON_RENEWAL_ADDONS']) {
+      assert.equal(runbook.includes(name), false, `the runbook must not name ${name}`);
+    }
   });
 });

@@ -1,7 +1,8 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 
-import { resolveAddOnRolloutFlags } from '../add-on-rollout.config';
+import { readAddOnRolloutFlags } from '../add-on-rollout.config';
+import { AddOnSwitchesService } from '../switches/add-on-switches.service';
 import { EffectiveProjectionService, type RecomputeProjectionResult } from './effective-projection.service';
 import { EntitlementCutoverService, type EnsureTermResult } from './entitlement-cutover.service';
 import {
@@ -107,12 +108,14 @@ export class SubscriptionTermHooksService {
     private readonly subscriptionTermService: SubscriptionTermService,
     private readonly effectiveProjectionService: EffectiveProjectionService,
     private readonly entitlementCutoverService: EntitlementCutoverService,
+    /** The stage switches; `@Optional()` only for the specs that build this by hand. */
+    @Optional() private readonly addOnSwitches?: AddOnSwitchesService,
   ) {}
 
   /**
    * A subscription this transaction has just CREATED (a free trial, the
    * operator's «Выдать подписку», a promo code's subscription) gets its first
-   * term — while stage 1 (`ADDON_ENTITLEMENT_SHADOW`) is on, and `null`
+   * term — while stage 1 («Новый учёт докупок») is on, and `null`
    * otherwise. Its columns are the plan's, so the baseline is MATCHED and the
    * SHADOW projection equals them; an add-on bought a minute later is then
    * ledgered rather than falling back to the permanent increment. Idempotent
@@ -122,7 +125,7 @@ export class SubscriptionTermHooksService {
     tx: Prisma.TransactionClient,
     subscriptionId: string,
   ): Promise<EnsureTermResult | null> {
-    if (!resolveAddOnRolloutFlags().entitlementShadow) return null;
+    if (!(await readAddOnRolloutFlags(this.addOnSwitches)).entitlementShadow) return null;
     return this.entitlementCutoverService.ensureTermInTransaction(tx, subscriptionId);
   }
 

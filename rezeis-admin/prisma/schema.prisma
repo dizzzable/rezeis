@@ -2517,12 +2517,11 @@ model TransactionItem {
   amount          Decimal   @map("amount") @db.Decimal(20, 8)
   currency        Currency  @map("currency")
   discountPercent Int       @default(0) @map("discount_percent")
-  /// Optional renewal add-on composition for this line (subscription-add-on-
-  /// entitlements, T-007). JSON array of selected add-ons — each entry:
-  /// `{ addOnId, catalogRevision, type, value, lifetime, activation,
-  ///    sourceLineKey, unitAmount, currency, receiptName }`. NULL = no add-ons.
-  /// Consumed by `applyCombinedRenewal` to mint PENDING entitlements on the
-  /// scheduled renewal term. Gated by the `renewalAddOns` rollout flag.
+  /// HISTORY ONLY: the add-ons sold with this renewal line under stage 5
+  /// («renewal add-ons»), which was deleted with its code on 24.09.2026 and was
+  /// never on by default. Nothing writes it any more. A line that still carries
+  /// entries is refused at fulfilment (`RENEWAL_ADDON_LINES_NOT_SUPPORTED`)
+  /// rather than renewed with its add-ons silently dropped.
   addOnLines      Json?     @map("add_on_lines")
   /// Idempotency stamp — set when this item's renewal has been applied.
   appliedAt       DateTime? @map("applied_at") @db.Timestamptz(3)
@@ -3149,6 +3148,13 @@ model Settings {
   /// customers behind the operator's back. Not in `userNotifications`, whose
   /// absent key means ON and which keeps booleans only.
   connectHelpSettings       Json       @default("{}") @map("connect_help_settings")
+  /// «Доп. услуги» → «Настройки»: the switches of the durable add-on model.
+  /// Shape: `{ durableAccounting?: boolean, deviceCleanupAuto?: boolean,
+  /// trafficResetExpiry?: boolean }`, sparse — a key is present only once an
+  /// operator set that switch; absent means the default in
+  /// `ADD_ON_SWITCH_DEFAULTS` (`add-on-rollout.config.ts`). An explicit `ADDON_*`
+  /// line in `.env` still wins over what is stored here.
+  addOnSettings             Json       @default("{}") @map("add_on_settings")
   updatedAt                 DateTime   @updatedAt @map("updated_at") @db.Timestamptz(3)
 
   @@map("settings")

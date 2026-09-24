@@ -4,6 +4,7 @@ import { Module } from '@nestjs/common';
 import { OutboundHttpModule } from '../../common/http/outbound-http.module';
 import { AddOnsModule } from '../add-ons/add-ons.module';
 import { AddOnEntitlementsModule } from '../add-on-entitlements/add-on-entitlements.module';
+import { AddOnSwitchesModule } from '../add-on-entitlements/switches/add-on-switches.module';
 import { AuthModule } from '../auth/auth.module';
 import { PartnersModule } from '../partners/partners.module';
 import { AdvertisingModule } from '../advertising/advertising.module';
@@ -63,6 +64,9 @@ import { YookassaPaymentVerificationService } from './services/yookassa-payment-
     AuthModule,
     OutboundHttpModule,
     AddOnEntitlementsModule,
+    // The stage switches («Доп. услуги» → «Настройки»): the fulfilment, the
+    // add-on checkout and the refund read them. Not `@Global()` either.
+    AddOnSwitchesModule,
     // For `TrafficResetService`: a paid RESET_TRAFFIC add-on is performed on the
     // panel after the fulfilment transaction commits. Neither module is
     // `@Global()`, so without this the capture path would compile, run, and

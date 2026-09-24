@@ -7,7 +7,7 @@ import { SettingsService } from '../../settings/services/settings.service';
 import { isGatewayAvailableForChannel } from '../../plans/utils/purchase-gateway-policy.util';
 import { InternalPaymentCheckoutDto } from '../dto/internal-payment-checkout.dto';
 import { InternalPartnerBalanceCheckoutDto } from '../dto/internal-partner-balance-checkout.dto';
-import { InternalRenewalCheckoutDto, toAddOnSelectionMap } from '../dto/internal-renewal-checkout.dto';
+import { InternalRenewalCheckoutDto } from '../dto/internal-renewal-checkout.dto';
 import { toDurationMap } from '../../subscriptions/dto/renewal-duration.dto';
 import { toPlanMap } from '../../subscriptions/dto/renewal-plan.dto';
 import {
@@ -181,7 +181,6 @@ export class InternalPaymentsController {
       idempotencyKey: input.idempotencyKey,
       expectedAmount: input.expectedAmount,
       expectedCurrency: input.expectedCurrency,
-      addOns: toAddOnSelectionMap(input.addOns),
       savedPaymentMethodId: input.savedPaymentMethodId,
       savePaymentMethod: input.savePaymentMethod,
       savePaymentMethodConsent: input.savePaymentMethodConsent,

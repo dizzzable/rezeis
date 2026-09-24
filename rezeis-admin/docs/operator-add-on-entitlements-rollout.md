@@ -1,76 +1,66 @@
-# Operator runbook: subscription add-on entitlements (defaults, rollout, rollback)
+# Operator runbook: subscription add-on entitlements (switches, rollout, rollback)
 
 This runbook covers the durable add-on entitlement model: subscription terms,
-the effective projection and add-on entitlements with an end date. Every stage is
-a **deployment-time environment flag**. The flags cannot be edited in the panel,
-for two reasons: entering the model is one-way for each subscription, and the web
-and worker processes must change at the same moment.
+the effective projection and add-on entitlements with an end date. Its stages
+are **switches in the panel**: «Доп. услуги» → tab «Настройки».
 
-## 0. The flags, their defaults, and how to override them
+## 0. The switches, their defaults, and where they are read
 
-The defaults live in one table in the code:
-`ADD_ON_ROLLOUT_FLAG_DEFAULTS` in
-`src/modules/add-on-entitlements/add-on-rollout.config.ts`. A variable that is not
-set takes the default from that table.
-
-| Stage | Variable | Default | Why |
+| Switch | Stages | Default | Why |
 |---|---|---|---|
-| 1 | `ADDON_ENTITLEMENT_SHADOW` | **ON** | Owner's decision, 24.09.2026. |
-| 2 | `ADDON_ENTITLEMENT_DIRECT_PURCHASE` | **ON** | Owner's decision, 24.09.2026. |
-| 3 | `ADDON_PROJECTION_SYNC` | OFF | See stage 3: it would break the upgrade's expiry. |
-| 4 | `ADDON_RESET_EXPIRY_{DAY,WEEK,MONTH,MONTH_ROLLING}` | OFF | See stage 4: no parity with Remnawave 3.x yet. |
-| 5 | `ADDON_RENEWAL_ADDONS` | OFF | Owner's decision. |
-| 6 | `ADDON_DEVICE_CLEANUP_AUTO` | **ON** | Owner's decision, 24.09.2026. |
+| «Новый учёт докупок» | 1 and 2 | **ON** | Owner's decision, 24.09.2026. |
+| «Удалять лишние устройства автоматически» | 6 | **ON** | Owner's decision, 24.09.2026. |
+| «Докупка трафика до сброса» | 4 | OFF | See stage 4: parity with Remnawave 3.x is not shown yet. The default flips once it is. |
 
-**Stages 1, 2 and 6 are ON by default from this release.** An install that sets
-none of these variables gets the table above as soon as it runs the new
-version: the worker starts bringing every subscription into the model at boot
-(see [The background cutover](#the-background-cutover)), add-ons bought from
-then on end with the subscription, and devices over the limit are removed when
-a device add-on ends. An install that already sets a variable in `.env` keeps
-its own value.
+The defaults live in one table in the code: `ADD_ON_SWITCH_DEFAULTS` in
+`src/modules/add-on-entitlements/add-on-rollout.config.ts`. A switch nobody
+has touched follows that table, so a later change of a default reaches every
+install that left the switch alone. A switch an operator set keeps the
+operator's value.
 
-**Switching a stage off, or on, on one install.** Put the variable in `.env`,
-then run `docker compose up -d`. Both containers (API and worker) read `.env`,
-and the flags are read on every call, so the change takes effect right after
-the restart. To keep the durable model off entirely:
+**Stages 3 and 5 no longer exist.** Stage 3 (the versioned projection sync)
+and stage 5 (add-ons sold with a renewal) were removed with their code on
+24.09.2026. Neither was ever on by default. See
+[Stages 3 and 5: removed](#3-stages-3-and-5-removed).
 
-```
-ADDON_ENTITLEMENT_SHADOW=false
-ADDON_ENTITLEMENT_DIRECT_PURCHASE=false
-ADDON_DEVICE_CLEANUP_AUTO=false
-```
+**No restart.** The switches are stored in the settings row and read by both
+processes (API and worker) through the settings cache. A change reaches the
+API at once and the worker within five seconds. The page says so above the
+switches.
 
-What that does, and what it does not undo once the model has run, is in
-[Rollback](#rollback). The parser accepts these values:
+**Switching one off** opens a dialog that says what switching off does and
+what it does **not** undo — see [Rollback](#rollback). Turning a switch on
+needs no confirmation. Changing a switch needs the permission «Доп. услуги» →
+«Изменение» (`add_ons:edit`); seeing it needs «Просмотр» (`add_ons:view`).
 
-- `true`, `1`, `on` or `yes` turns the stage **ON**, and `false`, `0`, `off` or
-  `no` turns it **OFF**. Case and surrounding spaces do not matter, so `False`,
-  ` 0 ` and `Off` all mean OFF.
-- An **explicit OFF beats an ON default.** This is how one install stays off:
-  set `ADDON_ENTITLEMENT_SHADOW=false` (or `off`, `no`, `0`).
-- An empty or unset variable takes the default.
-- Anything else (`enabled`, `disabled`, a typo) also takes the default, and the
-  log shows one warning per value: `ADDON_…="disabled" is not a recognised value
-  …`. `disabled` does **not** turn a stage off.
+**A line in `.env` still wins.** An install that set a stage in `.env` before
+the switches existed keeps exactly what it set. The switch then shows «Задано
+в .env», names the variable and its value, and cannot be changed on the page.
+To manage it from the panel, delete that line from `.env` and run
+`docker compose up -d`: from then on the switch decides. Such a line is read
+per variable, so a line for one stage of «Новый учёт докупок» decides that
+stage and leaves the other to the switch — the switch is locked all the same.
+A value the panel does not recognise (`enabled`, a typo) decides nothing: the
+log shows one warning per value, and the switch decides.
 
-### What a flag decides, and what it does not
+### What a switch decides, and what it does not
 
-A flag decides **who enters the model** and **whether new purchases are
-recorded as entitlements**. Once a subscription has a term, no flag decides how
-that term is treated:
+A switch decides **who enters the model**, **whether new purchases are
+recorded as entitlements**, whether «до следующего сброса» add-ons are sold,
+and whether extra devices are removed automatically. Once a subscription has a
+term, no switch decides how that term is treated:
 
 - The boundary sweep expires sold add-ons, aligns terms and activates renewal
-  terms whatever the flags say.
+  terms whatever the switches say.
 - Plan migration rotates a term whenever one is ACTIVE.
-- The shared plan-change rotation and tail alignment also read no flag.
+- The shared plan-change rotation and tail alignment also read no switch.
 - A paid renewal appends its term, and a paid upgrade starts one, whenever the
   subscription has an ACTIVE term. See
   [Payments on a subscription in the model](#payments-on-a-subscription-in-the-model).
 
-This is what makes rollback safe. See [Rollback](#rollback).
+This is what makes switching off safe. See [Rollback](#rollback).
 
-## 1. Stage 1, `ADDON_ENTITLEMENT_SHADOW`: subscriptions enter the model
+## 1. Stage 1 («Новый учёт докупок»): subscriptions enter the model
 
 With stage 1 ON:
 
@@ -83,9 +73,7 @@ With stage 1 ON:
   transaction, so an add-on bought a minute later already gets an end date.
 - **A payment brings in a subscription the cutover has not reached yet.** An
   add-on purchase (stage 2 on as well), a paid renewal and a paid upgrade first
-  give it its first term, then do their own work on it. A renewal carrying paid
-  add-on lines (stage 5) brings it in whatever stage 1 says: those add-ons have
-  nowhere else to live.
+  give it its first term, then do their own work on it.
 
 ### The background cutover
 
@@ -123,7 +111,7 @@ version that turned stage 1 on by default.
     incident's metadata. While the incident is OPEN, the subscription is left out
     of every pass.
   - To retry it, fix the cause, then open the subscription in the inspector on
-    the entitlements tab and press **«Принять»** on the incident. The next pass
+    the «Доставка» tab and press **«Принять»** on the incident. The next pass
     tries the subscription again. If it fails again, a new incident opens.
 
 ### How the first term is shaped
@@ -147,7 +135,7 @@ version that turned stage 1 on by default.
   - `inModel`: those that already have a term;
   - `remaining`: those that do not yet;
   - `needAttention`: those held out by an OPEN `CUTOVER_FAILED` incident.
-- **The «Дополнительные опции» page, entitlements tab.** It loads that endpoint
+- **«Доп. услуги» → tab «Доставка».** It loads that endpoint
   but does not show the `cutover` block yet. What it shows today is the count of
   SHADOW projections (one per subscription brought in) and open incidents by
   kind (`RECONCILIATION_REQUIRED` includes the cutover failures). Each incident
@@ -205,14 +193,10 @@ Decided by the term row, whatever the flags say.
     reads as the plan's own value and does not carry.
   - Live add-ons keep their own end dates, never later than the new end, and
     count on the new term (audit reason `UPGRADE_KEPT_OWN_END`).
-  - A queued renewal term that carries paid add-ons survives: it is re-based
-    onto the new plan and runs after the new term, and its days are already in
-    the new expiry. When the upgrade ends before that period would begin, its
-    add-ons cannot be delivered; the card «⏭ Тариф улучшен, а оплаченный
-    следующий период начнётся после конца подписки» asks the operator to decide
-    on a refund. A queued term with nothing bought for it is cancelled.
+  - A queued renewal term is cancelled: its days are already converted into
+    the new expiry.
 
-## 2. Stage 2, `ADDON_ENTITLEMENT_DIRECT_PURCHASE`: purchases are recorded
+## 2. Stage 2 («Новый учёт докупок»): purchases are recorded
 
 - **What it does.** A completed add-on purchase creates an immutable
   `AddOnEntitlement` with an end date. It then recomputes the projection and
@@ -236,24 +220,64 @@ Decided by the term row, whatever the flags say.
   no date is shown.
 - **Check.** One paid add-on produces one ACTIVE entitlement, and the mirrored
   limits equal base plus add-on. A webhook replay creates nothing new.
+- **A purchase paid across a switch-off.** The checkout decides by the switches
+  as they stand when the customer pays; the fulfilment decides by them as they
+  stand when the payment arrives. An add-on quoted with an end date and paid
+  after «Новый учёт докупок» was switched off is fulfilled the old way, as a
+  permanent raise.
 
-## 3. Stage 3, `ADDON_PROJECTION_SYNC`: keep it OFF
+## 3. Stages 3 and 5: removed
 
-**Keep stage 3 OFF on every install.** The versioned write sends only the
-limits, tag, strategy and squads, followed by a read-back. It does **not** send
-`expireAt`, `status`, the description or the contacts. On a paid upgrade that
-creates a versioned job, the Remnawave expiry would therefore never move, and the
-customer would be cut off at the old date.
+Both were removed with their code on 24.09.2026. Neither was ever on by
+default, and this runbook told every install to keep them off.
 
-Stages 1 and 2 do not need stage 3. The legacy push already sends the mirrored
-columns in full.
+- **Stage 3, the versioned projection sync.** It pushed only the limits, tag,
+  strategy and squads, followed by a read-back, and never the expiry: a paid
+  upgrade would not have moved the Remnawave expiry. Stages 1 and 2 never
+  needed it — the ordinary push already sends the mirrored columns in full,
+  and that is now the only push there is.
+- **Stage 5, add-ons sold with a renewal.** The renewal checkout no longer
+  takes add-on lines, and the cabinet no longer shows the step. A renewal line
+  that still carries add-on lines — drafted on an install that switched stage 5
+  on, and paid after this version — is not fulfilled: the payment stays paid
+  and unfulfilled, its webhook is marked FAILED with
+  `RENEWAL_ADDON_LINES_NOT_SUPPORTED`, and the operator alert fires. Refund it
+  (or its add-ons' part) by hand. An add-on such a renewal already recorded
+  stays PENDING, counts toward nothing and is not activated when its term
+  begins; an upgrade cancels the queued term it was bought for, as it cancels
+  any queued term. The customer's «Мои опции» shows it as «Ожидает активации»
+  until it is reversed: «Доп. услуги» → tab «Доставка» → «Открыть инспектор
+  подписки» → «ID подписки» → «Открыть» → «Причина» → «Реестр прав» →
+  «Откатить» → «Откатить» (permission «Доставка доп. услуг» →
+  «Принудительные меры»). It then shows «Отменена». Reversing moves no money:
+  refund its price by hand.
 
-## 4. Stage 4, reset expiry per strategy: keep it OFF until parity is shown
+  Stage 5 was never on by default, so these are normally empty. Both queries
+  only read:
 
-Do not turn on a strategy until parity has been shown against **every Remnawave
-line this panel serves: 3.2.x, 3.3.x and 3.4.x**. The panel refuses 2.x
-outright, so the old 2.7.4 and 2.8.0 criterion no longer applies. Parity needs
-three things:
+  ```sql
+  -- Add-ons sold with a renewal that never started.
+  SELECT e.id, e.subscription_id, e.receipt_name, e.total_amount, e.currency,
+         tx.payment_id, tx.status AS payment_status
+  FROM add_on_entitlements e
+  JOIN transactions tx ON tx.id = e.source_transaction_id
+  WHERE e.state = 'PENDING_ACTIVATION';
+
+  -- Renewal lines with add-ons that were never applied (refused if paid).
+  SELECT ti.id, tx.payment_id, tx.status AS payment_status, ti.subscription_id,
+         ti.amount, ti.currency
+  FROM transaction_items ti
+  JOIN transactions tx ON tx.id = ti.transaction_id
+  WHERE ti.applied_at IS NULL
+    AND ti.add_on_lines IS NOT NULL
+    AND ti.add_on_lines NOT IN ('null'::jsonb, '[]'::jsonb);
+  ```
+
+## 4. Stage 4 («Докупка трафика до сброса»): keep it OFF until parity is shown
+
+Do not turn it on until parity has been shown against **every Remnawave line
+this panel serves: 3.2.x, 3.3.x and 3.4.x**. A 2.x panel is refused on every
+call, so it is owed no parity. Parity needs three things:
 
 1. A harness against each of those lines.
 2. Proof that the panel's own reset job fires at the same instant as our UTC
@@ -264,18 +288,11 @@ three things:
    - for MONTH_ROLLING, the anniversary of the panel profile's `createdAt`.
 3. A probe showing that a paid epoch ends exactly when the panel zeroes usage.
 
-Then turn on one strategy at a time: `ADDON_RESET_EXPIRY_DAY`, `_WEEK`, `_MONTH`
-or `_MONTH_ROLLING`. Turning a strategy off stops new `UNTIL_NEXT_RESET` sales.
-Epochs that already exist are not deleted.
+The switch covers every reset strategy at once. Turning it off stops new
+`UNTIL_NEXT_RESET` sales; epochs and add-ons that already exist are not
+deleted, and those add-ons still end at their reset.
 
-## 5. Stage 5, `ADDON_RENEWAL_ADDONS`: OFF (owner's decision)
-
-This stage adds add-on lines to the renewal checkout. Fulfilling such a renewal
-creates the SCHEDULED renewal term together with its PENDING entitlements, in
-one transaction. The cabinet shows the step only when the platform policy's
-`renewalAddOns` capability is on.
-
-## 6. Stage 6, `ADDON_DEVICE_CLEANUP_AUTO`: automatic device reduction (target ON)
+## 6. Stage 6 («Удалять лишние устройства автоматически»): automatic device reduction
 
 When a device add-on ends, the desired device limit drops. The panel then refuses
 **new** registrations over the limit. What happens to the devices already
@@ -285,8 +302,8 @@ registered depends on stage 6:
   the newest registrations first, and it refuses to delete a recently seen device
   while keeping a dormant one.
 - **OFF.**
-  - Plans wait for an operator's approval on the entitlements tab (the approve
-    button on the device plan).
+  - Plans wait for an operator's approval on the «Доставка» tab («Утвердить» on
+    the device plan).
   - While a plan waits, the five-minute sweep **parks** that subscription and does
     not re-plan it every tick. An hourly re-drive (at :23) looks at parked rows,
     oldest first and at most 100 per run. That re-drive is what notices a device
@@ -375,8 +392,8 @@ model (it has a term), decided by the term row and not by any flag:
     forwarded». The one-off facts `user.first_connected` and
     `user.traffic_reset` are forwarded however late they arrive.
   - The status after a push is Remnawave's answer to that push: the answer to
-    the PATCH or the POST, to the counter reset a renewal makes after its PATCH,
-    or the read-back of a versioned write. The profile-sync worker writes it,
+    the PATCH or the POST, or to the counter reset a renewal makes after its
+    PATCH. The profile-sync worker writes it,
     unless a newer push of the panel's is still queued, running or failed. It
     never goes against the panel's own date: never ACTIVE → EXPIRED (autopay may
     still be retrying), never EXPIRED while the date runs, never ACTIVE or
@@ -473,7 +490,8 @@ bought before the model (grandfathered, no end date) never get a notice.
   `addon_devices_ended` (devices, stage 6 OFF: new devices over the limit do not
   connect), `addon_devices_auto_ends_in_3_days` / `addon_devices_auto_ended`
   (devices, stage 6 ON: the extra devices are disconnected, newest first). The
-  sender picks by the add-on's type and `ADDON_DEVICE_CLEANUP_AUTO`. A template
+  sender picks by the add-on's type and the switch «Удалять лишние устройства
+  автоматически». A template
   switched off holds its notices unrecorded; switched back on while they are
   still due (within three days), they go out.
 - **Customer's switches.** Two, in the cabinet's «Настройка уведомлений»
@@ -529,35 +547,33 @@ that keeps the two in step:
 
 ## Rollback
 
-**How to switch stages off.** Set the variable to `false` (or `0`, `off`, `no`)
-in `.env` and run `docker compose up -d`. Stages 1, 2 and 6 are ON by default,
-so switching the model off means all three:
+**How to switch stages off.** «Доп. услуги» → tab «Настройки» → the switch →
+«Выключить» in the dialog that opens. Both processes pick it up within five
+seconds; nothing is restarted. A switch that shows «Задано в .env» is decided
+by a line in `.env`: change or delete that line, then `docker compose up -d`.
 
-```
-ADDON_ENTITLEMENT_SHADOW=false
-ADDON_ENTITLEMENT_DIRECT_PURCHASE=false
-ADDON_DEVICE_CLEANUP_AUTO=false
-```
+**What switching off does:**
 
-**What turning stages off does:**
+- **«Новый учёт докупок» off (stages 1 and 2).** No subscription enters the
+  model any more. The background cutover stops: the cron queues no pass, and a
+  pass already queued re-reads the switch and does nothing. Payments stop
+  bringing subscriptions in. A subscription already in the model keeps getting
+  its terms from renewals, paid upgrades and plan changes. New add-on purchases
+  go back to the legacy permanent increment; on a subscription already in the
+  model such an increment is kept, because the next recompute reads it as the
+  subscription's own.
+- **«Удалять лишние устройства автоматически» off (stage 6).** Device
+  reductions wait for an operator again.
+- **«Докупка трафика до сброса» off (stage 4).** «До следующего сброса»
+  add-ons are no longer offered or sold.
 
-- **Stage 1 off.** No subscription enters the model any more. The background
-  cutover stops: the cron queues no pass, and a pass already queued re-reads the
-  flag and does nothing. Payments stop bringing subscriptions in. A subscription
-  already in the model keeps getting its terms from renewals, paid upgrades and
-  plan changes.
-- **Stage 2 off.** New add-on purchases go back to the legacy permanent
-  increment. On a subscription already in the model such an increment is kept:
-  the next recompute reads it as the subscription's own.
-- **Stage 6 off.** Device reductions wait for an operator again.
-
-**What turning stages off does NOT undo:**
+**What switching off does NOT undo** — the dialog says the same:
 
 - Terms, projections, entitlements and incidents stay. The schema is additive,
   every relation is `Restrict`, and there is no down-migration.
 - **Subscriptions already in the model stay in it.** Stage 1 off stops new
   entrants only.
-- **Add-ons already sold still end on their dates.** The sweep reads no flag.
+- **Add-ons already sold still end on their dates.** The sweep reads no switch.
 - Terms keep being aligned and activated.
 - Devices a reduction already removed are not restored.
 - **The limits of a subscription in the model stay the panel's.** Remnawave

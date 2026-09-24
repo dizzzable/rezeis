@@ -1,12 +1,9 @@
 import { after, before } from 'node:test';
 
-import {
-  ADD_ON_ROLLOUT_FLAG_DEFAULTS,
-  type AddOnRolloutFlagName,
-} from '../../src/modules/add-on-entitlements/add-on-rollout.config';
+import { ADD_ON_ROLLOUT_FLAG_NAMES } from '../../src/modules/add-on-entitlements/add-on-rollout.config';
 
-/** Every `ADDON_*` rollout variable the resolver reads. */
-export const ADD_ON_ROLLOUT_FLAG_NAMES = Object.keys(ADD_ON_ROLLOUT_FLAG_DEFAULTS) as AddOnRolloutFlagName[];
+/** Every `ADDON_*` variable that can still decide a stage over the panel switches. */
+export { ADD_ON_ROLLOUT_FLAG_NAMES };
 
 /**
  * Pins EVERY `ADDON_*` rollout flag OFF, explicitly, for the whole spec file
@@ -19,6 +16,9 @@ export const ADD_ON_ROLLOUT_FLAG_NAMES = Object.keys(ADD_ON_ROLLOUT_FLAG_DEFAULT
  * the model's code paths (`$queryRaw` row locks, terms, projections) they were
  * never shaped for. The model's own behaviour is pinned by its own specs, most
  * of them against PostgreSQL.
+ *
+ * The stages are panel switches now, but an explicit `.env` value still wins
+ * over a switch, so this pin holds whatever a settings row in the spec says.
  *
  * A case inside the file may still switch a single stage on around its own run;
  * it then restores this pinned value, not an unset one.

@@ -599,7 +599,11 @@ run('an upgrade adds the old plan’s paid remainder to the new term (PostgreSQL
     });
   });
 
-  it('durable model: a scheduled term that survives (paid add-ons on it) keeps no days, so its renewal is converted too', async () => {
+  it('durable model: a scheduled term carrying a renewal add-on left by stage 5 is cancelled like any, and its renewal converted', async () => {
+    // Renewal add-ons (stage 5) were deleted on 24.09.2026, and with them the
+    // re-basing that kept such a term alive through an upgrade. A row one left
+    // behind no longer shields its term: the upgrade cancels it and converts
+    // its days like any queued renewal's, and the row stays PENDING, inert.
     await withDurableModel(async () => {
       const plans = await createPlans();
       const userId = await createUser();
@@ -615,8 +619,8 @@ run('an upgrade adds the old plan’s paid remainder to the new term (PostgreSQL
       const scheduled = await prisma.subscriptionTerm.findFirstOrThrow({
         where: { subscriptionId: owner.subscriptionId, status: 'SCHEDULED' },
       });
-      // A paid add-on bound to that term: the upgrade may not cancel it.
-      await prisma.addOnEntitlement.create({
+      // A paid add-on bound to that term, as stage 5 sold them.
+      const leftover = await prisma.addOnEntitlement.create({
         data: {
           subscriptionId: owner.subscriptionId,
           termId: scheduled.id,
@@ -647,20 +651,19 @@ run('an upgrade adds the old plan’s paid remainder to the new term (PostgreSQL
 
       assert.equal(
         (await prisma.subscriptionTerm.findUniqueOrThrow({ where: { id: scheduled.id } })).status,
-        'SCHEDULED',
-        'fixture: the upgrade kept the term — paid add-ons on it — re-based onto the new plan',
+        'CANCELED',
+        'the leftover add-on does not keep the renewal’s term alive',
       );
       const term = await termOf(owner.subscriptionId);
       assert.equal(daysBetween(term.startedAt, term.expiresAt), 45, 'the renewal’s 30 days are converted as well');
+      const row = await prisma.addOnEntitlement.findUniqueOrThrow({ where: { id: leftover.id } });
+      assert.equal(row.state, 'PENDING_ACTIVATION');
+      assert.equal(row.termId, scheduled.id);
 
-      // Why they had to be: when the surviving term starts, it moves no expiry.
-      // Its days lived only in `expiresAt`, which the upgrade restarted.
-      await boundary.activateDueScheduledTerm(owner.subscriptionId, new Date(scheduled.startsAt.getTime() + 1000));
-      assert.equal(
-        (await prisma.subscriptionTerm.findUniqueOrThrow({ where: { id: scheduled.id } })).status,
-        'ACTIVE',
-        'fixture: the term did start',
-      );
+      // Nothing is queued any more: at the old term's start the sweep activates
+      // nothing, and the expiry stays where the upgrade put it.
+      const swept = await boundary.activateDueScheduledTerm(owner.subscriptionId, new Date(scheduled.startsAt.getTime() + 1000));
+      assert.equal(swept.activated, false);
       assert.equal((await termOf(owner.subscriptionId)).expiresAt?.getTime(), term.expiresAt?.getTime());
     });
   });

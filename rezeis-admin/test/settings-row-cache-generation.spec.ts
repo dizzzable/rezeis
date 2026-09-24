@@ -95,6 +95,7 @@ function settingsRow(brandName: string): Settings {
     pointsSettings: {},
     wheelSettings: {},
     connectHelpSettings: {},
+    addOnSettings: {},
     updatedAt: new Date('2026-09-13T10:00:00.000Z'),
   };
 }

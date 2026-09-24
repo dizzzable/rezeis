@@ -25,10 +25,9 @@ import { GIB_BYTES } from './cutover-baseline';
  * `baseTrafficLimitBytes` / `baseDeviceLimit` are minted from the plan and
  * never mutated afterwards. `EffectiveProjectionService` then derived
  * `desired = term baseline + ACTIVE add-ons`, so at the moment the term
- * activated the hand-set value was replaced by the plan's — and pushed into the
- * Remnawave panel, because the versioned sync path reads
- * `SubscriptionEffectiveProjection.desired*`, not the mirrored columns. The
- * customer genuinely lost the devices.
+ * activated the hand-set value was replaced by the plan's — mirrored into the
+ * columns and pushed into the Remnawave panel. The customer genuinely lost the
+ * devices.
  *
  * The term row is not the place to repair this and it is deliberately not
  * touched here: it is a BILLING record, written once, and the override may be

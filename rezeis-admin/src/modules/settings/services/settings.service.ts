@@ -44,7 +44,10 @@ import { BrandingSettingsInterface } from '../interfaces/branding-settings.inter
 import { CustomIconInterface } from '../interfaces/custom-icon.interface';
 import { InternalPlatformPolicyInterface } from '../interfaces/internal-platform-policy.interface';
 import { PlatformSettingsInterface } from '../interfaces/platform-settings.interface';
-import { resolveAddOnRolloutFlags } from '../../add-on-entitlements/add-on-rollout.config';
+import {
+  readStoredAddOnSwitches,
+  type StoredAddOnSwitches,
+} from '../../add-on-entitlements/add-on-rollout.config';
 import { mergeBrandingSettings, readBrandingSettings } from '../utils/branding-settings.util';
 import { PlatformBrandingInterface } from '../interfaces/platform-branding.interface';
 import { mergePlatformBranding, readPlatformBranding } from '../utils/platform-branding.util';
@@ -253,8 +256,6 @@ const DEFAULT_INTERNAL_PLATFORM_POLICY: InternalPlatformPolicyInterface = {
   accessMode: 'PUBLIC',
   inviteModeStartedAt: null,
   defaultCurrency: 'USD',
-  // Always overridden from env in getInternalPlatformPolicy — placeholder only.
-  renewalAddOns: false,
 };
 
 /**
@@ -452,11 +453,27 @@ export class SettingsService {
    */
   public async getInternalPlatformPolicy(): Promise<InternalPlatformPolicyInterface> {
     const settings: Settings | null = await this.getSettingsRecord();
-    const base =
-      settings === null ? DEFAULT_INTERNAL_PLATFORM_POLICY : mapInternalPlatformPolicy(settings);
-    // Capability flags are deployment-time env, not stored in Settings — apply
-    // them here so both the default and the mapped payload reflect the rollout.
-    return { ...base, renewalAddOns: resolveAddOnRolloutFlags().renewalAddOns };
+    return settings === null ? DEFAULT_INTERNAL_PLATFORM_POLICY : mapInternalPlatformPolicy(settings);
+  }
+
+  /**
+   * The add-on model's switches as the operator stored them («Доп. услуги» →
+   * «Настройки»), sparse. `AddOnSwitchesService` lays the `.env` overrides and
+   * the defaults over them; nothing else should read this.
+   *
+   * THROUGH THE ROW CACHE, on purpose, like every other runtime read of the
+   * row: a save in this process bumps the settings-write generation, so the
+   * next read here is fresh; the other process (API or worker) sees the save
+   * within {@link SettingsService.SETTINGS_CACHE_TTL_MS}. That is the whole
+   * "no restart" promise of the switches, and it adds no second cache.
+   *
+   * Does not swallow a failed read, for the reason `getAntiFraudTunablesRuntime`
+   * does not: falling back to the defaults here would quietly turn back ON a
+   * stage an operator had switched off in the panel.
+   */
+  public async getStoredAddOnSwitches(): Promise<StoredAddOnSwitches> {
+    const settings = await this.getSettingsRecord();
+    return readStoredAddOnSwitches(settings?.addOnSettings ?? null);
   }
 
   /**
@@ -1837,8 +1854,6 @@ function mapInternalPlatformPolicy(settings: Settings): InternalPlatformPolicyIn
     inviteModeStartedAt:
       settings.inviteModeStartedAt === null ? null : settings.inviteModeStartedAt.toISOString(),
     defaultCurrency: settings.defaultCurrency,
-    // Always overridden from env in getInternalPlatformPolicy — placeholder only.
-    renewalAddOns: false,
   };
 }
 

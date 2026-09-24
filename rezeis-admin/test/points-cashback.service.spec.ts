@@ -289,7 +289,7 @@ describe('PointsCashbackService.creditForTransaction — one subscription', () =
 });
 
 describe('PointsCashbackService.creditForTransaction — the other two shapes', () => {
-  it('a combined renewal is one line per item plus one per paid add-on line', async () => {
+  it('a combined renewal is one plan line per item, and add-on lines left on an item earn nothing', async () => {
     const world = makeWorld({
       items: [
         {
@@ -298,11 +298,10 @@ describe('PointsCashbackService.creditForTransaction — the other two shapes', 
           amount: new Prisma.Decimal('100'),
           currency: Currency.RUB,
           planSnapshot: { name: 'Premium' },
-          addOnLines: [
-            { addOnId: 'ao-1', unitAmount: '50', receiptName: 'Extra 10 GB', catalogRevision: 1 },
-            { addOnId: 'ao-1', unitAmount: 'not-a-number-and-no-id' },
-            { unitAmount: '50' },
-          ],
+          // Sold with a renewal under stage 5, deleted on 24.09.2026. Such a
+          // line is refused at fulfilment and refunded by hand, so it is never
+          // money the customer paid for something delivered.
+          addOnLines: [{ addOnId: 'ao-1', unitAmount: '50', receiptName: 'Extra 10 GB', catalogRevision: 1 }],
         },
       ],
     });
@@ -312,18 +311,13 @@ describe('PointsCashbackService.creditForTransaction — the other two shapes', 
       planPurchase({ purchaseType: PurchaseType.RENEW, amount: new Prisma.Decimal('150'), currency: Currency.RUB, planSnapshot: {} }) as never,
     );
 
-    // plan-1 for 30 days: INHERIT → 5% of 100 = 5; add-on: FIXED 20. The entry
-    // with an unreadable amount and the one without an id are left out — a
-    // hook that runs after the money moved does not throw over a field.
+    // plan-1 for 30 days: INHERIT → 5% of 100 = 5, and nothing for the add-on.
     assert.equal(outcome.credited, true);
-    assert.equal((outcome as { points: number }).points, 25);
+    assert.equal((outcome as { points: number }).points, 5);
     const details = world.ledger[0]!['details'] as { lines: Array<Record<string, unknown>> };
     assert.deepEqual(
       details.lines.map((line) => [line['kind'], line['id'], line['name'], line['effective'], line['points']]),
-      [
-        ['PLAN', 'plan-1', 'Premium', 'PERCENT', 5],
-        ['ADD_ON', 'ao-1', 'Extra 10 GB', 'FIXED', 20],
-      ],
+      [['PLAN', 'plan-1', 'Premium', 'PERCENT', 5]],
     );
   });
 

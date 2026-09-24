@@ -23,7 +23,6 @@ const EXPECTED_POLICY_KEYS: readonly string[] = [
   'channelUsername',
   'defaultCurrency',
   'inviteModeStartedAt',
-  'renewalAddOns',
   'requireTelegramWebCredentials',
   'rulesLink',
   'rulesRequired',
@@ -78,7 +77,6 @@ describe('InternalPlatformPolicyController', () => {
       accessMode: AccessMode.INVITED,
       inviteModeStartedAt: '2026-04-01T00:00:00.000Z',
       defaultCurrency: Currency.USD,
-      renewalAddOns: false,
     };
     const settingsService = {
       getInternalPlatformPolicy: async (): Promise<InternalPlatformPolicyInterface> => {
@@ -136,7 +134,6 @@ function createSettingsService(accessMode: AccessMode): SettingsService {
       accessMode,
       inviteModeStartedAt: null,
       defaultCurrency: Currency.USD,
-      renewalAddOns: false,
     }),
   } as SettingsService;
 }

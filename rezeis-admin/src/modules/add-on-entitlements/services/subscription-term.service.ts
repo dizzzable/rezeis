@@ -88,9 +88,13 @@ export interface RotateForPlanChangeInput {
    *   - `REFUSE`: leave everything alone and report it. Plan migration's rule —
    *     nobody paid for the move, so it may not cancel a paid renewal.
    *   - `CANCEL_UNBOUND`: cancel queued terms that carry no live add-on, and
-   *     refuse only when one does. The paid upgrade's rule
-   *     (`startUpgradeTermInTransaction`): a queued term left in place would
-   *     activate later and put the superseded plan's baseline back.
+   *     refuse only when one does — «Назначить план» and the bulk assignment:
+   *     a queued term left in place would activate later and put the
+   *     superseded plan's baseline back. Only the renewal add-ons (stage 5,
+   *     deleted on 24.09.2026) ever bound an add-on to a queued term, so the
+   *     refusal is left for the rows they left behind. The paid upgrade does
+   *     not come through here: it cancels every queued term
+   *     (`startUpgradeTermInTransaction`), because the money is already in.
    */
   readonly scheduledTerms: 'REFUSE' | 'CANCEL_UNBOUND';
   readonly now?: Date;

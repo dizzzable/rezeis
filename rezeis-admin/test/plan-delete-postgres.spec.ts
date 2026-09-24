@@ -542,7 +542,6 @@ run('plan deletion on PostgreSQL', () => {
     const renewal = new SubscriptionRenewalService(
       prisma,
       new SubscriptionQuoteService(prisma, catalog, new PricingService()),
-      {} as never,
     );
 
     assert.equal(await renewal.requiresPlanSelection(onHidden), true);

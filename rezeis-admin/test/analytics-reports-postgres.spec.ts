@@ -1246,7 +1246,7 @@ run('business analytics on PostgreSQL', () => {
           } as never,
           new SavedPaymentMethodService(tx as never, refuse('systemEvents')),
           refuse('noticePayload'),
-          new SubscriptionRenewalService(tx as never, refuse('subscriptionQuoteService'), refuse('addOnEligibilityService')),
+          new SubscriptionRenewalService(tx as never, refuse('subscriptionQuoteService')),
           { info: () => undefined } as never,
         );
         await autoRenew.processAutopayCharges();

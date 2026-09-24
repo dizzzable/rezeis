@@ -1,5 +1,5 @@
 import { InjectQueue } from '@nestjs/bullmq';
-import { BeforeApplicationShutdown, Injectable, Logger } from '@nestjs/common';
+import { BeforeApplicationShutdown, Injectable, Logger, Optional } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import {
   AddOnEntitlementActorType,
@@ -25,8 +25,9 @@ import {
   ADD_ON_NOTICE_LEAD_MS,
   ADD_ON_NOTICE_REDELIVER_AFTER_MS,
 } from '../addon-expiry-notice.constants';
-import { resolveAddOnRolloutFlags } from '../add-on-rollout.config';
+import { readAddOnRolloutFlags } from '../add-on-rollout.config';
 import { LAPSED_TERM_WINDOW_MS } from '../domain/term-window';
+import { AddOnSwitchesService } from '../switches/add-on-switches.service';
 
 /** The two moments a customer is told about: three days before the end, and the end. */
 export type AddOnNoticeMoment = 'endsSoon' | 'ended';
@@ -55,8 +56,8 @@ const GIB = 1024 ** 3;
 
 /**
  * The template a notice is sent with: its moment, and — for devices — what
- * the end does to the devices already connected, which stage 6
- * (`ADDON_DEVICE_CLEANUP_AUTO`) decides (see `ADD_ON_TEMPLATES`).
+ * the end does to the devices already connected, which stage 6 — the switch
+ * «Удалять лишние устройства автоматически» — decides (see `ADD_ON_TEMPLATES`).
  */
 export function addOnNoticeType(
   moment: AddOnNoticeMoment,
@@ -114,7 +115,7 @@ interface Pass {
  *    decision is recorded too, so it is not taken again.
  *  - Whatever the rollout flags say. The notices follow the add-on's row, as
  *    the boundary sweep that ends it does (it reads no flag): an add-on sold
- *    while stage 2 (`ADDON_ENTITLEMENT_DIRECT_PURCHASE`) was on still ends
+ *    while stage 2 («Новый учёт докупок») was on still ends
  *    after stage 2 is turned off, and its customer is told. Only stage 6 is
  *    read, for what the end does to the devices. The model's rule since
  *    24.09.2026: behaviour follows the row, not the flag.
@@ -192,6 +193,8 @@ export class AddOnExpiryNoticeService implements BeforeApplicationShutdown {
     private readonly templatesService: NotificationTemplatesService,
     private readonly notifications: UserNotificationsService,
     @InjectQueue(ADD_ON_EXPIRY_NOTICE_QUEUE) private readonly queue: Queue,
+    /** The stage switches; `@Optional()` only for the specs that build this by hand. */
+    @Optional() private readonly addOnSwitches?: AddOnSwitchesService,
   ) {}
 
   /**
@@ -268,7 +271,7 @@ export class AddOnExpiryNoticeService implements BeforeApplicationShutdown {
    * at the pass, for the device texts.
    */
   public async runTick(now: Date = new Date()): Promise<AddOnNoticeTickReport> {
-    const flags = resolveAddOnRolloutFlags();
+    const flags = await readAddOnRolloutFlags(this.addOnSwitches);
     const pass: Pass = {
       now,
       deviceCleanupAuto: flags.deviceCleanupAuto,

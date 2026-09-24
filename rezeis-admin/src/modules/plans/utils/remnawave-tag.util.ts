@@ -11,17 +11,9 @@
  * oracles of the same rule.
  *
  * It is restated HERE, at the DTO, rather than only inside the sync path,
- * because the two write paths disagree about what happens to a tag the panel
- * will not accept and the disagreement is invisible to the operator:
- *
- *  - the strict path (`projectionSync` rollout flag on) refuses the whole
- *    desired-state PATCH with `invalidContract` — see `isUpstreamTag` in
- *    `remnawave-api.service.ts`, and `classifyRecovery` files that as TERMINAL,
- *    so the subscription's limits stop converging entirely;
- *  - the legacy path forwards the tag verbatim and the panel answers 400.
- *
- * Either way the operator finds out hours later, in a background job, on
- * somebody else's subscription. Rejecting at the form costs one error message.
+ * because the sync forwards the tag verbatim and the panel answers 400: the
+ * operator finds out hours later, in a background job, on somebody else's
+ * subscription. Rejecting at the form costs one error message.
  *
  * NOTE: this is deliberately NOT applied to tags already stored on a plan. A
  * plan cloned from a donor backup (`backup-plan-cloner.service.ts`, which

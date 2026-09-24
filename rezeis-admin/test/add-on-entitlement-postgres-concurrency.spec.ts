@@ -35,20 +35,10 @@ function deferred() {
   return { promise, resolve };
 }
 
-/**
- * The panel adapter as every case in this file needs it: one method, answering
- * "the era cannot be read".
- *
- * `SubscriptionDeletionService` asks the adapter which Remnawave era it is
- * talking to before it arms a panel deletion, and refuses only on a PROVEN 3.x
- * panel holding a 2.x uuid. Every case here predates that guard and asserts the
- * behaviour an unreadable era must preserve unchanged — so this is the honest
- * stub for them, not a switch that turns the guard off. The guard's own cases
- * live in `subscription-delete-stale-panel-link.spec.ts` and stub a real era.
- */
-function panelEraUnreadable() {
-  return { getPanelShape: async () => ({ addressing: 'unknown' }) } as never;
-}
+// `SubscriptionDeletionService` takes no panel adapter: its stale-link refusal
+// reads no version (`isStalePanelIdentity`), and the rows here hold decimal
+// identities, which it never refuses. The refusal's own cases live in
+// `subscription-delete-stale-panel-link.spec.ts`.
 
 run('add-on entitlement PostgreSQL concurrency', () => {
   const terms = new SubscriptionTermService();
@@ -399,7 +389,6 @@ run('add-on entitlement PostgreSQL concurrency', () => {
       { enqueue: async () => undefined } as never,
       entitlements,
       terms,
-      panelEraUnreadable(),
     );
     await deletion.deleteByOperator(id);
     assert.equal((await prisma.subscription.findUniqueOrThrow({ where: { id } })).status, 'DELETED');
@@ -474,7 +463,6 @@ run('add-on entitlement PostgreSQL concurrency', () => {
       { enqueue: async (jobId: string) => queueCalls.push(jobId) } as never,
       entitlements,
       terms,
-      panelEraUnreadable(),
     );
     await deletion.deleteByOperator(id);
     assert.equal(await prisma.profileSyncJob.count({ where: { subscriptionId: id, action: 'DELETE' } }), 1);
@@ -505,7 +493,6 @@ run('add-on entitlement PostgreSQL concurrency', () => {
       { enqueue: async (id: string) => queueCalls.push(id) } as never,
       failingEntitlements as never,
       terms,
-      panelEraUnreadable(),
     );
 
     await assert.rejects(() => deletion.deleteByOperator(subscriptionId), /forced lifecycle failure/);
@@ -518,7 +505,9 @@ run('add-on entitlement PostgreSQL concurrency', () => {
   it('serializes two deletes that both observed ACTIVE and creates one DELETE job', async () => {
     const id = `${prefix}-delete-race`;
     await prisma.subscription.create({
-      data: { id, userId, status: 'ACTIVE', remnawaveId: `${prefix}-rw-delete-race`, planSnapshot: {} },
+      // A decimal: a stored identity that is not one is refused before any job
+      // is armed, and this case is about the race, not the refusal.
+      data: { id, userId, status: 'ACTIVE', remnawaveId: '90103', planSnapshot: {} },
     });
     const bothRead = deferred();
     let reads = 0;
@@ -540,7 +529,6 @@ run('add-on entitlement PostgreSQL concurrency', () => {
       { enqueue: async (jobId: string) => queueCalls.push(jobId) } as never,
       entitlements,
       terms,
-      panelEraUnreadable(),
     );
 
     await Promise.all([deletion.deleteByOperator(id), deletion.deleteByOperator(id)]);
@@ -632,7 +620,6 @@ run('add-on entitlement PostgreSQL concurrency', () => {
       { enqueue: async () => undefined } as never,
       entitlements,
       terms,
-      panelEraUnreadable(),
     );
     const deleting = deletion.deleteByOperator(id).finally(() => { deleteSettled = true; });
     await new Promise((resolve) => setTimeout(resolve, 25));
@@ -883,7 +870,11 @@ run('add-on entitlement PostgreSQL concurrency', () => {
     assert.equal(proj.desiredTrafficLimitBytes, 100n * gib);
   });
 
-  it('activates a due scheduled renewal term and its pending entitlements at the boundary', async () => {
+  it('activates a due scheduled renewal term; a PENDING add-on left by the removed renewal add-ons stays PENDING and counts for nothing', async () => {
+    // Renewal add-ons (stage 5) were deleted on 24.09.2026, and with them the
+    // activation of their PENDING rows. An install that had switched stage 5 on
+    // may still hold such a row on a queued term: activating the term must go
+    // through all the same, and the row must neither activate nor count.
     const gib = 1024n * 1024n * 1024n;
     const id = `${prefix}-activate-sub`;
     const txId = `${prefix}-activate-tx`;
@@ -916,7 +907,7 @@ run('add-on entitlement PostgreSQL concurrency', () => {
         amount: new Prisma.Decimal('2.50'), planSnapshot: {},
       },
     });
-    // A PENDING renewal add-on bound to the scheduled term, due to activate now.
+    // The leftover: a PENDING renewal add-on bound to the scheduled term.
     const created = await prisma.$transaction((tx) =>
       entitlements.createPendingInTransaction(tx, {
         subscriptionId: id, termId: scheduled.id, sourceTransactionId: txId, sourceLineKey: `${prefix}-act-line`,
@@ -932,66 +923,18 @@ run('add-on entitlement PostgreSQL concurrency', () => {
     const result = await boundary.activateDueScheduledTerm(id, new Date());
     assert.equal(result.activated, true);
     assert.equal(result.termId, scheduled.id);
-    assert.equal(result.activatedEntitlements, 1);
 
     // Old term ended, scheduled term is now ACTIVE.
     assert.equal((await prisma.subscriptionTerm.findUniqueOrThrow({ where: { id: scheduled.id } })).status, 'ACTIVE');
     assert.equal((await prisma.subscriptionTerm.findFirstOrThrow({ where: { subscriptionId: id, generation: 1 } })).status, 'ENDED');
-    // The renewal entitlement is ACTIVE and contributes to the projection.
-    assert.equal((await prisma.addOnEntitlement.findUniqueOrThrow({ where: { id: created.entitlementId } })).state, 'ACTIVE');
+    // The leftover is untouched, and the limit is the term's own.
+    assert.equal(
+      (await prisma.addOnEntitlement.findUniqueOrThrow({ where: { id: created.entitlementId } })).state,
+      'PENDING_ACTIVATION',
+    );
     const proj = await prisma.subscriptionEffectiveProjection.findUniqueOrThrow({ where: { subscriptionId: id } });
-    assert.equal(proj.desiredTrafficLimitBytes, 150n * gib);
+    assert.equal(proj.desiredTrafficLimitBytes, 100n * gib);
     assert.equal(proj.baselineTermId, scheduled.id);
-  });
-
-  it('creates the term reset epoch on activation only when the strategy capability is ENABLED', async () => {
-    const gib = 1024n * 1024n * 1024n;
-    const anchor = new Date('2026-06-15T00:00:00.000Z');
-    const boundary = new EntitlementBoundaryService(prisma, entitlements, terms, new EffectiveProjectionService());
-
-    async function activateFreshTerm(suffix: string): Promise<string> {
-      const id = `${prefix}-epoch-${suffix}`;
-      await prisma.subscription.create({
-        data: { id, userId, status: 'ACTIVE', planSnapshot: {}, trafficLimit: 100, deviceLimit: 3 },
-      });
-      await prisma.subscriptionTerm.create({
-        data: {
-          subscriptionId: id, generation: 1, status: 'ACTIVE', planSnapshot: {},
-          startsAt: new Date('2019-01-01T00:00:00.000Z'), endsAt: new Date('2020-01-01T00:00:00.000Z'),
-          baseTrafficLimitBytes: 100n * gib, baseDeviceLimit: 3,
-          trafficResetStrategy: 'MONTH', resetAnchorAt: anchor,
-        },
-      });
-      const scheduled = await prisma.subscriptionTerm.create({
-        data: {
-          subscriptionId: id, generation: 2, status: 'SCHEDULED', planSnapshot: {},
-          startsAt: anchor, endsAt: new Date('2027-06-15T00:00:00.000Z'),
-          baseTrafficLimitBytes: 100n * gib, baseDeviceLimit: 3,
-          trafficResetStrategy: 'MONTH', resetAnchorAt: anchor,
-        },
-      });
-      await boundary.activateDueScheduledTerm(id, new Date());
-      return scheduled.id;
-    }
-
-    // Flag OFF (default) → no epoch created.
-    const offTermId = await activateFreshTerm('off');
-    assert.equal(await prisma.subscriptionResetEpoch.count({ where: { termId: offTermId } }), 0);
-
-    // Flag ON for MONTH → the term's first epoch is created deterministically.
-    const prev = process.env.ADDON_RESET_EXPIRY_MONTH;
-    process.env.ADDON_RESET_EXPIRY_MONTH = 'true';
-    try {
-      const onTermId = await activateFreshTerm('on');
-      const epochs = await prisma.subscriptionResetEpoch.findMany({ where: { termId: onTermId } });
-      assert.equal(epochs.length, 1);
-      assert.equal(epochs[0]!.ordinal, 1);
-      // MONTH epoch starts at the UTC month start of the reference instant.
-      assert.equal(epochs[0]!.plannedEndsAt.getTime() > epochs[0]!.startsAt.getTime(), true);
-    } finally {
-      if (prev === undefined) delete process.env.ADDON_RESET_EXPIRY_MONTH;
-      else process.env.ADDON_RESET_EXPIRY_MONTH = prev;
-    }
   });
 
   it('renewal producer: schedules a gen-2 SCHEDULED term after a committed renewal whenever an ACTIVE term exists, the flag or not', async () => {
@@ -1327,188 +1270,6 @@ run('add-on entitlement PostgreSQL concurrency', () => {
     assert.equal(noTermTerms[0]!.endsAt?.getTime(), noTermEndsAt.getTime(), 'the entry minted its term to the expiry');
     assert.equal(noTermTerms[1]!.startsAt.getTime(), noTermEndsAt.getTime());
     assert.equal(noTermTerms[1]!.baseTrafficLimitBytes, 200n * gib);
-  });
-
-  it('createPending accepts a combined-renewal transaction bound via a line and rejects a target without a matching line', async () => {
-    const gib = 1024n * 1024n * 1024n;
-    const subX = `${prefix}-comb-ent-x`;
-    const planX = `${prefix}-comb-ent-plan`;
-    await prisma.plan.create({ data: { id: planX, name: `${prefix}-comb-ent-plan-name`, trafficLimit: 100, deviceLimit: 3 } });
-    await prisma.subscription.create({ data: { id: subX, userId, status: 'ACTIVE', planSnapshot: {}, trafficLimit: 100, deviceLimit: 3 } });
-    const term = await prisma.subscriptionTerm.create({
-      data: {
-        subscriptionId: subX, generation: 1, status: 'ACTIVE', planSnapshot: {},
-        startsAt: dueAt, endsAt: new Date('2031-01-01T00:00:00.000Z'),
-        baseTrafficLimitBytes: 100n * gib, baseDeviceLimit: 3,
-        trafficResetStrategy: 'NO_RESET', resetAnchorAt: dueAt,
-      },
-    });
-    // Combined renewal: subscriptionId = null, one TransactionItem line for subX.
-    const combinedTx = await prisma.transaction.create({
-      data: {
-        paymentId: `${prefix}-comb-ent-pay`, userId, subscriptionId: null, status: 'COMPLETED',
-        purchaseType: 'RENEW', channel: 'WEB', gatewayType: 'YOOKASSA', currency: 'USD',
-        amount: new Prisma.Decimal('2.50'), planSnapshot: {},
-      },
-    });
-    await prisma.transactionItem.create({
-      data: { transactionId: combinedTx.id, subscriptionId: subX, planId: planX, durationDays: 30, amount: new Prisma.Decimal('2.50'), currency: 'USD' },
-    });
-
-    const base = {
-      sourceTransactionId: combinedTx.id, addOnId: null, catalogRevision: 1,
-      receiptName: 'Renewal add-on', applicabilitySnapshot: {}, unitAmount: '2.50', totalAmount: '2.50',
-      currency: 'USD' as const, purchasedAt: dueAt, scheduledActivationAt: dueAt, expiryEpochId: null,
-    };
-    // Bound to the paying transaction via its renewal line → accepted.
-    const created = await prisma.$transaction((tx) =>
-      entitlements.createPendingInTransaction(tx, {
-        ...base, subscriptionId: subX, termId: term.id, sourceLineKey: 'renew-addon-x',
-        type: 'EXTRA_TRAFFIC', valuePerUnit: 50, totalValue: 50n * gib, lifetime: 'UNTIL_SUBSCRIPTION_END',
-        expiresAt: new Date('2031-01-01T00:00:00.000Z'), correlationId: `${prefix}-comb-ent-corr`,
-      }),
-    );
-    assert.equal((await prisma.addOnEntitlement.findUniqueOrThrow({ where: { id: created.entitlementId } })).state, 'PENDING_ACTIVATION');
-    assert.equal(
-      (await prisma.addOnEntitlement.findUniqueOrThrow({ where: { id: created.entitlementId } })).subscriptionId,
-      subX,
-    );
-
-    // A target subscription with NO renewal line on this transaction → rejected.
-    const subY = `${prefix}-comb-ent-y`;
-    await prisma.subscription.create({ data: { id: subY, userId, status: 'ACTIVE', planSnapshot: {}, deviceLimit: 2 } });
-    const termY = await prisma.subscriptionTerm.create({
-      data: {
-        subscriptionId: subY, generation: 1, status: 'ACTIVE', planSnapshot: {},
-        startsAt: dueAt, baseDeviceLimit: 2, trafficResetStrategy: 'NO_RESET', resetAnchorAt: dueAt,
-      },
-    });
-    await assert.rejects(() =>
-      prisma.$transaction((tx) =>
-        entitlements.createPendingInTransaction(tx, {
-          ...base, subscriptionId: subY, termId: termY.id, sourceLineKey: 'renew-addon-y',
-          type: 'EXTRA_DEVICES', valuePerUnit: 1, totalValue: 1n, lifetime: 'UNTIL_SUBSCRIPTION_END',
-          expiresAt: null, correlationId: `${prefix}-comb-ent-corr-y`,
-        }),
-      ),
-    /no renewal line/);
-    assert.equal(await prisma.addOnEntitlement.count({ where: { subscriptionId: subY } }), 0);
-  });
-
-  it('renewal add-on fulfillment: mints a PENDING entitlement on the scheduled term atomically when renewalAddOns is on', async () => {
-    const gib = 1024n * 1024n * 1024n;
-    const planId = `${prefix}-radd-plan`;
-    const addOnId = `${prefix}-radd-addon`;
-    const id = `${prefix}-radd-sub`;
-    const termEndsAt = new Date('2030-05-01T00:00:00.000Z');
-    await prisma.plan.create({ data: { id: planId, name: `${prefix}-radd-plan-name`, trafficLimit: 100, deviceLimit: 3, trafficLimitStrategy: 'NO_RESET' } });
-    await prisma.addOn.create({
-      data: {
-        id: addOnId, name: 'Renewal Extra 50GB', type: 'EXTRA_TRAFFIC', value: 50,
-        lifetime: 'UNTIL_SUBSCRIPTION_END', revision: 3,
-        prices: { create: [{ currency: 'USD', price: new Prisma.Decimal('2.50') }] },
-      },
-    });
-    await prisma.subscription.create({
-      data: { id, userId, status: 'ACTIVE', planSnapshot: {}, trafficLimit: 100, deviceLimit: 3, expiresAt: termEndsAt, remnawaveId: `${prefix}-rw-radd` },
-    });
-    await prisma.subscriptionTerm.create({
-      data: {
-        subscriptionId: id, generation: 1, status: 'ACTIVE', planSnapshot: {},
-        startsAt: new Date('2020-01-01T00:00:00.000Z'), endsAt: termEndsAt,
-        baseTrafficLimitBytes: 100n * gib, baseDeviceLimit: 3,
-        trafficResetStrategy: 'NO_RESET', resetAnchorAt: new Date('2020-01-01T00:00:00.000Z'),
-      },
-    });
-    const lineKey = `renew:${id}:${addOnId}`;
-    const txn = await prisma.transaction.create({
-      data: {
-        paymentId: `${prefix}-radd-pay`, userId, subscriptionId: null, status: 'COMPLETED',
-        purchaseType: 'RENEW', channel: 'WEB', gatewayType: 'YOOKASSA', currency: 'USD',
-         amount: new Prisma.Decimal('7.50'), planSnapshot: { combinedRenewal: true },
-      },
-    });
-    await prisma.transactionItem.create({
-      data: {
-        transactionId: txn.id, subscriptionId: id, planId, durationDays: 30,
-        amount: new Prisma.Decimal('7.50'), currency: 'USD',
-        addOnLines: [
-          {
-            addOnId, catalogRevision: 3, type: 'EXTRA_TRAFFIC', value: 50,
-            lifetime: 'UNTIL_SUBSCRIPTION_END', activation: 'TERM_START', sourceLineKey: lineKey,
-            unitAmount: '2.50', receiptName: 'Renewal Extra 50GB',
-          },
-        ] as Prisma.InputJsonValue,
-      },
-    });
-
-    const mutation = new PaymentSubscriptionMutationService(
-      prisma, { info: () => undefined } as never, entitlements, new EffectiveProjectionService(), terms, {} as never,
-    );
-    const prevShadow = process.env.ADDON_ENTITLEMENT_SHADOW;
-    const prevRenewal = process.env.ADDON_RENEWAL_ADDONS;
-    process.env.ADDON_ENTITLEMENT_SHADOW = 'true';
-    process.env.ADDON_RENEWAL_ADDONS = 'true';
-    try {
-      await mutation.applyCompletedTransaction(txn);
-      // Idempotent replay: appliedAt guards, no second entitlement.
-      await mutation.applyCompletedTransaction(await prisma.transaction.findUniqueOrThrow({ where: { id: txn.id } }));
-    } finally {
-      if (prevShadow === undefined) delete process.env.ADDON_ENTITLEMENT_SHADOW; else process.env.ADDON_ENTITLEMENT_SHADOW = prevShadow;
-      if (prevRenewal === undefined) delete process.env.ADDON_RENEWAL_ADDONS; else process.env.ADDON_RENEWAL_ADDONS = prevRenewal;
-    }
-
-    // Scheduled gen-2 term produced (starts at the current term end).
-    const scheduled = await prisma.subscriptionTerm.findFirstOrThrow({ where: { subscriptionId: id, status: 'SCHEDULED' } });
-    assert.equal(scheduled.generation, 2);
-    assert.equal(scheduled.startsAt.getTime(), termEndsAt.getTime());
-    // Exactly one PENDING entitlement, bound to the scheduled term, activating at term start.
-    assert.equal(await prisma.addOnEntitlement.count({ where: { sourceTransactionId: txn.id } }), 1);
-    const ent = await prisma.addOnEntitlement.findFirstOrThrow({ where: { sourceTransactionId: txn.id } });
-    assert.equal(ent.state, 'PENDING_ACTIVATION');
-    assert.equal(ent.termId, scheduled.id);
-    assert.equal(ent.subscriptionId, id);
-    assert.equal(ent.type, 'EXTRA_TRAFFIC');
-    assert.equal(ent.totalValue, 50n * gib);
-    assert.equal(ent.catalogRevision, 3);
-    assert.equal(ent.sourceLineKey, lineKey);
-    assert.equal(ent.scheduledActivationAt.getTime(), scheduled.startsAt.getTime());
-    assert.equal(ent.expiresAt!.getTime(), scheduled.endsAt!.getTime());
-  });
-
-  it('renewal add-on fulfillment: PERSISTED (paid) add-on lines are fulfilled even when the flag is now OFF', async () => {
-    const gib = 1024n * 1024n * 1024n;
-    const planId = `${prefix}-raddoff-plan`;
-    const addOnId = `${prefix}-raddoff-addon`;
-    const id = `${prefix}-raddoff-sub`;
-    await prisma.plan.create({ data: { id: planId, name: `${prefix}-raddoff-plan-name`, trafficLimit: 100, deviceLimit: 3, trafficLimitStrategy: 'NO_RESET' } });
-    await prisma.addOn.create({
-      data: { id: addOnId, name: 'Renewal Extra 50GB off', type: 'EXTRA_TRAFFIC', value: 50, lifetime: 'UNTIL_SUBSCRIPTION_END', revision: 1, prices: { create: [{ currency: 'USD', price: new Prisma.Decimal('2.50') }] } },
-    });
-    await prisma.subscription.create({ data: { id, userId, status: 'ACTIVE', planSnapshot: {}, trafficLimit: 100, deviceLimit: 3, expiresAt: new Date('2030-05-01T00:00:00.000Z') } });
-    await prisma.subscriptionTerm.create({
-      data: { subscriptionId: id, generation: 1, status: 'ACTIVE', planSnapshot: {}, startsAt: new Date('2020-01-01T00:00:00.000Z'), endsAt: new Date('2030-05-01T00:00:00.000Z'), baseTrafficLimitBytes: 100n * gib, baseDeviceLimit: 3, trafficResetStrategy: 'NO_RESET', resetAnchorAt: new Date('2020-01-01T00:00:00.000Z') },
-    });
-    const txn = await prisma.transaction.create({
-      data: { paymentId: `${prefix}-raddoff-pay`, userId, subscriptionId: null, status: 'COMPLETED', purchaseType: 'RENEW', channel: 'WEB', gatewayType: 'YOOKASSA', currency: 'USD', amount: new Prisma.Decimal('7.50'), planSnapshot: { combinedRenewal: true } },
-    });
-    await prisma.transactionItem.create({
-      data: {
-        transactionId: txn.id, subscriptionId: id, planId, durationDays: 30, amount: new Prisma.Decimal('7.50'), currency: 'USD',
-        addOnLines: [{ addOnId, catalogRevision: 1, type: 'EXTRA_TRAFFIC', value: 50, lifetime: 'UNTIL_SUBSCRIPTION_END', activation: 'TERM_START', sourceLineKey: `renew:${id}:${addOnId}`, unitAmount: '2.50', receiptName: 'x' }] as Prisma.InputJsonValue,
-      },
-    });
-    const mutation = new PaymentSubscriptionMutationService(prisma, { info: () => undefined } as never, entitlements, new EffectiveProjectionService(), terms, {} as never);
-    // renewalAddOns OFF (default): the FLAG only gates intake (whether new lines
-    // get persisted at checkout). A line that is ALREADY persisted means the
-    // customer paid for it, so fulfillment must mint it regardless — otherwise a
-    // flag flipped off between checkout and the webhook would drop paid goods.
-    await mutation.applyCompletedTransaction(txn);
-    assert.equal(await prisma.addOnEntitlement.count({ where: { sourceTransactionId: txn.id } }), 1);
-    const scheduled = await prisma.subscriptionTerm.findFirstOrThrow({ where: { subscriptionId: id, status: 'SCHEDULED' } });
-    const ent = await prisma.addOnEntitlement.findFirstOrThrow({ where: { sourceTransactionId: txn.id } });
-    assert.equal(ent.state, 'PENDING_ACTIVATION');
-    assert.equal(ent.termId, scheduled.id);
   });
 
   it('legacy add-on top-up: EXTRA_DEVICES on an UNLIMITED subscription is a no-op (never downgrades to finite)', async () => {

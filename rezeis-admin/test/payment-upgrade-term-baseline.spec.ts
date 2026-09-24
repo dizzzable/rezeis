@@ -563,11 +563,11 @@ describe('PaymentSubscriptionMutationService upgrade term baseline', () => {
     });
   });
 
-  it('re-bases a queued term that carries paid add-ons onto the new plan, and starts the upgrade’s own term before it', async () => {
-    // The queued term used to survive the upgrade on the OLD plan and bring its
-    // snapshot, squads and limits back when it began. Now it is moved above a
-    // new ACTIVE term on the new plan, re-based, and the chain ends where the
-    // subscription does — its days are already in the upgrade's expiry.
+  it('cancels a queued term even when a renewal add-on left by stage 5 is bound to it; the add-on stays PENDING and counts for nothing', async () => {
+    // Renewal add-ons (stage 5) were deleted on 24.09.2026. An install that had
+    // them on may still hold one on a queued term: the upgrade goes through all
+    // the same, and the row is left exactly as it was — not activated, not
+    // clamped, not moved, and no share of the new limits.
     await withShadowFlag('true', async () => {
       const store = createStore({
         terms: [
@@ -602,87 +602,22 @@ describe('PaymentSubscriptionMutationService upgrade term baseline', () => {
         selectedDurationDays: 30,
       });
 
-      const expiresAt = store.subscription.expiresAt as Date;
-      assert.equal(store.terms.find((term) => term.id === 'term-old')?.status, 'ENDED');
+      assert.equal(store.terms.find((term) => term.id === 'term-queued')?.status, 'CANCELED');
       const active = store.terms.filter((term) => term.status === 'ACTIVE');
       assert.equal(active.length, 1);
-      assert.equal(active[0]!.generation, 3, 'the upgrade’s term is minted next');
-      assert.equal(active[0]!.baseTrafficLimitBytes, 500n * GIB);
-      const queued = store.terms.find((term) => term.id === 'term-queued')!;
-      assert.equal(active[0]!.endsAt?.getTime(), queued.startsAt.getTime(), 'the new term ends where the queued one begins');
-      assert.equal(queued.status, 'SCHEDULED');
-      assert.equal(queued.generation, 4, 'moved above the new term, so it still activates after it');
-      assert.equal(queued.planId, 'plan-new');
-      assert.equal(queued.baseTrafficLimitBytes, 500n * GIB, 'no longer the old plan’s base');
-      assert.equal(queued.baseDeviceLimit, 10);
-      assert.equal((queued.planSnapshot as Record<string, unknown>)['snapshotSource'], 'UPGRADE_REBASED_TERM');
-      assert.equal((queued.planSnapshot as Record<string, unknown>)['id'], 'plan-new');
-      assert.equal(queued.endsAt?.getTime(), expiresAt.getTime(), 'the chain ends where the subscription does');
-      // The add-on bought for that period still begins at its start, and keeps
-      // its own end — clamped to the subscription's.
+      assert.equal(active[0]!.baseDeviceLimit, 10);
+      assert.equal(
+        active[0]!.endsAt?.getTime(),
+        (store.subscription.expiresAt as Date).getTime(),
+        'the new term runs to the subscription’s end',
+      );
       const addOn = store.entitlements.find((row) => row.id === 'ent-queued')!;
       assert.equal(addOn.state, 'PENDING_ACTIVATION');
       assert.equal(addOn.termId, 'term-queued');
-      assert.equal(addOn.expiresAt?.getTime(), expiresAt.getTime());
-      assert.equal(store.syncJobs[0]!.aggregateKey, 'sub-1', 'a versioned job: the durable path ran');
-    });
-  });
-
-  it('tells the operator when the upgrade ends before a paid queued term begins, and leaves that term’s add-ons alone', async () => {
-    const queuedEndsAt = inDays(90);
-    await withShadowFlag('true', async () => {
-      const store = createStore({
-        terms: [
-          activeCutoverTerm({ startsAt: inDays(-20), endsAt: inDays(60) }),
-          activeCutoverTerm({
-            id: 'term-queued',
-            generation: 2,
-            status: 'SCHEDULED',
-            startsAt: inDays(60),
-            endsAt: queuedEndsAt,
-          }),
-        ],
-        entitlements: [
-          {
-            id: 'ent-queued',
-            subscriptionId: 'sub-1',
-            termId: 'term-queued',
-            type: 'EXTRA_DEVICES',
-            state: 'PENDING_ACTIVATION',
-            totalValue: 2n,
-            scheduledActivationAt: inDays(60),
-            expiresAt: queuedEndsAt,
-          },
-        ],
-        // The SAME instant as the queued term's end. Two `inDays(90)` calls a
-        // millisecond apart made the tail read as drifted, and the alignment
-        // before the upgrade then moved it by that millisecond — a failure
-        // that came and went with machine load.
-        subscription: { expiresAt: queuedEndsAt },
-      });
-      const warnings: Array<Record<string, unknown>> = [];
-      const service = buildService(store.tx, warnings);
-
-      await upgradeOf(service)({
-        transaction: UPGRADE_TRANSACTION,
-        purchasedPlan: plan({}),
-        selectedDurationDays: 30,
-      });
-
-      const expiresAt = store.subscription.expiresAt as Date;
-      const active = store.terms.filter((term) => term.status === 'ACTIVE');
-      assert.equal(active[0]!.endsAt?.getTime(), expiresAt.getTime(), 'the new term ends with the subscription');
-      const queued = store.terms.find((term) => term.id === 'term-queued')!;
-      assert.equal(queued.baseTrafficLimitBytes, 500n * GIB, 're-based all the same: it never brings the old plan back');
-      assert.equal(queued.endsAt?.getTime(), queuedEndsAt.getTime(), 'its window is left alone');
-      assert.ok(queued.startsAt.getTime() > expiresAt.getTime(), 'fixture: it begins after the new end');
-      const addOn = store.entitlements.find((row) => row.id === 'ent-queued')!;
-      assert.equal(addOn.version, 1, 'an add-on that cannot begin inside the subscription is not moved');
-      const card = warnings.find((warning) => warning['code'] === 'UPGRADE_ENDS_BEFORE_PAID_SCHEDULED_TERM');
-      assert.ok(card, 'the operator is told');
-      assert.deepEqual(card['scheduledTermIds'], ['term-queued']);
-      assert.equal(card['boundEntitlements'], 1);
-      assert.equal(card['reason'], 'upgrade_addons_after_end');
+      assert.equal(addOn.version, 1, 'not touched');
+      assert.deepEqual(store.entitlementEvents, []);
+      // The new plan's 10 devices alone: the pending +2 is no share of them.
+      assert.equal(store.subscriptionUpdate!.deviceLimit, 10);
     });
   });
 

@@ -33,7 +33,7 @@ const EXPECTED_FP = buildRenewalCheckoutFingerprint({
   channel: 'WEB',
   currency: 'USD',
   savedPaymentMethodId: null,
-  lines: [{ subscriptionId: 'sub-1', planId: 'plan-1', durationDays: 30, termId: null, addOns: [] }],
+  lines: [{ subscriptionId: 'sub-1', planId: 'plan-1', durationDays: 30, termId: null }],
 });
 
 const EXPECTED_REQUEST_FP = fingerprint({

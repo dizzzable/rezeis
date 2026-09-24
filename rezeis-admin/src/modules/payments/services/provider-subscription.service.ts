@@ -1379,7 +1379,6 @@ export class ProviderSubscriptionService {
             amount: row.amount,
             currency: row.currency,
             discountPercent: 0,
-            addOnLines: Prisma.JsonNull,
           },
         });
         return created;

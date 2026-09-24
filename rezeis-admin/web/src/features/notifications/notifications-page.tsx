@@ -182,16 +182,6 @@ const EVENT_TYPE_CATALOG: Readonly<Record<string, readonly string[]>> = {
     // payment.method_autopay_updated.
     'payment.autopay_stopped_by_operator',
     'payment.autopay_confirmation_required',
-    // A paid renewal add-on line whose capture-time baseline absorbs it, so it
-    // is on course to deliver nothing. Grouped under PAYMENT rather than
-    // SUBSCRIPTION because the decision it asks for is a commercial one: refund
-    // the line, or restore the limit before the renewed term starts.
-    //
-    // NO APOSTROPHES IN THIS LITERAL. `readOperatorCatalogue` in
-    // `test/system-event-registry.spec.ts` reads the catalogue by pairing
-    // single quotes, so one in a comment desynchronises every match after it
-    // and the spec fails with «the parse, not the catalogue, is wrong».
-    'payment.addon_adds_nothing',
     // Grouped here, not under SUBSCRIPTION, because its emit site passes
     // category PAYMENT — which is what picks the Telegram topic it lands in.
     'trial.claim_late_success_over_cap',

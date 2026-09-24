@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, Optional } from '@nestjs/common';
 import {
   AddOnLifetime,
   AddOnType,
@@ -11,7 +11,8 @@ import { TrafficResetService } from './traffic-reset.service';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { readJsonObject } from '../../../common/utils/read-json-object.util';
 import {
-  resolveAddOnRolloutFlags,
+  type AddOnRolloutFlags,
+  readAddOnRolloutFlags,
   resolveIntakeResetCapabilities,
 } from '../../add-on-entitlements/add-on-rollout.config';
 import { resolveAddOnLifetimeGrant } from '../../add-on-entitlements/domain/add-on-lifetime';
@@ -22,8 +23,14 @@ import {
   isBaselineExtendable,
   resolveConfiguredEntitlementBaseline,
 } from '../../add-on-entitlements/services/configured-baseline.util';
+import { AddOnSwitchesService } from '../../add-on-entitlements/switches/add-on-switches.service';
 
-export type AddOnActivation = 'NOW' | 'TERM_START';
+/**
+ * Always `NOW`: an add-on bought here starts at once. `TERM_START` belonged to
+ * the add-ons sold with a renewal (stage 5), deleted on 24.09.2026; the
+ * cabinet's reader still accepts both, so the field stays on the wire.
+ */
+export type AddOnActivation = 'NOW';
 
 export interface AddOnEligibilityInfo {
   readonly eligible: true;
@@ -163,6 +170,8 @@ export class AddOnEligibilityService {
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly trafficResetService: TrafficResetService,
+    /** The stage switches; `@Optional()` only for the specs that build this by hand. */
+    @Optional() private readonly addOnSwitches?: AddOnSwitchesService,
   ) {}
 
   public async listForSubscription(
@@ -244,9 +253,13 @@ export class AddOnEligibilityService {
       orderBy: [{ orderIndex: 'asc' }],
     });
 
-    const capabilities = this.getResetCapabilities();
+    // ONE read of the stage switches for the whole listing: the capability map
+    // and the dating both come from it, so a switch flipped mid-listing cannot
+    // make the two disagree about one add-on.
+    const flags = await readAddOnRolloutFlags(this.addOnSwitches);
+    const capabilities = this.getResetCapabilities(flags);
     const now = new Date();
-    const dating = await this.readPurchaseDating(subscriptionId, term, subscription.expiresAt, now);
+    const dating = await this.readPurchaseDating(subscriptionId, term, subscription.expiresAt, now, flags);
 
     const addOns: EligibleAddOn[] = [];
     for (const addOn of catalog) {
@@ -311,6 +324,7 @@ export class AddOnEligibilityService {
     activeTerm: { readonly endsAt: Date | null } | null,
     subscriptionExpiresAt: Date | null,
     now: Date,
+    flags: AddOnRolloutFlags,
   ): Promise<{
     readonly flags: { readonly directPurchase: boolean; readonly entitlementShadow: boolean };
     readonly activeTerm: { readonly endsAt: Date | null } | null;
@@ -319,7 +333,6 @@ export class AddOnEligibilityService {
     readonly subscriptionExpiresAt: Date | null;
     readonly now: Date;
   }> {
-    const flags = resolveAddOnRolloutFlags();
     const base = { flags, activeTerm, subscriptionExpiresAt, now };
     if (!flags.directPurchase) return { ...base, hasAnyTerm: activeTerm !== null, scheduledTermQueued: false };
     const hasAnyTerm =
@@ -544,9 +557,9 @@ export class AddOnEligibilityService {
    *
    * This stays a `protected` method rather than becoming a direct call at the
    * use site because it is the seam a test subclasses to fix a capability map
-   * without touching `process.env`.
+   * without touching the switches or `process.env`.
    */
-  protected getResetCapabilities(): ResetCapabilityMap {
-    return resolveIntakeResetCapabilities();
+  protected getResetCapabilities(flags: AddOnRolloutFlags): ResetCapabilityMap {
+    return resolveIntakeResetCapabilities(flags);
   }
 }

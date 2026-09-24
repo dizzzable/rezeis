@@ -519,7 +519,7 @@ run('a subscription with no end date is neither renewed nor upgraded by a purcha
       loadConfig: async () => ({ enabled: false, percent: 0, defaultCurrency: 'RUB' }),
     } as never);
     quotes = new SubscriptionQuoteService(prisma, catalog, new PricingService());
-    renewals = new SubscriptionRenewalService(prisma, quotes, {} as never);
+    renewals = new SubscriptionRenewalService(prisma, quotes);
     drafts = new PaymentsTransactionsService(prisma, quotes);
     // The post-payment hooks are spies; everything between them and the row is real.
     reconciliation = new PaymentReconciliationService(

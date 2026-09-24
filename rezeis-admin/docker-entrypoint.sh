@@ -99,6 +99,9 @@ is_auto_recoverable_migration() {
     20260922120000_settings_channel_new_users_since)
       return 0
       ;;
+    20260924200000_settings_add_on_switches)
+      return 0
+      ;;
     *)
       return 1
       ;;

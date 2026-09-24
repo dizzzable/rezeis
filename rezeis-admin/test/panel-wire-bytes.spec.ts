@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { afterEach, describe, it } from 'node:test';
+import { describe, it } from 'node:test';
 
 import { Logger } from '@nestjs/common';
 import { SubscriptionStatus, SyncAction, SyncJobStatus, FraudSignalSeverity, FraudSignalStatus } from '@prisma/client';
@@ -186,7 +186,6 @@ async function runProcessor(options: {
   readonly job: ReturnType<typeof jobOf>;
   readonly respond: (config: AxiosLikeConfig) => Answer;
   readonly contacts?: { email: string | null; telegramId: string | null };
-  readonly projection?: { desiredRevision: bigint; desiredTrafficLimitBytes: bigint | null; desiredDeviceLimit: number | null };
 }): Promise<readonly WireRequest[]> {
   const stack = realStack(options.respond);
   const failures: unknown[] = [];
@@ -203,10 +202,6 @@ async function runProcessor(options: {
     subscription: {
       findFirst: async () => null,
       findMany: async () => [],
-      updateMany: async () => ({ count: 1 }),
-    },
-    subscriptionEffectiveProjection: {
-      findUnique: async () => options.projection ?? null,
       updateMany: async () => ({ count: 1 }),
     },
     $transaction: async (callback: (tx: unknown) => Promise<unknown>) =>
@@ -234,12 +229,6 @@ async function runProcessor(options: {
   assert.deepStrictEqual(failures, [], 'the job must complete, or the wire below is not the success path');
   return stack.wires;
 }
-
-const ORIGINAL_PROJECTION_SYNC = process.env['ADDON_PROJECTION_SYNC'];
-afterEach(() => {
-  if (ORIGINAL_PROJECTION_SYNC === undefined) delete process.env['ADDON_PROJECTION_SYNC'];
-  else process.env['ADDON_PROJECTION_SYNC'] = ORIGINAL_PROJECTION_SYNC;
-});
 
 describe('profile-sync CREATE puts the same bytes on the wire', () => {
   it('a paid plan with every field the create carries', async () => {
@@ -401,31 +390,6 @@ describe('profile-sync UPDATE puts the same bytes on the wire', () => {
     assert.deepStrictEqual(wires, EXPECTED['update-resolve-username']);
   });
 
-  it('the versioned desired-state write and its independent read-back', async () => {
-    process.env['ADDON_PROJECTION_SYNC'] = 'true';
-    const job = {
-      ...jobOf(SyncAction.UPDATE, {
-        remnawaveId: '4711',
-        remnawavePanelId: 4711,
-        remnawavePanelUsername: 'rz_login_sub',
-        trafficLimit: 20,
-        deviceLimit: 5,
-        internalSquads: [U2],
-        externalSquad: U1,
-        expiresAt: FUTURE,
-        planSnapshot: { tag: 'PLAN_X', trafficLimitStrategy: 'MONTH_ROLLING' },
-      }),
-      aggregateKey: 'subscription-1',
-      desiredRevision: 5n,
-    };
-    const limits = { trafficLimitBytes: 20 * 1024 ** 3, hwidDeviceLimit: 5 };
-    const wires = await runProcessor({
-      job,
-      projection: { desiredRevision: 5n, desiredTrafficLimitBytes: 20n * 1024n ** 3n, desiredDeviceLimit: 5 },
-      respond: () => ({ status: 200, data: { response: { ...CAPTURED_USER, id: 4711, username: 'rz_login_sub', ...limits } } }),
-    });
-    assert.deepStrictEqual(wires, EXPECTED['update-desired-state']);
-  });
 });
 
 describe('profile-sync DELETE and TRAFFIC_RESET put the same bytes on the wire', () => {
@@ -713,16 +677,6 @@ const EXPECTED: Readonly<Record<string, readonly WireRequest[]>> = {
       body:
         '{"id":4711,"trafficLimitBytes":5368709120,"trafficLimitStrategy":"DAY","expireAt":"2099-03-04T05:06:07.089Z","description":"name: Buyer\\nreiwa_id: user-1","tag":"VIP_1","telegramId":null,"email":null,"hwidDeviceLimit":2,"activeInternalSquads":[],"externalSquadUuid":"7aa64e53-f5da-4366-9760-0fdad1497a28"}',
     },
-  ],
-  'update-desired-state': [
-    {
-      method: 'PATCH',
-      url: '/api/users/',
-      contentType: 'application/json',
-      body:
-        '{"id":4711,"trafficLimitBytes":21474836480,"trafficLimitStrategy":"MONTH_ROLLING","tag":"PLAN_X","hwidDeviceLimit":5,"activeInternalSquads":["7aa64e53-f5da-4366-9760-0fdad1497a28"],"externalSquadUuid":"2f1c9a44-0000-4000-8000-000000000001"}',
-    },
-    { method: 'GET', url: '/api/users/4711', contentType: null, body: null },
   ],
   'delete': [
     { method: 'DELETE', url: '/api/users/4711', contentType: null, body: null },

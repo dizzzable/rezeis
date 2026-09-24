@@ -121,6 +121,9 @@ describe('what the card says of the extra devices', () => {
   function service(input: {
     readonly planning: unknown;
     readonly execution?: unknown;
+    /** The panel's switches, as `AddOnSwitchesService.flags` answers; unset = `.env` and the defaults. */
+    readonly switches?: { flags(): Promise<unknown> };
+    readonly executed?: string[];
   }) {
     return new AddOnRefundService(
       {} as never,
@@ -133,9 +136,26 @@ describe('what the card says of the extra devices', () => {
           return input.planning;
         },
       } as never,
-      { executePlan: async () => input.execution } as never,
+      {
+        executePlan: async (planId: string) => {
+          input.executed?.push(planId);
+          return input.execution;
+        },
+      } as never,
+      undefined,
+      input.switches as never,
     );
   }
+  /** The switches as the page stores them: stage 6 on or off, everything else at its default. */
+  const switchesWith = (deviceCleanupAuto: boolean) => ({
+    flags: async () => ({
+      entitlementShadow: true,
+      directPurchase: true,
+      deviceCleanupAuto,
+      resetExpiry: { DAY: false, WEEK: false, MONTH: false, MONTH_ROLLING: false },
+    }),
+  });
+  /** Stage 6 by an explicit `.env` line, which wins over any switch. */
   const withCleanup = async <T>(on: boolean, run: () => Promise<T>): Promise<T> => {
     const saved = process.env.ADDON_DEVICE_CLEANUP_AUTO;
     process.env.ADDON_DEVICE_CLEANUP_AUTO = on ? 'true' : 'false';
@@ -144,6 +164,16 @@ describe('what the card says of the extra devices', () => {
     } finally {
       if (saved === undefined) delete process.env.ADDON_DEVICE_CLEANUP_AUTO;
       else process.env.ADDON_DEVICE_CLEANUP_AUTO = saved;
+    }
+  };
+  /** No stage-6 line in `.env`: the switch decides. */
+  const withNoCleanupLine = async <T>(run: () => Promise<T>): Promise<T> => {
+    const saved = process.env.ADDON_DEVICE_CLEANUP_AUTO;
+    delete process.env.ADDON_DEVICE_CLEANUP_AUTO;
+    try {
+      return await run();
+    } finally {
+      if (saved !== undefined) process.env.ADDON_DEVICE_CLEANUP_AUTO = saved;
     }
   };
 
@@ -163,7 +193,8 @@ describe('what the card says of the extra devices', () => {
   });
 
   const APPROVE_PLAN =
-    'Лишние устройства панель сама не удаляет: автоудаление выключено. Чтобы удалить их, утвердите план: ' +
+    'Лишние устройства панель сама не удаляет: выключено «Удалять лишние устройства автоматически» ' +
+    '(«Доп. услуги» → вкладка «Настройки»). Чтобы удалить их, утвердите план: ' +
     '«Доп. услуги» → вкладка «Доставка» → «Открыть инспектор подписки» → «ID подписки»: sub-1 → «Открыть» → ' +
     'впишите «Причина» → «Планы сокращения устройств» → «Утвердить» → «Утвердить и выполнить».';
   const REMOVED_AUTOMATICALLY =
@@ -173,9 +204,48 @@ describe('what the card says of the extra devices', () => {
     'Лишние устройства панель не удалила — удалите их вручную: «Пользователи» → клиент → вкладка «Подписки» → ' +
     '«Быстрые действия» → «Устройства (HWID)» → корзина у устройства → «Удалить».';
 
-  it('what will happen, before the refund’s own run says what did: by stage 6', async () => {
-    assert.equal(await withCleanup(true, async () => predictedDevicesLine('sub-1')), REMOVED_AUTOMATICALLY);
-    assert.equal(await withCleanup(false, async () => predictedDevicesLine('sub-1')), APPROVE_PLAN);
+  it('what will happen, before the refund’s own run says what did: by stage 6', () => {
+    assert.equal(predictedDevicesLine('sub-1', true), REMOVED_AUTOMATICALLY);
+    assert.equal(predictedDevicesLine('sub-1', false), APPROVE_PLAN);
+  });
+
+  it('the switch on the page decides, with nothing in .env', async () => {
+    const planned = { status: 'PLANNED', planId: 'plan-1', targetCount: 2 };
+    const executed: string[] = [];
+    await withNoCleanupLine(async () => {
+      assert.equal(
+        await service({ planning: planned, switches: switchesWith(false), executed }).reduceDevices('sub-1'),
+        APPROVE_PLAN,
+      );
+      assert.deepEqual(executed, [], 'with the switch off the plan waits for the operator');
+      assert.equal(
+        await service({
+          planning: planned,
+          execution: { status: 'APPLIED', deleted: 2 },
+          switches: switchesWith(true),
+          executed,
+        }).reduceDevices('sub-1'),
+        'Лишние устройства удалены: 2.',
+      );
+      assert.deepEqual(executed, ['plan-1']);
+    });
+  });
+
+  it('switches that cannot be read: the way by hand, never a promise the panel removes them', async () => {
+    mock.method(Logger.prototype, 'error', () => undefined);
+    const executed: string[] = [];
+    const unreadable = { flags: async () => Promise.reject(new Error('settings row unreadable')) };
+    await withNoCleanupLine(async () => {
+      assert.equal(
+        await service({
+          planning: { status: 'PLANNED', planId: 'plan-1', targetCount: 2 },
+          switches: unreadable,
+          executed,
+        }).reduceDevices('sub-1'),
+        BY_HAND,
+      );
+    });
+    assert.deepEqual(executed, [], 'nothing is deleted on a guess');
   });
 
   it('where the plan waits, with automatic cleanup off', async () => {

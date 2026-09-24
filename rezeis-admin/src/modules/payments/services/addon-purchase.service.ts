@@ -24,7 +24,11 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { SystemEventsService } from '../../../common/services/system-events.service';
 import { announceCheckoutCreated } from '../utils/checkout-created-event.util';
 import { readJsonObject } from '../../../common/utils/read-json-object.util';
-import { resolveIntakeResetCapabilities } from '../../add-on-entitlements/add-on-rollout.config';
+import {
+  readAddOnRolloutFlags,
+  resolveIntakeResetCapabilities,
+} from '../../add-on-entitlements/add-on-rollout.config';
+import { AddOnSwitchesService } from '../../add-on-entitlements/switches/add-on-switches.service';
 import {
   resolveAddOnLifetimeGrant,
   type AddOnLifetimeBaseline,
@@ -98,6 +102,8 @@ export class AddOnPurchaseService {
     // Nest injects the shared instance; `@Optional()` only keeps the unit
     // specs' hand-built checkouts compiling. The service holds no state.
     @Optional() subscriptionTermService?: SubscriptionTermService,
+    /** The stage switches; `@Optional()` only for the specs that build this by hand. */
+    @Optional() private readonly addOnSwitches?: AddOnSwitchesService,
   ) {
     this.subscriptionTermService = subscriptionTermService ?? new SubscriptionTermService();
   }
@@ -348,21 +354,16 @@ export class AddOnPurchaseService {
     // it makes checkout answer exactly what the offer answers, which is the
     // only property that keeps the two from drifting again.
     //
-    // THE ASYMMETRY WITH RENEWAL CAPTURE IS DELIBERATE — do not "make them
-    // consistent". A renewal add-on line is ALREADY PAID and stays PENDING
-    // until `term.startsAt`, days or weeks out, so a verdict taken there is a
-    // PREDICTION: `applyCombinedRenewal` captures the line anyway and writes
-    // the verdict into the entitlement's immutable `applicabilitySnapshot`.
-    // Here nothing is paid yet, and a direct purchase activates at capture, so
-    // the checkout-time answer IS the verdict.
+    // Nothing is paid yet, and a direct purchase activates at capture, so the
+    // checkout-time answer IS the verdict.
     //
-    // The capability map is `resolveIntakeResetCapabilities()` — the same
-    // function `AddOnEligibilityService.getResetCapabilities` returns, not a
-    // second reading of the flags.
+    // The capability map is `resolveIntakeResetCapabilities(flags)` — the same
+    // function `AddOnEligibilityService.getResetCapabilities` returns, over the
+    // same stage switches, not a second rule.
     const lifetimeGrant = resolveAddOnLifetimeGrant({
       lifetime: addOn.lifetime,
       baseline: lifetimeBaseline,
-      capabilities: resolveIntakeResetCapabilities(),
+      capabilities: resolveIntakeResetCapabilities(await readAddOnRolloutFlags(this.addOnSwitches)),
       now: new Date(),
     });
     if (lifetimeGrant === null) {

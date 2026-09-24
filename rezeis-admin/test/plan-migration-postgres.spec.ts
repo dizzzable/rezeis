@@ -984,7 +984,7 @@ run('plan migration on PostgreSQL', () => {
     const catalog = new PlanCatalogService(prisma, new PricingService(), {
       loadConfig: async () => ({ enabled: false, percent: 0, defaultCurrency: 'RUB' }),
     } as never);
-    const renewal = new SubscriptionRenewalService(prisma, new SubscriptionQuoteService(prisma, catalog, new PricingService()), {} as never);
+    const renewal = new SubscriptionRenewalService(prisma, new SubscriptionQuoteService(prisma, catalog, new PricingService()));
 
     for (const [label, targetPlanId] of Object.entries(targets)) {
       const user = await createUser(`renew-${label}`);

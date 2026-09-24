@@ -374,27 +374,71 @@ describe('PaymentSubscriptionMutationService — combined renewal', () => {
     assert.equal(env.committedItems.get('it-marker')!.appliedAt, null);
   });
 
-  it('fails closed and rolls back when persisted paid addOnLines is not an array', async () => {
-    const originalExpiry = new Date(Date.now() + 40 * DAY_MS);
-    const env = createEnv({
-      subs: [{ id: 'sub-malformed', expiresAt: originalExpiry, remnawaveId: 'rw-1' }],
-      items: [{
-        id: 'it-malformed',
-        subscriptionId: 'sub-malformed',
-        planId: 'plan-1',
-        durationDays: 30,
-        appliedAt: null,
-        addOnLines: { addOnId: 'paid-but-corrupt' },
-      }],
-    });
+  it('refuses a paid line still carrying add-ons sold with a renewal, and applies no line of the payment', async () => {
+    // Renewal add-ons (stage 5) were deleted on 24.09.2026. A line an install
+    // sold under it before the upgrade would otherwise be renewed with its
+    // add-ons silently dropped — money taken, nothing delivered. So it is not
+    // fulfilled at all: the payment stays unapplied, the webhook fails with
+    // this code, and the operator refunds by hand. Whatever the stored shape.
+    const shapes: readonly unknown[] = [
+      [
+        {
+          addOnId: 'addon-valid',
+          catalogRevision: 1,
+          type: 'EXTRA_TRAFFIC',
+          value: 50,
+          lifetime: 'UNTIL_SUBSCRIPTION_END',
+          activation: 'TERM_START',
+          sourceLineKey: 'renew:sub-addons:addon-valid',
+          unitAmount: '2.50',
+          receiptName: 'Valid paid line',
+        },
+      ],
+      [{ addOnId: 'addon-corrupt', type: 'EXTRA_TRAFFIC' }],
+      { addOnId: 'paid-but-corrupt' },
+    ];
+    for (const addOnLines of shapes) {
+      const originalExpiry = new Date(Date.now() + 40 * DAY_MS);
+      const env = createEnv({
+        subs: [
+          { id: 'sub-plain', expiresAt: originalExpiry, remnawaveId: 'rw-1' },
+          { id: 'sub-addons', expiresAt: originalExpiry, remnawaveId: 'rw-2' },
+        ],
+        items: [
+          { id: 'it-plain', subscriptionId: 'sub-plain', planId: 'plan-1', durationDays: 30, appliedAt: null },
+          { id: 'it-addons', subscriptionId: 'sub-addons', planId: 'plan-1', durationDays: 30, appliedAt: null, addOnLines },
+        ],
+      });
 
-    await assert.rejects(
-      () => env.service.applyCompletedTransaction(env.transaction as never),
-      /add-on lines/i,
-    );
-    assert.equal(env.committedSubs.get('sub-malformed')!.expiresAt!.getTime(), originalExpiry.getTime());
-    assert.equal(env.committedItems.get('it-malformed')!.appliedAt, null);
+      await assert.rejects(
+        () => env.service.applyCompletedTransaction(env.transaction as never),
+        /RENEWAL_ADDON_LINES_NOT_SUPPORTED/,
+        JSON.stringify(addOnLines),
+      );
+      for (const [subscriptionId, itemId] of [['sub-plain', 'it-plain'], ['sub-addons', 'it-addons']] as const) {
+        assert.equal(env.committedSubs.get(subscriptionId)!.expiresAt!.getTime(), originalExpiry.getTime());
+        assert.equal(env.committedItems.get(itemId)!.appliedAt, null, `${itemId} must stay unapplied`);
+      }
+    }
   });
+
+  it('fulfils a line whose add-on list is empty or absent: that is every renewal sold without add-ons', async () => {
+    for (const addOnLines of [[], null]) {
+      const expiry = new Date(Date.now() + 5 * DAY_MS);
+      const env = createEnv({
+        subs: [{ id: 'sub-plain', expiresAt: expiry, remnawaveId: 'rw-1' }],
+        items: [{ id: 'it-plain', subscriptionId: 'sub-plain', planId: 'plan-1', durationDays: 30, appliedAt: null, addOnLines }],
+      });
+      await env.service.applyCompletedTransaction(env.transaction as never);
+      assert.equal(
+        env.committedSubs.get('sub-plain')!.expiresAt!.getTime(),
+        expiry.getTime() + 30 * DAY_MS,
+        JSON.stringify(addOnLines),
+      );
+      assert.notEqual(env.committedItems.get('it-plain')!.appliedAt, null);
+    }
+  });
+
   it('fulfills a legacy in-flight draft (no snapshotVersion) via live-plan fallback — paid money is never stranded', async () => {
     // Reproduces a combined-renewal draft created BEFORE strict snapshot
     // verification shipped: the parent marker and the item snapshot both lack
@@ -466,41 +510,6 @@ describe('PaymentSubscriptionMutationService — combined renewal', () => {
       expiry.getTime() + 30 * DAY_MS,
     );
     assert.notEqual(env.committedItems.get('it-1')!.appliedAt, null);
-  });
-
-  it('rejects a mixed paid addOnLines array instead of fulfilling only the valid subset', async () => {
-    const originalExpiry = new Date(Date.now() + 40 * DAY_MS);
-    const env = createEnv({
-      subs: [{ id: 'sub-mixed', expiresAt: originalExpiry, remnawaveId: 'rw-1' }],
-      items: [{
-        id: 'it-mixed',
-        subscriptionId: 'sub-mixed',
-        planId: 'plan-1',
-        durationDays: 30,
-        appliedAt: null,
-        addOnLines: [
-          {
-            addOnId: 'addon-valid',
-            catalogRevision: 1,
-            type: 'EXTRA_TRAFFIC',
-            value: 50,
-            lifetime: 'UNTIL_SUBSCRIPTION_END',
-            activation: 'TERM_START',
-            sourceLineKey: 'renew:sub-mixed:addon-valid',
-            unitAmount: '2.50',
-            receiptName: 'Valid paid line',
-          },
-          { addOnId: 'addon-corrupt', type: 'EXTRA_TRAFFIC' },
-        ],
-      }],
-    });
-
-    await assert.rejects(
-      () => env.service.applyCompletedTransaction(env.transaction as never),
-      /add-on lines/i,
-    );
-    assert.equal(env.committedSubs.get('sub-mixed')!.expiresAt!.getTime(), originalExpiry.getTime());
-    assert.equal(env.committedItems.get('it-mixed')!.appliedAt, null);
   });
 });
 

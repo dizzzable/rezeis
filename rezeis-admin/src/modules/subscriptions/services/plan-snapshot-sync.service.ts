@@ -86,10 +86,9 @@ export class PlanSnapshotSyncService {
    * subscription columns AND these four snapshot keys AND the ACTIVE term's
    * baseline AND rerun `EffectiveProjectionService.recomputeInTransaction` to
    * advance `desiredRevision`. Miss any one and you reproduce, at fan-out
-   * scale, the split-brain `upgradeSubscriptionFromPayment` already has: it
-   * moves the columns and leaves the term stale, so with `projectionSync` on
-   * the next versioned job pushes the OLD baseline back. Build it after the
-   * entitlement cutover picks a single owner, not before.
+   * scale, the split-brain a paid upgrade once had: it moved the columns and
+   * left the term stale, so the next recompute pushed the OLD baseline back.
+   * Build it after the entitlement cutover picks a single owner, not before.
    */
   public async syncPlanSnapshotMetadata(
     prismaClient: Prisma.TransactionClient | PrismaClient,

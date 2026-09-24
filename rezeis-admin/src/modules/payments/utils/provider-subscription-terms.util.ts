@@ -67,7 +67,6 @@ export const PROVIDER_SUBSCRIPTION_REFUSALS = [
   'DURATION',
   'AMOUNT',
   'ITEMS',
-  'ADD_ONS',
   // This VPN subscription already renews itself: a second one would charge twice a period.
   'ALREADY_ACTIVE',
   // Another sign-up converting the same trial still waits to be confirmed (see `assertNoLiveSubscriptionFor`).

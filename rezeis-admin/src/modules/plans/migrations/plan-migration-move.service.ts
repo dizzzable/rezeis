@@ -60,7 +60,7 @@ export const PLAN_MIGRATED_AUDIT_ACTION = 'user.subscription.plan_migrated';
 export const LIMITS_CHANGED_AUDIT_ACTION = 'user.subscription.limits_changed';
 export const PLAN_MIGRATION_AUDIT_SOURCE = 'plan_migration';
 
-/** `cause` of a versioned sync job, next to the upgrade's `PLAN_CHANGE`. */
+/** `cause` of a move's sync job, next to the upgrade's `PLAN_CHANGE`. */
 export const PLAN_MIGRATION_SYNC_CAUSE = 'PLAN_MIGRATION';
 
 /** `snapshotSource` of the term a move rotates a subscription onto. */

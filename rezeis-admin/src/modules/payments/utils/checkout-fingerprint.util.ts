@@ -75,25 +75,13 @@ export function buildAddOnCheckoutFingerprint(input: AddOnCheckoutFingerprintInp
   });
 }
 
-/** One selected add-on line inside a renewal composition. */
-export interface RenewalAddOnSelectionInput {
-  readonly addOnId: string;
-  readonly addOnRevision: number;
-  readonly type: string;
-  readonly value: number;
-  readonly lifetime: string;
-  /** When this add-on activates: `NOW` or at the renewed term start. */
-  readonly activation: string;
-}
-
-/** One subscription's renewal line (plan/duration/term + selected add-ons). */
+/** One subscription's renewal line (plan/duration/term). */
 export interface RenewalLineFingerprintInput {
   readonly subscriptionId: string;
   readonly planId: string;
   readonly durationDays: number;
   /** Scheduled/active baseline term id when known; null on the legacy path. */
   readonly termId: string | null;
-  readonly addOns: readonly RenewalAddOnSelectionInput[];
 }
 
 export interface RenewalCheckoutFingerprintInput {
@@ -117,12 +105,11 @@ export interface RenewalCheckoutFingerprintInput {
  * Build the canonical fingerprint for a combined renewal composition.
  *
  * The fingerprint is over the full commercial COMPOSITION — every line's
- * plan/duration/term and every selected add-on's revision/type/value/lifetime/
- * activation — NOT the total amount (AC-R008: "same amount is irrelevant", so
- * two selections that happen to total the same but differ in products must NOT
- * collide). Ordering is normalized (lines sorted by subscriptionId, add-ons by
- * addOnId) so the client sending the same picks in a different order resolves
- * to the same draft.
+ * plan/duration/term — NOT the total amount (AC-R008: "same amount is
+ * irrelevant", so two selections that happen to total the same but differ in
+ * products must NOT collide). Ordering is normalized (lines sorted by
+ * subscriptionId) so the client sending the same picks in a different order
+ * resolves to the same draft.
  */
 export function buildRenewalCheckoutFingerprint(input: RenewalCheckoutFingerprintInput): string {
   const lines = input.lines
@@ -131,17 +118,10 @@ export function buildRenewalCheckoutFingerprint(input: RenewalCheckoutFingerprin
       planId: line.planId,
       durationDays: line.durationDays,
       termId: line.termId,
-      addOns: [...line.addOns]
-        .map((addOn) => ({
-          addOnId: addOn.addOnId,
-          addOnRevision: addOn.addOnRevision,
-          type: addOn.type,
-          value: addOn.value,
-          lifetime: addOn.lifetime,
-          activation: addOn.activation,
-          quantity: 1,
-        }))
-        .sort((left, right) => (left.addOnId < right.addOnId ? -1 : left.addOnId > right.addOnId ? 1 : 0)),
+      // Always empty since renewal add-ons were deleted (24.09.2026), and still
+      // hashed: every draft persisted before that keeps the fingerprint it was
+      // stored under, so a keyed replay or a draft reuse still finds it.
+      addOns: [],
     }))
     .sort((left, right) =>
       left.subscriptionId < right.subscriptionId ? -1 : left.subscriptionId > right.subscriptionId ? 1 : 0,
@@ -158,25 +138,4 @@ export function buildRenewalCheckoutFingerprint(input: RenewalCheckoutFingerprin
     ...(input.providerSubscription === true ? { providerSubscription: true } : {}),
     lines,
   });
-}
-
-/**
- * Returns the first `{subscriptionId, addOnId}` selected more than once within
- * a single renewal line, or `null` when every line's add-on picks are unique.
- * One add-on may be bought once per line (quantity is fixed at 1); a duplicate
- * pick is an `ADDON_DUPLICATE_SELECTION` rejection at composition time.
- */
-export function findDuplicateAddOnSelection(
-  input: RenewalCheckoutFingerprintInput,
-): { readonly subscriptionId: string; readonly addOnId: string } | null {
-  for (const line of input.lines) {
-    const seen = new Set<string>();
-    for (const addOn of line.addOns) {
-      if (seen.has(addOn.addOnId)) {
-        return { subscriptionId: line.subscriptionId, addOnId: addOn.addOnId };
-      }
-      seen.add(addOn.addOnId);
-    }
-  }
-  return null;
 }

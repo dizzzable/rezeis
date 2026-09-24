@@ -269,9 +269,9 @@ export const en = {
         name: 'Add-ons',
         description: 'The catalogue of paid extras for a subscription: extra traffic and devices.',
         actions: {
-          view: 'The catalogue and its statistics.',
+          view: 'The catalogue, its statistics and the add-on accounting switches on the Settings tab.',
           create: 'Add an add-on.',
-          edit: 'Change an add-on or archive it.',
+          edit: 'Change an add-on or archive it; switch the add-on accounting, the automatic removal of extra devices and traffic add-ons until the reset on and off on the Settings tab.',
           delete: 'Delete an add-on.',
         },
       },

@@ -188,7 +188,7 @@ run('PointsCashbackService on PostgreSQL', () => {
     assert.equal(user.points, 0);
   });
 
-  it('a combined renewal credits the plan line and the add-on line from the item rows', async () => {
+  it('a combined renewal credits the plan line from the item rows, and nothing for add-on lines left on one', async () => {
     const transaction = await completedTransaction({
       suffix: 'combined',
       amount: '150',
@@ -210,6 +210,8 @@ run('PointsCashbackService on PostgreSQL', () => {
         durationDays: 30,
         amount: new Prisma.Decimal('100'),
         currency: Currency.RUB,
+        // Sold with a renewal under stage 5, deleted on 24.09.2026: refused at
+        // fulfilment and refunded by hand, so never a line that earns points.
         addOnLines: [
           {
             addOnId,
@@ -229,7 +231,7 @@ run('PointsCashbackService on PostgreSQL', () => {
     const credited = await service.creditForTransaction(transaction);
 
     assert.equal(credited.credited, true, JSON.stringify(credited));
-    assert.equal((credited as { points: number }).points, 25, 'INHERIT 5% of 100 = 5, plus FIXED 20 for the add-on');
+    assert.equal((credited as { points: number }).points, 5, 'INHERIT 5% of 100 = 5, and nothing for the add-on');
     const row = await prisma.pointsLedgerEntry.findUniqueOrThrow({
       where: { source_referenceKey: { source: PointsLedgerSource.CASHBACK, referenceKey: transaction.id } },
     });
@@ -238,7 +240,6 @@ run('PointsCashbackService on PostgreSQL', () => {
       details.lines.map((line) => [line.kind, line.name, line.points]),
       [
         ['PLAN', 'Premium', 5],
-        ['ADD_ON', 'Extra 10 GB', 20],
       ],
     );
   });

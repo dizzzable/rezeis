@@ -254,14 +254,14 @@ export class PointsCashbackService {
 
   /**
    * The payment as lines. Three shapes, in the order they are told apart:
-   * a combined renewal carries its items (each with its own add-on lines), a
-   * standalone add-on carries an `ADDON_PURCHASE` snapshot, and everything
-   * else is one plan with one purchased duration.
+   * a combined renewal carries its items, one plan line each, a standalone
+   * add-on carries an `ADDON_PURCHASE` snapshot, and everything else is one
+   * plan with one purchased duration.
    */
   public async resolveLines(transaction: CashbackTransaction): Promise<CashbackLineInput[]> {
     const items = await this.prismaService.transactionItem.findMany({
       where: { transactionId: transaction.id },
-      select: { planId: true, durationDays: true, amount: true, currency: true, addOnLines: true, planSnapshot: true },
+      select: { planId: true, durationDays: true, amount: true, currency: true, planSnapshot: true },
     });
 
     const drafts: DraftLine[] = [];
@@ -275,15 +275,6 @@ export class PointsCashbackService {
           amount: item.amount,
           currency: item.currency,
         });
-        for (const addOn of readAddOnLines(item.addOnLines)) {
-          drafts.push({
-            kind: 'ADD_ON',
-            id: addOn.addOnId,
-            name: addOn.name ?? addOn.addOnId,
-            amount: addOn.unitAmount,
-            currency: item.currency,
-          });
-        }
       }
     } else {
       const snapshot = asRecord(transaction.planSnapshot) ?? {};
@@ -423,12 +414,6 @@ interface DraftLine {
   readonly currency: Currency;
 }
 
-interface PaidAddOnLine {
-  readonly addOnId: string;
-  readonly unitAmount: string | number;
-  readonly name: string | null;
-}
-
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -437,32 +422,4 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 function readString(value: unknown): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null;
-}
-
-/**
- * Lenient on purpose. Fulfilment already validated these lines strictly and
- * refused the payment otherwise; by the time cashback reads them they are
- * commercial history, and a hook that runs after the money moved must not
- * throw over a field it does not even use. An entry it cannot read is left
- * out, and left out is zero points, not a failed hook.
- */
-function readAddOnLines(raw: Prisma.JsonValue | null): PaidAddOnLine[] {
-  if (!Array.isArray(raw)) return [];
-  const lines: PaidAddOnLine[] = [];
-  for (const entry of raw) {
-    const record = asRecord(entry);
-    if (record === null) continue;
-    const addOnId = readString(record['addOnId']);
-    const unitAmount = readAmount(record['unitAmount']);
-    if (addOnId === null || unitAmount === null) continue;
-    lines.push({ addOnId, unitAmount, name: readString(record['receiptName']) });
-  }
-  return lines;
-}
-
-/** A decimal the computation can take: a finite number, or a plain decimal string. */
-function readAmount(value: unknown): string | number | null {
-  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
-  if (typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(value.trim())) return value.trim();
-  return null;
 }

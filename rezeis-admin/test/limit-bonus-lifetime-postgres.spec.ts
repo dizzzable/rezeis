@@ -72,8 +72,6 @@ const run = testUrl === undefined ? describe.skip : describe;
 const ROLLOUT_FLAGS = [
   'ADDON_ENTITLEMENT_SHADOW',
   'ADDON_ENTITLEMENT_DIRECT_PURCHASE',
-  'ADDON_PROJECTION_SYNC',
-  'ADDON_RENEWAL_ADDONS',
   'ADDON_DEVICE_CLEANUP_AUTO',
 ] as const;
 const PLAN: Limits = { trafficLimit: 100, deviceLimit: 3 };

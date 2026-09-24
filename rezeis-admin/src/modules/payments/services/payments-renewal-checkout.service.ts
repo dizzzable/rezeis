@@ -74,9 +74,6 @@ export interface RenewalCheckoutInput {
    * present together; legacy internal callers may omit both. */
   readonly expectedAmount?: string;
   readonly expectedCurrency?: Currency;
-  /** Optional per-subscription selected renewal add-on ids (T-007). Honored
-   *  only when the `renewalAddOns` rollout flag is on. */
-  readonly addOns?: ReadonlyMap<string, readonly string[]>;
   /** Local SavedPaymentMethod.id for off-session YooKassa charge. */
   readonly savedPaymentMethodId?: string;
   /** Per-request YooKassa bind-card intent (interactive only). */
@@ -198,7 +195,6 @@ export class PaymentsRenewalCheckoutService {
       channel,
       durations: input.durations,
       plans: input.plans,
-      addOns: input.addOns,
     });
     const providerSubscriptionTerms = resolveRenewalProviderSubscription(input, gateway, priced);
     if (providerSubscriptionTerms !== null) {
@@ -229,14 +225,6 @@ export class PaymentsRenewalCheckoutService {
         planId: item.planId,
         durationDays: item.durationDays,
         termId: null,
-        addOns: (item.addOnLines ?? []).map((addOn) => ({
-          addOnId: addOn.addOnId,
-          addOnRevision: addOn.catalogRevision,
-          type: addOn.type,
-          value: addOn.value,
-          lifetime: addOn.lifetime,
-          activation: addOn.activation,
-        })),
       })),
     });
     const existing =
@@ -641,10 +629,6 @@ export class PaymentsRenewalCheckoutService {
             amount: new Prisma.Decimal(item.amount),
             currency: item.currency,
             discountPercent: item.discountPercent,
-            addOnLines:
-              (item.addOnLines ?? []).length > 0
-                ? (item.addOnLines as unknown as Prisma.InputJsonValue)
-                : Prisma.JsonNull,
           })),
         });
         return created;
@@ -904,9 +888,7 @@ interface ExistingRenewalDraft {
 
 /**
  * Whether this renewal is a provider subscription, and on what terms. One line
- * without add-ons only: the provider repeats one sum for one period, and an
- * add-on bought for this term would be charged, and not delivered, every term
- * after it.
+ * only: the provider repeats one sum for one period.
  */
 function resolveRenewalProviderSubscription(
   input: RenewalCheckoutInput,
@@ -922,9 +904,6 @@ function resolveRenewalProviderSubscription(
   const [item] = priced.items;
   if (priced.items.length !== 1 || item === undefined) {
     throw autopayNotAvailable('ITEMS');
-  }
-  if ((item.addOnLines ?? []).length > 0) {
-    throw autopayNotAvailable('ADD_ONS');
   }
   const resolved = resolveProviderSubscriptionTerms({
     gatewayType: gateway.type,
@@ -966,9 +945,10 @@ function buildRenewalRequestFingerprint(input: {
     plans: [...(input.input.plans?.entries() ?? [])]
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([subscriptionId, planId]) => ({ subscriptionId, planId })),
-    addOns: [...(input.input.addOns?.entries() ?? [])]
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([subscriptionId, addOnIds]) => ({ subscriptionId, addOnIds: [...addOnIds].sort() })),
+    // Always empty since renewal add-ons were deleted (24.09.2026), and still
+    // hashed: a draft persisted before that keeps the fingerprint it was
+    // stored under, so its keyed replay still finds it.
+    addOns: [],
   });
 }
 

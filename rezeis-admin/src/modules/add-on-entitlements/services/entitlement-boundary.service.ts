@@ -1,8 +1,7 @@
-import { ConflictException, Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import {
   AddOnEntitlementActorType,
   AddOnEntitlementState,
-  AddOnLifetime,
   AddOnType,
   EntitlementIncidentKind,
   Prisma,
@@ -16,14 +15,13 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { carryImportDomainKeys } from '../../imports/utils/import-domain-snapshot.util';
 import { storedIdentityOf } from '../../remnawave/services/panel-user-address';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
-import { resolveResetCapabilities } from '../add-on-rollout.config';
+import { readAddOnRolloutFlags, resolveResetCapabilities } from '../add-on-rollout.config';
 import { GIB_BYTES } from '../domain/cutover-baseline';
 import { resolveOperatorConfiguredLimits } from '../domain/entitlement-baseline';
-import { ResetStrategy } from '../domain/reset-cycle-policy';
 import { withoutTermLimitBonuses } from '../domain/term-limit-bonus';
+import { AddOnSwitchesService } from '../switches/add-on-switches.service';
 import { AddOnEntitlementService } from './add-on-entitlement.service';
 import { DurableRetirementResult, retireDurableRowsInTransaction } from './durable-retirement.util';
-import { ensureLiveResetEpoch, LiveResetEpoch } from './reset-epoch.util';
 import { EffectiveProjectionService } from './effective-projection.service';
 import { SubscriptionTermService } from './subscription-term.service';
 import { pruneEndedTermLimitBonusesInTransaction } from './term-limit-bonus.util';
@@ -31,7 +29,6 @@ import { pruneEndedTermLimitBonusesInTransaction } from './term-limit-bonus.util
 export interface BoundaryActivationResult {
   readonly activated: boolean;
   readonly termId: string | null;
-  readonly activatedEntitlements: number;
   readonly desiredRevision: bigint | null;
   readonly syncJobIds: readonly string[];
 }
@@ -88,12 +85,12 @@ function decodeDeferredPlanActivation(
  * EntitlementBoundaryService (T-008)
  * ──────────────────────────────────
  * Expires ACTIVE add-on entitlements at their authoritative LOCAL boundary
- * (`expiresAt <= now`) — a term end (UNTIL_SUBSCRIPTION_END) or, once reset
- * expiry is enabled, a reset epoch (UNTIL_NEXT_RESET; those only carry an
- * `expiresAt` when their strategy capability is on, so this service processes
- * them automatically without its own flag). A manual panel reset can NEVER
- * expire a commercial entitlement — expiry is driven purely by the local
- * `expiresAt`, not by a Remnawave observation.
+ * (`expiresAt <= now`) — a term end (UNTIL_SUBSCRIPTION_END) or a reset epoch
+ * (UNTIL_NEXT_RESET, sold only while stage 4 is on — «Докупка трафика до
+ * сброса»; the date is on the row, so this service expires it without a flag
+ * of its own). A manual panel reset can NEVER expire a commercial entitlement
+ * — expiry is driven purely by the local `expiresAt`, not by a Remnawave
+ * observation.
  *
  * Per due entitlement (idempotent via per-entitlement command keys):
  *  - `BEGIN_EXPIRY` (ACTIVE → EXPIRING): the desired projection drops
@@ -117,23 +114,40 @@ export class EntitlementBoundaryService {
     private readonly subscriptionTermService: SubscriptionTermService,
     private readonly effectiveProjectionService: EffectiveProjectionService,
     private readonly remnawaveApiService?: RemnawaveApiService,
+    /** The stage switches; `@Optional()` only for the specs that build this by hand. */
+    @Optional() private readonly addOnSwitches?: AddOnSwitchesService,
   ) {}
 
   /**
    * Activates a due SCHEDULED term at its start boundary (early-renewal flow,
    * design D-4). Finds the earliest SCHEDULED term whose `startsAt <= now`,
    * activates it (which atomically closes the prior ACTIVE term via
-   * {@link SubscriptionTermService.activateInTransaction}), then ACTIVATEs its
-   * PENDING_ACTIVATION entitlements whose `scheduledActivationAt <= now`, and
-   * recomputes the projection + enqueues a versioned sync — all in ONE
-   * transaction. Idempotent: re-running finds no due scheduled term (or the
-   * entitlement ACTIVATE command keys short-circuit).
+   * {@link SubscriptionTermService.activateInTransaction}), recomputes the
+   * projection and enqueues a sync — all in ONE transaction. Idempotent:
+   * re-running finds no due scheduled term.
+   *
+   * A MONTH_ROLLING term gets its reset anchor here, from the panel profile's
+   * `createdAt` (read before the transaction), while stage 4 is on: it is what
+   * later sales of «до следующего сброса» on this term count their cycle from.
+   * The stage-4 flag is read ONCE, for both the fetch and the write, so a
+   * switch flipped in between cannot clear an anchor it never fetched.
+   *
+   * Nothing else is activated here any more. The PENDING add-ons this used to
+   * activate were sold with a renewal (stage 5), which was deleted with its
+   * code on 24.09.2026 and never on by default; a row such a sale left behind
+   * stays PENDING, counts toward nothing, and the entitlements inspector can
+   * reverse it.
    */
   public async activateDueScheduledTerm(
     subscriptionId: string,
     now: Date = new Date(),
   ): Promise<BoundaryActivationResult> {
-    const panelAnchor = await this.resolveDueMonthRollingPanelAnchor(subscriptionId, now);
+    const rollingAnchored =
+      (resolveResetCapabilities(await readAddOnRolloutFlags(this.addOnSwitches)).MONTH_ROLLING ?? 'DISABLED') ===
+      'ENABLED';
+    const panelAnchor = rollingAnchored
+      ? await this.resolveDueMonthRollingPanelAnchor(subscriptionId, now)
+      : undefined;
     return this.prismaService.$transaction(async (tx) => {
       const due = await tx.subscriptionTerm.findFirst({
         where: {
@@ -144,91 +158,27 @@ export class EntitlementBoundaryService {
         orderBy: { generation: 'asc' },
         select: {
           id: true,
-          startsAt: true,
           trafficResetStrategy: true,
-          resetAnchorAt: true,
           planSnapshot: true,
         },
       });
       if (due === null) {
-        return { activated: false, termId: null, activatedEntitlements: 0, desiredRevision: null, syncJobIds: [] };
+        return { activated: false, termId: null, desiredRevision: null, syncJobIds: [] };
       }
 
-      // Nullable on purpose: the MONTH_ROLLING branch below CLEARS the anchor
-      // when the panel instant cannot be read, and `startsAt` is not a legal
-      // stand-in for it — a window minted from the wrong moment would hand out
-      // paid traffic against the wrong cycle. A null anchor makes
-      // `ensureLiveResetEpoch` return no epoch, which is what keeps
-      // reset-scoped commerce fail-closed (see the ConflictException below).
-      let resetAnchorAt: Date | null = due.resetAnchorAt ?? due.startsAt;
-      if (
-        due.trafficResetStrategy === 'MONTH_ROLLING' &&
-        (resolveResetCapabilities().MONTH_ROLLING ?? 'DISABLED') === 'ENABLED'
-      ) {
-        resetAnchorAt = panelAnchor?.termId === due.id ? panelAnchor.anchorAt : null;
+      // Nullable on purpose: the anchor is CLEARED when the panel instant
+      // cannot be read, and `startsAt` is not a legal stand-in for it — a
+      // window minted from the wrong moment would hand out paid traffic against
+      // the wrong cycle. A null anchor makes `ensureLiveResetEpoch` return no
+      // epoch, which is what keeps reset-scoped sales fail-closed.
+      if (due.trafficResetStrategy === 'MONTH_ROLLING' && rollingAnchored) {
         await tx.subscriptionTerm.update({
           where: { id: due.id },
-          data: { resetAnchorAt },
+          data: { resetAnchorAt: panelAnchor?.termId === due.id ? panelAnchor.anchorAt : null },
         });
       }
 
       const activation = await this.subscriptionTermService.activateInTransaction(tx, due.id, now);
-      const correlationId = `boundary-activate:${subscriptionId}`;
-
-      // Reset expiry (design D-4): on term activation the cycle policy creates
-      // the term's first reset epoch + planned UTC boundary — but ONLY when the
-      // strategy's capability is ENABLED (staging parity verified). Gated by
-      // `resetExpiry.<strategy>` (OFF by default → no epoch, so UNTIL_NEXT_RESET
-      // stays on the legacy path). Idempotent per term.
-      const epoch = await this.createResetEpochIfEnabled(tx, {
-        termId: due.id,
-        strategy: due.trafficResetStrategy as ResetStrategy,
-        anchorAt: resetAnchorAt,
-        now: due.startsAt,
-      });
-
-      const pending = await tx.addOnEntitlement.findMany({
-        where: {
-          subscriptionId,
-          termId: due.id,
-          state: AddOnEntitlementState.PENDING_ACTIVATION,
-          scheduledActivationAt: { lte: now },
-        },
-        select: { id: true, lifetime: true },
-      });
-      if (
-        epoch === null &&
-        pending.some((entitlement) => entitlement.lifetime === AddOnLifetime.UNTIL_NEXT_RESET)
-      ) {
-        throw new ConflictException(
-          `Paid reset entitlement cannot activate without a reset epoch for term ${due.id}`,
-        );
-      }
-      let activatedEntitlements = 0;
-      for (const entitlement of pending) {
-        if (entitlement.lifetime === AddOnLifetime.UNTIL_NEXT_RESET && epoch !== null) {
-          await tx.addOnEntitlement.updateMany({
-            where: {
-              id: entitlement.id,
-              state: AddOnEntitlementState.PENDING_ACTIVATION,
-              lifetime: AddOnLifetime.UNTIL_NEXT_RESET,
-            },
-            data: {
-              expiryEpochId: epoch.id,
-              expiresAt: epoch.plannedEndsAt,
-            },
-          });
-        }
-        const result = await this.addOnEntitlementService.transitionInTransaction(tx, {
-          entitlementId: entitlement.id,
-          command: 'ACTIVATE',
-          commandKey: `boundary-activate:${entitlement.id}`,
-          correlationId,
-          actorType: AddOnEntitlementActorType.SYSTEM,
-          reason: 'TERM_START_ACTIVATION',
-        });
-        if (result.changed) activatedEntitlements += 1;
-      }
 
       const projection = await this.effectiveProjectionService.recomputeInTransaction(tx, {
         subscriptionId,
@@ -284,13 +234,10 @@ export class EntitlementBoundaryService {
         syncJobIds.push(syncJob.id);
       }
 
-      this.logger.log(
-        `Activated scheduled term ${due.id} for ${subscriptionId}: term-changed ${activation.changed}, entitlements ${activatedEntitlements}`,
-      );
+      this.logger.log(`Activated scheduled term ${due.id} for ${subscriptionId}: term-changed ${activation.changed}`);
       return {
-        activated: activation.changed || activatedEntitlements > 0,
+        activated: activation.changed,
         termId: due.id,
-        activatedEntitlements,
         desiredRevision: projection.desiredRevision,
         syncJobIds,
       };
@@ -367,16 +314,13 @@ export class EntitlementBoundaryService {
    * metadata. The panel call happens before the interactive DB transaction.
    * A missing/unavailable/invalid profile timestamp is represented as a null
    * anchor so activation remains available while reset-scoped commerce stays
-   * fail-closed.
+   * fail-closed. Called only while the MONTH_ROLLING capability is on; the
+   * caller has read it.
    */
   private async resolveDueMonthRollingPanelAnchor(
     subscriptionId: string,
     now: Date,
   ): Promise<{ readonly termId: string; readonly anchorAt: Date | null } | undefined> {
-    if ((resolveResetCapabilities().MONTH_ROLLING ?? 'DISABLED') !== 'ENABLED') {
-      return undefined;
-    }
-
     const due = await this.prismaService.subscriptionTerm.findFirst({
       where: {
         subscriptionId,
@@ -423,33 +367,6 @@ export class EntitlementBoundaryService {
       );
       return { termId: due.id, anchorAt: null };
     }
-  }
-
-  /**
-   * Ensures the term's CURRENT reset-cycle epoch exists when the strategy's
-   * capability is ENABLED (`resetExpiry.<strategy>` flag). Delegates to the
-   * shared {@link ensureLiveResetEpoch} (find-or-create the window containing
-   * `now`), so this is idempotent and also covers a term that was already
-   * ACTIVE when the flag was enabled. No-op for NO_RESET / disabled capability.
-   */
-  private async createResetEpochIfEnabled(
-    tx: Prisma.TransactionClient,
-    input: { readonly termId: string; readonly strategy: ResetStrategy; readonly anchorAt: Date | null; readonly now: Date },
-  ): Promise<LiveResetEpoch | null> {
-    const capability = resolveResetCapabilities()[input.strategy] ?? 'DISABLED';
-    const epoch = await ensureLiveResetEpoch(tx, {
-      termId: input.termId,
-      strategy: input.strategy,
-      anchorAt: input.anchorAt,
-      capability,
-      now: input.now,
-    });
-    if (epoch !== null) {
-      this.logger.log(
-        `Reset epoch ensured for term ${input.termId} (${input.strategy}, ends ${epoch.plannedEndsAt.toISOString()})`,
-      );
-    }
-    return epoch;
   }
 
   public async completeVerifiedDeviceExpiryForSubscription(
@@ -688,10 +605,9 @@ export class EntitlementBoundaryService {
         });
         desiredRevision = projection.desiredRevision;
 
-        // Propagate the dropped desired limits: mirror into the legacy
-        // compatibility columns and enqueue a versioned profile-sync push so
-        // the panel converges to the reduced limit (T-009 supersession keeps
-        // only the latest revision).
+        // Propagate the dropped desired limits: mirror them into the limit
+        // columns and enqueue a profile-sync push, which sends those columns,
+        // so the panel converges to the reduced limit.
         if (projection.changed) {
           const subscription = await tx.subscription.update({
             where: { id: subscriptionId },

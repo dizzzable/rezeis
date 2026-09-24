@@ -361,7 +361,8 @@ describe('the name a paid invoice on a hidden plan is fulfilled under', () => {
       $queryRaw: async () => [{ id: 'sub-1', status: 'ACTIVE' }],
       subscriptionTerm: {
         findFirst: async () => ({ id: 'term-1' }),
-        findMany: async () => [],
+        // Cancels any queued term; none here.
+        updateMany: async () => ({ count: 0 }),
       },
     };
     const start = (
@@ -371,7 +372,6 @@ describe('the name a paid invoice on a hidden plan is fulfilled under', () => {
     ).startUpgradeTermInTransaction.bind(service);
 
     await start(tx, {
-      deferrals: [],
       subscriptionId: 'sub-1',
       plan: hidden,
       durationDays: 30,

@@ -606,7 +606,7 @@ export class InternalUserEdgeService {
    * User-facing "My add-ons" history: every durable add-on entitlement across
    * the user's own subscriptions (own data only, resolved from the identity).
    * Read-only + user-safe projection; naturally empty until the entitlement
-   * ledger is populated (direct-purchase / renewal add-on rollout).
+   * ledger is populated (direct purchases, stage 2).
    */
   public async listAddOnEntitlements(
     telegramId: string,

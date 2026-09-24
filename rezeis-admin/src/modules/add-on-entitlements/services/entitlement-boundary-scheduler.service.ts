@@ -1,11 +1,12 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { Prisma, SubscriptionStatus } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { shouldRunSchedules } from '../../../common/runtime/process-role.util';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
-import { resolveAddOnRolloutFlags } from '../add-on-rollout.config';
+import { readAddOnRolloutFlags } from '../add-on-rollout.config';
+import { AddOnSwitchesService } from '../switches/add-on-switches.service';
 import { DeviceReductionExecutionService } from './device-reduction-execution.service';
 import { DeviceReductionPlanService } from './device-reduction-plan.service';
 import { EntitlementBoundaryService } from './entitlement-boundary.service';
@@ -125,6 +126,8 @@ export class EntitlementBoundarySchedulerService {
     private readonly deviceReductionPlanService: DeviceReductionPlanService,
     private readonly deviceReductionExecutionService: DeviceReductionExecutionService,
     private readonly subscriptionTermService: SubscriptionTermService,
+    /** The stage switches; `@Optional()` only for the specs that build this by hand. */
+    @Optional() private readonly addOnSwitches?: AddOnSwitchesService,
   ) {}
 
   @Cron(CronExpression.EVERY_5_MINUTES, { name: 'entitlement-boundary-sweep' })
@@ -161,7 +164,7 @@ export class EntitlementBoundarySchedulerService {
   public async runDueBoundaries(
     now: Date = new Date(),
   ): Promise<{ readonly subscriptions: number; readonly enqueued: number }> {
-    const autoCleanup = resolveAddOnRolloutFlags().deviceCleanupAuto;
+    const autoCleanup = (await readAddOnRolloutFlags(this.addOnSwitches)).deviceCleanupAuto;
     const fresh = await this.selectFreshDue(now, MAX_PER_TICK);
     const room = MAX_PER_TICK - fresh.length;
     const reentries =
@@ -184,7 +187,7 @@ export class EntitlementBoundarySchedulerService {
   public async redriveParkedDeviceExpiries(
     now: Date = new Date(),
   ): Promise<{ readonly subscriptions: number; readonly enqueued: number }> {
-    const autoCleanup = resolveAddOnRolloutFlags().deviceCleanupAuto;
+    const autoCleanup = (await readAddOnRolloutFlags(this.addOnSwitches)).deviceCleanupAuto;
     const parked = await this.selectDeviceReentries(now, MAX_PARKED_PER_RUN, {
       parked: true,
       autoCleanup,

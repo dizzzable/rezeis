@@ -51,8 +51,8 @@ import { removeDurableFixtures } from './helpers/durable-rows-cleanup';
  *     (the snapshot and the carry are written BEFORE the recompute).
  *  7. Live add-ons keep their own end across a paid upgrade, clamped to the
  *     new end, re-bound to the new term (owner, 24.09.2026).
- *  8. A paid queued term that survives an upgrade is re-based onto the new
- *     plan.
+ *  8. A queued term carrying a renewal add-on left by the deleted stage 5
+ *     is cancelled by an upgrade like any other; the add-on stays inert.
  *  9. A renewal drafted before «Назначить план» keeps the operator's plan.
  * 10. A renewal that buys no day renews nothing.
  * 11. The upgrade quote tells what carries and which add-ons stay, until when.
@@ -720,7 +720,12 @@ run('the payment paths in the durable add-on model (PostgreSQL)', () => {
       assert.equal((await termsOf(outside.subscriptionId)).length, 0);
     });
 
-    it('a combined renewal with PAID add-on lines and every flag off brings a subscription with no term in: the lines have nowhere else to live', async () => {
+    it('a combined renewal whose line still carries PAID add-on lines is refused whole: no term, no entitlement, nothing applied', async () => {
+      // Sold under the renewal add-ons (stage 5), deleted with their code on
+      // 24.09.2026. Renewing the line would take the add-ons' money and deliver
+      // none of them, so the payment is not fulfilled at all and the operator
+      // refunds by hand. It used to bring the subscription into the model to
+      // give the lines a term to live on; now nothing of it is written.
       const plan = await createPlan({ trafficLimit: 100, deviceLimit: 3 });
       const owner = await subscriptionOn(plan, { trafficLimit: 100, deviceLimit: 3 });
       const addOnId = `${prefix}-addon-${next()}`;
@@ -751,8 +756,7 @@ run('the payment paths in the durable add-on model (PostgreSQL)', () => {
           durationDays: 30,
           amount: new Prisma.Decimal('398'),
           currency: 'RUB',
-          // Sold while the renewal add-ons were on; every flag is off by the
-          // time the payment arrives.
+          // Sold while the renewal add-ons were on, paid after the upgrade.
           addOnLines: [
             {
               addOnId,
@@ -769,14 +773,18 @@ run('the payment paths in the durable add-on model (PostgreSQL)', () => {
         },
       });
 
-      await withFlags({}, () => fulfilment.applyCompletedTransaction(parent));
+      const before = await subscriptionOf(owner.subscriptionId);
 
-      const rows = await termsOf(owner.subscriptionId);
-      assert.deepEqual(rows.map((term) => [term.generation, term.status]), [[1, 'ACTIVE'], [2, 'SCHEDULED']]);
-      const line = await prisma.addOnEntitlement.findFirstOrThrow({ where: { sourceTransactionId: parent.id } });
-      assert.equal(line.state, AddOnEntitlementState.PENDING_ACTIVATION);
-      assert.equal(line.termId, rows[1]!.id, 'on the renewal’s own term');
-      assert.equal(line.expiresAt?.getTime(), rows[1]!.endsAt?.getTime());
+      await assert.rejects(
+        withFlags({ shadow: true, direct: true }, () => fulfilment.applyCompletedTransaction(parent)),
+        /RENEWAL_ADDON_LINES_NOT_SUPPORTED/,
+      );
+
+      assert.deepEqual(await termsOf(owner.subscriptionId), [], 'no term was created for it');
+      assert.equal(await prisma.addOnEntitlement.count({ where: { sourceTransactionId: parent.id } }), 0);
+      const item = await prisma.transactionItem.findFirstOrThrow({ where: { transactionId: parent.id } });
+      assert.equal(item.appliedAt, null, 'the line stays unapplied for the operator');
+      assert.equal((await subscriptionOf(owner.subscriptionId)).expiresAt?.getTime(), before.expiresAt?.getTime());
     });
 
     it('an upgrade with every flag off rotates the term onto the new plan, and the next add-on expiry keeps the new plan', async () => {
@@ -970,11 +978,15 @@ run('the payment paths in the durable add-on model (PostgreSQL)', () => {
 
   // ── 8 ─────────────────────────────────────────────────────────────────────
 
-  describe('a paid queued term that survives an upgrade', () => {
+  describe('a queued term carrying a renewal add-on left by stage 5, under an upgrade', () => {
+    // Renewal add-ons (stage 5) were deleted on 24.09.2026, with the code that
+    // re-based such a queued term above the upgrade's own. An install that had
+    // them on may still hold one: the upgrade treats the term like any queued
+    // term, and the add-on is left as it was — PENDING, counting for nothing.
+
     /** A subscription in the model with a queued renewal term that carries a paid add-on. */
     async function withPaidQueuedTerm(input: {
       readonly plan: string;
-      readonly target: string;
       readonly remainingDays: number;
     }): Promise<{ readonly owner: Owner; readonly queuedId: string; readonly addOnId: string }> {
       const owner = await subscriptionOn(input.plan, { trafficLimit: 100, deviceLimit: 3 }, {
@@ -996,61 +1008,29 @@ run('the payment paths in the durable add-on model (PostgreSQL)', () => {
       return { owner, queuedId: queued.id, addOnId };
     }
 
-    it('is re-based onto the new plan and moved above the new term; when it begins, the subscription stays on the new plan', async () => {
+    it('cancels the term; the add-on stays PENDING and counts for nothing, and the new plan stays', async () => {
       const target = await createPlan({ trafficLimit: 500, deviceLimit: 5 }, { internalSquads: ['squad-new'] });
       const plan = await createPlan({ trafficLimit: 100, deviceLimit: 3 }, { upgradeToPlanIds: [target], internalSquads: ['squad-old'] });
-      const { owner, queuedId, addOnId } = await withPaidQueuedTerm({ plan, target, remainingDays: 20 });
+      const { owner, queuedId, addOnId } = await withPaidQueuedTerm({ plan, remainingDays: 20 });
 
       await withFlags({ shadow: true, direct: true }, () => pay(owner, PurchaseType.UPGRADE, target));
-
-      const expiresAt = (await subscriptionOf(owner.subscriptionId)).expiresAt!;
-      const active = await activeTermOf(owner.subscriptionId);
-      const queued = await prisma.subscriptionTerm.findUniqueOrThrow({ where: { id: queuedId } });
-      assert.equal(active.planId, target);
-      assert.equal(active.endsAt?.getTime(), queued.startsAt.getTime(), 'the new term ends where the queued one begins');
-      assert.equal(queued.status, 'SCHEDULED');
-      assert.ok(queued.generation > active.generation, 'still after the new term in the chain');
-      assert.equal(queued.planId, target, 're-based: no longer the old plan');
-      assert.equal(queued.baseDeviceLimit, 5);
-      assert.equal(queued.endsAt?.getTime(), expiresAt.getTime(), 'the chain ends where the subscription does');
-      const addOn = await prisma.addOnEntitlement.findUniqueOrThrow({ where: { id: addOnId } });
-      assert.ok(addOn.expiresAt!.getTime() <= expiresAt.getTime(), 'clamped to the subscription');
-
-      await boundary.activateDueScheduledTerm(owner.subscriptionId, new Date(queued.startsAt.getTime() + 1000));
 
       const after = await subscriptionOf(owner.subscriptionId);
-      assert.equal((await prisma.subscriptionTerm.findUniqueOrThrow({ where: { id: queuedId } })).status, 'ACTIVE');
-      assert.equal(asRecord(after.planSnapshot)['id'], target, 'the old plan did not come back');
+      const active = await activeTermOf(owner.subscriptionId);
+      assert.equal(active.planId, target);
+      assert.equal(active.endsAt?.getTime(), after.expiresAt?.getTime(), 'the new term runs to the subscription’s end');
+      assert.equal((await prisma.subscriptionTerm.findUniqueOrThrow({ where: { id: queuedId } })).status, 'CANCELED');
+      const addOn = await prisma.addOnEntitlement.findUniqueOrThrow({ where: { id: addOnId } });
+      assert.equal(addOn.state, AddOnEntitlementState.PENDING_ACTIVATION);
+      assert.equal(addOn.termId, queuedId);
+      assert.equal(after.deviceLimit, 5, 'the new plan alone: the pending +2 is no share of it');
       assert.deepEqual(after.internalSquads, ['squad-new']);
-      assert.equal(after.deviceLimit, 7, 'the new plan and the add-on bought for that period');
-      assert.equal(after.expiresAt?.getTime(), expiresAt.getTime(), 'its days were already in the expiry');
-    });
 
-    it('tells the operator when the upgrade ends before it begins, and leaves the add-ons bought for it alone', async () => {
-      // A long period left on a cheap plan, onto a very dear one: the paid
-      // remainder converts to next to nothing, and the upgrade's 30 days end
-      // before the queued period would begin.
-      const target = await createPlan({ trafficLimit: 500, deviceLimit: 5 }, {
-        durations: [{ days: 30, currency: 'RUB', price: '90000' }],
-      });
-      const plan = await createPlan({ trafficLimit: 100, deviceLimit: 3 }, { upgradeToPlanIds: [target] });
-      const { owner, queuedId, addOnId } = await withPaidQueuedTerm({ plan, target, remainingDays: 60 });
-      const before = await prisma.subscriptionTerm.findUniqueOrThrow({ where: { id: queuedId } });
-
-      await withFlags({ shadow: true, direct: true }, () => pay(owner, PurchaseType.UPGRADE, target));
-
-      const expiresAt = (await subscriptionOf(owner.subscriptionId)).expiresAt!;
-      assert.ok(expiresAt.getTime() <= before.startsAt.getTime(), 'fixture: the upgrade ends before the queued period');
-      const queued = await prisma.subscriptionTerm.findUniqueOrThrow({ where: { id: queuedId } });
-      assert.equal(queued.planId, target, 're-based all the same: it never brings the old plan back');
-      assert.equal(queued.endsAt?.getTime(), before.endsAt?.getTime(), 'its window is left alone');
-      assert.equal((await prisma.addOnEntitlement.findUniqueOrThrow({ where: { id: addOnId } })).version, 1);
-      const cards = eventsOf(
-        EVENT_TYPES.SYSTEM_ERROR,
-        (metadata) => metadata['subscriptionId'] === owner.subscriptionId && metadata['code'] === 'UPGRADE_ENDS_BEFORE_PAID_SCHEDULED_TERM',
-      );
-      assert.equal(cards.length, 1);
-      assert.deepEqual(cards[0]!.metadata['scheduledTermIds'], [queuedId]);
+      // Nothing is queued any more: past the old period's end the sweep
+      // activates nothing, and the old plan does not come back.
+      const swept = await boundary.activateDueScheduledTerm(owner.subscriptionId, inDays(25));
+      assert.equal(swept.activated, false);
+      assert.equal(asRecord((await subscriptionOf(owner.subscriptionId)).planSnapshot)['id'], target);
     });
   });
 

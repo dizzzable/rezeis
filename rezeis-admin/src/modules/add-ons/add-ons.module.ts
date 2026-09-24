@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 
 import { AuthModule } from '../auth/auth.module';
+import { AddOnSwitchesModule } from '../add-on-entitlements/switches/add-on-switches.module';
 import { AdminAddOnsController } from './controllers/admin-add-ons.controller';
 import { AdminAddOnsStatsController } from './controllers/admin-add-ons-stats.controller';
 import { InternalAddOnsController } from './controllers/internal-add-ons.controller';
@@ -17,7 +18,9 @@ import { AddOnsStatsService } from './services/add-ons-stats.service';
   // `undefined` and every reset would answer "the Remnawave integration is not
   // configured", on an install where it is configured perfectly well. The
   // optionality is there for specs, not to paper over a missing import.
-  imports: [AuthModule, RemnawaveModule],
+  // `AddOnSwitchesModule` for the same reason: the offer reads the stage
+  // switches, and without the import it would read `.env` and the defaults.
+  imports: [AuthModule, RemnawaveModule, AddOnSwitchesModule],
   controllers: [AdminAddOnsController, AdminAddOnsStatsController, InternalAddOnsController],
   providers: [
     AddOnsService,

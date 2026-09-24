@@ -4,6 +4,7 @@ import {
   Injectable,
   Logger,
   OnApplicationBootstrap,
+  Optional,
 } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { Queue } from 'bullmq';
@@ -19,7 +20,8 @@ import {
   ADD_ON_CUTOVER_TICK_BUDGET_MS,
   ADD_ON_CUTOVER_TICK_JOB,
 } from '../add-on-cutover.constants';
-import { resolveAddOnRolloutFlags } from '../add-on-rollout.config';
+import { readAddOnRolloutFlags } from '../add-on-rollout.config';
+import { AddOnSwitchesService } from '../switches/add-on-switches.service';
 import { CutoverRunReport, EntitlementCutoverService } from './entitlement-cutover.service';
 
 /**
@@ -35,7 +37,8 @@ import { CutoverRunReport, EntitlementCutoverService } from './entitlement-cutov
  * ── How it is scheduled ────────────────────────────────────────────────────
  *
  *  - A `@Cron` every five minutes, on the process that runs schedules (the
- *    worker), enqueues one tick — only while `ADDON_ENTITLEMENT_SHADOW` is on.
+ *    worker), enqueues one tick — only while stage 1 is on (the switch
+ *    «Новый учёт докупок», or `ADDON_ENTITLEMENT_SHADOW` where `.env` sets it).
  *    Once everything is in the model a tick is one short query that finds
  *    nothing: cheap enough to keep running, which is what picks up subscriptions
  *    created later by a path that does not create their term itself (imports,
@@ -43,7 +46,8 @@ import { CutoverRunReport, EntitlementCutoverService } from './entitlement-cutov
  *  - `onApplicationBootstrap` enqueues the first one WITHOUT awaiting it: boot
  *    never waits on Redis or the database, and an outage there cannot fail it.
  *  - The processor re-reads the flag before it starts: a tick queued just before
- *    stage 1 was switched off does nothing.
+ *    stage 1 was switched off does nothing. The switch reaches the worker within
+ *    the settings row cache's five seconds, so no restart is involved.
  *
  * ── Why it is safe ─────────────────────────────────────────────────────────
  *
@@ -78,13 +82,15 @@ export class EntitlementCutoverJobService implements OnApplicationBootstrap, Bef
   public constructor(
     private readonly cutoverService: EntitlementCutoverService,
     @InjectQueue(ADD_ON_CUTOVER_QUEUE) private readonly queue: Queue,
+    /** The stage switches; `@Optional()` only for the specs that build this by hand. */
+    @Optional() private readonly addOnSwitches?: AddOnSwitchesService,
   ) {}
 
   /** Every five minutes on the worker: queue a tick while stage 1 is on. */
   @Cron(CronExpression.EVERY_5_MINUTES, { name: 'add-on-entitlement-cutover' })
   public async schedule(): Promise<boolean> {
     if (!shouldRunSchedules()) return false;
-    if (!resolveAddOnRolloutFlags().entitlementShadow) return false;
+    if (!(await readAddOnRolloutFlags(this.addOnSwitches)).entitlementShadow) return false;
     return this.enqueueTick();
   }
 
@@ -136,8 +142,8 @@ export class EntitlementCutoverJobService implements OnApplicationBootstrap, Bef
 
   /** One pass, as the processor runs it. `null` when stage 1 is off. */
   public async runTick(now: number = Date.now()): Promise<CutoverRunReport | null> {
-    if (!resolveAddOnRolloutFlags().entitlementShadow) {
-      this.logger.log('Cutover tick skipped: ADDON_ENTITLEMENT_SHADOW is off');
+    if (!(await readAddOnRolloutFlags(this.addOnSwitches)).entitlementShadow) {
+      this.logger.log('Cutover tick skipped: stage 1 («Новый учёт докупок») is off');
       return null;
     }
     return this.cutoverService.runCutover({

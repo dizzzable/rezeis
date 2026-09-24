@@ -141,8 +141,20 @@ describe('every ERROR card says why it matters and what to check next', () => {
     assert.equal(perFile('modules/backup/backup.processor.ts'), 3);
     // `this.systemEvents?.emit({ severity: cond ? 'ERROR' : 'WARNING' })`
     assert.equal(perFile('modules/push/services/web-push.service.ts'), 1);
-    // `this.events.warn(EVENT_TYPES.SYSTEM_ERROR, …)` — an incident card at WARNING.
-    assert.equal(perFile('modules/payments/services/payment-subscription-mutation.service.ts'), 1);
+    // `this.events.warn(EVENT_TYPES.REIWA_ERROR, …)` — an incident card at
+    // WARNING. The one guarded producer of that form (an upgrade over a queued
+    // term with renewal add-ons) went with the renewal add-ons on 24.09.2026,
+    // so the form is proved on the exempt relay, found before the exemption.
+    const relay = 'modules/system-events-ingest/internal-system-events.controller.ts';
+    const warnLine =
+      readFileSync(join(SRC, ...relay.split('/')), 'utf8')
+        .split(/\r?\n/)
+        .findIndex((text) => text.includes('.warn(EVENT_TYPES.REIWA_ERROR')) + 1;
+    assert.ok(warnLine > 0, `${relay} no longer raises its incident card at WARNING`);
+    assert.ok(
+      ALL.some((emission) => relativeToSrc(emission.file) === relay && emission.line === warnLine),
+      `the scan does not find ${relay}:${warnLine}`,
+    );
     assert.ok(GUARDED.length >= 20, `only ${GUARDED.length} ERROR emissions found — the scan has gone blind`);
   });
 

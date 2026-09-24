@@ -12,7 +12,7 @@ import {
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
-import { resolveAddOnRolloutFlags } from '../../add-on-entitlements/add-on-rollout.config';
+import { readAddOnRolloutFlags } from '../../add-on-entitlements/add-on-rollout.config';
 import { ADD_ON_NOTICE_COMMAND_KEY } from '../../add-on-entitlements/addon-expiry-notice.constants';
 import { GIB_BYTES } from '../../add-on-entitlements/domain/cutover-baseline';
 import { AddOnEntitlementService } from '../../add-on-entitlements/services/add-on-entitlement.service';
@@ -21,6 +21,7 @@ import { DeviceReductionExecutionService } from '../../add-on-entitlements/servi
 import { DeviceReductionPlanService } from '../../add-on-entitlements/services/device-reduction-plan.service';
 import { EffectiveProjectionService } from '../../add-on-entitlements/services/effective-projection.service';
 import { SubscriptionTermService } from '../../add-on-entitlements/services/subscription-term.service';
+import { AddOnSwitchesService } from '../../add-on-entitlements/switches/add-on-switches.service';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { writeTransactionGatewayData } from '../utils/transaction-gateway-data.util';
 
@@ -67,7 +68,7 @@ export interface AddOnRefundOutcome {
   readonly reduceDevicesOf: string | null;
   /**
    * With {@link reduceDevicesOf}: what WILL happen to the extra devices, by
-   * stage 6 (`ADDON_DEVICE_CLEANUP_AUTO`) — the line the card carries unless
+   * stage 6 («Удалять лишние устройства автоматически») — the line the card carries unless
    * the refund's own run of the reduction finishes before it goes out
    * ({@link AddOnRefundService.reduceDevices}), whose line replaces it.
    */
@@ -140,6 +141,8 @@ export class AddOnRefundService {
     // module, so Nest injects the shared instance; the fallback — the same
     // stateless service — keeps the hand-built services of the specs as they are.
     @Optional() terms?: SubscriptionTermService,
+    /** The stage switches; `@Optional()` only for the specs that build this by hand. */
+    @Optional() private readonly addOnSwitches?: AddOnSwitchesService,
   ) {
     this.terms = terms ?? new SubscriptionTermService();
   }
@@ -201,7 +204,9 @@ export class AddOnRefundService {
    * queue retries.
    */
   public async reduceDevices(subscriptionId: string): Promise<string | null> {
-    const predicted = predictedDevicesLine(subscriptionId);
+    const autoCleanup = await this.readDeviceCleanupAuto(subscriptionId);
+    if (autoCleanup === null) return MANUAL_DEVICES_LINE;
+    const predicted = predictedDevicesLine(subscriptionId, autoCleanup);
     if (this.devicePlans === undefined) return predicted;
     try {
       const planning = await this.devicePlans.planForSubscription(subscriptionId);
@@ -210,7 +215,7 @@ export class AddOnRefundService {
         case 'NOT_APPLICABLE':
           return null;
         case 'PLANNED': {
-          if (!resolveAddOnRolloutFlags().deviceCleanupAuto || this.deviceExecution === undefined) return predicted;
+          if (!autoCleanup || this.deviceExecution === undefined) return predicted;
           const run = await this.deviceExecution.executePlan(planning.planId);
           if (run.status === 'APPLIED') {
             return run.deleted > 0 ? `Лишние устройства удалены: ${run.deleted}.` : null;
@@ -222,7 +227,7 @@ export class AddOnRefundService {
         }
         case 'DEFERRED':
           this.logger.warn(`Device reduction after the refund on subscription ${subscriptionId}: DEFERRED (${planning.reason})`);
-          return resolveAddOnRolloutFlags().deviceCleanupAuto ? DEVICES_RETRY_LINE : predicted;
+          return autoCleanup ? DEVICES_RETRY_LINE : predicted;
         case 'BLOCKED':
           this.logger.warn(`Device reduction after the refund on subscription ${subscriptionId}: BLOCKED (${planning.reason})`);
           return MANUAL_DEVICES_LINE;
@@ -230,6 +235,25 @@ export class AddOnRefundService {
     } catch (error: unknown) {
       this.logger.error(`Device reduction after the refund on subscription ${subscriptionId} failed: ${describeError(error)}`);
       return predicted;
+    }
+  }
+
+  /**
+   * Stage 6 as it stands, for what the card says about the devices — or
+   * `null` when the switches cannot be read. Never thrown: a card's forecast
+   * must not keep a refund from ending the add-on. Without the switch there is
+   * no knowing whether the panel removes the devices itself, and the card must
+   * never promise that it does; its caller then gives the hand-made way, which
+   * is always right, at worst redundant.
+   */
+  private async readDeviceCleanupAuto(subscriptionId: string): Promise<boolean | null> {
+    try {
+      return (await readAddOnRolloutFlags(this.addOnSwitches)).deviceCleanupAuto;
+    } catch (error: unknown) {
+      this.logger.error(
+        `Refund on subscription ${subscriptionId}: the add-on switches could not be read: ${describeError(error)}`,
+      );
+      return null;
     }
   }
 
@@ -241,6 +265,9 @@ export class AddOnRefundService {
   ): Promise<AddOnRefundOutcome> {
     const correlationId = `refund:${transaction.paymentId}`;
     const summaryCode = kind === 'CHARGEBACK' ? ADDON_CHARGEBACK_SUMMARY : ADDON_REFUNDED_SUMMARY;
+    // Read before the transaction: only the card's forecast for the devices
+    // depends on it, and a settings read has no place under these row locks.
+    const deviceCleanupAuto = await this.readDeviceCleanupAuto([...subscriptionIds].sort().join(','));
     return this.prismaService.$transaction(async (tx) => {
       // THE SUBSCRIPTION ROWS FIRST, one at a time in id order, and only then
       // the add-ons — the order the boundary sweep and every term writer keep.
@@ -345,7 +372,12 @@ export class AddOnRefundService {
         },
         syncJobIds,
         reduceDevicesOf,
-        devicesLine: reduceDevicesOf === null ? null : predictedDevicesLine(reduceDevicesOf),
+        devicesLine:
+          reduceDevicesOf === null
+            ? null
+            : deviceCleanupAuto === null
+              ? MANUAL_DEVICES_LINE
+              : predictedDevicesLine(reduceDevicesOf, deviceCleanupAuto),
         addOnType: marker?.addOnType ?? rows[0]?.type ?? null,
         addOnValue: marker?.addOnValue ?? (rows[0] === undefined ? null : entitlementValue(rows[0].type, rows[0].totalValue)),
       };
@@ -694,7 +726,7 @@ const DEVICES_RETRY_LINE =
 
 /**
  * What WILL happen to a refunded device add-on's extra devices, by stage 6
- * (`ADDON_DEVICE_CLEANUP_AUTO`): the line the card carries when it goes out
+ * («Удалять лишние устройства автоматически»): the line the card carries when it goes out
  * before the refund's own run of the reduction finished — a stop, a panel that
  * did not answer — which the queue then finishes. With stage 6 off the
  * reduction waits for the operator, as an expired add-on's does; the names are
@@ -702,12 +734,13 @@ const DEVICES_RETRY_LINE =
  * «Открыть инспектор подписки», «ID подписки», «Открыть», «Причина»,
  * «Планы сокращения устройств», «Утвердить», «Утвердить и выполнить»).
  */
-export function predictedDevicesLine(subscriptionId: string): string {
-  if (resolveAddOnRolloutFlags().deviceCleanupAuto) {
+export function predictedDevicesLine(subscriptionId: string, deviceCleanupAuto: boolean): string {
+  if (deviceCleanupAuto) {
     return 'Лишние устройства панель удалит сама, а если Remnawave не ответит — повторит, пока не удалит.';
   }
   return (
-    'Лишние устройства панель сама не удаляет: автоудаление выключено. Чтобы удалить их, утвердите план: ' +
+    'Лишние устройства панель сама не удаляет: выключено «Удалять лишние устройства автоматически» ' +
+    '(«Доп. услуги» → вкладка «Настройки»). Чтобы удалить их, утвердите план: ' +
     '«Доп. услуги» → вкладка «Доставка» → «Открыть инспектор подписки» → «ID подписки»: ' +
     `${subscriptionId} → «Открыть» → впишите «Причина» → «Планы сокращения устройств» → «Утвердить» → «Утвердить и выполнить».`
   );

@@ -305,7 +305,6 @@ interface Tables {
   subscriptionUpdates: Array<{ readonly id: string; readonly data: Record<string, unknown> }>;
   transactionUpdates: Array<{ readonly id: string; readonly data: Record<string, unknown> }>;
   termCreates: Array<Record<string, unknown>>;
-  entitlementCreates: Array<Record<string, unknown>>;
 }
 
 interface RawQuery {
@@ -376,7 +375,6 @@ function createWorld(seed: {
     subscriptionUpdates: [],
     transactionUpdates: [],
     termCreates: [],
-    entitlementCreates: [],
   };
   const events: Emitted[] = [];
   const statements: string[] = [];
@@ -527,13 +525,9 @@ function createWorld(seed: {
   const service = new PaymentSubscriptionMutationService(
     prismaService as never,
     { info: record('INFO'), warn: record('WARNING'), error: record('ERROR') } as never,
-    {
-      createPendingInTransaction: async (tx: unknown, input: Record<string, unknown>) => {
-        const staged = stagedOf(tx);
-        staged.entitlementCreates.push(structuredClone(input));
-        return { entitlementId: `ent-${staged.entitlementCreates.length}` };
-      },
-    } as never,
+    // No entitlement is created on a renewal since renewal add-ons were deleted
+    // (24.09.2026): a call here would now throw.
+    {} as never,
     {} as never,
     {
       createScheduledInTransaction: async (tx: unknown, input: Record<string, unknown>) => {
@@ -1067,8 +1061,6 @@ describe('a kept renewal on a subscription with durable terms', () => {
 
 describe('a combined renewal with a line whose subscription a plan migration moved', () => {
   function combinedWorld(options: {
-    readonly movedAddOnLines?: unknown;
-    readonly terms?: readonly TermRow[];
     readonly grants?: readonly GrantRow[];
   } = {}) {
     const transaction = renewalForOldPlan({
@@ -1093,7 +1085,7 @@ describe('a combined renewal with a line whose subscription a plan migration mov
           durationDays: PAID_DAYS,
           amount: '199',
           currency: 'RUB',
-          addOnLines: options.movedAddOnLines ?? null,
+          addOnLines: null,
           appliedAt: null,
         },
         {
@@ -1110,7 +1102,6 @@ describe('a combined renewal with a line whose subscription a plan migration mov
         },
       ],
       migrationItems: [movedOffOldPlan({ subscriptionId: 'sub-moved' })],
-      terms: options.terms,
       grants: options.grants,
     });
   }
@@ -1192,50 +1183,6 @@ describe('a combined renewal with a line whose subscription a plan migration mov
     await world.fulfil();
 
     assert.deepEqual(world.consumedGrantIds, ['grant-old']);
-  });
-
-  it('binds the kept line’s paid add-ons to the current plan’s term', async () => {
-    const expiresAt = new Date(NOW + 10 * DAY_MS);
-    const world = combinedWorld({
-      movedAddOnLines: [
-        {
-          addOnId: 'addon-traffic',
-          catalogRevision: 1,
-          type: 'EXTRA_TRAFFIC',
-          value: 10,
-          lifetime: 'UNTIL_SUBSCRIPTION_END',
-          activation: 'TERM_START',
-          sourceLineKey: 'line-1',
-          unitAmount: '50',
-          receiptName: 'Трафик +10 ГБ',
-        },
-      ],
-      terms: [
-        {
-          id: 'term-moved-active',
-          subscriptionId: 'sub-moved',
-          generation: 1,
-          status: 'ACTIVE',
-          planId: CURRENT_PLAN.id,
-          startsAt: new Date(NOW - 20 * DAY_MS),
-          endsAt: expiresAt,
-        },
-      ],
-    });
-
-    await world.fulfil();
-
-    const termsForMoved = world.committed.termCreates.filter((term) => term['subscriptionId'] === 'sub-moved');
-    assert.equal(termsForMoved.length, 1);
-    assert.equal(termsForMoved[0]!['planId'], CURRENT_PLAN.id);
-    assert.equal((termsForMoved[0]!['planSnapshot'] as Record<string, unknown>)['selectedDurationDays'], PAID_DAYS);
-    // With a term the line writes no snapshot now, exactly as a normal line with a term.
-    assert.deepEqual(Object.keys(onlyUpdateOf(world, 'sub-moved')).sort(), ['expiresAt', 'status']);
-    const newTerm = world.committed.terms.find((term) => term.subscriptionId === 'sub-moved' && term.status === 'SCHEDULED');
-    assert.ok(newTerm !== undefined);
-    assert.equal(world.committed.entitlementCreates.length, 1);
-    assert.equal(world.committed.entitlementCreates[0]!['termId'], newTerm.id);
-    assert.equal(world.committed.entitlementCreates[0]!['subscriptionId'], 'sub-moved');
   });
 
   it('announces nothing for an attempt that rolled back, and once for the attempt that committed', async () => {

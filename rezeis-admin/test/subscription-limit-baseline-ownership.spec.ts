@@ -392,7 +392,7 @@ describe('panel webhook limit mirror', () => {
       }
     ).reconcileSubscriptionFromEvent.bind(service);
 
-    await reconcile('user.modified', { event: 'user.modified', data: { uuid: 'rw-1', ...payloadData } });
+    await reconcile('user.modified', { event: 'user.modified', data: { id: 4711, ...payloadData } });
     return { columnWrites, baselineWrites, snapshotReads };
   }
 

@@ -220,27 +220,12 @@ export class AddOnEntitlementService {
     if (source.length !== 1) {
       throw new NotFoundException('Source transaction not found');
     }
+    // The paying transaction must point at the target subscription: the add-on
+    // checkout's fulfilment binds it first. (A combined renewal, which names no
+    // subscription of its own, once proved the link by a matching renewal
+    // line; renewal add-ons were deleted with their code on 24.09.2026.)
     if (source[0]?.subscriptionId !== input.subscriptionId) {
-      // Combined-renewal binding: a combined renewal transaction carries
-      // `subscriptionId = null` (the presence of TransactionItem lines is what
-      // marks it as combined), so the entitlement's link to the PAYING
-      // transaction is proven by a matching renewal line rather than by the
-      // transaction's own `subscriptionId`. Any other mismatch is a hard bind
-      // violation. The line is locked FOR UPDATE so it serializes against the
-      // combined-renewal application (which stamps `appliedAt` on the line).
-      if (source[0]?.subscriptionId !== null) {
-        throw new ConflictException('Source transaction is not bound to the target subscription');
-      }
-      const line = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`
-        SELECT "id"
-        FROM "transaction_items"
-        WHERE "transaction_id" = ${input.sourceTransactionId}
-          AND "subscription_id" = ${input.subscriptionId}
-        FOR UPDATE
-      `);
-      if (line.length === 0) {
-        throw new ConflictException('Source transaction has no renewal line for the target subscription');
-      }
+      throw new ConflictException('Source transaction is not bound to the target subscription');
     }
     const subscription = await tx.$queryRaw<Array<{ id: string; status: string }>>(Prisma.sql`
       SELECT "id", "status"::text AS "status"

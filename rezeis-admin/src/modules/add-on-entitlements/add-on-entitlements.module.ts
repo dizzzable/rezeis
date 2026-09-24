@@ -25,6 +25,7 @@ import { EntitlementCutoverJobService } from './services/entitlement-cutover-job
 import { EntitlementMetricsService } from './services/entitlement-metrics.service';
 import { SubscriptionTermHooksService } from './services/subscription-term-hooks.service';
 import { SubscriptionTermService } from './services/subscription-term.service';
+import { AddOnSwitchesModule } from './switches/add-on-switches.module';
 
 @Module({
   imports: [
@@ -32,6 +33,9 @@ import { SubscriptionTermService } from './services/subscription-term.service';
     AuthModule,
     RemnawaveModule,
     ProfileSyncModule,
+    // The stage switches («Доп. услуги» → «Настройки»): the cutover job, the
+    // boundary sweep, the device reduction and the notices all read them.
+    AddOnSwitchesModule,
     // The background cutover's own queue: one tick at a time under a fixed id
     // (`ADD_ON_CUTOVER_JOB_ID`), queued by `EntitlementCutoverJobService`.
     BullModule.registerQueue({ name: ADD_ON_CUTOVER_QUEUE }),
