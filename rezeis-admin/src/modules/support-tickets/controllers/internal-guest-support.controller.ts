@@ -25,6 +25,7 @@ import { CreateGuestTicketDto, GuestReplyDto } from '../dto/guest-support.dto';
 import { GuestGateService } from '../services/guest-gate.service';
 import { SupportGuestService } from '../services/support-guest.service';
 import { AttachGuestDto } from '../dto/guest-support.dto';
+import { GUEST_LOCALE_HEADER, readGuestLocale } from '../utils/guest-letter-language.util';
 import { AttachmentValidationError } from '../utils/support-attachment.util';
 
 /** Header reiwa uses to relay the raw, server-bound guest token. */
@@ -77,6 +78,10 @@ export class InternalGuestSupportController {
   public async create(
     @Body() body: CreateGuestTicketDto,
     @Headers(GUEST_IP_HEADER) clientIp: string | undefined,
+    // The guest page's language, for the letters — a header, because a body
+    // field an older panel does not declare fails the request there
+    // (`guest-letter-language.util.ts`).
+    @Headers(GUEST_LOCALE_HEADER) locale?: string,
   ): Promise<GuestCreateResponse> {
     const runtime = await this.settingsService.getSupportRuntimeConfig();
     if (!runtime.enabled) throw new NotFoundException('Conversation not found');
@@ -112,6 +117,7 @@ export class InternalGuestSupportController {
       installId: verdict.installId,
       deviceHash: verdict.deviceHash,
       flaggedReason: verdict.flaggedReason,
+      locale: readGuestLocale(locale),
     });
     this.systemEvents.info(
       EVENT_TYPES.SUPPORT_TICKET_CREATED,
@@ -152,8 +158,9 @@ export class InternalGuestSupportController {
   public async reply(
     @Headers(GUEST_TOKEN_HEADER) token: string | undefined,
     @Body() body: GuestReplyDto,
+    @Headers(GUEST_LOCALE_HEADER) locale?: string,
   ): Promise<SerializedGuestTicket> {
-    const ticket = await this.guestService.reply(token ?? '', body.content.trim());
+    const ticket = await this.guestService.reply(token ?? '', body.content.trim(), readGuestLocale(locale));
     if (ticket === null) throw new NotFoundException('Conversation not found');
     this.systemEvents.info(
       EVENT_TYPES.SUPPORT_TICKET_USER_REPLY,

@@ -8,6 +8,8 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { buildUserReferenceWhere } from '../../internal-user/utils/user-reference.util';
 import { SettingsService } from '../../settings/services/settings.service';
 
+import { guestLocaleMetadata, type GuestLetterLanguage } from '../utils/guest-letter-language.util';
+
 import { SupportAttachmentService, type AttachmentStream } from './support-attachment.service';
 import { SupportTicketsService } from './support-tickets.service';
 
@@ -80,6 +82,8 @@ export class SupportGuestService {
     readonly deviceHash?: string | null;
     /** Non-null when the gate found this device on a blocked account. */
     readonly flaggedReason?: string | null;
+    /** The guest page's language, kept for the letters (`guest-letter-language.util.ts`). */
+    readonly locale?: GuestLetterLanguage | null;
   }): Promise<{ readonly token: string; readonly ticketId: string }> {
     const token = generateToken();
     const limits = await this.settingsService.getSupportLimits();
@@ -105,6 +109,7 @@ export class SupportGuestService {
       authorType: 'USER',
       authorId: null,
       content: input.message,
+      metadata: guestLocaleMetadata(input.locale),
     });
     return { token, ticketId: ticket.id };
   }
@@ -140,8 +145,16 @@ export class SupportGuestService {
     return { ticket, deviceToken };
   }
 
-  /** Append a guest reply to the bound, still-open conversation. */
-  public async reply(token: string, content: string): Promise<unknown | null> {
+  /**
+   * Append a guest reply to the bound, still-open conversation. `locale` is the
+   * guest page's language, when the cabinet sent it: the next letter follows
+   * the language the guest last wrote in.
+   */
+  public async reply(
+    token: string,
+    content: string,
+    locale?: GuestLetterLanguage | null,
+  ): Promise<unknown | null> {
     const resolution = await this.resolve(token);
     if (resolution === null) return null;
     await this.supportTicketsService.addMessage({
@@ -149,6 +162,7 @@ export class SupportGuestService {
       authorType: 'USER',
       authorId: null,
       content,
+      metadata: guestLocaleMetadata(locale),
     });
     return this.supportTicketsService.getById(resolution.ticketId);
   }

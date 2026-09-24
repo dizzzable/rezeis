@@ -3,6 +3,7 @@ import { SupportTicketStatus } from '@prisma/client';
 
 import { resolveCabinetSiteUrl } from '../../../common/config/public-site-url.util';
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { literalCardText, literalPlainText } from '../../../common/utils/operator-card-text.util';
 import { ReiwaAdvertisingLinkConfigService } from '../../advertising/services/reiwa-advertising-link-config.service';
 import type { SendEmailPayload } from '../../email/interfaces/email.interface';
 import { EmailDeliveryService } from '../../email/services/email-delivery.service';
@@ -14,6 +15,11 @@ import {
   resolveTemplateButtons,
   resolveTemplateLocale,
 } from '../../notifications/utils/notification-template-locale.util';
+import {
+  GUEST_LANGUAGE_LOOKBACK,
+  guestLetterLanguage,
+  type GuestLetterLanguage,
+} from '../utils/guest-letter-language.util';
 import { SupportGuestService } from './support-guest.service';
 
 /**
@@ -105,7 +111,10 @@ export class SupportNotificationsService {
 
     try {
       const locale = coerceNotificationLocale(input.user.language);
-      const substHtml = makeSubstitution({ subject: input.subject, ticketId: input.ticketId }, true);
+      // The feed's copy: the cabinet draws the operator's `:slug:` in it — and
+      // would draw the client's too, so their subject goes in as typed
+      // (`literalPlainText`).
+      const substHtml = makeSubstitution({ subject: literalPlainText(input.subject), ticketId: input.ticketId }, true);
       const substRaw = makeSubstitution({ subject: input.subject, ticketId: input.ticketId }, false);
 
       // The operator-editable, seeded template supplies the copy + buttons
@@ -119,25 +128,32 @@ export class SupportNotificationsService {
 
       let title: string;
       let body: string;
+      // The Telegram message — the client's, and the operator's copy of it
+      // (`mirrorToOperatorChat`). The subject in it is the client's own words,
+      // so it goes in as typed (`literalCardText`): the bot resolves the
+      // operator's emoji tokens across the whole message, and a subject
+      // «ключ {{SUB_ID}} не работает» came out «ключ • не работает».
+      let html: string;
       let buttons: NotifyButton[];
       if (template !== null) {
         const loc = resolveTemplateLocale(template, locale);
         title = substHtml(loc.title);
         body = substHtml(loc.body);
+        html = `<b>${fillForTelegram(loc.title, subjectOf(input), false)}</b>\n\n${fillForTelegram(loc.body, subjectOf(input), true)}`;
         buttons = resolveTemplateButtons(template, locale).map((button) =>
           applyTicketDeepLink(button, substRaw, input.ticketId),
         );
       } else {
         const copy = fallbackCopy[locale === 'ru' ? 'ru' : 'en'];
         title = copy.title;
-        body = copy.body(escapeHtml(input.subject));
+        body = copy.body(escapeHtml(literalPlainText(input.subject)));
+        html = `<b>${escapeHtml(title)}</b>\n\n${copy.body(literalCardText(input.subject))}`;
         buttons = [{ text: copy.openButton, webAppPath: `/support?ticket=${input.ticketId}` }];
       }
 
-      // Title is HTML-escaped; injected values inside the body are escaped by
-      // the substitutor while operator markup is preserved (matches the
-      // template fanout convention). The cabinet feed strips HTML on display.
-      const html = `<b>${escapeHtml(title)}</b>\n\n${body}`;
+      // `title` and `body` are the cabinet feed's copy: the feed strips the
+      // markup and reads `&amp;`, `&lt;`, `&gt;` — not the numeric references
+      // the Telegram message writes the subject with.
       await this.userNotifications.create({
         userId: input.user.id,
         type: 'support_reply',
@@ -204,10 +220,20 @@ export class SupportNotificationsService {
           status: true,
           guestId: true,
           guest: { select: { id: true, email: true, expiresAt: true } },
+          // The guest's own messages, newest first: the letter is in the
+          // language the guest last wrote in (`guestLetterLanguage`).
+          messages: {
+            where: { authorType: 'USER' },
+            orderBy: { createdAt: 'desc' },
+            take: GUEST_LANGUAGE_LOOKBACK,
+            select: { metadata: true },
+          },
         },
       });
       const email = ticket?.guest?.email?.trim();
       if (!ticket || !ticket.guest || !email) return; // no contact → polling only
+      const language = guestLetterLanguage(ticket.messages);
+      const copy = GUEST_REPLY_EMAIL[language];
 
       // SMTP off — the default install: there is no letter to send, so there is
       // nothing to mint a link for, nothing to write and nothing to warn about
@@ -256,10 +282,12 @@ export class SupportNotificationsService {
           token,
           payload: {
             to: email,
-            subject: GUEST_REPLY_EMAIL.subject,
+            subject: copy.subject,
             templateType: '__support_guest_reply__',
             variables: {},
-            rawHtml: buildGuestReplyEmail(ticket.subject, way),
+            rawHtml: buildGuestReplyEmail(ticket.subject, way, copy),
+            // The letter's `lang`, for the reader's mail client and screen reader.
+            locale: language,
             ...(date === null ? {} : { date }),
           },
         };
@@ -395,6 +423,37 @@ function makeSubstitution(
     );
 }
 
+/** What a ticket card's placeholders are filled with. */
+function subjectOf(input: { readonly subject: string; readonly ticketId: string }): {
+  readonly subject: string;
+  readonly ticketId: string;
+} {
+  return { subject: input.subject, ticketId: input.ticketId };
+}
+
+/**
+ * A template line for the Telegram message, its `{{subject}}`/`{{ticketId}}`
+ * filled AS TYPED (`literalCardText`), so the bot's emoji pass cannot read the
+ * client's subject as the operator's tokens. The operator's own words stay as
+ * they were: a body is HTML the operator wrote (`templateIsHtml`), a title is
+ * text and escaped.
+ */
+function fillForTelegram(
+  template: string,
+  ctx: { readonly subject: string; readonly ticketId: string },
+  templateIsHtml: boolean,
+): string {
+  const words = (text: string): string => (templateIsHtml ? text : escapeHtml(text));
+  let out = '';
+  let last = 0;
+  for (const match of template.matchAll(/\{\{\s*(subject|ticketId)\s*\}\}/g)) {
+    out += words(template.slice(last, match.index));
+    out += literalCardText(match[1] === 'ticketId' ? ctx.ticketId : ctx.subject);
+    last = (match.index ?? 0) + match[0].length;
+  }
+  return out + words(template.slice(last));
+}
+
 /**
  * Substitute `{{subject}}`/`{{ticketId}}` placeholders in a resolved button and
  * auto-append the ticket id to a bare `/support` Mini App deep-link so the
@@ -431,28 +490,57 @@ function escapeHtml(input: string): string {
 
 // ── Guest email continuity ─────────────────────────────────────────────────
 
-// Russian only: a guest has no language on record (the conversation is opened
-// without an account, and the cabinet sends none), so there is nothing to pick
-// an English letter by.
-const GUEST_REPLY_EMAIL = {
-  subject: 'Поддержка ответила на ваше обращение',
-  button: 'Открыть переписку',
-  body: (subject: string): string =>
-    `По вашему обращению «${subject}» есть новый ответ от поддержки. ` +
-    `Нажмите кнопку ниже, чтобы вернуться к переписке.`,
+/** The words of the guest reply letter, in one language. */
+interface GuestReplyEmailCopy {
+  readonly subject: string;
+  readonly button: string;
+  readonly body: (subject: string) => string;
   /** No cabinet address, so no button: the letter says where the reply is instead. */
-  bodyWithoutButton: (subject: string): string =>
-    `По вашему обращению «${subject}» есть новый ответ от поддержки. ` +
-    `Он ждёт вас в чате поддержки на сайте.`,
+  readonly bodyWithoutButton: (subject: string) => string;
   /**
    * The guest's access has ended (`expiresAt`) or the conversation is closed:
    * no link, code or credential opens it any more. The letter does not carry
    * the reply itself, so all it can honestly do is say so.
    */
-  bodyUnreachable: (subject: string): string =>
-    `По вашему обращению «${subject}» есть новый ответ от поддержки, ` +
-    `но открыть переписку на сайте больше нельзя. ` +
-    `Чтобы продолжить, напишите в поддержку на сайте ещё раз.`,
+  readonly bodyUnreachable: (subject: string) => string;
+}
+
+/**
+ * In the language the guest last wrote in (`guestLetterLanguage`): the guest
+ * page sends its own. A conversation from a cabinet that sends none, or a
+ * language the letter is not written in, gets the Russian letter, which was the
+ * only one there was. The English words are the ones the cabinet's guest page
+ * uses: «Open conversation», a «request».
+ */
+const GUEST_REPLY_EMAIL: Readonly<Record<GuestLetterLanguage, GuestReplyEmailCopy>> = {
+  ru: {
+    subject: 'Поддержка ответила на ваше обращение',
+    button: 'Открыть переписку',
+    body: (subject) =>
+      `По вашему обращению «${subject}» есть новый ответ от поддержки. ` +
+      `Нажмите кнопку ниже, чтобы вернуться к переписке.`,
+    bodyWithoutButton: (subject) =>
+      `По вашему обращению «${subject}» есть новый ответ от поддержки. ` +
+      `Он ждёт вас в чате поддержки на сайте.`,
+    bodyUnreachable: (subject) =>
+      `По вашему обращению «${subject}» есть новый ответ от поддержки, ` +
+      `но открыть переписку на сайте больше нельзя. ` +
+      `Чтобы продолжить, напишите в поддержку на сайте ещё раз.`,
+  },
+  en: {
+    subject: 'Support replied to your request',
+    button: 'Open conversation',
+    body: (subject) =>
+      `There is a new reply from support to your request “${subject}”. ` +
+      `Press the button below to return to the conversation.`,
+    bodyWithoutButton: (subject) =>
+      `There is a new reply from support to your request “${subject}”. ` +
+      `It is waiting for you in the support chat on the site.`,
+    bodyUnreachable: (subject) =>
+      `There is a new reply from support to your request “${subject}”, ` +
+      `but the conversation can no longer be opened on the site. ` +
+      `To continue, write to support on the site again.`,
+  },
 };
 
 /**
@@ -471,8 +559,7 @@ type GuestLetterWay =
  * the letter used to say «Нажмите кнопку ниже» on every install while no
  * install ever had the button.
  */
-function buildGuestReplyEmail(subject: string, way: GuestLetterWay): string {
-  const copy = GUEST_REPLY_EMAIL;
+function buildGuestReplyEmail(subject: string, way: GuestLetterWay, copy: GuestReplyEmailCopy): string {
   const body =
     way.kind === 'button'
       ? copy.body(subject)
