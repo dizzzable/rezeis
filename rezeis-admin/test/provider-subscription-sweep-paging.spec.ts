@@ -11,8 +11,7 @@ import {
 } from '../src/modules/payments/services/provider-subscription.service';
 
 /**
- * The stranded sweep reads EVERY live provider subscription (R3-support-money
- * laterList 1).
+ * The stranded sweep reads EVERY live provider subscription.
  *
  * It read the oldest 500 once. The oldest are exactly the rows that stay: the
  * healthy ones it leaves alone, and the stranded ones the provider will not

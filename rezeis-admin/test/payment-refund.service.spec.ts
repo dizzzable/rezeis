@@ -363,7 +363,7 @@ describe('PaymentRefundService.refundTransaction', () => {
       requestMetadata: REQUEST_META,
     });
     assert.deepEqual(reversals, ['tx-1']);
-    // The operator's answer does not wait on Platega or RollyPay (R5 F3): the
+    // The operator's answer does not wait on Platega or RollyPay: the
     // provider is asked after it, and the card follows.
     assert.deepEqual(reversalOptions, [{ deferAutopay: true }]);
   });

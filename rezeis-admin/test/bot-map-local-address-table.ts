@@ -1,6 +1,6 @@
 /**
  * What an address on this machine is — the table reiwa's test pins its own
- * `isLocalAddress` with (P1, `main-keyboard.ts`), shared by the specs that pin
+ * `isLocalAddress` with (`main-keyboard.ts`), shared by the specs that pin
  * the panel's: the route model's two copies (`bot-map-route-parity.spec.ts`)
  * and the composer's screen buttons (`bot-map-composer.service.spec.ts`).
  *

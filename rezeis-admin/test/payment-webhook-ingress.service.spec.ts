@@ -539,7 +539,7 @@ describe('PaymentWebhookIngressService on RollyPay subscription charges', () => 
 });
 
 describe('PaymentWebhookIngressService on Platega subscription callbacks', () => {
-  // Wave 6: a chargeback on a subscription charge is the refund of one of its
+  // A chargeback on a subscription charge is the refund of one of its
   // payments. It used to reach `sync` alone, which counts charges and never
   // reverses one; it now goes to the chargeback handling, which runs the
   // refund reversal and ends the autopay.

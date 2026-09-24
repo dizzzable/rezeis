@@ -69,9 +69,10 @@ interface PostedRequest {
 type CabinetLinks = Pick<ReiwaAdvertisingLinkConfigService, 'resolveCabinetWebBaseUrl'>;
 
 /**
- * P3's resolver itself, on the configuration the environment gives it, with
- * the cabinet unreachable (`reiwaApiBaseUrl: null`), so what it answers is the
- * `.env` tail of its chain; `overrides` changes one field.
+ * The cabinet-address resolver itself (`ReiwaAdvertisingLinkConfigService`),
+ * on the configuration the environment gives it, with the cabinet unreachable
+ * (`reiwaApiBaseUrl: null`), so what it answers is the `.env` tail of its
+ * chain; `overrides` changes one field.
  */
 function realResolver(overrides: Record<string, unknown> = {}): ReiwaAdvertisingLinkConfigService {
   return new ReiwaAdvertisingLinkConfigService({

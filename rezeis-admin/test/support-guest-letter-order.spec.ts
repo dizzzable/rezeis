@@ -232,7 +232,7 @@ describe('the order a guest sees their letters in', () => {
   }
 
   it('is the order of the links when an older reply’s letter goes out on a retry, after a newer reply’s', async () => {
-    // The R4 probe: reply 1's first attempt is a transient failure; reply 2's
+    // Reply 1's first attempt is a transient failure; reply 2's
     // letter goes out meanwhile; reply 1's retry goes out after it.
     const panel = buildPanel({ retryDelaysMs: [40] });
     await panel.guestService.createConversation({ subject: 'Оплата', message: 'не прошла', email: 'v@example.com' });
@@ -252,7 +252,7 @@ describe('the order a guest sees their letters in', () => {
 
   it('is the order of the links when the first reply’s session is the slower one', async () => {
     // By `Date` the newest is reply 2's letter, which the links agree with.
-    // (By arrival the slow letter lands last: see the report — a Date cannot
+    // (By arrival the slow letter lands last — a Date cannot
     // follow a session that has not ended yet.)
     const panel = buildPanel();
     await panel.guestService.createConversation({ subject: 'Оплата', message: 'не прошла', email: 'v@example.com' });

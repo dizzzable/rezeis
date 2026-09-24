@@ -24,7 +24,7 @@ import { executeGatewayDataWrites } from './helpers/gateway-data-write-double';
  * ADDITIONAL — a second subscription, or an add-on — was acknowledged as done
  * and never delivered, because its draft used to record the buyer's latest
  * subscription and a claim could not be told from a finished one. Its draft
- * records none now, so it is recovered the same way (R-money laterList 5).
+ * records none now, so it is recovered the same way.
  */
 
 const MINUTE = 60 * 1000;
