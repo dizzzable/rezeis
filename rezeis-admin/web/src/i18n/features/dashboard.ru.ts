@@ -387,6 +387,7 @@ export const ru = {
         user_subscription_extended: 'Продлена подписка',
         user_subscription_plan_migrated: 'Подписка перенесена на другой тариф',
         user_subscription_limits_changed: 'Изменены лимиты подписки',
+        user_subscription_lifetime_restored: 'Бессрочность подписки восстановлена',
         users_export: 'Выгрузка пользователей',
         users_registration_export: 'Выгрузка регистраций',
         blocked_identity_changed: 'Изменён чёрный список',
@@ -425,6 +426,7 @@ export const ru = {
         settings_questPartnerSecrets_update: 'Изменены ключи партнёров заданий',
         settings_customIcons_update: 'Изменены иконки оформления',
         settings_remnawaveCleanupSettings_update: 'Изменены настройки очистки Remnawave',
+        settings_addOnSwitches_update: 'Изменены переключатели учёта докупок',
       },
       entries: {
         import: {

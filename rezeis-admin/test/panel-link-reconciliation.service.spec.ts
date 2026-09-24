@@ -3,10 +3,8 @@ import { describe, it } from 'node:test';
 
 import { SubscriptionStatus } from '@prisma/client';
 
-import {
-  PANEL_ERA_3X,
-  PanelLinkReconciliationService,
-} from '../src/modules/profile-sync/panel-link-reconciliation.service';
+import { PanelLinkReconciliationService } from '../src/modules/profile-sync/panel-link-reconciliation.service';
+import { answerPanelLinkWalkPage, isPanelLinkWalkPage } from './helpers/panel-link-walk-fake';
 
 /**
  * The damaged-row repair, tested against the two things that can go wrong with
@@ -51,11 +49,9 @@ function subscriptionRow(overrides: Record<string, unknown> = {}) {
 }
 
 /**
- * THERE IS NO ERA PROBE LEFT TO STUB. The sweep used to ask the panel which
- * addressing era it spoke and leave both era-dependent arms out unless the
- * answer was a proven `'id'`; 2.x is now refused centrally by
- * `LegacyPanelRefusal`, so there is one era and both arms run unconditionally.
- * `PANEL_ERA_3X` is what every report carries.
+ * THERE IS NO ERA PROBE TO STUB. Remnawave 2.x is refused centrally by
+ * `LegacyPanelRefusal`, so there is one era, both arms run unconditionally, and
+ * the report carries no era at all.
  */
 
 /**
@@ -313,6 +309,15 @@ function prismaHarness(
 
   const client = {
     subscription,
+    // The walk's pages are raw SQL (a regular expression has no Prisma
+    // spelling); the mirror in `helpers/panel-link-walk-fake.ts` answers them
+    // from the same table, and refuses a statement that lost the one spelling
+    // of the population.
+    $queryRaw: async (query: unknown): Promise<Array<Record<string, unknown>>> => {
+      if (!isPanelLinkWalkPage(query)) throw new Error(`unexpected raw query: ${JSON.stringify(query)}`);
+      queries.push('subscription.walkPage');
+      return answerPanelLinkWalkPage(table, query);
+    },
     $transaction: async (callback: (tx: unknown) => Promise<unknown>) => {
       transactions.push(transactions.length);
       return callback({
@@ -450,14 +455,8 @@ function panelHarness(input: {
   };
 }
 
-const SILENT_EVENTS = { info: () => undefined, warn: () => undefined, error: () => undefined };
-
 function service(prisma: PrismaHarness, panel: PanelHarness): PanelLinkReconciliationService {
-  return new PanelLinkReconciliationService(
-    prisma.client as never,
-    panel.api as never,
-    SILENT_EVENTS as never,
-  );
+  return new PanelLinkReconciliationService(prisma.client as never, panel.api as never);
 }
 
 /** Every row the report mentions, repaired or not, in the order it reports them. */
@@ -525,15 +524,11 @@ describe('PanelLinkReconciliationService — selection', () => {
   });
 });
 
-describe('PanelLinkReconciliationService — panel era', () => {
-  it('reports the one era it can be talking to, without asking the panel', async () => {
-    // The sweep used to probe the panel and leave BOTH era-dependent arms out
-    // unless the answer was a proven `'id'`, because a uuid-shaped identity is
-    // CORRECT on 2.x and rewriting one there strands the row the repair claimed
-    // to fix. `LegacyPanelRefusal` turns a 2.x panel away centrally now, so the
-    // probe had nothing left to decide — and the harness below has no version
-    // method on it at all, so a build that reintroduced the probe fails here
-    // rather than passing quietly.
+describe('PanelLinkReconciliationService — identities no supported panel issued', () => {
+  it('runs both arms without asking the panel which era it is', async () => {
+    // The harness has no version method on it at all, so a build that
+    // reintroduced an era probe fails here rather than passing quietly — and the
+    // report carries no era field to fill.
     const prisma = prismaHarness([
       subscriptionRow({ id: 'sub-a-missing-identity' }),
       subscriptionRow({ id: 'sub-b-stale', remnawaveId: DEAD_UUID }),
@@ -542,8 +537,8 @@ describe('PanelLinkReconciliationService — panel era', () => {
 
     const report = await service(prisma, panel).reconcile({ dryRun: false });
 
-    assert.equal(report.panelEra, PANEL_ERA_3X);
-    assert.equal(report.staleIdentityScanned, 1, 'the stale arm runs unconditionally');
+    assert.equal('panelEra' in report, false);
+    assert.equal(report.staleIdentityScanned, 1, 'the non-decimal arm runs unconditionally');
     assert.equal(report.linked, 2);
     assert.deepEqual(panel.calls, [
       'resolveUser',
@@ -553,7 +548,27 @@ describe('PanelLinkReconciliationService — panel era', () => {
     ]);
   });
 
-  it('selects the stale uuid on a 3.x panel and rewrites it to the identity the panel reports', async () => {
+  it('selects every identity that is not a decimal — an empty string and a donor\'s junk as well as a uuid', async () => {
+    // The same test the destructive paths refuse on (`^\d+$`): a row they refuse
+    // must be a row this walk tries to prove, or the operator is refused with
+    // nothing to fix it by.
+    const prisma = prismaHarness([
+      subscriptionRow({ id: 'sub-a-empty', remnawaveId: '' }),
+      subscriptionRow({ id: 'sub-b-junk', userId: 'user-2', remnawaveId: 'imported-abc' }),
+      subscriptionRow({ id: 'sub-c-letters', userId: 'user-3', remnawaveId: 'abc' }),
+      subscriptionRow({ id: 'sub-d-decimal', userId: 'user-4', remnawaveId: '7777', remnawavePanelId: 7777 }),
+      subscriptionRow({ id: 'sub-e-signed', userId: 'user-5', remnawaveId: '+12' }),
+    ]);
+    const panel = panelHarness({ resolve: () => null });
+
+    const report = await service(prisma, panel).reconcile({ dryRun: true });
+
+    assert.deepEqual(reportedIds(report), ['sub-a-empty', 'sub-b-junk', 'sub-c-letters', 'sub-e-signed']);
+    assert.equal(report.staleIdentityScanned, 4);
+    for (const row of report.unrepaired) assert.equal(row.reasonCode, 'notFound', row.subscriptionId);
+  });
+
+  it('selects the stale uuid and rewrites it to the identity the panel reports', async () => {
     const prisma = prismaHarness([
       subscriptionRow({ id: 'sub-a-stale', remnawaveId: DEAD_UUID }),
     ]);
@@ -561,7 +576,6 @@ describe('PanelLinkReconciliationService — panel era', () => {
 
     const report = await service(prisma, panel).reconcile({ dryRun: false });
 
-    assert.equal(report.panelEra, '3.x');
     assert.equal(report.staleIdentityScanned, 1);
     assert.equal(report.linked, 1);
     const row = report.repaired[0];
@@ -576,7 +590,7 @@ describe('PanelLinkReconciliationService — panel era', () => {
     assert.deepEqual(panel.calls, ['resolveUser', 'getUserById']);
   });
 
-  it('never selects a decimal identity on a 3.x panel — that row is healthy', async () => {
+  it('never selects a decimal identity — that row is healthy', async () => {
     const prisma = prismaHarness([
       // A different profile from the one the stale row resolves to, so this
       // case tests the SHAPE predicate and not the conflict probe.
@@ -1339,7 +1353,7 @@ describe('PanelLinkReconciliationService — duplicates that already name their 
     // rows is broken), one aggregate per identity angle, one `IN` lookup for the
     // members those aggregates named.
     assert.deepEqual(small.queries, [
-      'subscription.findMany',
+      'subscription.walkPage',
       'subscription.groupBy',
       'subscription.groupBy',
       'subscription.findMany',
@@ -1362,7 +1376,7 @@ describe('PanelLinkReconciliationService — duplicates that already name their 
 
     assert.equal(report.sharedIdentityPairs, 0);
     assert.deepEqual(prisma.queries, [
-      'subscription.findMany',
+      'subscription.walkPage',
       'subscription.groupBy',
       'subscription.groupBy',
     ]);
@@ -1635,7 +1649,7 @@ describe('PanelLinkReconciliationService — reporting', () => {
     ]);
     const panel = panelHarness({});
 
-    const report = await service(prisma, panel).reconcile({ dryRun: true, chunkSize: 1 });
+    const report = await service(prisma, panel).reconcile({ dryRun: true, pageSize: 1 });
 
     assert.equal(report.scanned, 3, 'the walk must reach every row across its chunks');
     assert.equal(report.hasMore, false, 'nothing is left, so nothing may be promised');
@@ -1654,7 +1668,7 @@ describe('PanelLinkReconciliationService — reporting', () => {
     ]);
     const panel = panelHarness({});
 
-    const report = await service(prisma, panel).reconcile({ dryRun: true, chunkSize: 1 });
+    const report = await service(prisma, panel).reconcile({ dryRun: true, pageSize: 1 });
 
     assert.deepEqual(
       reportedIds(report),
@@ -1675,12 +1689,363 @@ describe('PanelLinkReconciliationService — reporting', () => {
     ]);
     const panel = panelHarness({});
 
-    const report = await service(prisma, panel).reconcile({ dryRun: true, limit: 2, chunkSize: 1 });
+    const report = await service(prisma, panel).reconcile({ dryRun: true, limit: 2, pageSize: 1 });
 
     assert.equal(report.scanned, 2);
     assert.equal(report.hasMore, true);
     assert.equal(report.nextCursor, 'sub-b');
     assert.deepEqual(report.repaired.map((row) => row.subscriptionId), ['sub-a', 'sub-b']);
+  });
+});
+
+/**
+ * WHAT THE AUTOMATIC CHECK READS OFF A ROW. The check lists every row it could
+ * not prove, with the reason in the operator's language, so each reason travels
+ * as a CODE a screen translates — a screen that parsed the English sentence
+ * would break on its first rewording — together with the other subscription or
+ * customer the reason is about.
+ */
+describe('PanelLinkReconciliationService — the reason travels as a code', () => {
+  it('codes a profile the panel does not know, and one that vanished between resolve and read', async () => {
+    const prisma = prismaHarness([
+      subscriptionRow({ id: 'sub-a-unknown', configUrl: 'https://sub.example.test/GONEGONEGONE' }),
+      subscriptionRow({ id: 'sub-b-vanished', userId: 'user-2' }),
+    ]);
+    const panel = panelHarness({
+      resolve: (selector) =>
+        (selector as { shortUuid?: string }).shortUuid === 'GONEGONEGONE'
+          ? null
+          : { id: 5150, shortUuid: 'AAAshortAAA', username: 'rz_alice_sub' },
+      profile: () => ({ kind: 'missing' }),
+    });
+
+    const report = await service(prisma, panel).reconcile({ dryRun: false });
+
+    assert.deepEqual(
+      report.unrepaired.map((row) => [row.subscriptionId, row.reasonCode]),
+      [
+        ['sub-a-unknown', 'notFound'],
+        ['sub-b-vanished', 'profileGone'],
+      ],
+    );
+    assert.equal(report.panelUnavailable, false, 'a missing profile is an answer, not an outage');
+  });
+
+  it('codes a profile owned by another customer and names that customer', async () => {
+    const prisma = prismaHarness([subscriptionRow()]);
+    const panel = panelHarness({
+      profile: () => ({ kind: 'ok', user: { description: 'reiwa_id: user-999', username: 'rz_alice_sub' } }),
+    });
+
+    const report = await service(prisma, panel).reconcile({ dryRun: false });
+
+    assert.equal(report.unrepaired[0]?.reasonCode, 'ownedByOther');
+    assert.equal(report.unrepaired[0]?.otherUserId, 'user-999');
+  });
+
+  it('codes a profile nothing proves as noOwnerProof, with no customer to name', async () => {
+    for (const description of ['imported from a donor panel', 'reiwa_id: user-1\nreiwa_id: user-999']) {
+      const prisma = prismaHarness([subscriptionRow()]);
+      const panel = panelHarness({
+        profile: () => ({ kind: 'ok', user: { description, username: 'rz_alice_sub' } }),
+      });
+
+      const report = await service(prisma, panel).reconcile({ dryRun: false });
+
+      assert.equal(report.unrepaired[0]?.reasonCode, 'noOwnerProof', description);
+      assert.equal(report.unrepaired[0]?.otherUserId, null, description);
+      assert.deepEqual(prisma.writes, [], description);
+    }
+  });
+
+  it('names the holder of a conflict and the partner of a pair', async () => {
+    const conflict = prismaHarness([
+      subscriptionRow({ id: 'sub-a-mine', userId: 'user-1', remnawaveId: DEAD_UUID }),
+      subscriptionRow({ id: 'sub-z-other', userId: 'user-9', remnawaveId: '5150', remnawavePanelId: 5150 }),
+    ]);
+    const conflictReport = await service(conflict, panelHarness({})).reconcile({ dryRun: true });
+    assert.equal(conflictReport.unrepaired[0]?.reasonCode, 'profileTaken');
+    assert.equal(conflictReport.unrepaired[0]?.otherSubscriptionId, 'sub-z-other');
+    assert.equal(conflictReport.unrepaired[0]?.otherUserId, 'user-9');
+
+    const pair = prismaHarness([
+      subscriptionRow({ id: 'sub-a-original', remnawaveId: DEAD_UUID }),
+      subscriptionRow({ id: 'sub-z-duplicate', remnawaveId: '5150', remnawavePanelId: 5150 }),
+    ]);
+    const pairReport = await service(pair, panelHarness({})).reconcile({ dryRun: true });
+    assert.equal(pairReport.unrepaired[0]?.reasonCode, 'duplicatePair');
+    assert.equal(pairReport.unrepaired[0]?.otherSubscriptionId, 'sub-z-duplicate');
+  });
+
+  it('codes a row with nowhere to look and a panel that agrees with the row', async () => {
+    const noRoute = prismaHarness([
+      subscriptionRow({ id: 'sub-a-no-route', remnawaveId: DEAD_UUID, remnawavePanelUsername: null, configUrl: null }),
+    ]);
+    const noRouteReport = await service(noRoute, panelHarness({})).reconcile({ dryRun: false });
+    assert.equal(noRouteReport.unrepaired[0]?.reasonCode, 'noRoute');
+
+    const agrees = prismaHarness([subscriptionRow({ id: 'sub-a-agrees', remnawaveId: DEAD_UUID })]);
+    const agreesReport = await service(
+      agrees,
+      panelHarness({ resolve: () => ({ id: DEAD_UUID, shortUuid: 'AAAshortAAA', username: 'rz_alice_sub' }) }),
+    ).reconcile({ dryRun: false });
+    assert.equal(agreesReport.unrepaired[0]?.reasonCode, 'panelAgrees');
+  });
+
+  it('carries no reason code on a row it linked', async () => {
+    const prisma = prismaHarness([subscriptionRow()]);
+    const report = await service(prisma, panelHarness({})).reconcile({ dryRun: false });
+    assert.equal(report.repaired[0]?.outcome, 'linked');
+    assert.equal(report.repaired[0]?.reasonCode, null);
+  });
+
+  it('marks the rows it asked about apart from the ones a pair or a shared identity drags in', async () => {
+    const prisma = prismaHarness([
+      subscriptionRow({ id: 'sub-a-original', remnawaveId: DEAD_UUID }),
+      subscriptionRow({ id: 'sub-z-duplicate', remnawaveId: '5150', remnawavePanelId: 5150 }),
+      subscriptionRow({ id: 'sub-m-shared-1', userId: 'user-5', remnawaveId: '6000', remnawavePanelId: 6000 }),
+      subscriptionRow({ id: 'sub-n-shared-2', userId: 'user-5', remnawaveId: '6000', remnawavePanelId: 6000 }),
+    ]);
+
+    const report = await service(prisma, panelHarness({})).reconcile({ dryRun: true });
+
+    assert.deepEqual(
+      report.unrepaired.map((entry) => [entry.subscriptionId, entry.scanned]),
+      [
+        ['sub-a-original', true],
+        ['sub-z-duplicate', false],
+        ['sub-m-shared-1', false],
+        ['sub-n-shared-2', false],
+      ],
+    );
+  });
+});
+
+/**
+ * `walkComplete` is what the automatic check schedules its retry on: `true`
+ * only where the walk SAW its selection end. A cap, a budget or an outage is
+ * work left for the next pass.
+ */
+describe('PanelLinkReconciliationService — whether the walk finished', () => {
+  const rows = () =>
+    prismaHarness([
+      subscriptionRow({ id: 'sub-a' }),
+      subscriptionRow({ id: 'sub-b', userId: 'user-2' }),
+      subscriptionRow({ id: 'sub-c', userId: 'user-3' }),
+    ]);
+
+  it('finished: the selection ran out, across pages', async () => {
+    const report = await service(rows(), panelHarness({})).reconcile({ dryRun: true, pageSize: 1 });
+    assert.equal(report.walkComplete, true);
+  });
+
+  it('finished: an empty selection', async () => {
+    const report = await service(prismaHarness([]), panelHarness({})).reconcile({ dryRun: true });
+    assert.equal(report.walkComplete, true);
+    assert.equal(report.hasMore, false);
+  });
+
+  it('not finished: the row cap', async () => {
+    const report = await service(rows(), panelHarness({})).reconcile({ dryRun: true, limit: 2 });
+    assert.equal(report.walkComplete, false);
+    assert.equal(report.hasMore, true);
+  });
+
+  it('finished: the cap met the last row exactly', async () => {
+    const report = await service(rows(), panelHarness({})).reconcile({ dryRun: true, limit: 3 });
+    assert.equal(report.walkComplete, true);
+    assert.equal(report.hasMore, false);
+  });
+
+  it('not finished: Remnawave stopped answering', async () => {
+    const report = await service(rows(), panelHarness({ resolve: () => null, profile: () => ({ kind: 'unavailable' }) }))
+      .reconcile({ dryRun: true });
+    // `resolve: () => null` answers "no such profile" for every row: an answer.
+    assert.equal(report.walkComplete, true);
+
+    const outage = panelHarness({});
+    (outage.api as { resolveUser: () => Promise<unknown> }).resolveUser = async () => ({
+      kind: 'network',
+      detail: 'ETIMEDOUT',
+    });
+    const stopped = await service(rows(), outage).reconcile({ dryRun: true });
+    assert.equal(stopped.walkComplete, false);
+    assert.equal(stopped.panelUnavailable, true);
+  });
+});
+
+/**
+ * THE `subscription_id` LINE (owner's decision, 24.09.2026): when a profile says
+ * which subscription it was made for, an automatic link gives it to that one or
+ * to none. The `reiwa_id` line still decides WHOSE it is.
+ */
+describe('PanelLinkReconciliationService — the subscription line narrows an automatic link', () => {
+  it('refuses a profile of this customer that names ANOTHER of their subscriptions', async () => {
+    const prisma = prismaHarness([subscriptionRow({ id: 'sub-fits' })]);
+    const panel = panelHarness({
+      profile: () => ({
+        kind: 'ok',
+        user: { description: 'reiwa_id: user-1\nsubscription_id: sub-other', username: 'rz_alice_sub' },
+      }),
+    });
+
+    const preview = await service(prisma, panel).reconcile({ dryRun: true });
+    assert.equal(preview.wouldLink, 0, 'the preview does not promise it either');
+    assert.equal(preview.unrepaired[0]?.outcome, 'markedForOtherSubscription');
+
+    const report = await service(prisma, panel).reconcile({ dryRun: false });
+    assert.equal(report.linked, 0);
+    const row = report.unrepaired[0];
+    assert.equal(row?.outcome, 'markedForOtherSubscription');
+    assert.equal(row?.reasonCode, 'markedForOtherSubscription');
+    assert.equal(row?.otherSubscriptionId, 'sub-other');
+    assert.deepEqual(prisma.writes, []);
+    assert.equal(prisma.table[0]['remnawaveId'], null);
+  });
+
+  it('links a profile whose subscription line names this very subscription', async () => {
+    const prisma = prismaHarness([subscriptionRow({ id: 'sub-fits' })]);
+    const panel = panelHarness({
+      profile: () => ({
+        kind: 'ok',
+        user: { description: 'reiwa_id: user-1\nsubscription_id: sub-fits', username: 'rz_alice_sub' },
+      }),
+    });
+
+    const report = await service(prisma, panel).reconcile({ dryRun: false });
+
+    assert.equal(report.linked, 1);
+    assert.equal(prisma.table[0]['remnawaveId'], '5150');
+  });
+
+  it('refuses when two subscription lines disagree, even if one of them names this row', async () => {
+    const prisma = prismaHarness([subscriptionRow({ id: 'sub-fits' })]);
+    const panel = panelHarness({
+      profile: () => ({
+        kind: 'ok',
+        user: {
+          description: 'reiwa_id: user-1\nsubscription_id: sub-fits\nsubscription_id: sub-other',
+          username: 'rz_alice_sub',
+        },
+      }),
+    });
+
+    const report = await service(prisma, panel).reconcile({ dryRun: false });
+
+    assert.equal(report.linked, 0);
+    assert.equal(report.unrepaired[0]?.otherSubscriptionId, 'sub-other');
+  });
+});
+
+/**
+ * ONE FAILED READ ENDS THE WALK. The automatic check runs by itself, and a
+ * panel that is down would otherwise be asked once per row of a backlog — the
+ * outage made louder, nothing learned. The row that met the outage is reported
+ * but not FINISHED: the cursor stays before it, so the retry asks about it first.
+ */
+describe('PanelLinkReconciliationService — a panel that stops answering', () => {
+  const three = () =>
+    prismaHarness([
+      subscriptionRow({ id: 'sub-a' }),
+      subscriptionRow({ id: 'sub-b', userId: 'user-2' }),
+      subscriptionRow({ id: 'sub-c', userId: 'user-3' }),
+    ]);
+
+  it('stops at the first resolve the panel could not answer, and hands back the row before it', async () => {
+    const prisma = three();
+    let asked = 0;
+    const panel = panelHarness({});
+    const api = panel.api as { resolveUser: (selector: unknown) => Promise<unknown> };
+    const answering = api.resolveUser;
+    api.resolveUser = async (selector: unknown) => {
+      asked += 1;
+      if (asked === 2) {
+        panel.calls.push('resolveUser');
+        return { kind: 'network', detail: 'ECONNREFUSED' };
+      }
+      return answering(selector);
+    };
+
+    const report = await service(prisma, panel).reconcile({ dryRun: false });
+
+    assert.equal(asked, 2, 'the third row is never asked about');
+    assert.equal(report.panelUnavailable, true);
+    assert.equal(report.hasMore, true);
+    assert.equal(report.nextCursor, 'sub-a', 'the continuation starts at the row the outage met');
+    assert.equal(report.linked, 1);
+    assert.deepEqual(
+      report.unrepaired.map((row) => [row.subscriptionId, row.reasonCode]),
+      [['sub-b', 'panelUnavailable']],
+    );
+    assert.equal(prisma.table[1]['remnawaveId'], null);
+    assert.equal(prisma.table[2]['remnawaveId'], null);
+  });
+
+  it('stops the same way when the profile read-back cannot be made', async () => {
+    const prisma = three();
+    const panel = panelHarness({ profile: () => ({ kind: 'unavailable' }) });
+
+    const report = await service(prisma, panel).reconcile({ dryRun: false });
+
+    assert.deepEqual(panel.calls, ['resolveUser', 'getUserById'], 'one row asked, then the walk stops');
+    assert.equal(report.panelUnavailable, true);
+    assert.equal(report.hasMore, true);
+    assert.equal(report.nextCursor, null, 'no row was finished');
+    assert.equal(report.unrepaired[0]?.reasonCode, 'panelUnavailable');
+  });
+
+  it('walks everything and says the panel answered when it did', async () => {
+    const prisma = three();
+    const report = await service(prisma, panelHarness({})).reconcile({ dryRun: false });
+    assert.equal(report.panelUnavailable, false);
+    assert.equal(report.hasMore, false);
+    assert.equal(report.scanned, 3, 'every row was asked about');
+    // The stub's one profile names user-1: the other two customers are refused
+    // by its reiwa_id line, not by an outage.
+    assert.deepEqual(
+      report.unrepaired.map((row) => row.reasonCode),
+      ['ownedByOther', 'ownedByOther'],
+    );
+  });
+});
+
+describe('PanelLinkReconciliationService — a time budget', () => {
+  it('stops before the next row once the budget is spent, and continues from the last row finished', async () => {
+    const prisma = prismaHarness([
+      subscriptionRow({ id: 'sub-a' }),
+      subscriptionRow({ id: 'sub-b', userId: 'user-2' }),
+    ]);
+    const panel = panelHarness({});
+    const realNow = Date.now;
+    let now = realNow();
+    Date.now = () => now;
+    const api = panel.api as { getUserById: (id: number) => Promise<unknown> };
+    const reading = api.getUserById;
+    api.getUserById = async (id: number) => {
+      now += 60_000;
+      return reading(id);
+    };
+    try {
+      const report = await service(prisma, panel).reconcile({ dryRun: true, budgetMs: 30_000 });
+
+      assert.deepEqual(report.repaired.map((row) => row.subscriptionId), ['sub-a']);
+      assert.equal(report.scanned, 1);
+      assert.equal(report.hasMore, true);
+      assert.equal(report.nextCursor, 'sub-a');
+      assert.equal(report.panelUnavailable, false);
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
+  it('has no budget unless one is given', async () => {
+    const prisma = prismaHarness([
+      subscriptionRow({ id: 'sub-a' }),
+      subscriptionRow({ id: 'sub-b', userId: 'user-2' }),
+    ]);
+    const report = await service(prisma, panelHarness({})).reconcile({ dryRun: true });
+    assert.equal(report.scanned, 2);
+    assert.equal(report.hasMore, false);
   });
 });
 

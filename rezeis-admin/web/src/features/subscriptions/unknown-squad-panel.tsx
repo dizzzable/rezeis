@@ -20,10 +20,12 @@
  *
  * This answers for the whole install, at any moment, and writes nothing.
  *
- * WHY IT LIVES HERE. Same page as the two repair panels, same population — the
- * rows are subscriptions and the tiles at the top of this page count the states
- * those rows are in. It asks for `plans:view`, which is what its endpoint
- * demands, and renders nothing without it.
+ * WHERE IT LIVES. «Подписки» → «Инструменты» → «Подписки на сквадах, которых
+ * нет в панели» (`tools/subscription-tools-sheet.tsx`): the rows are
+ * subscriptions, and the sheet gathers every tool that looks at many of them at
+ * once. It asks for `plans:view`, which is what its endpoint demands — the one
+ * tab of that sheet that does not need `subscriptions:edit` — and renders
+ * nothing without it.
  *
  * THE PLANS ARE LISTED TOO, and that is not padding: repairing subscriptions
  * one at a time while the plan still holds the dead uuid means the next

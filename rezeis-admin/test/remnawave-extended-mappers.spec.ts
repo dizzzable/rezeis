@@ -7,16 +7,16 @@
  * `monthlyCost`, the assertion passed, and the operator still saw a blank
  * column because Remnawave has never sent that field.
  *
- * So every fixture below is pinned to the record it stands for. On the 2.x
- * blocks that pin is the `required` array quoted verbatim from
- * `Remnawave API v274.json` / `Remnawave API v280.json`, and a guard asserts
- * the fixture's own key set is EXACTLY that array — no more, no less. Padding
- * a fixture with a field the panel does not send now fails loudly instead of
- * quietly vouching for a mapper that reads it.
+ * So every fixture below is pinned to the record it stands for. On the
+ * spec-quoted blocks that pin is the `required` array quoted verbatim from
+ * `Remnawave API v3.3.2.json` / `Remnawave API v3.4.3.json` — the panels rezeis
+ * serves — and a guard asserts the fixture's own key set is EXACTLY that
+ * array — no more, no less. Padding a fixture with a field the panel does not
+ * send now fails loudly instead of quietly vouching for a mapper that reads it.
  *
- * Scope is 2.7.4, 2.8.0 and 3.2.1. The 3.2.1 block is pinned differently and
- * says so where it starts: there is no `Remnawave API v321.json` to quote, so
- * it is pinned against a payload measured on a live 3.2.1 panel instead.
+ * The 3.2.1 block is pinned differently and says so where it starts: there is
+ * no `Remnawave API v321.json` to quote, so it is pinned against a payload
+ * measured on a live 3.2.1 panel instead.
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -28,10 +28,12 @@ import { describe, it } from 'node:test';
 import { ExtendedUsersSchema, HwidUserDeviceSchema } from '@remnawave/contract-panel-3.2.1';
 
 import {
+  mapHwidTopUser,
   mapInfraProvider,
   mapNodePlugin,
   mapSnippet,
   mapSubpageConfig,
+  mapSubscriptionSettings,
   mapUserSummary,
 } from '../src/modules/remnawave/services/remnawave-extended-mappers';
 
@@ -74,12 +76,54 @@ function assertMatchesCapturedRecord(
   );
 }
 
+// ── HWID top users ──────────────────────────────────────────────────────────
+//
+// `GET /api/hwid/devices/top-users` → `response.users[]`, whose `required` is
+// identical in 3.3.2 and 3.4.3: ["id","username","devicesCount"]. No uuid of
+// any spelling — the `userUuid` 2.x sent beside the id is gone.
+
+const TOP_USER_REQUIRED = ['id', 'username', 'devicesCount'] as const;
+
+const TOP_USER = { id: 4471, username: 'rz_user_4471', devicesCount: 9 };
+
+describe('mapHwidTopUser', () => {
+  it('keys a row by its numeric id, in the decimal form remnawaveId holds', () => {
+    assertMatchesSpecRecord(TOP_USER, TOP_USER_REQUIRED, 'hwidTopUser');
+
+    // `userUuid` is the SPA's name for the field, not a uuid.
+    assert.deepStrictEqual(mapHwidTopUser(TOP_USER), {
+      userUuid: '4471',
+      username: 'rz_user_4471',
+      telegramId: null,
+      devicesCount: 9,
+      lastSeenAt: null,
+    });
+  });
+
+  it('reads no uuid spelling — a row that still carries one is keyed by its id', () => {
+    for (const legacy of [
+      { userUuid: 'b7f1e0c2-1111-4222-8333-444455556666' },
+      { userId: 'b7f1e0c2-1111-4222-8333-444455556666' },
+      { uuid: 'b7f1e0c2-1111-4222-8333-444455556666' },
+      { user: { uuid: 'b7f1e0c2-1111-4222-8333-444455556666', id: 1 } },
+    ]) {
+      assert.equal(mapHwidTopUser({ ...TOP_USER, ...legacy }).userUuid, '4471', JSON.stringify(legacy));
+    }
+  });
+
+  it('does not invent an identity from an id that is not an integer', () => {
+    assert.equal(mapHwidTopUser({ ...TOP_USER, id: 1.5 }).userUuid, '');
+    assert.equal(mapHwidTopUser({ username: 'no-id', devicesCount: 1 }).userUuid, '');
+  });
+});
+
 // ── Infra providers ─────────────────────────────────────────────────────────
 //
 // `GET /api/infra-billing/providers` → `response.providers[]`, whose
-// `required` is identical on both builds:
+// `required` is identical in 3.3.2 and 3.4.3:
 //   ["uuid","name","faviconLink","loginUrl","createdAt","updatedAt",
 //    "billingHistory","billingNodes"]
+// and `billingNodes[]`'s is ["name","details"], `details` nullable.
 
 const PROVIDER_REQUIRED = [
   'uuid',
@@ -92,26 +136,12 @@ const PROVIDER_REQUIRED = [
   'billingNodes',
 ] as const;
 
-/** 2.7.4: `billingNodes[]` required is `["nodeUuid","name","countryCode"]`. */
-const PROVIDER_274 = {
+const BILLING_NODE_REQUIRED = ['name', 'details'] as const;
+
+const PROVIDER = {
   uuid: '0e0f0f4a-9f5a-4b1a-9a30-6f9c2f4f7a11',
   name: 'Hetzner',
   faviconLink: 'https://hetzner.com/favicon.ico',
-  loginUrl: 'https://accounts.hetzner.com/login',
-  createdAt: '2026-01-04T10:00:00.000Z',
-  updatedAt: '2026-05-19T08:22:31.000Z',
-  billingHistory: { totalAmount: 428.5, totalBills: 7 },
-  billingNodes: [
-    { nodeUuid: 'aaaaaaaa-0000-4000-8000-000000000001', name: 'de-fsn-1', countryCode: 'DE' },
-    { nodeUuid: 'aaaaaaaa-0000-4000-8000-000000000002', name: 'fi-hel-1', countryCode: 'FI' },
-  ],
-};
-
-/** 2.8.0: `billingNodes[]` required is `["name","details"]`, `details` nullable. */
-const PROVIDER_280 = {
-  uuid: '0e0f0f4a-9f5a-4b1a-9a30-6f9c2f4f7a11',
-  name: 'Hetzner',
-  faviconLink: null,
   loginUrl: null,
   createdAt: '2026-01-04T10:00:00.000Z',
   updatedAt: '2026-05-19T08:22:31.000Z',
@@ -128,62 +158,45 @@ const PROVIDER_280 = {
 };
 
 describe('mapInfraProvider', () => {
-  it('reads the 2.7.4 provider record the panel actually sends', () => {
-    assertMatchesSpecRecord(PROVIDER_274, PROVIDER_REQUIRED, 'provider/2.7.4');
+  it('reads the provider record the panel actually sends', () => {
+    assertMatchesSpecRecord(PROVIDER, PROVIDER_REQUIRED, 'provider');
+    for (const node of PROVIDER.billingNodes) {
+      assertMatchesSpecRecord(node, BILLING_NODE_REQUIRED, 'provider.billingNodes[]');
+    }
 
-    assert.deepStrictEqual(mapInfraProvider(PROVIDER_274), {
+    assert.deepStrictEqual(mapInfraProvider(PROVIDER), {
       uuid: '0e0f0f4a-9f5a-4b1a-9a30-6f9c2f4f7a11',
       name: 'Hetzner',
       faviconLink: 'https://hetzner.com/favicon.ico',
-      loginUrl: 'https://accounts.hetzner.com/login',
+      loginUrl: null,
       billedTotalAmount: 428.5,
       billsCount: 7,
       billingNodes: [
         { nodeUuid: 'aaaaaaaa-0000-4000-8000-000000000001', name: 'de-fsn-1', countryCode: 'DE' },
-        { nodeUuid: 'aaaaaaaa-0000-4000-8000-000000000002', name: 'fi-hel-1', countryCode: 'FI' },
+        // The count is what the Costs tab renders; a `details`-less orphan must
+        // still be counted, or the operator reconciles against a short number.
+        { nodeUuid: null, name: 'retired-node', countryCode: null },
       ],
       createdAt: '2026-01-04T10:00:00.000Z',
       updatedAt: '2026-05-19T08:22:31.000Z',
     });
   });
 
-  it('reads 2.8.0 billing nodes through their nested `details` block', () => {
-    assertMatchesSpecRecord(PROVIDER_280, PROVIDER_REQUIRED, 'provider/2.8.0');
-
-    const mapped = mapInfraProvider(PROVIDER_280);
-
-    // The count is what the Costs tab renders; a `details`-less orphan must
-    // still be counted, or the operator reconciles against a short number.
-    assert.equal(mapped.billingNodes.length, 2);
-    assert.deepStrictEqual(mapped.billingNodes[0], {
-      nodeUuid: 'aaaaaaaa-0000-4000-8000-000000000001',
-      name: 'de-fsn-1',
-      countryCode: 'DE',
+  it('reads the node of a billing line out of `details` only', () => {
+    // The flat `{ nodeUuid, name, countryCode }` line was 2.7's. No supported
+    // panel sends it, and the mapper does not read it.
+    const flat = mapInfraProvider({
+      ...PROVIDER,
+      billingNodes: [{ nodeUuid: 'aaaaaaaa-0000-4000-8000-000000000002', name: 'fi-hel-1', countryCode: 'FI' }],
     });
-    assert.deepStrictEqual(mapped.billingNodes[1], {
-      nodeUuid: null,
-      name: 'retired-node',
-      countryCode: null,
-    });
-  });
-
-  it('carries a cost figure on both builds — the tab is no longer costless', () => {
-    for (const [label, record] of [
-      ['2.7.4', PROVIDER_274],
-      ['2.8.0', PROVIDER_280],
-    ] as const) {
-      const mapped = mapInfraProvider(record);
-      assert.equal(mapped.billedTotalAmount, 428.5, `${label}: billed total`);
-      assert.equal(mapped.billsCount, 7, `${label}: bill count`);
-      assert.equal(mapped.billingNodes.length, 2, `${label}: billed nodes`);
-    }
+    assert.deepStrictEqual(flat.billingNodes, [{ nodeUuid: null, name: 'fi-hel-1', countryCode: null }]);
   });
 
   it('exposes no field the panel does not send', () => {
     // `type`, `currency`, `monthlyCost` and `nodesCount` were read here and
-    // appear in NEITHER spec. Re-adding one would put a permanent `—`/`0` back
-    // on the Costs tab, so the exact surface is pinned.
-    assert.deepStrictEqual(Object.keys(mapInfraProvider(PROVIDER_274)).sort(), [
+    // appear in no spec. Re-adding one would put a permanent `—`/`0` back on
+    // the Costs tab, so the exact surface is pinned.
+    assert.deepStrictEqual(Object.keys(mapInfraProvider(PROVIDER)).sort(), [
       'billedTotalAmount',
       'billingNodes',
       'billsCount',
@@ -213,10 +226,12 @@ describe('mapInfraProvider', () => {
 
 // ── Node plugins ────────────────────────────────────────────────────────────
 //
-// `GET /api/node-plugins` → `response.nodePlugins[]`, `required` identical on
-// both builds: ["uuid","viewPosition","name","pluginConfig"]
+// `GET /api/node-plugins` → `response.nodePlugins[]`. `required` in 3.3.2:
+// ["uuid","viewPosition","name","pluginConfig"]; 3.4.3 adds "tags", which the
+// mapper does not surface.
 
 const NODE_PLUGIN_REQUIRED = ['uuid', 'viewPosition', 'name', 'pluginConfig'] as const;
+const NODE_PLUGIN_REQUIRED_343 = ['uuid', 'viewPosition', 'name', 'tags', 'pluginConfig'] as const;
 
 const NODE_PLUGIN_CONFIGURED = {
   uuid: 'bbbbbbbb-0000-4000-8000-000000000001',
@@ -233,15 +248,19 @@ const NODE_PLUGIN_BARE = {
 };
 
 describe('mapNodePlugin', () => {
-  it('reads the record both builds send', () => {
+  it('reads the record the panel sends, with or without 3.4 tags', () => {
     assertMatchesSpecRecord(NODE_PLUGIN_CONFIGURED, NODE_PLUGIN_REQUIRED, 'nodePlugin');
+    const tagged = { ...NODE_PLUGIN_CONFIGURED, tags: ['EU'] };
+    assertMatchesSpecRecord(tagged, NODE_PLUGIN_REQUIRED_343, 'nodePlugin/3.4.3');
 
-    assert.deepStrictEqual(mapNodePlugin(NODE_PLUGIN_CONFIGURED), {
+    const expected = {
       uuid: 'bbbbbbbb-0000-4000-8000-000000000001',
       name: 'torrent-blocker',
       viewPosition: 1,
       hasConfig: true,
-    });
+    };
+    assert.deepStrictEqual(mapNodePlugin(NODE_PLUGIN_CONFIGURED), expected);
+    assert.deepStrictEqual(mapNodePlugin(tagged), expected);
   });
 
   it('distinguishes a null pluginConfig from a populated one', () => {
@@ -265,8 +284,8 @@ describe('mapNodePlugin', () => {
 
 // ── Snippets ────────────────────────────────────────────────────────────────
 //
-// `GET /api/snippets` → `response.snippets[]`, `required` identical on both
-// builds: ["name","snippet"]. The write DTO types `snippet` as
+// `GET /api/snippets` → `response.snippets[]`, `required` identical in 3.3.2
+// and 3.4.3: ["name","snippet"]. The write DTO types `snippet` as
 // `{"type":"array","items":{"type":"object"}}`.
 
 const SNIPPET_REQUIRED = ['name', 'snippet'] as const;
@@ -275,7 +294,7 @@ const SNIPPET_A = { name: 'happ-routing', snippet: [{ tag: 'direct' }, { tag: 'p
 const SNIPPET_B = { name: 'happ-announce', snippet: [] };
 
 describe('mapSnippet', () => {
-  it('reads the two-field record both builds send', () => {
+  it('reads the two-field record the panel sends', () => {
     assertMatchesSpecRecord(SNIPPET_A, SNIPPET_REQUIRED, 'snippet');
 
     assert.deepStrictEqual(mapSnippet(SNIPPET_A), {
@@ -307,10 +326,12 @@ describe('mapSnippet', () => {
 
 // ── Subscription page configs ───────────────────────────────────────────────
 //
-// `GET /api/subscription-page-configs` → `response.configs[]`, `required`
-// identical on both builds: ["uuid","viewPosition","name","config"]
+// `GET /api/subscription-page-configs` → `response.configs[]`. `required` in
+// 3.3.2: ["uuid","viewPosition","name","config"]; 3.4.3 adds "tags", which the
+// mapper does not surface.
 
 const SUBPAGE_REQUIRED = ['uuid', 'viewPosition', 'name', 'config'] as const;
+const SUBPAGE_REQUIRED_343 = ['uuid', 'viewPosition', 'name', 'tags', 'config'] as const;
 
 const SUBPAGE_CONFIGURED = {
   uuid: 'cccccccc-0000-4000-8000-000000000001',
@@ -327,15 +348,19 @@ const SUBPAGE_BARE = {
 };
 
 describe('mapSubpageConfig', () => {
-  it('reads the record both builds send', () => {
+  it('reads the record the panel sends, with or without 3.4 tags', () => {
     assertMatchesSpecRecord(SUBPAGE_CONFIGURED, SUBPAGE_REQUIRED, 'subpageConfig');
+    const tagged = { ...SUBPAGE_CONFIGURED, tags: ['EU'] };
+    assertMatchesSpecRecord(tagged, SUBPAGE_REQUIRED_343, 'subpageConfig/3.4.3');
 
-    assert.deepStrictEqual(mapSubpageConfig(SUBPAGE_CONFIGURED), {
+    const expected = {
       uuid: 'cccccccc-0000-4000-8000-000000000001',
       name: 'default-page',
       viewPosition: 1,
       hasConfig: true,
-    });
+    };
+    assert.deepStrictEqual(mapSubpageConfig(SUBPAGE_CONFIGURED), expected);
+    assert.deepStrictEqual(mapSubpageConfig(tagged), expected);
   });
 
   it('distinguishes a null config from a populated one', () => {
@@ -357,24 +382,98 @@ describe('mapSubpageConfig', () => {
   });
 });
 
+// ── Subscription settings ───────────────────────────────────────────────────
+//
+// `GET /api/subscription-settings` → `response`, whose `required` is identical
+// in 3.3.2 and 3.4.3. The six display fields a Settings screen shows are not
+// on it any more: they travel in `customResponseHeaders`, a free-form
+// `name -> value` map.
+
+const SETTINGS_REQUIRED = [
+  'uuid',
+  'serveJsonAtBaseSubscription',
+  'isShowCustomRemarks',
+  'customRemarks',
+  'customResponseHeaders',
+  'randomizeHosts',
+  'responseRules',
+  'hwidSettings',
+  'createdAt',
+  'updatedAt',
+] as const;
+
+const SETTINGS = {
+  uuid: 'dddddddd-0000-4000-8000-00000000000a',
+  serveJsonAtBaseSubscription: false,
+  isShowCustomRemarks: true,
+  customRemarks: {
+    expiredUsers: ['expired'],
+    limitedUsers: ['limited'],
+    disabledUsers: ['disabled'],
+    emptyHosts: ['empty'],
+    HWIDMaxDevicesExceeded: ['max'],
+    HWIDNotSupported: ['unsupported'],
+  },
+  customResponseHeaders: {
+    // The panel's own marker for a value the client must receive base64'd.
+    'profile-title': `rwEncodeBase64:${Buffer.from('Мой VPN', 'utf8').toString('base64')}`,
+    'support-url': 'https://t.me/support',
+    'profile-update-interval': '12',
+    'profile-web-page-url': 'https://sub.example.com',
+    announce: '{"token":"raw-announce-secret"}',
+    routing: 'happ://routing/raw-route-secret',
+  },
+  randomizeHosts: false,
+  responseRules: null,
+  hwidSettings: null,
+  createdAt: '2026-04-19T10:00:00.000Z',
+  updatedAt: '2026-04-19T10:00:00.000Z',
+};
+
+describe('mapSubscriptionSettings', () => {
+  it('reads the display fields out of the response headers the panel sends', () => {
+    assertMatchesSpecRecord(SETTINGS, SETTINGS_REQUIRED, 'subscriptionSettings');
+
+    const mapped = mapSubscriptionSettings(SETTINGS);
+    assert.equal(mapped.profileTitle, 'Мой VPN');
+    assert.equal(mapped.supportLink, 'https://t.me/support');
+    assert.equal(mapped.profileUpdateInterval, 12);
+    assert.equal(mapped.isProfileWebpageUrlEnabled, true);
+    assert.equal(mapped.hasHappAnnounce, true);
+    assert.equal(mapped.hasHappRouting, true);
+    // Presence only: the raw values carry tokens and never leave the server.
+    const serialized = JSON.stringify(mapped);
+    assert.equal(serialized.includes('raw-announce-secret'), false);
+    assert.equal(serialized.includes('raw-route-secret'), false);
+  });
+
+  it('reads an empty header map as "not configured", not as a failure', () => {
+    const mapped = mapSubscriptionSettings({ ...SETTINGS, customResponseHeaders: null });
+    assert.equal(mapped.profileTitle, '');
+    assert.equal(mapped.supportLink, null);
+    assert.equal(mapped.isProfileWebpageUrlEnabled, false);
+    assert.equal(mapped.hasHappAnnounce, false);
+  });
+});
+
 // ── User summary ────────────────────────────────────────────────────────────
 //
-// `GET /api/users/by-{short-uuid,username,email,telegram-id}/…`, whose
-// `response.required` is identical on both builds:
-//   ["uuid","id","shortUuid","username","expireAt","telegramId","email",
-//    "description","tag","hwidDeviceLimit","externalSquadUuid",
-//    "trojanPassword","vlessUuid","ssPassword","subRevokedAt",
-//    "lastTrafficResetAt","createdAt","updatedAt","subscriptionUrl",
-//    "activeInternalSquads","userTraffic"]
-//
-// `status` and `trafficLimitBytes` are declared but NOT required, so they are
-// carried here as the optional extras they are.
+// `GET /api/users/by-{short-uuid,username}/…`, whose `response.required` is
+// identical in 3.3.2 and 3.4.3 — and identical to the 3.2.1 capture below:
+//   ["id","shortUuid","username","status","trafficLimitBytes",
+//    "trafficLimitStrategy","expireAt","telegramId","email","description",
+//    "tag","hwidDeviceLimit","externalSquadUuid","trojanPassword","vlessUuid",
+//    "ssPassword","lastTriggeredThreshold","subRevokedAt","lastTrafficResetAt",
+//    "createdAt","updatedAt","subscriptionUrl","activeInternalSquads",
+//    "userTraffic"]
 
 const USER_REQUIRED = [
-  'uuid',
   'id',
   'shortUuid',
   'username',
+  'status',
+  'trafficLimitBytes',
+  'trafficLimitStrategy',
   'expireAt',
   'telegramId',
   'email',
@@ -385,6 +484,7 @@ const USER_REQUIRED = [
   'trojanPassword',
   'vlessUuid',
   'ssPassword',
+  'lastTriggeredThreshold',
   'subRevokedAt',
   'lastTrafficResetAt',
   'createdAt',
@@ -392,21 +492,17 @@ const USER_REQUIRED = [
   'subscriptionUrl',
   'activeInternalSquads',
   'userTraffic',
-  // declared, optional
-  'status',
-  'trafficLimitBytes',
 ] as const;
 
 const USER_RECORD = {
-  uuid: 'dddddddd-0000-4000-8000-000000000001',
   id: 4211,
   shortUuid: 'aB3xY9zQ',
   username: 'durov',
   status: 'ACTIVE',
   trafficLimitBytes: 107374182400,
+  trafficLimitStrategy: 'MONTH',
   expireAt: '2026-09-01T00:00:00.000Z',
-  // `{"type": ["integer","null"]}` on 2.7.4, `{"type":"integer","nullable":true}`
-  // on 2.8.0 — a NUMBER on both.
+  // `{"type": "number", "nullable": true}` — a NUMBER.
   telegramId: 123456789,
   email: 'durov@example.com',
   description: null,
@@ -416,14 +512,15 @@ const USER_RECORD = {
   trojanPassword: 'tp',
   vlessUuid: 'eeeeeeee-0000-4000-8000-000000000001',
   ssPassword: 'ss',
+  lastTriggeredThreshold: 0,
   subRevokedAt: null,
   lastTrafficResetAt: null,
   createdAt: '2025-11-07T08:13:47.071Z',
   updatedAt: '2026-06-01T12:00:00.000Z',
   subscriptionUrl: 'https://sub.example.com/aB3xY9zQ',
   activeInternalSquads: [{ uuid: 'ffffffff-0000-4000-8000-000000000001', name: 'Default-Squad' }],
-  // Consumption lives HERE on both builds; there is no row-level
-  // `trafficUsedBytes` on any of the four user lookups.
+  // Consumption lives HERE; there is no row-level `trafficUsedBytes` on the
+  // user lookups.
   userTraffic: {
     usedTrafficBytes: 53687091200,
     lifetimeUsedTrafficBytes: 96636764160,
@@ -450,8 +547,7 @@ describe('mapUserSummary', () => {
   });
 
   it('stringifies the numeric telegramId the panel sends', () => {
-    // `{"type": ["integer","null"]}` / `{"type":"integer","nullable":true}` —
-    // a string-only read discarded every id that existed.
+    // A string-only read discarded every id that existed.
     assert.equal(mapUserSummary(USER_RECORD).telegramId, '123456789');
     assert.equal(mapUserSummary({ ...USER_RECORD, telegramId: null }).telegramId, null);
     // A transport that already stringified it must survive untouched.
@@ -462,7 +558,8 @@ describe('mapUserSummary', () => {
 
   it('maps the rest of the record the panel really sends', () => {
     assert.deepStrictEqual(mapUserSummary(USER_RECORD), {
-      uuid: 'dddddddd-0000-4000-8000-000000000001',
+      // No uuid on a 3.x user: the identity is the numeric id as a string.
+      uuid: '4211',
       panelId: 4211,
       shortUuid: 'aB3xY9zQ',
       username: 'durov',
@@ -489,12 +586,12 @@ describe('mapUserSummary', () => {
 
 // ── User summary on 3.2.1 ───────────────────────────────────────────────────
 //
-// WHERE THE PIN COMES FROM, SINCE IT IS NOT AN OPENAPI FILE. Every block above
-// quotes a `required` array out of `Remnawave API v274.json` /
-// `Remnawave API v280.json`. There is no `Remnawave API v321.json` — the file
-// does not exist in this repo and is not being invented to make this section
-// look like the others. The key set below was MEASURED: it is the `user`
-// object of a payload captured off a live Remnawave 3.2.1 panel
+// WHERE THE PIN COMES FROM, SINCE IT IS NOT AN OPENAPI FILE. The blocks above
+// quote `required` arrays out of `Remnawave API v3.3.2.json` /
+// `Remnawave API v3.4.3.json`. There is no `Remnawave API v321.json` — the
+// file does not exist in this repo and is not being invented to make this
+// section look like the others. The key set below was MEASURED: it is the
+// `user` object of a payload captured off a live Remnawave 3.2.1 panel
 // (`GET /api/users/{userId}`), and the two user fixtures under
 // `test/fixtures/remnawave/3.2.1/` are that same payload with its credential
 // fields replaced by same-shaped placeholders.
@@ -533,7 +630,7 @@ const USER_321_CAPTURED_KEYS = [
   'userTraffic',
 ] as const;
 
-/** Captured nested consumption block. Flat on 2.x, nested here. */
+/** Captured nested consumption block. */
 const USER_TRAFFIC_321_CAPTURED_KEYS = [
   'usedTrafficBytes',
   'lifetimeUsedTrafficBytes',
@@ -568,7 +665,8 @@ describe('mapUserSummary on Remnawave 3.2.1', () => {
     // via a fixture "helpfully" padded with the field 2.x used to send.
     assert.equal(Object.prototype.hasOwnProperty.call(USER_321, 'uuid'), false);
     assert.equal((USER_321_CAPTURED_KEYS as readonly string[]).includes('uuid'), false);
-    assert.ok(USER_REQUIRED.includes('uuid'), '2.x sends `uuid`; 3.x is the version that dropped it');
+    // The live 3.2.1 row and the 3.3.2 / 3.4.3 spec describe the same record.
+    assert.deepStrictEqual([...USER_321_CAPTURED_KEYS].sort(), [...USER_REQUIRED].sort());
 
     // What replaced it: a panel-local integer plus the two public handles.
     assert.equal(typeof USER_321['id'], 'number');
@@ -616,12 +714,13 @@ describe('mapUserSummary on Remnawave 3.2.1', () => {
     assert.equal(fresh.shortUuid, 'PyTr7C5568QuLhup');
   });
 
-  it('leaves a 2.x row keyed by its uuid, not by its id', () => {
-    // The other half of the same rule: on a row that has both, the uuid wins —
-    // it is what every `remnawaveId` stored from that era matches against.
+  it('reads no uuid — a row that still carries one is keyed by its id', () => {
+    // A 2.x row keyed by its uuid; no supported panel sends one. Its id is the
+    // identity like every other row's, and a row with no usable id has none.
     const mapped = mapUserSummary({ uuid: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', id: 7 });
-    assert.equal(mapped.uuid, 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee');
+    assert.equal(mapped.uuid, '7');
     assert.equal(mapped.panelId, 7);
+    assert.equal(mapUserSummary({ uuid: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee' }).uuid, '');
   });
 
   it('reads 3.x consumption out of the nested `userTraffic` block', () => {
@@ -679,7 +778,7 @@ describe('mapUserSummary on Remnawave 3.2.1', () => {
       tag: null,
       createdAt: '2026-08-10T12:34:05.233Z',
       updatedAt: '2026-08-10T12:36:17.671Z',
-      // 3.2.1 serves subscriptions under `/api/sub/…`; 2.x served `/sub/…`.
+      // 3.2.1 serves subscriptions under `/api/sub/…`.
       subscriptionUrl: 'https://panel.example/api/sub/PyTr7C5568QuLhup',
     });
   });
@@ -712,7 +811,7 @@ describe('Remnawave 3.2.1 HWID device list fixture', () => {
     assert.equal(new Set(devices.map((d) => d['hwid'])).size, devices.length);
   });
 
-  it('is keyed by a numeric `userId`, where 2.7.4 sent a `userUuid` string', () => {
+  it('is keyed by a numeric `userId`, never by a `userUuid` string', () => {
     const devices = fixtureResponse('3.2.1/devices.json')[
       'devices'
     ] as ReadonlyArray<Record<string, unknown>>;

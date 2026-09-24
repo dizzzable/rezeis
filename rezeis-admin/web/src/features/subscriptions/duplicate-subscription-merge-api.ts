@@ -269,10 +269,15 @@ export interface DuplicateMergeReport {
   readonly rows: readonly DuplicateMergeRow[]
   readonly hasMore: boolean
   readonly nextCursor: string | null
-  /** `null` when the discovery sweep could not tell which era answered. */
-  readonly panelEra: string | null
 }
 
+/**
+ * NO `chunkSize` AND NO ERA. Discovery used to run the panel-link repair's
+ * sweep, paged by a database chunk size, and reported which Remnawave era
+ * answered it; the repair is gone, discovery reads the pairs straight from the
+ * database, and the server ignores `chunkSize` and no longer sends `panelEra`.
+ * `startAfterId` stays: it is still how a truncated run is carried on.
+ */
 export interface DuplicateMergeRequest {
   /**
    * `false` writes. Required rather than optional so no call site can reach the
@@ -281,7 +286,6 @@ export interface DuplicateMergeRequest {
    */
   readonly dryRun: boolean
   readonly limit?: number
-  readonly chunkSize?: number
   readonly startAfterId?: string
 }
 
@@ -289,7 +293,6 @@ export interface DuplicateMergeRequest {
 interface DuplicateMergeBody {
   dryRun: boolean
   limit?: number
-  chunkSize?: number
   startAfterId?: string
 }
 
@@ -360,16 +363,6 @@ function readRow(value: unknown): DuplicateMergeRow {
 }
 
 /**
- * `'unknown'` is a value `getPanelShape()` really produces for a panel whose
- * version could not be read, and it means precisely what an ABSENT field means
- * here. Both collapse to `null` so the surface has one "we do not know" branch.
- */
-function readPanelEra(value: unknown): string | null {
-  const era = readString(value)
-  return era === null || era === 'unknown' ? null : era
-}
-
-/**
  * WHICH HALF IS BOUND TO THE LIVE PANEL PROFILE, as the SERVER reported it.
  *
  * READ, NOT DERIVED, and that is the whole point of the two fields. The rule
@@ -386,10 +379,10 @@ function readPanelEra(value: unknown): string | null {
  * `true` names one, so an absent field can never be read as "the duplicate" —
  * which is the reading that points at the panel DELETE.
  *
- * `'both'` IS A REAL ANSWER, NOT A DEFENSIVE BRANCH. The shared-identity arm of
- * the reconciliation sweep (`resolvedBy: 'storedIdentity'`) finds pairs whose two
- * rows ALREADY store the same well-formed identity, so the server reports both
- * flags true. Collapsing that onto one name — as the older code did, taking the
+ * `'both'` IS A REAL ANSWER, NOT A DEFENSIVE BRANCH. Discovery pairs rows that
+ * ALREADY store the same well-formed identity (one stored id, or one panel id,
+ * named by two live rows), so the server reports both flags true. Collapsing
+ * that onto one name — as the older code did, taking the
  * duplicate because that is the row the service uses as the identity source —
  * tells the operator the SURVIVOR is not bound. It is, and the reading that
  * follows from being told otherwise ends in a panel DELETE against a live
@@ -429,18 +422,17 @@ export function normalizeDuplicateMergeReport(
     rows,
     hasMore: record.hasMore === true,
     nextCursor: readString(record.nextCursor),
-    panelEra: readPanelEra(record.panelEra),
   }
 }
 
 /**
  * Runs one page of the merge.
  *
- * `limit` / `chunkSize` are dropped rather than coerced when they are not
- * finite numbers: the controller reads them as `typeof … === 'number' ? … :
- * undefined`, so a stringified bound is SILENTLY replaced by the server
- * default — an operator who asked for 5 pairs would get 25 and be told nothing.
- * Omitting the field produces the same server default and is honest about it.
+ * `limit` is dropped rather than coerced when it is not a finite number: the
+ * controller reads it as `typeof … === 'number' ? … : undefined`, so a
+ * stringified bound is SILENTLY replaced by the server default — an operator
+ * who asked for 5 pairs would get 25 and be told nothing. Omitting the field
+ * produces the same server default and is honest about it.
  */
 export async function runDuplicateSubscriptionMerge(
   request: DuplicateMergeRequest,
@@ -452,9 +444,6 @@ export async function runDuplicateSubscriptionMerge(
   }
   if (typeof request.limit === 'number' && Number.isFinite(request.limit)) {
     body.limit = Math.floor(request.limit)
-  }
-  if (typeof request.chunkSize === 'number' && Number.isFinite(request.chunkSize)) {
-    body.chunkSize = Math.floor(request.chunkSize)
   }
   if (typeof request.startAfterId === 'string' && request.startAfterId.length > 0) {
     body.startAfterId = request.startAfterId

@@ -100,6 +100,75 @@ describe('ImportProcessor post-import sync', () => {
   });
 });
 
+/**
+ * The automatic panel-link check runs after every backup import (owner,
+ * 24.09.2026). The import only records the request; the worker runs the check
+ * and sends the card. The import's own outcome must not depend on it.
+ */
+describe('ImportProcessor tells the automatic panel-link check that an import finished', () => {
+  it('records the request with the import and its source once the import has committed', async () => {
+    const requests: unknown[] = [];
+    const processor = buildProcessor({
+      onSubscriptionFindMany: () => [],
+      onProfileSyncCreate: () => ({ id: 'unused' }),
+      onEnqueue: () => undefined,
+      panelLinkCheck: {
+        requestAfterImport: async (input: unknown) => {
+          requests.push(input);
+          return true;
+        },
+      },
+    });
+
+    await processor.process(remnawaveJob({}) as never);
+
+    assert.deepStrictEqual(requests, [{ importRecordId: 'import-1', sourceType: 'remnawave' }]);
+  });
+
+  it('does not record anything for an import that failed', async () => {
+    const requests: unknown[] = [];
+    const processor = buildProcessor({
+      onSubscriptionFindMany: () => [],
+      onProfileSyncCreate: () => ({ id: 'unused' }),
+      onEnqueue: () => undefined,
+      failImport: true,
+      panelLinkCheck: {
+        requestAfterImport: async (input: unknown) => {
+          requests.push(input);
+          return true;
+        },
+      },
+    });
+
+    await assert.rejects(() => processor.process(remnawaveJob({}) as never), /donor unreadable/);
+    assert.deepStrictEqual(requests, []);
+  });
+
+  it('keeps the import a success when recording the request fails', async () => {
+    const records: unknown[] = [];
+    const processor = buildProcessor({
+      onSubscriptionFindMany: () => [],
+      onProfileSyncCreate: () => ({ id: 'unused' }),
+      onEnqueue: () => undefined,
+      onImportRecordUpdate: (data) => records.push(data),
+      panelLinkCheck: {
+        requestAfterImport: async () => {
+          throw new Error('Redis is down');
+        },
+      },
+    });
+
+    const result = await processor.process(remnawaveJob({}) as never);
+
+    assert.equal((result as { importRecordId: string }).importRecordId, 'import-1');
+    assert.equal(
+      records.some((data) => (data as { status?: string }).status === 'FAILED'),
+      false,
+      'the committed import is never marked FAILED because of the check',
+    );
+  });
+});
+
 // ── Harness ──────────────────────────────────────────────────────────────────
 
 interface Hooks {
@@ -108,11 +177,19 @@ interface Hooks {
   readonly onEnqueue: (jobId: string) => void;
   // Returns an existing un-finished sync job for the given subscription, or null.
   readonly onProfileSyncFindFirst?: (subscriptionId: string) => { id: string } | null;
+  readonly onImportRecordUpdate?: (data: unknown) => void;
+  readonly failImport?: boolean;
+  readonly panelLinkCheck?: { requestAfterImport: (input: unknown) => Promise<boolean> };
 }
 
 function buildProcessor(hooks: Hooks): ImportProcessor {
   const prisma = {
-    importRecord: { update: async () => undefined },
+    importRecord: {
+      update: async (args: { data: unknown }) => {
+        hooks.onImportRecordUpdate?.(args.data);
+        return undefined;
+      },
+    },
     subscription: { findMany: async (args: { where: unknown }) => hooks.onSubscriptionFindMany(args) },
     profileSyncJob: {
       findFirst: async (args: { where: { subscriptionId: string } }) =>
@@ -122,16 +199,10 @@ function buildProcessor(hooks: Hooks): ImportProcessor {
   };
   const systemEvents = { info: () => undefined, error: () => undefined };
   const remnawaveImporter = {
-    run: async () => ({
-      importRecordId: 'import-1',
-      fetched: 2,
-      created: 2,
-      updated: 0,
-      skipped: 0,
-      subscriptionsCreated: 2,
-      subscriptionsUpdated: 0,
-      errors: [],
-    }),
+    run: async () => {
+      if (hooks.failImport === true) throw new Error('donor unreadable');
+      return remnawaveImportResult();
+    },
   };
   const profileSyncQueue = { enqueue: async (jobId: string) => { hooks.onEnqueue(jobId); } };
 
@@ -146,7 +217,21 @@ function buildProcessor(hooks: Hooks): ImportProcessor {
     {} as never, // bedolaga
     {} as never, // bulkPlanAssignment
     profileSyncQueue as never,
+    hooks.panelLinkCheck as never,
   );
+}
+
+function remnawaveImportResult() {
+  return {
+    importRecordId: 'import-1',
+    fetched: 2,
+    created: 2,
+    updated: 0,
+    skipped: 0,
+    subscriptionsCreated: 2,
+    subscriptionsUpdated: 0,
+    errors: [],
+  };
 }
 
 function remnawaveJob(data: { syncToPanel?: boolean }): unknown {

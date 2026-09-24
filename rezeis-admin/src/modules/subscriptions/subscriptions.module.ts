@@ -9,9 +9,11 @@ import { ExpiredProfileCleanupService } from '../profile-sync/expired-profile-cl
 import { RemnawaveModule } from '../remnawave/remnawave.module';
 import { SettingsModule } from '../settings/settings.module';
 import { RbacModule } from '../rbac/rbac.module';
+import { AdminLifetimeRestoreController } from './controllers/admin-lifetime-restore.controller';
 import { AdminSubscriptionsController } from './controllers/admin-subscriptions.controller';
 import { InternalSubscriptionsController } from './controllers/internal-subscriptions.controller';
 import { AdminSubscriptionsListService } from './services/admin-subscriptions-list.service';
+import { LifetimeRestoreService } from './services/lifetime-restore.service';
 import { PlanSnapshotSyncService } from './services/plan-snapshot-sync.service';
 import { SubscriptionDeletionService } from './services/subscription-deletion.service';
 import { SubscriptionMutationsService } from './services/subscription-mutations.service';
@@ -32,7 +34,7 @@ import { SubscriptionRenewalService } from './services/subscription-renewal.serv
     RemnawaveModule,
     SettingsModule,
   ],
-  controllers: [AdminSubscriptionsController, InternalSubscriptionsController],
+  controllers: [AdminSubscriptionsController, AdminLifetimeRestoreController, InternalSubscriptionsController],
   providers: [
     SubscriptionQuoteService,
     SubscriptionRenewalService,
@@ -41,6 +43,7 @@ import { SubscriptionRenewalService } from './services/subscription-renewal.serv
     ExpiredProfileCleanupService,
     PlanSnapshotSyncService,
     AdminSubscriptionsListService,
+    LifetimeRestoreService,
   ],
   exports: [
     SubscriptionQuoteService,

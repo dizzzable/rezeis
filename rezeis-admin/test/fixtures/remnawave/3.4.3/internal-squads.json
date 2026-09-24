@@ -1,0 +1,72 @@
+{
+  "version": "3.4.3",
+  "endpoint": "GET /api/internal-squads",
+  "source": "derived from test/fixtures/remnawave/3.3.2/internal-squads.json by applying the one difference between the internalSquads item schemas of GET /api/internal-squads in the vendor OpenAPI documents \"Remnawave API v3.3.2.json\" and \"Remnawave API v3.4.3.json\" (info.version 3.4.3): `tags`, a required array of strings, placed where 3.4.3 declares it (after `name`). Every other key, type and nullability is identical, and the envelope is identical; 3.4.3 only tightens its date-time pattern to require seconds, which every date here carries (checked by script). Key set and key ORDER are the 3.4.3 specification's. `body` is the COMPLETE HTTP body, envelope included. Row 0 populates every nullable slot and carries one tag; row 1 sets every nullable slot to null and carries none.",
+  "specRequired": [
+    "uuid",
+    "viewPosition",
+    "name",
+    "tags",
+    "info",
+    "inbounds",
+    "createdAt",
+    "updatedAt"
+  ],
+  "body": {
+    "response": {
+      "total": 2,
+      "internalSquads": [
+        {
+          "uuid": "2f1c9a44-0000-4000-8000-000000000001",
+          "viewPosition": 0,
+          "name": "squad-0-populated",
+          "tags": [
+            "EU"
+          ],
+          "info": {
+            "membersCount": 40,
+            "inboundsCount": 3
+          },
+          "inbounds": [
+            {
+              "uuid": "2f1c9a44-0000-4000-8000-000000000002",
+              "profileUuid": "2f1c9a44-0000-4000-8000-000000000003",
+              "tag": "tag-0",
+              "type": "type-0",
+              "network": "network-0",
+              "security": "security-0",
+              "port": 1,
+              "rawInbound": null
+            }
+          ],
+          "createdAt": "2026-05-04T11:22:33.444Z",
+          "updatedAt": "2026-05-04T11:22:33.444Z"
+        },
+        {
+          "uuid": "2f1c9a44-0000-4000-8000-000000001004",
+          "viewPosition": 1,
+          "name": "squad-1-nulled",
+          "tags": [],
+          "info": {
+            "membersCount": 41,
+            "inboundsCount": 4
+          },
+          "inbounds": [
+            {
+              "uuid": "2f1c9a44-0000-4000-8000-000000001005",
+              "profileUuid": "2f1c9a44-0000-4000-8000-000000001006",
+              "tag": "tag-1",
+              "type": "type-1",
+              "network": null,
+              "security": null,
+              "port": null,
+              "rawInbound": null
+            }
+          ],
+          "createdAt": "2026-06-07T08:09:10.111Z",
+          "updatedAt": "2026-06-07T08:09:10.111Z"
+        }
+      ]
+    }
+  }
+}

@@ -4,7 +4,7 @@ import { Injectable } from '@nestjs/common';
 
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { verifiedTelegramUsername } from '../users/utils/verified-telegram-username.util';
-import { descriptionFieldValue, ownerMarkerLine } from './panel-owner-marker';
+import { descriptionFieldValue, ownerMarkerLine, subscriptionMarkerLine } from './panel-owner-marker';
 
 export { readProfileOwnerMarker } from './panel-owner-marker';
 
@@ -41,11 +41,17 @@ export { readProfileOwnerMarker } from './panel-owner-marker';
  *   login: {webAccount.login}
  *   username: {user.username}
  *   reiwa_id: {user.id}
+ *   subscription_id: {subscription.id}
  *   ```
  * The `reiwa_id` line is the ownership marker: the CREATE path adopts an
  * existing profile only when it names this customer (see
  * {@link readProfileOwnerMarker}), and the Remnawave importer resolves identity
- * by it.
+ * by it. The `subscription_id` line (owner's decision, 24.09.2026) says which
+ * of the customer's subscriptions the profile serves; an automatic link never
+ * gives a profile to a subscription that line does not name
+ * (`subscriptionMarkerAllows`). It is written by the ordinary CREATE and
+ * UPDATE pushes — there is no mass push — and only when the caller names the
+ * subscription.
  */
 
 /** The three operator-set parts of a profile name. */
@@ -345,6 +351,7 @@ export class RemnawaveProfileNamingService {
     }
     if (user.username) descriptionLines.push(`username: ${descriptionFieldValue(user.username)}`);
     descriptionLines.push(ownerMarkerLine(user.id));
+    if (subscriptionId !== undefined) descriptionLines.push(subscriptionMarkerLine(subscriptionId));
 
     return {
       username,

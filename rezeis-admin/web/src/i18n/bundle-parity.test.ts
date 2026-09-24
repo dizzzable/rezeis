@@ -35,6 +35,8 @@ import { keyPaths, valueAt } from '@/test/i18n-key-paths'
 
 import { en as coreEn } from './en'
 import { ru as coreRu } from './ru'
+import { en as addOnsEn } from './features/addOns.en'
+import { ru as addOnsRu } from './features/addOns.ru'
 import { en as advertisingEn } from './features/advertising.en'
 import { ru as advertisingRu } from './features/advertising.ru'
 import { en as analyticsEn } from './features/analytics.en'
@@ -59,8 +61,6 @@ import { en as legalDocumentsEn } from './features/legalDocuments.en'
 import { ru as legalDocumentsRu } from './features/legalDocuments.ru'
 import { en as notificationsEn } from './features/notifications.en'
 import { ru as notificationsRu } from './features/notifications.ru'
-import { en as panelLinkReconciliationEn } from './features/panelLinkReconciliation.en'
-import { ru as panelLinkReconciliationRu } from './features/panelLinkReconciliation.ru'
 import { en as paymentsEn } from './features/payments.en'
 import { ru as paymentsRu } from './features/payments.ru'
 import { en as platformSettingsEn } from './features/platformSettings.en'
@@ -71,6 +71,8 @@ import { en as remnawaveEn } from './features/remnawave.en'
 import { ru as remnawaveRu } from './features/remnawave.ru'
 import { en as subpageConfigEn } from './features/subpageConfig.en'
 import { ru as subpageConfigRu } from './features/subpageConfig.ru'
+import { en as subscriptionToolsEn } from './features/subscriptionTools.en'
+import { ru as subscriptionToolsRu } from './features/subscriptionTools.ru'
 import { en as twoFactorEn } from './features/twoFactor.en'
 import { ru as twoFactorRu } from './features/twoFactor.ru'
 import { en as userDetailEn } from './features/userDetail.en'
@@ -104,6 +106,7 @@ import { ru as userDetailRu } from './features/userDetail.ru'
  */
 const PAIRS = [
   { name: 'i18n/{en,ru}.ts', en: coreEn as unknown, ru: coreRu as unknown },
+  { name: 'features/addOns.{en,ru}.ts', en: addOnsEn as unknown, ru: addOnsRu as unknown },
   { name: 'features/advertising.{en,ru}.ts', en: advertisingEn as unknown, ru: advertisingRu as unknown },
   { name: 'features/analytics.{en,ru}.ts', en: analyticsEn as unknown, ru: analyticsRu as unknown },
   { name: 'features/appearance.{en,ru}.ts', en: appearanceEn as unknown, ru: appearanceRu as unknown },
@@ -116,12 +119,12 @@ const PAIRS = [
   { name: 'features/landingBuilder.{en,ru}.ts', en: landingBuilderEn as unknown, ru: landingBuilderRu as unknown },
   { name: 'features/legalDocuments.{en,ru}.ts', en: legalDocumentsEn as unknown, ru: legalDocumentsRu as unknown },
   { name: 'features/notifications.{en,ru}.ts', en: notificationsEn as unknown, ru: notificationsRu as unknown },
-  { name: 'features/panelLinkReconciliation.{en,ru}.ts', en: panelLinkReconciliationEn as unknown, ru: panelLinkReconciliationRu as unknown },
   { name: 'features/payments.{en,ru}.ts', en: paymentsEn as unknown, ru: paymentsRu as unknown },
   { name: 'features/platformSettings.{en,ru}.ts', en: platformSettingsEn as unknown, ru: platformSettingsRu as unknown },
   { name: 'features/rbac.{en,ru}.ts', en: rbacEn as unknown, ru: rbacRu as unknown },
   { name: 'features/remnawave.{en,ru}.ts', en: remnawaveEn as unknown, ru: remnawaveRu as unknown },
   { name: 'features/subpageConfig.{en,ru}.ts', en: subpageConfigEn as unknown, ru: subpageConfigRu as unknown },
+  { name: 'features/subscriptionTools.{en,ru}.ts', en: subscriptionToolsEn as unknown, ru: subscriptionToolsRu as unknown },
   { name: 'features/twoFactor.{en,ru}.ts', en: twoFactorEn as unknown, ru: twoFactorRu as unknown },
   { name: 'features/userDetail.{en,ru}.ts', en: userDetailEn as unknown, ru: userDetailRu as unknown },
 ] as const

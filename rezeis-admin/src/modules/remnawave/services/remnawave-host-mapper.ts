@@ -3,12 +3,9 @@ import { RemnawaveHostInterface } from '../interfaces/remnawave-host.interface';
 /**
  * Normalises a raw Remnawave host row across panel versions.
  *
- * The 2.7 → 2.8 host shape drifted:
- *   • `tag: string | null`  →  `tags: string[]`  (we normalize to `tags[]`
- *     and keep `tag` = first element for back-compat),
- *   • `xHttpExtraParams`    →  `xhttpExtraParams` (not surfaced; ignored),
- *   • `allowInsecure` dropped; `pinnedPeerCertSha256` / `verifyPeerCertByName`
- *     / `mihomoIpVersion` added (not surfaced; ignored).
+ * A host's labels are `tags: string[]` (optional in the 3.3.2 and 3.4.3
+ * specs). `tag` is surfaced as the first of them because the admin SPA still
+ * reads it; the single `tag` string 2.7 sent instead is not read.
  *
  * THE CONFIG-PROFILE LINK IS NESTED, and this mapper read it flat for as long
  * as it existed:
@@ -31,7 +28,7 @@ import { RemnawaveHostInterface } from '../interfaces/remnawave-host.interface';
  */
 export function mapHost(raw: unknown): RemnawaveHostInterface {
   const r = (raw ?? {}) as Record<string, unknown>;
-  const tags = normalizeTags(r['tags'], r['tag']);
+  const tags = normalizeStringList(r['tags']);
   const inbound = record(r['inbound']);
   return {
     uuid: str(r['uuid']) ?? '',
@@ -52,14 +49,6 @@ export function mapHost(raw: unknown): RemnawaveHostInterface {
     internalSquads: normalizeInternalSquads(r['internalSquads'], r['excludedInternalSquads']),
     excludeFromSubscriptionTypes: normalizeStringList(r['excludeFromSubscriptionTypes']),
   };
-}
-
-function normalizeTags(tagsValue: unknown, legacyTag: unknown): string[] {
-  if (Array.isArray(tagsValue)) {
-    return tagsValue.filter((t): t is string => typeof t === 'string' && t.length > 0);
-  }
-  if (typeof legacyTag === 'string' && legacyTag.length > 0) return [legacyTag];
-  return [];
 }
 
 /** An object property, or an empty object for anything else. */

@@ -2,43 +2,21 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Prisma, SubscriptionStatus } from '@prisma/client';
 
 import { PrismaService } from '../../common/prisma/prisma.service';
-import { EVENT_TYPES, SystemEventsService } from '../../common/services/system-events.service';
 import { panelShortUuidFromConfigUrl } from '../remnawave/services/panel-user-address';
 import { PanelUsersClient } from '../remnawave/services/panel-users.client';
+import { readProfileOwnerMarkers, readProfileSubscriptionMarkers } from './panel-owner-marker';
 import { assertPanelProfileOwnership, readPanelFailure } from './profile-sync.processor';
 
 /** How many rows one database page carries. Bounds memory, not panel load. */
-export const PANEL_LINK_RECONCILIATION_DEFAULT_CHUNK = 25;
-export const PANEL_LINK_RECONCILIATION_MAX_CHUNK = 100;
+export const PANEL_LINK_RECONCILIATION_PAGE_SIZE = 25;
 /**
  * How many rows ONE invocation may examine. Each row costs the panel a resolve
  * plus a profile read, so the ceiling is a panel-load budget rather than a
- * database one — an operator repairing a large backlog runs the endpoint again
- * with `startAfterId`, and each run is independently reportable.
+ * database one — the automatic check continues from `nextCursor` on its next
+ * run, and the duplicate merge's operator runs again.
  */
 export const PANEL_LINK_RECONCILIATION_DEFAULT_LIMIT = 200;
 export const PANEL_LINK_RECONCILIATION_MAX_LIMIT = 1000;
-
-/**
- * The panel era this sweep reports, and the only string
- * {@link PanelLinkReconciliationReport.panelEra} carries.
- *
- * Spelled as a constant rather than inlined because two separate things read it
- * — the report and the per-row reasons — and the operator SPA mirrors the same
- * wire value.
- */
-export const PANEL_ERA_3X = '3.x';
-
-/**
- * KEPT, THOUGH THIS BUILD CAN NO LONGER PRODUCE IT. Panel 2.x is refused
- * centrally by `LegacyPanelRefusal`, so no sweep can conclude this era any
- * more. The constant stays because it is the WIRE value: reports stored on
- * older audit rows carry it, and the operator SPA declares the same pair
- * (`web/src/features/subscriptions/panel-link-reconciliation-api.ts`) and
- * branches on it. Deleting one half of a mirrored pair leaves the other half
- * looking like the whole set.
- */
-export const PANEL_ERA_2X = '2.x';
 
 /**
  * How many SHARED-IDENTITY groups one invocation reports, and how many rows it
@@ -55,9 +33,36 @@ export const PANEL_LINK_SHARED_IDENTITY_MAX_GROUPS = 200;
 export const PANEL_LINK_SHARED_IDENTITY_MAX_MEMBERS = 1000;
 
 /**
+ * THE POPULATION THE WALK TRIES TO PROVE, spelled once. The walk's pages, the
+ * operator's list («Подписки» → «Инструменты» → «Подписки без привязки к
+ * Remnawave») and the count after a backup import all read it, so the three
+ * can never disagree about which rows are "without a proven link".
+ *
+ * Two arms, and a live row (`status <> 'DELETED'`) is in the population when it
+ * matches either:
+ *
+ *  1. NO IDENTITY, AND THE SIGNATURE OF THE 19.08.2026 WRITE-PATH DEFECT —
+ *     `remnawave_id IS NULL` while the panel username and the config URL did
+ *     land. See the class note for why exactly this and nothing wider.
+ *  2. AN IDENTITY NO SUPPORTED PANEL CAN HAVE ISSUED — `remnawave_id` that is
+ *     not a decimal: a Remnawave 2.x uuid kept after the panel was upgraded, an
+ *     empty string, a donor's junk. Remnawave 3.x names a user by its numeric
+ *     id and nothing else, so such a row names nobody the panel answers to. The
+ *     same test the destructive paths refuse on (`isNumericPanelIdentity`,
+ *     `^\d+$`), so every row they refuse is a row this check tries to prove.
+ *
+ * `!~` is NULL-safe in the direction this needs: a NULL identity makes the
+ * second arm NULL, not true, so only the first arm can bring an empty row in.
+ */
+export const PANEL_LINK_POPULATION_SQL = Prisma.sql`(
+  ("remnawave_id" IS NULL AND "remnawave_panel_username" IS NOT NULL AND "config_url" IS NOT NULL)
+  OR "remnawave_id" !~ '^[0-9]+$'
+)`;
+
+/**
  * What happened to ONE row. Everything that is not `linked`/`wouldLink` is
- * reported to the operator BY NAME — silence is the disease this sweep repairs,
- * so it is not allowed to be the way the sweep reports its own failures.
+ * reported BY NAME — silence is the disease this walk repairs, so it is not
+ * allowed to be the way the walk reports its own failures.
  */
 export type PanelLinkReconciliationOutcome =
   /** The link was written. */
@@ -72,37 +77,37 @@ export type PanelLinkReconciliationOutcome =
    * disagree. The reason says which.
    */
   | 'notOwned'
-  /** Another live subscription already holds that panel profile. */
+  /**
+   * The profile IS this customer's, but its `subscription_id` line names
+   * another of their subscriptions (owner's decision, 24.09.2026: when the line
+   * is there it must match for any automatic link).
+   */
+  | 'markedForOtherSubscription'
+  /** Another live subscription — of another customer — already holds that panel profile. */
   | 'conflict'
   /**
-   * The row was IDENTIFIED as holding a stale identity and could NOT be
-   * repaired — and the reason is one no other member covers.
+   * The row holds a non-decimal identity and could NOT be repaired — and the
+   * reason is one no other member covers.
    *
-   * WHY THIS IS THE NARROW MEANING, chosen over the wide one. The wide reading
-   * ("every stale row this sweep touched") was rejected because `linked` and
-   * `wouldLink` already carry the one distinction an operator acts on: whether
-   * a write HAPPENED or would happen. Collapsing repaired stale rows onto a
-   * single `staleIdentity` member would make a dry run and a real run report
-   * the same string for the same row, which is the exact class of report this
-   * whole service exists to stop producing. A repaired stale row is therefore
+   * WHY THIS IS THE NARROW MEANING. `linked` and `wouldLink` already carry the
+   * one distinction an operator acts on: whether a write HAPPENED or would
+   * happen. A repaired row with a non-decimal identity is therefore
    * `linked`/`wouldLink`, and {@link PanelLinkReconciliationRow.storedRemnawaveId}
-   * is what shows the operator the dead uuid it used to hold.
+   * is what shows the identity it used to hold.
    *
-   * That leaves exactly two ways to be stale and unrepairable, and both are
-   * reported here rather than folded into `unresolved`, which would say "the
-   * panel did not answer" about a row the panel was never asked about:
+   * That leaves exactly two ways to be here, and both are reported rather than
+   * folded into `unresolved`, which would say "the panel did not answer" about
+   * a row the panel was never asked about:
    *   • no resolve route at all — neither a `config_url` to recover a
    *     subscription short UUID from, nor a `remnawave_panel_username`;
    *   • the panel answers for the profile with the identity the row ALREADY
-   *     holds, so there is nothing to rewrite. The detected era and the panel's
-   *     own answer disagree, and a repair invented from that disagreement is
-   *     how this bug class is made in the first place.
+   *     holds, so there is nothing to rewrite. A repair invented from that
+   *     disagreement is how this bug class is made in the first place.
    */
   | 'staleIdentity'
   /**
-   * Two LIVE rows of ONE customer on ONE panel profile — the pair the 2.x → 3.x
-   * identity split produced, not a collision between two unrelated
-   * subscriptions.
+   * Two LIVE rows of ONE customer on ONE panel profile — not a collision
+   * between two unrelated subscriptions.
    *
    * REACHED BY TWO DIFFERENT ROUTES, and an operator can tell them apart by
    * {@link PanelLinkReconciliationRow.resolvedBy} and by
@@ -123,13 +128,12 @@ export type PanelLinkReconciliationOutcome =
    * survivor the duplicate's identity, so after the first merge of a cluster of
    * three the survivor holds a well-formed identity and so does the remaining
    * duplicate. Neither is a BROKEN link any more, and a selection that asks only
-   * "is this link broken?" cannot see either of them. The remaining duplicate
-   * would sit there forever, live on a profile another live row also owns.
+   * "is this link broken?" cannot see either of them.
    *
-
-   * NOT REPAIRED BY THIS SWEEP, deliberately: merging two subscriptions moves
+   * NOT REPAIRED BY THIS WALK, deliberately: merging two subscriptions moves
    * history, payments and referral links, and that belongs behind its own dry
-   * run rather than inside a link repair.
+   * run — «Подписки» → «Инструменты» → «Слияние подписок-дубликатов», which
+   * finds its pairs by running this walk as a preview.
    *
    * A pair contributes TWO rows to {@link PanelLinkReconciliationReport.unrepaired}
    * — the scanned half and the half it collided with — because an operator who
@@ -139,6 +143,35 @@ export type PanelLinkReconciliationOutcome =
   | 'duplicatePair'
   /** A concurrent CREATE linked the row first; its link is left alone. */
   | 'raceLost';
+
+/**
+ * WHY a row was not linked, as a code a screen can translate — the sentence in
+ * {@link PanelLinkReconciliationRow.reason} is for logs and audit rows, and a
+ * screen that parsed it would break on the first rewording.
+ */
+export type PanelLinkRowReason =
+  /** No short UUID in the config URL and no panel username: nothing to ask the panel by. */
+  | 'noRoute'
+  /** The panel has no profile under that short UUID / username. */
+  | 'notFound'
+  /** The panel could not be asked (transport, 5xx, auth, timeout). The walk stops there. */
+  | 'panelUnavailable'
+  /** The resolve named a profile that is gone by the time it is read. */
+  | 'profileGone'
+  /** The `reiwa_id` line names another customer ({@link PanelLinkReconciliationRow.otherUserId}). */
+  | 'ownedByOther'
+  /** No `reiwa_id` line, or lines naming different customers. */
+  | 'noOwnerProof'
+  /** The `subscription_id` line names another subscription ({@link PanelLinkReconciliationRow.otherSubscriptionId}). */
+  | 'markedForOtherSubscription'
+  /** A live row of ANOTHER customer holds the profile. */
+  | 'profileTaken'
+  /** A live row of the SAME customer holds the profile. */
+  | 'duplicatePair'
+  /** The row changed while the walk was in flight. */
+  | 'raceLost'
+  /** The panel answers with the very identity the row holds. */
+  | 'panelAgrees';
 
 export interface PanelLinkReconciliationRow {
   readonly subscriptionId: string;
@@ -161,11 +194,13 @@ export interface PanelLinkReconciliationRow {
    */
   readonly resolvedBy: 'shortUuid' | 'username' | 'storedIdentity';
   readonly outcome: PanelLinkReconciliationOutcome;
+  /** The code for {@link reason}; `null` on `linked` / `wouldLink`. */
+  readonly reasonCode: PanelLinkRowReason | null;
   /** The identity that was (or would be) written; `null` when nothing resolved. */
   readonly remnawaveId: string | null;
   /**
-   * What the row holds RIGHT NOW, before this sweep touched anything: `null`
-   * for the missing-identity population, the dead 2.x uuid for the stale one.
+   * What the row holds RIGHT NOW, before this walk touched anything: `null`
+   * for the missing-identity population, the non-decimal value for the other.
    *
    * A report that shows only the NEW value cannot be checked. The operator has
    * to be able to see the identity that stopped working, both to recognise the
@@ -176,22 +211,30 @@ export interface PanelLinkReconciliationRow {
   /**
    * The other row of a `duplicatePair`, `null` otherwise — including on a plain
    * `conflict`, where the two rows belong to DIFFERENT customers and are not a
-   * pair at all (the holder is still named in {@link reason}).
+   * pair at all (the holder is {@link otherSubscriptionId}).
    */
   readonly duplicateOfSubscriptionId: string | null;
+  /**
+   * The other subscription the reason is about, for a screen: the pair partner,
+   * the other customer's holder of a `conflict`, or the subscription a
+   * `subscription_id` line names. `null` when the reason names none.
+   */
+  readonly otherSubscriptionId: string | null;
+  /** The other customer the reason is about (`ownedByOther`, `profileTaken`), else `null`. */
+  readonly otherUserId: string | null;
   /**
    * True when the subscription THIS record describes is bound to the live panel
    * profile as this report leaves the database.
    *
    * THE FIELD EXISTS BECAUSE THE POLARITY IS BACKWARDS FROM INSTINCT. In the
-   * pair this defect produced, the OLDER row — the one carrying the customer's
-   * history, payments and plan, the one that looks legitimate — stores a 2.x
-   * uuid the 3.x panel no longer answers to, and is bound to NOTHING. The
+   * pair a lost link produces, the OLDER row — the one carrying the customer's
+   * history, payments and plan, the one that looks legitimate — holds an
+   * identity the panel no longer answers to, and is bound to NOTHING. The
    * NEWER, wrong-looking duplicate stores the current decimal and is the row
    * actually pointing at the live profile. An operator who deletes the
    * wrong-looking card issues a panel DELETE against a paying customer's live
    * profile. So this is stated as a field rather than left to be inferred from
-   * {@link storedRemnawaveId}, which requires knowing the era to read.
+   * {@link storedRemnawaveId}.
    *
    * Per outcome:
    *   `linked`             true  — the write just bound it.
@@ -201,11 +244,19 @@ export interface PanelLinkReconciliationRow {
    *                        partner. Via `storedIdentity`: TRUE ON BOTH — both
    *                        rows store the identity, so both are bound and
    *                        neither may be deleted.
-   *   `raceLost`           false — something else wrote an identity this sweep
+   *   `raceLost`           false — something else wrote an identity this walk
    *                        never verified, so there is nothing to vouch for.
    *   everything else      false.
    */
   readonly holdsLiveIdentity: boolean;
+  /**
+   * `true` for a row the walk itself selected and asked the panel about;
+   * `false` for the partner a pair drags in and for the shared-identity arm's
+   * rows, which were read out of the database. The automatic check keeps the
+   * verdict of a scanned row only: that is the answer to "why is this row not
+   * linked", and a partner's verdict is about another row.
+   */
+  readonly scanned: boolean;
   /** Why this row was not repaired. `null` on `linked` / `wouldLink`. */
   readonly reason: string | null;
 }
@@ -227,16 +278,36 @@ export interface PanelLinkReconciliationReport {
    */
   readonly unrepaired: readonly PanelLinkReconciliationRow[];
   /**
-   * `true` when the run stopped at `limit` with the selection not exhausted.
-   * The operator runs again from {@link nextCursor}.
+   * `true` when the walk stopped with the selection not exhausted — at
+   * `limit`, at the time budget, or because the panel stopped answering. The
+   * caller continues from {@link nextCursor}.
    */
   readonly hasMore: boolean;
-  /** The id of the last row examined, or `null` when nothing was. */
+  /**
+   * `true` when the WALK read its selection to the end in this invocation.
+   * Narrower than `!hasMore`, which also turns true when the shared-identity
+   * arm was cut at its cap: that is the merge's backlog, not rows the walk has
+   * yet to ask about, and waiting an hour does not shorten it — so the
+   * automatic check schedules its retry on this, not on `hasMore`.
+   */
+  readonly walkComplete: boolean;
+  /**
+   * Where a continuation starts: the id of the last row the walk FINISHED, or
+   * `null` when it finished none. A row the panel could not be asked about is
+   * not finished, so a continuation asks about it again first.
+   */
   readonly nextCursor: string | null;
   /**
-   * How many of {@link scanned} came from the STALE-identity population,
-   * whatever became of them. Zero on a 2.x panel and on an unidentified one,
-   * where that population is not selected at all.
+   * `true` when the walk stopped because the panel did not answer — transport,
+   * 5xx, auth, timeout. The rows after it were not asked about at all; one
+   * failed read is taken to mean the panel is down, and asking it once per row
+   * of a backlog would only make the outage louder. The automatic check
+   * schedules its retry on this.
+   */
+  readonly panelUnavailable: boolean;
+  /**
+   * How many of {@link scanned} came from the NON-DECIMAL-identity population,
+   * whatever became of them.
    */
   readonly staleIdentityScanned: number;
   /** How many duplicate PAIRS were diagnosed (each is two rows in `unrepaired`). */
@@ -245,23 +316,8 @@ export interface PanelLinkReconciliationReport {
    * How many of {@link duplicatePairs} were found by the SHARED-IDENTITY arm —
    * two live rows storing one identity — rather than by resolving a row that
    * could not name its profile.
-   *
-   * Reported separately for the same reason {@link staleIdentityScanned} is: an
-   * operator reading zero has to be able to tell "there were none" from "that
-   * arm did not run". It does not run on a 2.x panel, and it does not run on a
-   * panel whose era could not be read.
    */
   readonly sharedIdentityPairs: number;
-  /**
-   * Which era the sweep believed it was talking to: {@link PANEL_ERA_2X},
-   * {@link PANEL_ERA_3X}, or `null` when it could not tell.
-   *
-   * An operator reading a report of zero repairs must be able to see whether
-   * the sweep was even LOOKING. `null` is not a small number of repairs, it is
-   * a sweep that refused to guess an era and therefore left the second
-   * population out entirely.
-   */
-  readonly panelEra: string | null;
 }
 
 export interface PanelLinkReconciliationOptions {
@@ -272,9 +328,19 @@ export interface PanelLinkReconciliationOptions {
    */
   readonly dryRun?: boolean;
   readonly limit?: number;
-  readonly chunkSize?: number;
+  /**
+   * Rows per database page, at most {@link PANEL_LINK_RECONCILIATION_PAGE_SIZE}
+   * (the default). Smaller pages change nothing but how often the walk asks.
+   */
+  readonly pageSize?: number;
   /** Resume point: only rows with `id > startAfterId` are considered. */
   readonly startAfterId?: string | null;
+  /**
+   * A wall-clock budget for the WALK, in milliseconds. When it runs out the
+   * walk stops before the next row and reports `hasMore`. Absent: no budget
+   * (the row cap still applies).
+   */
+  readonly budgetMs?: number;
 }
 
 /** The row shape the selection reads. Nothing else is needed to repair one. */
@@ -282,9 +348,9 @@ interface BrokenLinkRow {
   readonly id: string;
   readonly userId: string;
   /**
-   * `null` for the missing-identity population; the stale (uuid-shaped) string
-   * for the second one. Which population a row came from is read off THIS
-   * field and nothing else — the two selection arms are mutually exclusive on
+   * `null` for the missing-identity population; the non-decimal string for
+   * the second one. Which population a row came from is read off THIS field
+   * and nothing else — the two selection arms are mutually exclusive on
    * exactly it.
    */
   readonly remnawaveId: string | null;
@@ -305,6 +371,8 @@ interface ProfileHolder {
 interface RowVerdict {
   readonly row: PanelLinkReconciliationRow;
   readonly partner: PanelLinkReconciliationRow | null;
+  /** The panel did not answer for this row: the walk stops before the next one. */
+  readonly panelUnavailable?: boolean;
 }
 
 /**
@@ -340,15 +408,26 @@ function pairKey(left: string, right: string): string {
 /**
  * PanelLinkReconciliationService
  * ──────────────────────────────
- * A deliberate, operator-initiated repair for subscriptions whose panel profile
- * EXISTS but which cannot name it. Two populations, one sweep, one report — the
- * per-row `outcome` says which of them a row came from and what became of it.
+ * The repair for subscriptions whose panel profile EXISTS but which cannot name
+ * it: the walk over {@link PANEL_LINK_POPULATION_SQL}, one resolve and one
+ * profile read per row, the ownership proof, the collision check, and the
+ * rewrite of `remnawave_id` to the panel's own decimal id. Two populations, one
+ * walk, one report — the per-row `outcome` says what became of each row.
+ *
+ * WHO RUNS IT (owner's decision, 24.09.2026). Nobody presses a button any more:
+ * `PanelLinkCheckService` runs it for real at worker boot, after every backup
+ * import, once a day and an hour after a run that could not finish, and lists
+ * what it could not prove in «Подписки» → «Инструменты» → «Подписки без
+ * привязки к Remnawave». `DuplicateSubscriptionMergeService` runs it as a
+ * PREVIEW to find its pairs. Our own ids never change: the only column a
+ * repair writes is the LINK (`remnawave_id`, with the numeric
+ * `remnawave_panel_id` beside it).
  *
  * NOTHING HERE MUTATES THE PANEL. The only two panel calls are
- * `resolvePanelIdentity` (`POST /api/users/resolve`, a read behind a POST) and
- * `getPanelUserOutcome` (a profile read). No create, no rename, no delete. That
- * is a property to preserve, not a coincidence: every repair this service
- * performs is a LOCAL write correcting which panel profile a local row NAMES.
+ * `resolveUser` (`POST /api/users/resolve`, a read behind a POST) and
+ * `getUserById` (a profile read). No create, no rename, no delete. That is a
+ * property to preserve, not a coincidence: every repair this service performs
+ * is a LOCAL write correcting which panel profile a local row NAMES.
  *
  * ── POPULATION 1: NO IDENTITY AT ALL ─────────────────────────────────────────
  *
@@ -373,43 +452,24 @@ function pairKey(left: string, right: string): string {
  *   • a row that was never provisioned has neither of the two;
  *   • a row detached by `reprovisionMissingProfile` or by `handleDelete` has
  *     all four cleared in the same statement;
- *   • the manual link-repair endpoint refuses unless `remnawaveId` is null and
- *     writes all of them together.
- * So `status <> DELETED AND remnawave_id IS NULL AND remnawave_panel_username
- * IS NOT NULL AND config_url IS NOT NULL` selects exactly the damaged rows and
- * nothing else. It is deliberately NOT widened to "any unlinked row": those are
- * the ordinary pre-provision state, and asking the panel to name a profile for
- * them would invent links for subscriptions that never had one.
+ *   • the manual link endpoint writes all of them together.
+ * It is deliberately NOT widened to "any unlinked row": those are the ordinary
+ * pre-provision state, and asking the panel to name a profile for them would
+ * invent links for subscriptions that never had one. (The per-customer
+ * comparison, `PanelProfileComparisonService`, reaches those rows by a
+ * different proof: the `reiwa_id` line of a profile nobody links.)
  *
- * ── POPULATION 2: A STALE IDENTITY ───────────────────────────────────────────
+ * ── POPULATION 2: AN IDENTITY NO SUPPORTED PANEL ISSUED ──────────────────────
  *
  * Remnawave 3.x dropped the `uuid` column outright and names every user by a
- * decimal id. `Subscription.remnawaveId` stores whichever spelling was current
- * when the row was linked and is deliberately never rewritten. Every row linked
- * before the operator upgraded therefore holds a uuid for a profile the panel
- * now reports a decimal for, and comparing the two spellings of one identity
- * finds them unequal FOREVER.
+ * decimal id. A row linked while the panel was 2.x still holds that uuid, and a
+ * donor's backup can bring an empty string or junk; none of them names anybody
+ * the panel answers to. Remnawave 2.x itself is refused centrally
+ * (`LegacyPanelRefusal`), so there is one era and no probe of it here.
  *
- * THE SHAPE TEST IS SOUND AND IT IS THE SAME ONE THE LINK-REPAIR ENDPOINT USES.
- * `admin-user-subscriptions.controller.ts` (the `namesSameProfile` block, in
- * the "which comparisons are sound" list) states it: "a uuid always carries
- * `-`, so it never equals a decimal". A live row whose identity contains `-` is
- * therefore provably holding a name this panel cannot answer to — there is no
- * legitimate way for a 3.x panel to have issued one.
- *
- * THE ERA IS NO LONGER PROBED. It used to be, because on a 2.x panel a
- * uuid-shaped identity is CORRECT and rewriting one would strand the row the
- * repair claimed to fix; the population was left empty whenever the answer was
- * `'uuid'` or unreadable. `LegacyPanelRefusal` now turns a 2.x panel away
- * centrally, so there is one era and nothing left for the probe to decide.
- *
- * WHAT THIS SWEEP DOES NOT DO. It does not merge the duplicate pair the defect
+ * WHAT THIS WALK DOES NOT DO. It does not merge the duplicate pair a lost link
  * produced. It diagnoses it (`duplicatePair`, with both halves named and the
  * live one flagged) and stops.
- *
- * NOT A CRON, NOT A STARTUP HOOK. One resolve and one profile read per row go
- * to the panel; that is a cost an operator chooses to pay, at a moment of their
- * choosing, having first seen a dry run.
  */
 @Injectable()
 export class PanelLinkReconciliationService {
@@ -418,7 +478,6 @@ export class PanelLinkReconciliationService {
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly panelUsers: PanelUsersClient,
-    private readonly events: SystemEventsService,
   ) {}
 
   public async reconcile(
@@ -432,26 +491,15 @@ export class PanelLinkReconciliationService {
       PANEL_LINK_RECONCILIATION_DEFAULT_LIMIT,
       PANEL_LINK_RECONCILIATION_MAX_LIMIT,
     );
-    const chunkSize = clampPositive(
-      options.chunkSize,
-      PANEL_LINK_RECONCILIATION_DEFAULT_CHUNK,
-      PANEL_LINK_RECONCILIATION_MAX_CHUNK,
+    const pageCeiling = clampPositive(
+      options.pageSize,
+      PANEL_LINK_RECONCILIATION_PAGE_SIZE,
+      PANEL_LINK_RECONCILIATION_PAGE_SIZE,
     );
-
-    // THE ERA IS NOT DISCOVERED ANY MORE, AND THAT IS NOT A GUESS. This used to
-    // probe the panel once before the walk and leave both era-dependent arms
-    // OUT whenever the answer was `'uuid'` or unreadable, because a uuid-shaped
-    // identity is CORRECT on a 2.x panel and rewriting one on a guess strands
-    // the row it repaired. A 2.x panel is now refused centrally by
-    // `LegacyPanelRefusal`, so there is one era, the probe had nothing left to
-    // decide, and both arms run unconditionally.
-    //
-    // WHAT THE ERA GATED IS STILL TRUE, restated so it does not read as a
-    // relaxation: a live row whose identity contains `-` is provably holding a
-    // name this panel cannot answer to, because there is no way for a 3.x panel
-    // to have issued one. The gate was protecting the OTHER era's rows, and
-    // that era is gone.
-    const panelEra = PANEL_ERA_3X;
+    const deadline =
+      typeof options.budgetMs === 'number' && Number.isFinite(options.budgetMs) && options.budgetMs > 0
+        ? Date.now() + options.budgetMs
+        : null;
 
     const repaired: PanelLinkReconciliationRow[] = [];
     const unrepaired: PanelLinkReconciliationRow[] = [];
@@ -461,8 +509,7 @@ export class PanelLinkReconciliationService {
      *
      * Only exact pairs are suppressed. A row already named in one pair is NOT
      * struck out of others: a walk pair the merge later refuses would then
-     * silently starve every shared pair its members belong to, and silence is
-     * the disease this whole sweep exists to end.
+     * silently starve every shared pair its members belong to.
      */
     const walkPairKeys = new Set<string>();
     let cursor: string | null =
@@ -473,19 +520,29 @@ export class PanelLinkReconciliationService {
     let staleIdentityScanned = 0;
     let duplicatePairs = 0;
     let hasMore = false;
+    let panelUnavailable = false;
+    /** Set only where the selection is seen to END — never by a cap, a budget or an outage. */
+    let walkComplete = false;
 
-    while (scanned < limit) {
+    walk: while (scanned < limit) {
       // One more than needed, so "the cap was reached AND rows remain" is
       // answered without a second query — and without reporting `hasMore` for a
       // selection that merely happened to end exactly on the boundary.
-      const page = await this.selectBrokenLinks(
-        cursor,
-        Math.min(chunkSize, limit - scanned) + 1,
-      );
-      const rows = page.slice(0, Math.min(chunkSize, limit - scanned));
-      if (rows.length === 0) break;
+      const pageSize = Math.min(pageCeiling, limit - scanned);
+      const page = await this.selectBrokenLinks(cursor, pageSize + 1);
+      const rows = page.slice(0, pageSize);
+      if (rows.length === 0) {
+        walkComplete = true;
+        break;
+      }
 
       for (const row of rows) {
+        if (deadline !== null && Date.now() >= deadline) {
+          // Out of time with this row not asked about: the cursor stays on the
+          // last row finished, so a continuation starts here.
+          hasMore = true;
+          break walk;
+        }
         const verdict = await this.reconcileRow(row, dryRun);
         const result = verdict.row;
         (result.outcome === 'linked' || result.outcome === 'wouldLink'
@@ -502,12 +559,13 @@ export class PanelLinkReconciliationService {
         // Which population this row came from, read off the one column that
         // separates the two selection arms.
         if (row.remnawaveId !== null) staleIdentityScanned += 1;
-        // Named in the log too, not only in the response body: the operator who
-        // triggers this from the SPA sees the report, the one reading logs a
-        // week later sees the same rows.
+        scanned += 1;
+        // Named in the log too, not only in the report: the list an operator
+        // opens shows the latest verdict, the one reading logs a week later sees
+        // the same rows.
         if (result.reason !== null) {
           this.logger.warn(
-            `Panel link reconciliation: subscription ${result.subscriptionId} (user ` +
+            `Panel link check: subscription ${result.subscriptionId} (user ` +
               `${result.userId}, panel username '${result.panelUsername}', stored identity ` +
               `'${result.storedRemnawaveId ?? 'none'}', tried ${result.resolvedBy}) not ` +
               `repaired — ${result.outcome}: ${result.reason}`,
@@ -515,22 +573,33 @@ export class PanelLinkReconciliationService {
         }
         if (verdict.partner !== null) {
           this.logger.warn(
-            `Panel link reconciliation: subscription ${verdict.partner.subscriptionId} is the ` +
+            `Panel link check: subscription ${verdict.partner.subscriptionId} is the ` +
               `LIVE half of the duplicate pair with ${result.subscriptionId} — ` +
               `${verdict.partner.reason}`,
           );
         }
+        if (verdict.panelUnavailable === true) {
+          // ONE failed read ends the walk. The panel is taken to be down, and
+          // asking it again once per remaining row would make the outage louder
+          // without learning anything. The row is REPORTED (its reason says
+          // the panel could not be asked) but not FINISHED: the cursor stays
+          // before it, so a continuation asks about it first.
+          panelUnavailable = true;
+          hasMore = true;
+          break walk;
+        }
         cursor = row.id;
-        scanned += 1;
       }
 
       // ASSIGNED, never latched. The extra row proves only that THIS page did
       // not drain the selection; the next page may. A `hasMore = true` that is
-      // never cleared survives the chunk that finished the walk and sends the
-      // operator round a loop of runs that repair nothing — a report that lies
-      // in the same direction as the defect this whole sweep repairs.
+      // never cleared survives the page that finished the walk and sends the
+      // caller round a loop of runs that repair nothing.
       hasMore = page.length > rows.length;
-      if (!hasMore) break;
+      if (!hasMore) {
+        walkComplete = true;
+        break;
+      }
       // The cap, not the page, is what stops the walk — `scanned < limit` ends
       // it on the next turn when the cap is what we hit.
       if (scanned >= limit) break;
@@ -543,14 +612,13 @@ export class PanelLinkReconciliationService {
     // than the one it started from. (The walk cannot itself create a shared
     // identity: `writeLink` probes for a holder under the profile advisory lock
     // and reports a `duplicatePair` instead of writing when it finds one. What
-    // it can do is REMOVE one, by repairing a stale row — and reading after the
-    // fact is what keeps this arm from reporting a pair that no longer exists.)
+    // it can do is REMOVE one, by repairing a row — and reading after the fact
+    // is what keeps this arm from reporting a pair that no longer exists.)
     //
     // NOT SCOPED BY THE CURSOR. `startAfterId` pages the WALK, whose selection
     // shrinks as it repairs; this arm is one whole-table aggregate whose answer
     // is not a page of rows. Scoping it to the cursor would hide every cluster
-    // behind the resume point, which is exactly the silent skip the cursor
-    // exists to prevent. Re-reporting an already-merged cluster is not the
+    // behind the resume point. Re-reporting an already-merged cluster is not the
     // opposite risk it looks like: a merge retires one half, the group drops to
     // one member, and the pair stops being reported by itself.
     const shared = await this.selectSharedIdentityPairs(walkPairKeys);
@@ -561,11 +629,11 @@ export class PanelLinkReconciliationService {
       if (row.duplicateOfSubscriptionId === null) continue;
       // The PROFILE both halves name, and separately what THIS half stores.
       // They are not always the same string: on a pair found through the numeric
-      // panel id one half can still be holding a 2.x uuid, and a log line that
-      // printed the stored value as though it were the profile would name a
-      // dead identity as the live one.
+      // panel id one half can still be holding a non-decimal identity, and a
+      // log line that printed the stored value as though it were the profile
+      // would name a dead identity as the live one.
       this.logger.warn(
-        `Panel link reconciliation: subscriptions ${row.subscriptionId} and ` +
+        `Panel link check: subscriptions ${row.subscriptionId} and ` +
           `${row.duplicateOfSubscriptionId} (user ${row.userId}) are BOTH live and BOTH name ` +
           `panel profile ${row.remnawaveId ?? 'unknown'}; this half stores ` +
           `'${row.storedRemnawaveId ?? 'none'}' — ${row.reason}`,
@@ -573,110 +641,55 @@ export class PanelLinkReconciliationService {
     }
 
     const linked = repaired.filter((row) => row.outcome === 'linked').length;
-    const wouldLink = repaired.length - linked;
-    const report: PanelLinkReconciliationReport = {
+    return {
       dryRun,
       scanned,
       linked,
-      wouldLink,
+      wouldLink: repaired.length - linked,
       repaired,
       unrepaired,
       hasMore,
+      walkComplete,
       nextCursor: cursor,
+      panelUnavailable,
       staleIdentityScanned,
       duplicatePairs,
       sharedIdentityPairs: shared.pairs,
-      panelEra,
     };
-
-    // A RUN THAT SCANNED NOTHING AND FOUND A CLUSTER IS STILL A RUN THAT FOUND
-    // SOMETHING. The shared-identity arm reaches rows the walk does not select
-    // at all, so gating the operator's event feed on `scanned` alone would make
-    // the one report this arm exists to produce the one report nobody sees.
-    if (scanned > 0 || shared.pairs > 0) {
-      this.events.info(
-        EVENT_TYPES.SYSTEM_REMNAWAVE_SYNC,
-        'SYSTEM',
-        dryRun
-          ? `Panel link reconciliation (dry run): ${wouldLink} of ${scanned} rows repairable`
-          : `Panel link reconciliation: linked ${linked} of ${scanned} rows`,
-        {
-          dryRun,
-          scanned,
-          linked,
-          wouldLink,
-          unrepaired: unrepaired.length,
-          hasMore,
-          panelEra,
-          staleIdentityScanned,
-          duplicatePairs,
-          sharedIdentityPairs: shared.pairs,
-        },
-      );
-    }
-    return report;
   }
 
   /**
-   * The damaged rows, paged by id, as ONE union across both populations.
+   * The damaged rows, paged by id: {@link PANEL_LINK_POPULATION_SQL}.
    *
    * Paged by `id > cursor` rather than by OFFSET on purpose: a real run REMOVES
    * rows from this selection as it repairs them, and an offset walk over a
-   * shrinking set skips one row for every row it fixes. THAT STILL HOLDS FOR
-   * THE WIDENED PREDICATE, and for the same reason on both arms: repairing a
-   * missing-identity row makes `remnawave_id` non-null, and repairing a stale
-   * one rewrites it from the uuid to the decimal, which no longer contains `-`.
-   * Either way the row leaves the selection under the sweep's own feet. Rows
-   * that are NOT repaired stay in it, and the cursor — advanced per ROW, not
-   * per page — is what keeps the walk from re-reading them forever.
+   * shrinking set skips one row for every row it fixes. That holds for both
+   * arms: repairing a missing-identity row makes `remnawave_id` non-null and
+   * decimal, and repairing a non-decimal one rewrites it to the decimal. Either
+   * way the row leaves the selection under the walk's own feet. Rows that are
+   * NOT repaired stay in it, and the cursor — advanced per ROW, not per page —
+   * is what keeps the walk from re-reading them forever.
    *
-   * THE THREE ARMS, and why the third is not merged into the second:
-   *
-   *  1. missing identity — the decoder-defect signature, exactly as before.
-   *  2. stale identity WITH a resolve route. A repair needs one of the two
-   *     routes, so this is the arm that can actually be fixed.
-   *  3. stale identity with NEITHER route. Unrepairable by any means: nothing
-   *     on the row can name a profile to the panel. It is selected anyway so
-   *     that it is REPORTED — by name, with a reason, and without costing a
-   *     panel round-trip — instead of being silently absent from a report whose
-   *     whole purpose is to end silence. {@link reconcileRow} short-circuits it
-   *     before either panel call.
+   * RAW SQL, because the second arm is a regular expression and Prisma's
+   * `where` has none. A non-decimal row with NEITHER route is selected all the
+   * same, so that it is REPORTED — by name, with a reason, and without costing
+   * a panel round-trip — instead of being silently absent. {@link reconcileRow}
+   * short-circuits it before either panel call.
    */
   private async selectBrokenLinks(cursor: string | null, take: number): Promise<BrokenLinkRow[]> {
-    const missingIdentity: Prisma.SubscriptionWhereInput = {
-      remnawaveId: null,
-      remnawavePanelUsername: { not: null },
-      configUrl: { not: null },
-    };
-    // `contains: '-'` is the whole shape test, and it is exact rather than
-    // approximate: a panel id is decimal and can never contain a hyphen, a uuid
-    // always does. Unconditional now that 3.x is the only era this build talks
-    // to — see the note in `reconcile`.
-    const staleWithRoute: Prisma.SubscriptionWhereInput = {
-      remnawaveId: { contains: '-' },
-      OR: [{ configUrl: { not: null } }, { remnawavePanelUsername: { not: null } }],
-    };
-    const staleWithoutRoute: Prisma.SubscriptionWhereInput = {
-      remnawaveId: { contains: '-' },
-      configUrl: null,
-      remnawavePanelUsername: null,
-    };
-    return this.prismaService.subscription.findMany({
-      where: {
-        status: { not: SubscriptionStatus.DELETED },
-        ...(cursor === null ? {} : { id: { gt: cursor } }),
-        OR: [missingIdentity, staleWithRoute, staleWithoutRoute],
-      },
-      orderBy: { id: 'asc' },
-      take,
-      select: {
-        id: true,
-        userId: true,
-        remnawaveId: true,
-        remnawavePanelUsername: true,
-        configUrl: true,
-      },
-    });
+    return this.prismaService.$queryRaw<BrokenLinkRow[]>(Prisma.sql`
+      SELECT "id",
+             "user_id" AS "userId",
+             "remnawave_id" AS "remnawaveId",
+             "remnawave_panel_username" AS "remnawavePanelUsername",
+             "config_url" AS "configUrl"
+      FROM "subscriptions"
+      WHERE "status" <> 'DELETED'
+        ${cursor === null ? Prisma.empty : Prisma.sql`AND "id" > ${cursor}`}
+        AND ${PANEL_LINK_POPULATION_SQL}
+      ORDER BY "id" ASC
+      LIMIT ${take}
+    `);
   }
 
   /**
@@ -684,48 +697,42 @@ export class PanelLinkReconciliationService {
    *
    * ── WHY THE OTHER SELECTION CANNOT ASK THIS ──────────────────────────────
    *
-   * {@link selectBrokenLinks} asks "is THIS link broken?" — `remnawave_id IS
-   * NULL`, or uuid-shaped on a proven 3.x panel. That is a predicate over one
-   * row at a time, and no predicate over one row can notice that a DIFFERENT
-   * row holds the same string. So the moment both halves of a cluster carry a
-   * well-formed identity the cluster becomes invisible — which is precisely the
-   * state a MERGE leaves behind, because the survivor takes the duplicate's
-   * identity. A cluster of three therefore used to stop halfway: the first
-   * merge was found, the second never was, and the customer was left with two
-   * live rows able to overwrite and delete each other's service.
+   * {@link selectBrokenLinks} asks "is THIS link broken?". That is a predicate
+   * over one row at a time, and no predicate over one row can notice that a
+   * DIFFERENT row holds the same string. So the moment both halves of a cluster
+   * carry a well-formed identity the cluster becomes invisible — which is
+   * precisely the state a MERGE leaves behind, because the survivor takes the
+   * duplicate's identity. A cluster of three therefore used to stop halfway:
+   * the first merge was found, the second never was, and the customer was left
+   * with two live rows able to overwrite and delete each other's service.
    *
    * ── WHAT COUNTS AS IDENTITY HERE, AND WHAT DOES NOT ──────────────────────
    *
    * The two IMMUTABLE identifiers, and only those — the same two-angled
    * question `writeLink`'s conflict probe asks:
    *
-   *   • `remnawave_id`, non-null and EQUAL as strings. Whatever era spelled it,
-   *     a profile's identity is that profile's forever, so two live rows
-   *     carrying the identical string carry one profile. Cross-era spellings
-   *     (a uuid against a decimal) are never compared, because they are never
-   *     equal — that is the second angle's job.
+   *   • `remnawave_id`, DECIMAL and EQUAL as strings. A profile's identity is
+   *     that profile's forever, so two live rows carrying the identical decimal
+   *     carry one profile. Non-decimal spellings are the walk's population, and
+   *     the walk diagnoses them with the panel's own answer rather than a
+   *     string match (see the `where` below).
    *   • `remnawave_panel_id`, non-null and EQUAL. A numeric panel id names one
-   *     profile forever too, and it is how a 2.x-era row and an importer-minted
-   *     one can be shown to be the same profile despite two spellings.
+   *     profile forever too, and it is how a row still holding a non-decimal
+   *     identity and an importer-minted one can be shown to be the same profile.
    *
    * NULLS ARE EXCLUDED FROM BOTH, not compared. `remnawave_panel_id` carries no
    * unique constraint (migration 20260810160000 records why one cannot be added
    * to live data), so grouping nulls together would put every row that has none
-   * in one bucket and turn "who is this profile" into "anybody" — the same trap
-   * `panelProfileClaims` and `handleDelete`'s retirement fence are written
-   * around.
+   * in one bucket and turn "who is this profile" into "anybody".
    *
-   * `remnawave_panel_username` IS DELIBERATELY NOT IDENTITY, and this is the one
-   * exclusion that would look like a free win. A name is not an identity: panel
-   * usernames are DETERMINISTIC (`clampPanelUsername` documents that determinism
-   * as a requirement, because the CREATE path uses the name as its
-   * crash-recovery key), so a profile that was deleted frees its name and the
-   * NEXT profile provisioned for that customer inherits it. Two live rows
-   * sharing a username are then the row that lost its profile and the row that
-   * got the replacement — two DIFFERENT profiles. Merging them would move a live
-   * subscription's history onto a dead row and retire the live one. Same trap,
-   * same conclusion as `namesSameProfile` in
-   * `admin-user-subscriptions.controller.ts` and as `panelProfileClaims`.
+   * `remnawave_panel_username` IS DELIBERATELY NOT IDENTITY. Panel usernames are
+   * DETERMINISTIC (`clampPanelUsername` documents that determinism as a
+   * requirement, because the CREATE path uses the name as its crash-recovery
+   * key), so a profile that was deleted frees its name and the NEXT profile
+   * provisioned for that customer inherits it. Two live rows sharing a username
+   * are then the row that lost its profile and the row that got the
+   * replacement — two DIFFERENT profiles. Merging them would move a live
+   * subscription's history onto a dead row and retire the live one.
    *
    * `config_url` is excluded for a weaker but sufficient reason: it is a resolve
    * ROUTE, not an identity. It is regenerated when a subscription link is
@@ -734,32 +741,26 @@ export class PanelLinkReconciliationService {
    * ── SAME CUSTOMER ONLY ───────────────────────────────────────────────────
    *
    * Groups are formed per `user_id`. Two rows of DIFFERENT customers sharing an
-   * identity is a genuine collision, not this defect's pair, and
-   * {@link describeCollision} already explains why nothing sound distinguishes
-   * "one customer the importer split in two" from "two customers" — there is no
-   * marker tying two Users together. A merge moves payments and referral spends
+   * identity is a genuine collision, not a pair, and {@link describeCollision}
+   * explains why nothing sound distinguishes "one customer the importer split in
+   * two" from "two customers". A merge moves payments and referral spends
    * between subscriptions, so a pair is claimed only where the owner is proven
    * identical.
    *
    * ── NO PANEL CALL, AND NO WRITE ──────────────────────────────────────────
    *
-   * The resolve routes exist because a row that cannot name its profile needs
-   * the panel to name it. These rows already name it — twice — so the panel has
-   * nothing to add, and this arm makes no call at all. It also writes nothing:
-   * it reports the pair, and the survivor rule, the ownership proof and every
-   * guard live in `DuplicateSubscriptionMergeService`, which re-verifies each
-   * pair from the database AND the panel before a byte is written.
+   * These rows already name their profile — twice — so the panel has nothing to
+   * add, and this arm makes no call at all. It also writes nothing: it reports
+   * the pair, and the survivor rule, the ownership proof and every guard live in
+   * `DuplicateSubscriptionMergeService`, which re-verifies each pair from the
+   * database AND the panel before a byte is written.
    *
    * ── COST ─────────────────────────────────────────────────────────────────
    *
    * THREE statements per invocation, and the number does not move with the size
    * of the table: two aggregates that return only the identities held more than
-   * once (a single grouped pass each, served by `@@index([remnawaveId])` and
-   * `@@index([remnawavePanelId])`), then ONE `IN` lookup for the member rows of
-   * those identities. Two statements when nothing is shared, because the
-   * lookup is skipped. Explicitly NOT a self-join and NOT a probe per row: the
-   * only alternatives that answer this question are `O(n²)` or `N+1`, and this
-   * runs over a live subscriptions table.
+   * once, then ONE `IN` lookup for the member rows of those identities. Two
+   * statements when nothing is shared, because the lookup is skipped.
    *
    * ── WHICH MEMBER IS THE SURVIVOR ─────────────────────────────────────────
    *
@@ -767,9 +768,7 @@ export class PanelLinkReconciliationService {
    * `created_at ASC, id ASC`, the same order the dry-run holder probe and
    * `writeLink`'s raw probe use, and the order the fixed importer converges on.
    * Every pair is anchored on the group's FIRST member, so the oldest row of the
-   * WHOLE cluster is one half of every pair the cluster produces. Pairing
-   * neighbours instead would let a cluster converge on some middle row and only
-   * reach the oldest after another round.
+   * WHOLE cluster is one half of every pair the cluster produces.
    */
   private async selectSharedIdentityPairs(
     excludePairKeys: ReadonlySet<string>,
@@ -788,18 +787,20 @@ export class PanelLinkReconciliationService {
       where: {
         ...live,
         remnawaveId: { not: null },
-        // STALE SPELLINGS ARE THE WALK'S POPULATION, NOT THIS ONE, and the two
-        // are kept mutually exclusive the same way the walk's own two arms are.
-        // Two live rows sharing a dead 2.x uuid ARE on one profile — but the
-        // walk already selects both, resolves them on the panel and diagnoses
-        // the pair with the panel's own answer rather than with a string match.
-        // Claiming them here as well would report one row under two verdicts at
-        // once ("this would be repaired" and "this is half of a pair"), and an
-        // operator cannot act on both. This arm's remit is the duplicate whose
-        // identity is ALREADY WELL FORMED — the one nothing else can see.
+        // NON-DECIMAL SPELLINGS ARE THE WALK'S POPULATION, NOT THIS ONE, and the
+        // two are kept apart the way the walk's own two arms are. Two live rows
+        // sharing a dead 2.x uuid ARE on one profile — but the walk already
+        // selects both, resolves them on the panel and diagnoses the pair with
+        // the panel's own answer. Claiming them here as well would report one
+        // row under two verdicts at once ("this would be repaired" and "this is
+        // half of a pair"), and an operator cannot act on both.
         //
-        // `contains: '-'` is the same exact shape test the stale arm uses, and
-        // it means "stale" only because the caller proved the era is 3.x.
+        // `contains: '-'` is the uuid half of "not a decimal", which is the half
+        // that can be shared: an identity is shared by being COPIED from one row
+        // to another, and a uuid is what a 2.x panel handed out. The other
+        // non-decimal spellings (an empty string, a donor's junk) are never an
+        // identity two rows could legitimately share, and the walk names each of
+        // them on its own.
         NOT: { remnawaveId: { contains: '-' } },
       },
       having: { remnawaveId: { _count: { gt: 1 } } },
@@ -881,10 +882,9 @@ export class PanelLinkReconciliationService {
         collect(
           `panelId\x00${member.userId}\x00${member.remnawavePanelId}`,
           {
-            // The identity spelling for a group keyed by the numeric id. Sound
-            // because this arm only runs on a panel PROVEN to be 3.x, where the
-            // decimal id IS the identity — the same rule `parsePanelUserRow`
-            // follows for a 3.x row.
+            // The identity spelling for a group keyed by the numeric id: on a
+            // 3.x panel the decimal id IS the identity — the same rule
+            // `parsePanelUserRow` follows for a 3.x row.
             remnawaveId: String(member.remnawavePanelId),
             panelId: member.remnawavePanelId,
             members: [],
@@ -943,11 +943,15 @@ export class PanelLinkReconciliationService {
       // was never asked — see the union's own note.
       resolvedBy: 'storedIdentity',
       outcome: 'duplicatePair',
+      reasonCode: 'duplicatePair',
       remnawaveId: group.remnawaveId,
       storedRemnawaveId: self.remnawaveId,
       panelId: self.remnawavePanelId ?? group.panelId,
       duplicateOfSubscriptionId: other.id,
+      otherSubscriptionId: other.id,
+      otherUserId: null,
       holdsLiveIdentity: true,
+      scanned: false,
       reason:
         `subscription ${other.id} — the SAME customer (${self.userId}) — is LIVE on panel ` +
         `profile ${group.remnawaveId}, and so is this row: both of them STORE that identity. ` +
@@ -956,7 +960,7 @@ export class PanelLinkReconciliationService {
         'so unlike the pair a broken link produces there is no wrong-looking half here — ' +
         `deleting EITHER enqueues a panel DELETE against a paying customer's live profile. ` +
         `Subscription ${older} is the OLDER row and is the one a merge keeps. Nothing was ` +
-        'changed, and merging the two is not the job of this sweep.',
+        'changed; merge them in «Подписки» → «Инструменты» → «Слияние подписок-дубликатов».',
     };
   }
 
@@ -970,19 +974,14 @@ export class PanelLinkReconciliationService {
    *     a stale one names the right profile or nobody.
    *  2. the stored panel username — ONLY when there is no short UUID.
    *     Deliberately second, and never a fallback for a short UUID that failed
-   *     to resolve: panel usernames are DETERMINISTIC (`clampPanelUsername`
-   *     documents that determinism as a requirement, because the CREATE path
-   *     uses the name as its crash-recovery key), so a profile that was deleted
-   *     and re-provisioned carries the SAME name as the one this row lost.
-   *     Resolving by name can therefore land on a DIFFERENT, live profile —
-   *     the same trap `panelProfileClaimedByAnother` guards the DELETE path
-   *     against. The ownership check below is what makes route 2 usable at all.
+   *     to resolve: panel usernames are DETERMINISTIC, so a profile that was
+   *     deleted and re-provisioned carries the SAME name as the one this row
+   *     lost. Resolving by name can therefore land on a DIFFERENT, live
+   *     profile. The ownership check below is what makes route 2 usable at all.
    *
-   * THE STORED IDENTITY IS NEVER USED AS A RESOLVE KEY. For the stale
+   * THE STORED IDENTITY IS NEVER USED AS A RESOLVE KEY. For the non-decimal
    * population it is precisely the string the panel cannot answer to, and for
-   * the other one there is none. Both populations therefore take the same two
-   * routes, in the same order, and the code below does not branch on which it
-   * is looking at until it comes to the WRITE FENCE.
+   * the other one there is none.
    */
   private async reconcileRow(row: BrokenLinkRow, dryRun: boolean): Promise<RowVerdict> {
     const stored = row.remnawaveId;
@@ -990,48 +989,45 @@ export class PanelLinkReconciliationService {
     const shortUuid = panelShortUuidFromConfigUrl(row.configUrl ?? null);
     const useShortUuid = shortUuid !== null && shortUuid.length > 0;
     const resolvedBy: 'shortUuid' | 'username' = useShortUuid ? 'shortUuid' : 'username';
-    const describe = (
-      outcome: PanelLinkReconciliationOutcome,
-      reason: string | null,
-      remnawaveId: string | null = null,
-      panelId: number | null = null,
-      extra: {
-        readonly duplicateOfSubscriptionId?: string | null;
-        readonly holdsLiveIdentity?: boolean;
-      } = {},
-    ): PanelLinkReconciliationRow => ({
+    const describe: DescribeRow = (outcome, reasonCode, reason, remnawaveId = null, panelId = null, extra = {}) => ({
       subscriptionId: row.id,
       userId: row.userId,
       panelUsername,
       resolvedBy,
       outcome,
+      reasonCode,
       remnawaveId,
       storedRemnawaveId: stored,
       panelId,
       duplicateOfSubscriptionId: extra.duplicateOfSubscriptionId ?? null,
+      otherSubscriptionId: extra.otherSubscriptionId ?? extra.duplicateOfSubscriptionId ?? null,
+      otherUserId: extra.otherUserId ?? null,
       holdsLiveIdentity: extra.holdsLiveIdentity ?? false,
+      scanned: true,
       reason,
     });
-    const alone = (result: PanelLinkReconciliationRow): RowVerdict => ({
+    const alone = (result: PanelLinkReconciliationRow, panelUnavailable = false): RowVerdict => ({
       row: result,
       partner: null,
+      panelUnavailable,
     });
 
     if (!useShortUuid && panelUsername.length === 0) {
       // Population 1 cannot reach this (its arm requires a non-null username),
       // but an empty string passes `IS NOT NULL` — and resolving by it would
       // ask the panel "which user is called nothing?" and act on the answer.
-      // Population 2's third arm reaches it BY DESIGN: those rows are selected
-      // in order to be named here, and they cost the panel nothing.
+      // Population 2 reaches it BY DESIGN: those rows are selected in order to
+      // be named here, and they cost the panel nothing.
       return alone(
         stored === null
-          ? describe('unresolved', 'no subscription short UUID and no panel username')
+          ? describe('unresolved', 'noRoute', 'no subscription short UUID and no panel username')
           : describe(
               'staleIdentity',
-              `stored identity '${stored}' is a 2.x uuid that a ${PANEL_ERA_3X} panel cannot ` +
-                'answer to, and neither a subscription short UUID nor a panel username was ever ' +
-                'recorded for this row — there is no resolve route at all, so nothing can repair ' +
-                'it automatically. The panel profile must be identified by hand.',
+              'noRoute',
+              `stored identity '${stored}' is not a panel id a supported Remnawave can answer to, ` +
+                'and neither a subscription short UUID nor a panel username was ever recorded for ' +
+                'this row — there is no resolve route at all, so nothing can repair it ' +
+                'automatically. The panel profile must be identified by hand.',
             ),
       );
     }
@@ -1045,49 +1041,42 @@ export class PanelLinkReconciliationService {
       const asked = useShortUuid
         ? `shortUuid '${shortUuid}'`
         : `username '${panelUsername}'`;
-      return alone(
-        describe(
-          'unresolved',
-          // WHY THE PANEL COULD NOT NAME IT IS PART OF THE ROW. This used to
-          // read a `null` that meant a missing profile, an expired token, a
-          // 5xx and a timeout alike, so an operator running the sweep during
-          // an outage was told every row was unresolvable and had no way to
-          // tell that from "these rows are genuinely beyond repair".
-          failure.kind === 'missing'
-            ? `panel did not resolve ${asked}`
-            : `panel could not be asked about ${asked} (${failure.detail}); nothing was changed`,
-        ),
-      );
+      // WHY THE PANEL COULD NOT NAME IT IS PART OF THE ROW. A `null` that meant
+      // a missing profile, an expired token, a 5xx and a timeout alike told an
+      // operator every row was unresolvable during an outage.
+      return failure.kind === 'missing'
+        ? alone(describe('unresolved', 'notFound', `panel did not resolve ${asked}`))
+        : alone(
+            describe(
+              'unresolved',
+              'panelUnavailable',
+              `panel could not be asked about ${asked} (${failure.detail}); nothing was changed`,
+            ),
+            true,
+          );
     }
     const resolved = resolution.data.response;
 
     // THE SPELLING TO STORE IS THE PANEL'S OWN. 3.x has no uuid to return and
-    // keys everything by the numeric id, so the decimal IS the identity — the
-    // `uuid` branch this used to carry could only ever be taken on a panel that
-    // is now refused before the request. Writing anything else would recreate,
-    // by hand, exactly the unaddressable row this sweep exists to repair.
+    // keys everything by the numeric id, so the decimal IS the identity.
     const remnawaveId = String(resolved.id);
 
     if (stored !== null && stored === remnawaveId) {
-      // The row was selected as stale and the panel answers with the very
+      // The row was selected as non-decimal and the panel answers with the very
       // string it already holds, so there is nothing to rewrite and no repair
-      // may be invented from the disagreement — that invention is the whole bug
-      // class. Short-circuited before the profile read: there is no adoption to
-      // prove when nothing changes.
+      // may be invented from the disagreement.
       //
       // REACHABLE ONLY THROUGH DRIFT, and kept for exactly that. The contract
-      // declares `id` as a number, so a conforming answer is always a decimal
-      // and can never equal a uuid-shaped stored identity — but the executor is
-      // LENIENT and hands back a body it could not validate RAW, so this field
-      // can arrive as whatever the panel sent. Writing a row's own value back
-      // over itself and reporting it `linked` is a repair that changed nothing,
-      // which is precisely the kind of report this sweep exists to stop.
+      // declares `id` as a number, so a conforming answer is always a decimal —
+      // but the executor is LENIENT and hands back a body it could not validate
+      // RAW, so this field can arrive as whatever the panel sent.
       return alone(
         describe(
           'staleIdentity',
+          'panelAgrees',
           `the panel answers for this profile with the identity the row already holds ` +
-            `('${stored}'), so there is nothing to rewrite — this row was selected as a stale ` +
-            "identity and the panel's own answer disagrees with that. Nothing was changed.",
+            `('${stored}'), so there is nothing to rewrite — this row was selected as a ` +
+            "non-decimal identity and the panel's own answer disagrees with that. Nothing was changed.",
           remnawaveId,
           resolved.id,
           { holdsLiveIdentity: true },
@@ -1101,25 +1090,32 @@ export class PanelLinkReconciliationService {
     // not a convenience.
     //
     // THE READ IS ADDRESSED BY THE NUMERIC ID THE RESOLVE JUST RETURNED, and by
-    // nothing else — no username, no short UUID. That is deliberate: those two
-    // are the keys `panelUserAddress` falls back to when it cannot build a path
-    // segment, and a hidden second resolve by name is precisely the landing
-    // this method refuses to make. Addressing the id directly makes that
-    // impossible rather than merely unintended.
+    // nothing else — no username, no short UUID — so a hidden second resolve by
+    // name is impossible rather than merely unintended.
     const outcome = await this.panelUsers.getUserById(resolved.id);
     if (outcome.kind !== 'ok') {
       const failure = readPanelFailure(outcome);
-      return alone(
-        describe(
-          'unresolved',
-          failure.kind === 'missing'
-            ? `panel resolved ${resolvedBy} to profile ${remnawaveId} but that profile is gone`
-            : `panel profile ${remnawaveId} could not be read back (${failure.detail}); ` +
-              'nothing was changed',
-          remnawaveId,
-          resolved.id,
-        ),
-      );
+      return failure.kind === 'missing'
+        ? alone(
+            describe(
+              'unresolved',
+              'profileGone',
+              `panel resolved ${resolvedBy} to profile ${remnawaveId} but that profile is gone`,
+              remnawaveId,
+              resolved.id,
+            ),
+          )
+        : alone(
+            describe(
+              'unresolved',
+              'panelUnavailable',
+              `panel profile ${remnawaveId} could not be read back (${failure.detail}); ` +
+                'nothing was changed',
+              remnawaveId,
+              resolved.id,
+            ),
+            true,
+          );
     }
     const profile = outcome.data.response;
 
@@ -1127,12 +1123,42 @@ export class PanelLinkReconciliationService {
       // "A profile answers to this name" is not "this profile is mine". The
       // owner is read from the `reiwa_id` LINE — a display name forging it
       // does not count — and it has to be PROVEN: a description with no such
-      // line is refused as `notOwned` with a reason naming the manual route,
-      // because a row resolved by its stored name can land on another
-      // customer's profile. See `assertPanelProfileOwnership`.
+      // line is refused, because a row resolved by its stored name can land on
+      // another customer's profile. See `assertPanelProfileOwnership`.
       assertPanelProfileOwnership(panelUsername, profile.description, row.userId);
     } catch (err: unknown) {
-      return alone(describe('notOwned', (err as Error).message, remnawaveId, resolved.id));
+      const owners = [...new Set(readProfileOwnerMarkers(profile.description))];
+      const otherOwner = owners.length === 1 ? owners[0] : null;
+      return alone(
+        describe(
+          'notOwned',
+          otherOwner !== null ? 'ownedByOther' : 'noOwnerProof',
+          (err as Error).message,
+          remnawaveId,
+          resolved.id,
+          { otherUserId: otherOwner },
+        ),
+      );
+    }
+
+    // THE SUBSCRIPTION LINE (owner's decision, 24.09.2026): when the profile
+    // says which subscription it was made for, an automatic link gives it to
+    // that one or to none. Ownership is already proven above — this stops a
+    // customer's profile landing on the wrong one of THEIR subscriptions.
+    const namedSubscriptions = [...new Set(readProfileSubscriptionMarkers(profile.description))];
+    const otherNamed = namedSubscriptions.find((named) => named !== row.id);
+    if (otherNamed !== undefined) {
+      return alone(
+        describe(
+          'markedForOtherSubscription',
+          'markedForOtherSubscription',
+          `Remnawave profile ${remnawaveId} is this customer's, but its subscription_id line names ` +
+            `subscription ${otherNamed}, not ${row.id} — refusing to link it automatically`,
+          remnawaveId,
+          resolved.id,
+          { otherSubscriptionId: otherNamed },
+        ),
+      );
     }
 
     if (dryRun) {
@@ -1140,24 +1166,16 @@ export class PanelLinkReconciliationService {
       // "would link" for a row a real run would refuse is not a preview.
       //
       // ORDERED, BECAUSE THIS ANSWER PICKS A MERGE PARTNER. A cluster of THREE
-      // or more live rows naming one profile is reachable: the importer cannot
-      // match a 2.x-era row whose `remnawave_panel_id` was never recorded, so
-      // it keeps minting, and every mint is another live row on that profile.
+      // or more live rows naming one profile is reachable, and
       // `DuplicateSubscriptionMergeService.discoverPairs` takes
       // `duplicateOfSubscriptionId` — this row — as the pair's other half. With
       // no `orderBy` that is whichever row Postgres happened to return first,
-      // so two identical runs can name two different pairs and the preview an
-      // operator approved is not the merge they get. The merge's own survivor
-      // rule is deterministic; this was the non-determinism UPSTREAM of it.
+      // so two identical runs could name two different pairs.
       //
       // `createdAt` ASC then `id` ASC, and the SAME order as the raw probe in
-      // {@link writeLink}. Oldest-first is not an arbitrary tiebreak — it is the
-      // rule the merge derives its survivor from and the one the fixed importer
-      // converges on (`orderBy: { createdAt: 'asc' }`), so all three agree that
-      // the oldest live row naming a profile is the canonical one. `id` settles
-      // an exact `createdAt` tie: the merge refuses to guess which of two rows
-      // stamped at the same instant carries the history, but the REPORT still
-      // has to name the same pair every time it is run.
+      // {@link writeLink}: the oldest live row naming a profile is the
+      // canonical one, which is the rule the merge derives its survivor from
+      // and the one the fixed importer converges on.
       const holder = await this.prismaService.subscription.findFirst({
         where: {
           id: { not: row.id },
@@ -1176,7 +1194,7 @@ export class PanelLinkReconciliationService {
       if (holder !== null) {
         return this.describeCollision(row, holder, remnawaveId, resolved.id, describe, resolvedBy);
       }
-      return alone(describe('wouldLink', null, remnawaveId, resolved.id));
+      return alone(describe('wouldLink', null, null, remnawaveId, resolved.id));
     }
 
     return this.writeLink(row, remnawaveId, resolved.id, describe, resolvedBy);
@@ -1186,28 +1204,20 @@ export class PanelLinkReconciliationService {
    * Two live rows on one panel profile: which of the two things is it?
    *
    * A GENUINE COLLISION (different customers) is the dangerous one and keeps
-   * the old `conflict` name and refusal. THE PAIR THIS DEFECT PRODUCED (both
+   * the old `conflict` name and refusal. THE PAIR A LOST LINK PRODUCED (both
    * rows on one `userId`) is a different animal: the importer saw one customer
-   * as two after the 2.x → 3.x identity split and minted a second Subscription
-   * for the profile they already had. It is reported as `duplicatePair` and
-   * NOT repaired here — merging carries history, payments and referral links,
-   * and belongs behind its own dry run.
+   * as two and minted a second Subscription for the profile they already had.
+   * It is reported as `duplicatePair` and NOT repaired here — merging carries
+   * history, payments and referral links, and belongs behind its own dry run.
    *
    * BOTH HALVES ARE EMITTED, and the polarity is the point. The scanned half is
-   * the OLDER row: it holds the customer's history and a 2.x uuid that names
+   * the OLDER row: it holds the customer's history and an identity that names
    * NOTHING on this panel. The holder is the NEWER, wrong-looking duplicate,
-   * and it is the row actually bound to the LIVE profile. An operator who
-   * deletes the wrong-looking card issues a panel DELETE against a paying
-   * customer's live profile, so a report that lists a pair without saying which
-   * half is live is worse than no report at all.
+   * and it is the row actually bound to the LIVE profile.
    *
    * CROSS-USER PAIRS ARE NOT DETECTABLE and are therefore not claimed. When the
-   * importer minted a second USER as well (`matchOrCreateUser` Priority 5), it
-   * wrote no marker tying the two Users together — no column on `User`, no
-   * column on `Subscription`, and `wasJustCreated` reads a five-second
-   * `createdAt` window that is long gone. Nothing sound distinguishes "one
-   * customer the importer split in two" from "two customers whose rows collided
-   * on one profile", so such a pair is reported as `conflict`: the weaker, safer
+   * importer minted a second USER as well, it wrote no marker tying the two
+   * Users together, so such a pair is reported as `conflict`: the weaker, safer
    * claim, which still names the holder and still refuses to write.
    */
   private describeCollision(
@@ -1226,13 +1236,18 @@ export class PanelLinkReconciliationService {
       return {
         row: describe(
           'conflict',
+          'profileTaken',
           `subscription ${holder.id} is already live on panel profile ${remnawaveId}; it belongs ` +
             `to a DIFFERENT customer (${holderOwner}, not ${row.userId}), so this is a genuine ` +
-            'collision and not the duplicate pair the 2.x/3.x identity split produces. Two ' +
-            "subscriptions sharing one panel profile overwrite each other and delete each other's " +
-            'service, so nothing was changed.',
+            'collision and not a duplicate pair of one customer. Two subscriptions sharing one ' +
+            "panel profile overwrite each other and delete each other's service, so nothing was " +
+            'changed.',
           remnawaveId,
           panelId,
+          {
+            otherSubscriptionId: holder.id,
+            otherUserId: holder.userId.length > 0 ? holder.userId : null,
+          },
         ),
         partner: null,
       };
@@ -1240,11 +1255,12 @@ export class PanelLinkReconciliationService {
     return {
       row: describe(
         'duplicatePair',
+        'duplicatePair',
         `subscription ${holder.id} — the SAME customer (${row.userId}) — is already live on panel ` +
-          `profile ${remnawaveId}, which is the profile this row resolves to. This is the pair ` +
-          'the 2.x/3.x identity split produced. THIS row does NOT hold the live identity: it ' +
-          `stores '${row.remnawaveId ?? 'nothing'}'. Subscription ${holder.id} does. Nothing was ` +
-          'changed, and merging the two is not the job of this sweep.',
+          `profile ${remnawaveId}, which is the profile this row resolves to. THIS row does NOT ` +
+          `hold the live identity: it stores '${row.remnawaveId ?? 'nothing'}'. Subscription ` +
+          `${holder.id} does. Nothing was changed; merge them in «Подписки» → «Инструменты» → ` +
+          '«Слияние подписок-дубликатов».',
         remnawaveId,
         panelId,
         { duplicateOfSubscriptionId: holder.id },
@@ -1257,11 +1273,15 @@ export class PanelLinkReconciliationService {
         // database. This records the route that identified the shared profile.
         resolvedBy,
         outcome: 'duplicatePair',
+        reasonCode: 'duplicatePair',
         remnawaveId,
         storedRemnawaveId: holder.remnawaveId,
         panelId: holder.remnawavePanelId ?? panelId,
         duplicateOfSubscriptionId: row.id,
+        otherSubscriptionId: row.id,
+        otherUserId: null,
         holdsLiveIdentity: true,
+        scanned: false,
         reason:
           `this row HOLDS the live identity for panel profile ${remnawaveId} and is the live half ` +
           `of the duplicate pair with subscription ${row.id}. It is the newer, wrong-looking one ` +
@@ -1280,26 +1300,19 @@ export class PanelLinkReconciliationService {
    * Prisma's query path has no deserializer for it.
    *
    * THE CONFLICT PROBE IS THE SAME TWO-ANGLED QUESTION, and only the two
-   * IMMUTABLE identifiers are asked about. A uuid and a numeric panel id each
-   * name one profile forever, so a match is a proven double-link. The panel
-   * USERNAME is deliberately not part of it — it is mutable and re-derivable,
-   * so a stale row still carrying the name of a profile that no longer exists
-   * would wedge every future repair under that name.
+   * IMMUTABLE identifiers are asked about. The panel USERNAME is deliberately
+   * not part of it — it is mutable and re-derivable, so a stale row still
+   * carrying the name of a profile that no longer exists would wedge every
+   * future repair under that name.
    *
    * AND IT IS ORDERED THE WAY THE DRY RUN ORDERS IT — `created_at` ASC, then
-   * `id` ASC. `LIMIT 1` with no `ORDER BY` hands back whichever row the plan
-   * reached first, which is not a promise Postgres makes twice. In a cluster of
-   * three live rows on one profile that lets the write path and the preview name
-   * two DIFFERENT holders for the same database — and the preview's answer is
-   * what `DuplicateSubscriptionMergeService.discoverPairs` merges on. Both
-   * probes ask one question, in one order.
+   * `id` ASC — so the write path and the preview name the same holder.
    *
    * THE FENCE IS "THE ROW STILL HOLDS WHAT IT HELD WHEN WE SELECTED IT" — a
    * compare-and-swap on `remnawave_id`, which is `IS NULL` for population 1 and
-   * `= <the stale uuid>` for population 2. One expression, both populations,
-   * and the same guarantee in each: a concurrent CREATE that has already
-   * re-linked this row must WIN, because it linked a profile it just
-   * provisioned or adopted under a lock while this sweep is acting on a fact it
+   * `= <the non-decimal value>` for population 2. A concurrent CREATE that has
+   * already re-linked this row must WIN, because it linked a profile it just
+   * provisioned or adopted under a lock while this walk is acting on a fact it
    * read before the round-trip. Overwriting it would detach a live profile and
    * leave an orphan on the panel. Widening the fence to the row id alone would
    * turn `raceLost` — a reported, harmless no-op — into exactly that loss.
@@ -1315,11 +1328,6 @@ export class PanelLinkReconciliationService {
       await tx.$executeRaw(Prisma.sql`
         SELECT pg_advisory_xact_lock(hashtext(${`remnawave-profile:${remnawaveId}`})::bigint)
       `);
-      // `panelId` is proven a safe integer by `resolvePanelIdentity`, so the
-      // `IS NOT NULL` guard `persistProfileLink` needs around its nullable
-      // argument has nothing to guard here and is left out rather than written
-      // as dead code. The question asked is otherwise identical.
-      //
       // The holder's `user_id` comes back with it, because "who else is on this
       // profile" and "is that somebody the same customer" are one question with
       // one answer and must not be two round-trips that can disagree.
@@ -1365,6 +1373,7 @@ export class PanelLinkReconciliationService {
         return {
           row: describe(
             'raceLost',
+            'raceLost',
             `the row no longer holds the identity it was selected with ('${row.remnawaveId ?? 'none'}') — ` +
               'a concurrent provision or link changed it while this repair was in flight; ' +
               'whatever it holds now is left alone',
@@ -1375,7 +1384,7 @@ export class PanelLinkReconciliationService {
         };
       }
       return {
-        row: describe('linked', null, remnawaveId, panelId, { holdsLiveIdentity: true }),
+        row: describe('linked', null, null, remnawaveId, panelId, { holdsLiveIdentity: true }),
         partner: null,
       };
     });
@@ -1385,11 +1394,14 @@ export class PanelLinkReconciliationService {
 /** The per-row constructor `reconcileRow` hands to its helpers. */
 type DescribeRow = (
   outcome: PanelLinkReconciliationOutcome,
+  reasonCode: PanelLinkRowReason | null,
   reason: string | null,
   remnawaveId?: string | null,
   panelId?: number | null,
   extra?: {
     readonly duplicateOfSubscriptionId?: string | null;
+    readonly otherSubscriptionId?: string | null;
+    readonly otherUserId?: string | null;
     readonly holdsLiveIdentity?: boolean;
   },
 ) => PanelLinkReconciliationRow;

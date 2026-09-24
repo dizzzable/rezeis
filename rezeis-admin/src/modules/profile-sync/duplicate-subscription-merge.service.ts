@@ -218,19 +218,9 @@ export interface DuplicateMergeReport {
    * a run that reached the end of its pairs. See {@link DuplicateMergeStop}.
    */
   readonly stoppedEarly: DuplicateMergeStop | null;
-  /** `true` when the DISCOVERY sweep stopped at its cap with rows remaining. */
+  /** `true` when the DISCOVERY walk stopped at its cap with rows remaining. */
   readonly hasMore: boolean;
   readonly nextCursor: string | null;
-  /**
-   * The panel era the discovery sweep reports; `null` on an explicit list,
-   * where no sweep ran.
-   *
-   * Only ever `PANEL_ERA_3X` now — a 2.x panel is refused centrally by
-   * `LegacyPanelRefusal`, so there is nothing left to discover. The field stays
-   * because the operator SPA reads it and because reports stored on older audit
-   * rows carry the other value.
-   */
-  readonly panelEra: string | null;
 }
 
 export interface DuplicateMergePairInput {
@@ -246,12 +236,11 @@ export interface DuplicateMergeOptions {
   readonly dryRun?: boolean;
   /**
    * An explicit list of pairs. When empty or omitted the service DISCOVERS
-   * pairs by running the diagnosis sweep. Either way every pair is re-verified
-   * from scratch before anything is written.
+   * pairs by running the panel-link walk as a preview. Either way every pair is
+   * re-verified from scratch before anything is written.
    */
   readonly pairs?: readonly DuplicateMergePairInput[];
   readonly limit?: number;
-  readonly chunkSize?: number;
   readonly startAfterId?: string | null;
 }
 
@@ -491,18 +480,21 @@ type MergeTx = Prisma.TransactionClient;
 /**
  * DuplicateSubscriptionMergeService
  * ─────────────────────────────────
- * Resolves the duplicate PAIR that the Remnawave 2.x → 3.x identity split
- * produced: two local `subscriptions` rows for ONE customer on ONE panel
- * profile. `PanelLinkReconciliationService` diagnoses those pairs and stops;
- * this is the action it stops short of.
+ * Resolves a duplicate PAIR: two live local `subscriptions` rows for ONE
+ * customer on ONE panel profile — any profile two live rows name, whether a
+ * lost link (a Remnawave 2.x uuid kept after the upgrade, an import that minted
+ * a second row) or a copied identity produced it. `PanelLinkReconciliationService`
+ * diagnoses those pairs and stops; this is the action it stops short of, run
+ * from «Подписки» → «Инструменты» → «Слияние подписок-дубликатов».
  *
  * ── THE SHAPE OF A PAIR, WHICH IS BACKWARDS FROM INSTINCT ────────────────────
  *
- * The OLDER row was linked in the 2.x era. It carries the customer's history,
- * their payments, their referral spends and the operator's plan — and it is
- * bound to NOTHING, because it stores a uuid a 3.x panel does not answer to.
- * The NEWER row is the duplicate the defect minted: it stores the current
- * decimal identity and it is the row pointing at the live profile.
+ * The OLDER row was linked first. It carries the customer's history, their
+ * payments, their referral spends and the operator's plan — and when a link was
+ * lost it is bound to NOTHING, because it stores an identity the panel does not
+ * answer to (a 2.x uuid on a 3.x panel). The NEWER row is the duplicate: it
+ * stores the current decimal identity and it is the row pointing at the live
+ * profile.
  *
  * SO THE SURVIVOR IS THE OLDER ROW. It holds everything that matters, and the
  * already-fixed importer converges on the same choice (`orderBy: { createdAt:
@@ -519,9 +511,9 @@ type MergeTx = Prisma.TransactionClient;
  * TRANSITIVELY IS THE HARD HALF, and the hazard is precisely located.
  * `SubscriptionDeletionService.deleteSubscription` enqueues a `SyncAction.DELETE`
  * job for ANY row with `remnawaveId !== null`, and `ProfileSyncProcessor`
- * .handleDelete` then calls `deletePanelUser`. On a 3.x panel that job does NOT
- * fail closed on a dead 2.x uuid — and WHICH material carries it to the live
- * profile depends on what the job itself is holding, which is worth stating
+ * .handleDelete` then calls `deletePanelUser`. A job that does not fail closed
+ * on a dead identity reaches the live profile — and WHICH material carries it
+ * there depends on what the job itself is holding, which is worth stating
  * exactly, because the two routes live in two different functions:
  *   • A PAYLOAD-BEARING job — every one `deleteSubscription` writes today, since
  *     it records `targetRemnawaveId`, `targetRemnawavePanelId` and
@@ -555,8 +547,8 @@ type MergeTx = Prisma.TransactionClient;
  * inside one transaction. Both halves live in one atomic step, so neither
  * intermediate is observable — but the order is still chosen rather than
  * incidental, because it is the order that is safe if the invariant ever
- * weakens: "nobody holds it" strands a row for the reconciliation sweep to
- * repair, whereas "both hold it, both live" is two subscriptions overwriting
+ * weakens: "nobody holds it" strands a row for the automatic panel-link check
+ * to repair, whereas "both hold it, both live" is two subscriptions overwriting
  * each other and deleting each other's service.
  */
 @Injectable()
@@ -580,12 +572,12 @@ export class DuplicateSubscriptionMergeService {
     const explicit = options.pairs ?? [];
     const discovery =
       explicit.length > 0
-        ? { pairs: explicit, hasMore: false, nextCursor: null, panelEra: null }
+        ? { pairs: explicit, hasMore: false, nextCursor: null }
         : // NOT bounded by `limit`. That caps the PAIRS this run merges; the
-          // sweep's own budget caps the ROWS it scans, and a run that merged
+          // walk's own budget caps the ROWS it scans, and a run that merged
           // fewer pairs than it found says so through `hasMore` rather than by
           // looking at less.
-          await this.discoverPairs(options.chunkSize, options.startAfterId ?? null);
+          await this.discoverPairs(options.startAfterId ?? null);
 
     // AN EXPLICIT LIST IS A CLAIM; A DISCOVERED PAIR IS NOT. When an operator
     // names the survivor, that nomination is checked and refused if it has the
@@ -675,7 +667,6 @@ export class DuplicateSubscriptionMergeService {
       stoppedEarly,
       hasMore: discovery.hasMore || incomplete,
       nextCursor: incomplete ? (options.startAfterId ?? null) : discovery.nextCursor,
-      panelEra: discovery.panelEra,
     };
 
     if (rows.length > 0) {
@@ -719,8 +710,8 @@ export class DuplicateSubscriptionMergeService {
                 `${stoppedEarly.duplicateSubscriptionId}. Пары до неё (${stoppedEarly.pairsCompleted}) слиты и ` +
                 'записаны, эта пара и всё после неё не тронуты.',
             nextSteps:
-              'Откройте «Подписки» → «Слияние подписок-дубликатов» и запустите ещё раз. Если остановится ' +
-              'на той же паре, причина в ней самой — она в «💬 Сообщение» ниже.',
+              'Откройте «Подписки» → «Инструменты» → «Слияние подписок-дубликатов» и запустите ещё раз. ' +
+              'Если остановится на той же паре, причина в ней самой — она в «💬 Сообщение» ниже.',
           },
         );
       }
@@ -729,32 +720,30 @@ export class DuplicateSubscriptionMergeService {
   }
 
   /**
-   * Finds pairs by running the DIAGNOSIS sweep in dry-run and reading its
+   * Finds pairs by running the panel-link walk as a PREVIEW and reading its
    * `duplicatePair` verdicts.
    *
    * DELEGATED RATHER THAN REIMPLEMENTED. There is exactly one sound definition
-   * of "these two rows are the pair the identity split produced" — same
-   * customer, both live, one panel profile, ownership proven — and a second
-   * copy of it here would be a second thing to keep in agreement with the
-   * first. `reconcile` is asked for a PREVIEW, so discovery itself writes
-   * nothing.
+   * of "these two rows are a duplicate pair" — same customer, both live, one
+   * panel profile, ownership proven — and a second copy of it here would be a
+   * second thing to keep in agreement with the first. `reconcile` is asked for
+   * a dry run, so discovery itself writes nothing. (The same walk runs for real
+   * by itself, `PanelLinkCheckService`; a pair is the one thing it never
+   * repairs, so the merge still finds every pair it finds.)
    *
    * THE VERDICT IS STILL NOT TRUSTED. Every pair it names is re-verified from
    * the database and the panel by {@link mergePair} before a byte is written;
    * this call decides only WHICH pairs to look at.
    */
   private async discoverPairs(
-    chunkSize: number | undefined,
     startAfterId: string | null,
   ): Promise<{
     pairs: DuplicateMergePairInput[];
     hasMore: boolean;
     nextCursor: string | null;
-    panelEra: string | null;
   }> {
     const report = await this.reconciliation.reconcile({
       dryRun: true,
-      chunkSize,
       startAfterId,
     });
     // Each pair contributes TWO rows to `unrepaired`, so they are de-duplicated
@@ -782,7 +771,6 @@ export class DuplicateSubscriptionMergeService {
       pairs,
       hasMore: report.hasMore,
       nextCursor: report.nextCursor,
-      panelEra: report.panelEra,
     };
   }
 
@@ -864,8 +852,8 @@ export class DuplicateSubscriptionMergeService {
         null,
         'differentCustomers',
         `subscription ${first} belongs to customer ${left.userId} and ${second} to customer ` +
-          `${right.userId}. These are two different customers, not the pair the 2.x/3.x identity ` +
-          'split produces, and merging them would move one customer history onto the other. ' +
+          `${right.userId}. These are two different customers, not a duplicate pair of one ` +
+          'customer, and merging them would move one customer history onto the other. ' +
           'Nothing was changed.',
       );
     }

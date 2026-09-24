@@ -8,10 +8,9 @@ import { api } from '@/lib/api'
 import { renderWithProviders } from '@/test/test-utils'
 import { DuplicateSubscriptionMergePanel } from './duplicate-subscription-merge-panel'
 import { ownerProofKind, OWNER_UNPROVEN } from './owner-proof'
-import { PanelLinkReconciliationPanel } from './panel-link-reconciliation-panel'
 
 /**
- * «Подписки» → «Починка привязки к панели» and «Слияние подписок-дубликатов».
+ * «Подписки» → «Инструменты» → «Слияние подписок-дубликатов».
  *
  * The server refuses to link or merge a panel profile unless its description's
  * `reiwa_id` line PROVES the customer, and it reports every such refusal under
@@ -64,22 +63,6 @@ function grantEdit() {
   })
 }
 
-function reconciliationRow(subscriptionId: string, reason: string) {
-  return {
-    subscriptionId,
-    userId: 'user-1',
-    panelUsername: 'rz_alice_sub',
-    resolvedBy: 'shortUuid',
-    outcome: 'notOwned',
-    remnawaveId: '5150',
-    storedRemnawaveId: null,
-    panelId: 5150,
-    duplicateOfSubscriptionId: null,
-    holdsLiveIdentity: false,
-    reason,
-  }
-}
-
 function mergeRefusal(survivor: string, duplicate: string, reason: string) {
   return {
     survivorSubscriptionId: survivor,
@@ -103,53 +86,14 @@ function mergeRefusal(survivor: string, duplicate: string, reason: string) {
   }
 }
 
-describe('the subscriptions page tells "not proven" from "somebody else\'s"', () => {
+describe('the merge tells "not proven" from "somebody else\'s"', () => {
   beforeAll(async () => {
-    await loadFeatureBundle('panelLinkReconciliation')
+    await loadFeatureBundle('subscriptionTools')
   })
 
   beforeEach(() => {
     usePermissionStore.getState().reset()
     vi.restoreAllMocks()
-  })
-
-  it('the link repair groups the unproven profiles under their own heading, with the way to link one by hand', async () => {
-    vi.spyOn(api, 'post').mockResolvedValue({
-      data: {
-        dryRun: true,
-        scanned: 3,
-        linked: 0,
-        wouldLink: 0,
-        repaired: [],
-        unrepaired: [
-          reconciliationRow('sub-owned-by-another', OWNED_BY_ANOTHER),
-          reconciliationRow('sub-no-marker', NO_MARKER),
-          reconciliationRow('sub-conflicting', CONFLICTING),
-        ],
-        hasMore: false,
-        nextCursor: null,
-        staleIdentityScanned: 0,
-        duplicatePairs: 0,
-        sharedIdentityPairs: 0,
-        panelEra: '3.x',
-      },
-    } as never)
-    grantEdit()
-    const user = userEvent.setup()
-    renderWithProviders(<PanelLinkReconciliationPanel />)
-
-    await user.click(screen.getByRole('button', { name: 'Run preview' }))
-    await screen.findByText('Report')
-
-    expect(screen.getByText('Belongs to somebody else — 1 row(s)')).toBeInTheDocument()
-    expect(screen.getByText('Not proven to be this customer’s — 2 row(s)')).toBeInTheDocument()
-    const remedy = screen.getByText(/link it on the customer’s card with «Link an existing Remnawave profile»/)
-    // What the card accepts now (19.09.2026): a stale import with no marker and
-    // a web-only customer both have a way through it…
-    expect(remedy).toHaveTextContent(/verified web-account e-mail proves it/)
-    expect(remedy).toHaveTextContent(/with none of them you can confirm it yourself/)
-    // …and what it never accepts.
-    expect(remedy).toHaveTextContent(/nothing links a profile while a line names somebody else/)
   })
 
   it('the merge gives an unproven profile its own refusal and a remedy that is not "another account\'s marker"', async () => {
@@ -166,7 +110,6 @@ describe('the subscriptions page tells "not proven" from "somebody else\'s"', ()
         ],
         hasMore: false,
         nextCursor: null,
-        panelEra: '3.x',
       },
     } as never)
     grantEdit()

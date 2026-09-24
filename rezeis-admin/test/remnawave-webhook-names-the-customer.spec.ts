@@ -94,12 +94,12 @@ function handle(
   return service.handleEvent(event, payload, null);
 }
 
-/** Remnawave 2.x flat shape: the profile id the local identity is found by. */
+/** The profile's numeric id, which the local identity is found by. */
 const PAYLOAD = { data: { id: 4711, username: 'rz_one', telegramId: '4242' } };
 
 describe('a user-scoped event the panel forwards', () => {
   const RETENTION = [
-    ['user.expires_in_24_hours', 'remnawave.user.expire_soon'],
+    ['user.expiration', 'remnawave.user.expire_soon'],
     ['user.expired', 'remnawave.user.expired'],
     ['user.bandwidth_usage_threshold_reached', 'remnawave.user.bandwidth_threshold'],
     ['user.limited', 'remnawave.user.limited'],
@@ -181,7 +181,7 @@ describe('a user-scoped event the panel forwards', () => {
     // just rescued from.
     const { service, lookups } = buildService();
 
-    await handle(service, 'user.expired', { data: { uuid: 'remna-1' } });
+    await handle(service, 'user.expired', { data: { id: 4711 } });
 
     assert.deepEqual(lookups, ['subscription.findFirst']);
   });

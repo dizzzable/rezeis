@@ -380,6 +380,7 @@ export const en = {
         user_subscription_extended: 'Subscription extended',
         user_subscription_plan_migrated: 'Subscription migrated to another plan',
         user_subscription_limits_changed: 'Subscription limits changed',
+        user_subscription_lifetime_restored: 'Subscription made lifetime again',
         users_export: 'Users exported',
         users_registration_export: 'Registrations exported',
         blocked_identity_changed: 'Blocklist changed',
@@ -418,6 +419,7 @@ export const en = {
         settings_questPartnerSecrets_update: 'Quest partner keys changed',
         settings_customIcons_update: 'Custom icons changed',
         settings_remnawaveCleanupSettings_update: 'Remnawave cleanup settings changed',
+        settings_addOnSwitches_update: 'Add-on accounting switches changed',
       },
       entries: {
         import: {

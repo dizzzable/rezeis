@@ -11,12 +11,6 @@ probe() {
 
 base="https://${REMNAWAVE_HOST}"
 
-echo "── Live & connections ─────────────────────────────"
-probe "${base}/api/ip-control/fetch-ips"
-probe "${base}/api/ip-control/fetch-users-ips"
-probe "${base}/api/ip-control/drop-connections"
-
-echo
 echo "── Realtime per-node metrics ──────────────────────"
 probe "${base}/api/system/nodes-metrics"
 probe "${base}/api/system/nodes-statistics"

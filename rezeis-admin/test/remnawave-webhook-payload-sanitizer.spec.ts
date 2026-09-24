@@ -12,9 +12,10 @@ import { RemnawaveWebhookService } from '../src/modules/remnawave/services/remna
  * (user events) and under `data.user` (hwid-device and torrent-blocker
  * events), so sanitization has to happen at every depth, not at the root.
  *
- * Every fixture below is shaped from the `RemnawaveWebhook*Dto` schemas in the
- * Remnawave API v3.2.1 OpenAPI document — same property names, same nesting,
- * same value formats — so a shape change in the panel shows up here.
+ * Every fixture below is shaped from the `RemnawaveWebhook*Dto` schemas of the
+ * panels rezeis serves (the 3.3.2 and 3.4.3 OpenAPI documents) — same property
+ * names, same nesting, same value formats — so a shape change in the panel
+ * shows up here.
  */
 
 interface StoredEvent {
@@ -100,10 +101,8 @@ function userEventPayload(): Record<string, unknown> {
     event: 'user.expired',
     timestamp: '2026-08-05T09:14:22.000Z',
     data: {
+      // The identity reconcile matches on. A 3.x user has no `uuid`.
       id: 4821,
-      // 3.x identity is the numeric `id`; `uuid` is the 2.x spelling that
-      // `Subscription.remnawaveId` still holds and that reconcile matches on.
-      uuid: '9d2f4c1e-7b3a-4f6d-9c58-2e1a7b4c9d30',
       shortUuid: 'aH3kQ9zR2mVt',
       username: 'anna_vpn',
       status: 'EXPIRED',
@@ -246,8 +245,8 @@ describe('RemnawaveWebhookService payload sanitization — user events', () => {
     await service.handleEvent('user.expired', userEventPayload(), null);
 
     const payload = stored[0]!.payload;
-    // `vlessUuid` goes but `uuid` / `id` stay — they are identity, not access.
-    assert.equal(at(payload, 'data.uuid'), '9d2f4c1e-7b3a-4f6d-9c58-2e1a7b4c9d30');
+    // `vlessUuid` goes but `id` stays — it is identity, not access. So does a
+    // squad's `uuid`, below.
     assert.equal(at(payload, 'data.id'), 4821);
     assert.equal(at(payload, 'data.username'), 'anna_vpn');
     assert.equal(at(payload, 'data.status'), 'EXPIRED');
@@ -259,9 +258,9 @@ describe('RemnawaveWebhookService payload sanitization — user events', () => {
 
     // The card metadata is built from the RAW payload and is unaffected.
     assert.equal(emitted[0]?.metadata?.['remnawaveUsername'], 'anna_vpn');
-    assert.equal(emitted[0]?.metadata?.['remnawaveId'], '9d2f4c1e-7b3a-4f6d-9c58-2e1a7b4c9d30');
+    assert.equal(emitted[0]?.metadata?.['remnawaveId'], '4821');
     // …including the counter read out of the nested `userTraffic` container,
-    // which is where every webhook contract, 2.7 through 3.4.4, puts it. The
+    // which is where every webhook contract, 3.2 through 3.4.4, puts it. The
     // formatter only renders the traffic line when this key is a number, so
     // leaving it unset silently strips consumption from every Remnawave card.
     assert.equal(emitted[0]?.metadata?.['usedTrafficBytes'], 53_687_091_200);
@@ -283,7 +282,7 @@ describe('RemnawaveWebhookService payload sanitization — user events', () => {
     // takes no date from Remnawave (`panel-expiry.ts`), and is written apart
     // only when this statement reached no row.
     assert.deepEqual(reconciled[0]!.where, {
-      remnawaveId: '9d2f4c1e-7b3a-4f6d-9c58-2e1a7b4c9d30',
+      OR: [{ remnawaveId: '4821' }, { remnawavePanelId: 4821 }],
       status: { not: 'DELETED' },
       terms: { none: { status: 'ACTIVE' } },
       expiresAt: { not: null },
@@ -409,7 +408,7 @@ describe('RemnawaveWebhookService payload sanitization — allow-list behaviour'
       {
         event: 'user.modified',
         data: {
-          uuid: '9d2f4c1e-7b3a-4f6d-9c58-2e1a7b4c9d30',
+          id: 4821,
           username: 'anna_vpn',
           hysteriaObfsPassword: 'a-credential-remnawave-has-not-shipped-yet',
         },

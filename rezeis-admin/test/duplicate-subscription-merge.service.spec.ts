@@ -6,6 +6,7 @@ import { SubscriptionStatus } from '@prisma/client';
 import { AdminDuplicateSubscriptionMergeController } from '../src/modules/profile-sync/duplicate-subscription-merge.controller';
 import { DuplicateSubscriptionMergeService } from '../src/modules/profile-sync/duplicate-subscription-merge.service';
 import { PanelLinkReconciliationService } from '../src/modules/profile-sync/panel-link-reconciliation.service';
+import { answerPanelLinkWalkPage, isPanelLinkWalkPage } from './helpers/panel-link-walk-fake';
 
 /**
  * The duplicate-pair merge, tested against the four ways it could go wrong:
@@ -420,6 +421,13 @@ function prismaHarness(seed: Partial<Record<TableName, Array<Record<string, unkn
 
   const client = {
     ...baseModels,
+    // The panel-link walk selects its pages with raw SQL (a regular expression
+    // has no Prisma spelling); the mirror answers it from the same table.
+    $queryRaw: async (query: unknown): Promise<Array<Record<string, unknown>>> => {
+      if (!isPanelLinkWalkPage(query)) throw new Error(`unexpected raw query: ${JSON.stringify(query)}`);
+      queries.push('subscription.walkPage');
+      return answerPanelLinkWalkPage(tables.subscription, query);
+    },
     $transaction: async (callback: (tx: unknown) => Promise<unknown>) => {
       const id = transactions.length;
       transactions.push(id);
@@ -588,7 +596,6 @@ function reconciliationStub(
         repaired: [],
         hasMore: false,
         nextCursor: null,
-        panelEra: '3.x',
         ...extra,
       });
     },
@@ -1524,7 +1531,8 @@ describe('DuplicateSubscriptionMergeService — batch discovery', () => {
     // Paging is passed straight through so an operator can resume.
     assert.equal(report.hasMore, true);
     assert.equal(report.nextCursor, 'sub-zzz');
-    assert.equal(report.panelEra, '3.x');
+    // The era is not a report field any more: there is one.
+    assert.equal('panelEra' in report, false);
     // Discovery previews; it never writes.
     assert.deepEqual((reconciliation.calls[0] as { dryRun: boolean }).dryRun, true);
     assert.deepEqual(prisma.writes, []);
@@ -1716,13 +1724,9 @@ describe('DuplicateSubscriptionMergeService — a cluster of three converges', (
     },
   ];
 
-  /** The real sweep, wired to the same fake table the merge writes through. */
+  /** The real walk, wired to the same fake table the merge writes through. */
   const sweep = (prisma: PrismaHarness, panel: PanelHarness): PanelLinkReconciliationService =>
-    new PanelLinkReconciliationService(
-      prisma.client as never,
-      panel.api as never,
-      SILENT_EVENTS as never,
-    );
+    new PanelLinkReconciliationService(prisma.client as never, panel.api as never);
 
   /** Every row still live, oldest first — the state convergence is judged on. */
   const liveRows = (prisma: PrismaHarness): string[] =>
@@ -1856,7 +1860,7 @@ describe('DuplicateSubscriptionMergeService — a cluster of three converges', (
     // drains at once — neither row is broken), one aggregate per identity angle,
     // one `IN` lookup for the members. No probe per row.
     assert.deepEqual(prisma.queries, [
-      'subscription.findMany',
+      'subscription.walkPage',
       'subscription.groupBy',
       'subscription.groupBy',
       'subscription.findMany',
@@ -2664,7 +2668,6 @@ describe('AdminDuplicateSubscriptionMergeController', () => {
     stoppedEarly: null as Record<string, unknown> | null,
     hasMore: false,
     nextCursor: null as string | null,
-    panelEra: '3.x',
     rows: [
       {
         survivorSubscriptionId: 'sub-old-survivor',

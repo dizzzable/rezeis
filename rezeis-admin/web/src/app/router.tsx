@@ -34,7 +34,7 @@ const UserDetailPage = lazy(
 );
 const PlansPage = lazy(() => import('@/features/plans/plans-page'));
 const SubscriptionsPage = lazy(
-  withFeatureBundle('panelLinkReconciliation', () =>
+  withFeatureBundle('subscriptionTools', () =>
     import('@/features/subscriptions/subscriptions-page'),
   ),
 );
@@ -121,7 +121,9 @@ const FaqPage = lazy(() => import('@/features/faq/faq-page'));
 // Config portability is now embedded as a tab in /settings/panel; old route redirects.
 // System logs are now embedded as a tab in /audit; old route redirects.
 // Bulk users UI is now embedded as a tab in /users; old route redirects.
-const AddOnsPage = lazy(() => import('@/features/add-ons/add-ons-page'));
+const AddOnsPage = lazy(
+  withFeatureBundle('addOns', () => import('@/features/add-ons/add-ons-page')),
+);
 const NotFoundPage = lazy(() => import('./not-found-page'));
 
 function PageFallback() {

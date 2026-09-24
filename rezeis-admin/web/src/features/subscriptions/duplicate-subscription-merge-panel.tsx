@@ -4,25 +4,18 @@
  * The only caller of `POST /admin/profile-sync/duplicate-subscription-merge`
  * (`AdminDuplicateSubscriptionMergeController`, `subscriptions:edit`), which
  * was built, tested and documented and then had ZERO callers anywhere in the
- * SPA — the same shape of hole its neighbour `PanelLinkReconciliationPanel`
- * was written to close. The repair existed; the way to ask for it did not, so
- * duplicate pairs were being cleaned by hand in production, which is the one
- * thing the owner said must stop.
+ * SPA. The repair existed; the way to ask for it did not, so duplicate pairs
+ * were being cleaned by hand in production, which is the one thing the owner
+ * said must stop.
  *
- * WHY IT LIVES HERE, BESIDE THE RECONCILIATION PANEL. Four reasons:
- *
- *  • Same authority. The controller demands `subscriptions:edit`, the identical
- *    token the sweep next door asks for, expressed the identical way
- *    (`useHasPermission('subscriptions', 'edit')` and a `null` render).
- *  • Same population. The merge DISCOVERS its pairs by running the
- *    reconciliation sweep in dry-run and reading its `duplicatePair` verdicts,
- *    so the two surfaces are literally looking at the same rows. The sweep
- *    diagnoses a pair and stops; this is the action it stops short of, and the
- *    sweep's own warning ("merging the two subscriptions … is a separate
- *    action") now points at something the operator can actually press.
- *  • No route means no nav entry and no guard list to touch.
- *  • The rows it retires are subscriptions, and the stat tiles at the top of
- *    this page count the states those rows are in.
+ * WHERE IT LIVES. The first tab of «Подписки» → «Инструменты»
+ * (`tools/subscription-tools-sheet.tsx`), «Слияние подписок-дубликатов» — the
+ * name server messages send the operator to. Beside it, the tab «Подписки без
+ * привязки к Remnawave» lists what the automatic link check could not prove,
+ * and its `duplicatePair` rows point back here: the check diagnoses a pair and
+ * stops, and this is the action it stops short of. Same authority as that tab
+ * (`subscriptions:edit`), expressed the same way (`useHasPermission` and a
+ * `null` render).
  *
  * WHAT THE SURFACE HAS TO DO, and why no part of it is decoration:
  *
@@ -45,9 +38,9 @@
  *    destroys a paying customer's profile: on the pair a broken link produces
  *    the polarity is inverted from instinct — the older, legitimate-looking row
  *    is bound to nothing and the wrong-looking duplicate is the one the customer
- *    is actually using. And on the pair the SHARED-IDENTITY arm produces there is
- *    no unbound half at all: both rows already store the same identity, so the
- *    cell says BOTH rather than picking one and implying the other is spare.
+ *    is actually using. And on a pair whose two rows already store the same
+ *    identity there is no unbound half at all, so the cell says BOTH rather
+ *    than picking one and implying the other is spare.
  *  5. RETRYABLE AND NEVER-RETRY REFUSALS ARE SEPARATED. An operator must not
  *    keep pressing a refusal that will never change, and must not give up on
  *    one that would have cleared by itself. See `DuplicateMergeRetryClass`.
@@ -58,7 +51,7 @@ import { useCallback, useMemo, useState, type JSX } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import type { TFunction } from 'i18next'
-import { GitMerge, Loader2, PlayCircle, ShieldAlert, Wrench } from 'lucide-react'
+import { GitMerge, Loader2, PlayCircle, Wrench } from 'lucide-react'
 import { toast } from 'sonner'
 
 import {
@@ -103,22 +96,16 @@ import {
   type DuplicateMergeRow,
 } from './duplicate-subscription-merge-api'
 import { ownerProofKind, OWNER_UNPROVEN } from './owner-proof'
-import {
-  PANEL_ERA_2X,
-  PANEL_ERA_3X,
-  PANEL_LINK_RECONCILIATION_DEFAULT_CHUNK,
-  PANEL_LINK_RECONCILIATION_MAX_CHUNK,
-} from './panel-link-reconciliation-api'
 
 /**
  * Everything the operator has learned in this sweep, across however many
  * invocations it took.
  *
- * Accumulated rather than replaced, for the reason its neighbour accumulates:
- * a paged sweep is ONE piece of work to the person running it, and showing only
- * the newest page scrolls the named pairs of page one off the screen, which is
- * the same as not reporting them. Totals add up; `hasMore` / `nextCursor` /
- * `panelEra` come from the newest page only and `hasMore` is never latched.
+ * Accumulated rather than replaced: a paged sweep is ONE piece of work to the
+ * person running it, and showing only the newest page scrolls the named pairs
+ * of page one off the screen, which is the same as not reporting them. Totals
+ * add up; `hasMore` / `nextCursor` come from the newest page only and `hasMore`
+ * is never latched.
  */
 interface MergeSweep {
   readonly dryRun: boolean
@@ -130,7 +117,6 @@ interface MergeSweep {
   readonly rows: readonly DuplicateMergeRow[]
   readonly hasMore: boolean
   readonly nextCursor: string | null
-  readonly panelEra: string | null
 }
 
 function appendPage(
@@ -154,7 +140,6 @@ function appendPage(
     rows: [...(base?.rows ?? []), ...report.rows],
     hasMore: report.hasMore,
     nextCursor: report.nextCursor,
-    panelEra: report.panelEra,
   }
 }
 
@@ -288,7 +273,6 @@ export function DuplicateSubscriptionMergePanel(): JSX.Element | null {
   const canMerge = useHasPermission('subscriptions', 'edit')
 
   const [limitInput, setLimitInput] = useState(String(DUPLICATE_MERGE_DEFAULT_LIMIT))
-  const [chunkInput, setChunkInput] = useState(String(PANEL_LINK_RECONCILIATION_DEFAULT_CHUNK))
   const [sweep, setSweep] = useState<MergeSweep | null>(null)
 
   const runMutation = useMutation({
@@ -326,11 +310,10 @@ export function DuplicateSubscriptionMergePanel(): JSX.Element | null {
       mutate({
         dryRun,
         limit: parseBound(limitInput),
-        chunkSize: parseBound(chunkInput),
         ...(startAfterId === undefined ? {} : { startAfterId }),
       })
     },
-    [mutate, limitInput, chunkInput],
+    [mutate, limitInput],
   )
 
   // `sweep?.rows` rather than a `?? []` local: the fallback array is a fresh
@@ -401,24 +384,6 @@ export function DuplicateSubscriptionMergePanel(): JSX.Element | null {
               {t('duplicateMerge.limitHint', { max: DUPLICATE_MERGE_MAX_LIMIT })}
             </p>
           </div>
-          <div className="space-y-1">
-            <Label htmlFor="duplicate-merge-chunk" className="text-xs">
-              {t('duplicateMerge.chunkLabel')}
-            </Label>
-            <Input
-              id="duplicate-merge-chunk"
-              type="number"
-              min={1}
-              max={PANEL_LINK_RECONCILIATION_MAX_CHUNK}
-              className="h-9 w-32"
-              value={chunkInput}
-              disabled={busy}
-              onChange={(event) => setChunkInput(event.target.value)}
-            />
-            <p className="text-[11px] text-muted-foreground">
-              {t('duplicateMerge.chunkHint', { max: PANEL_LINK_RECONCILIATION_MAX_CHUNK })}
-            </p>
-          </div>
 
           <Button size="sm" className="h-9" disabled={busy} onClick={() => run(true)}>
             {busy ? (
@@ -443,8 +408,6 @@ export function DuplicateSubscriptionMergePanel(): JSX.Element | null {
 
         {sweep === null ? null : (
           <div className="space-y-4 border-t pt-4">
-            <MergeEraNotice era={sweep.panelEra} />
-
             <div className="flex flex-wrap items-center gap-2">
               <p className="text-sm font-semibold">{t('duplicateMerge.reportTitle')}</p>
               <Badge variant={sweep.dryRun ? 'secondary' : 'warning'}>
@@ -537,43 +500,6 @@ function Metric({
         {value}
       </p>
       <p className="text-xs text-muted-foreground">{label}</p>
-    </div>
-  )
-}
-
-/**
- * Which era of the panel API the DISCOVERY sweep believed it was talking to.
- *
- * `null` is the only one that gets an alert, and it is not a footnote: discovery
- * runs the reconciliation sweep, and a sweep that could not identify the panel
- * refuses to guess which identity spelling is current. "Zero pairs" from such a
- * run means the panel answered nothing — not that there are no duplicates —
- * and those two readings must not look alike.
- */
-function MergeEraNotice({ era }: { readonly era: string | null }): JSX.Element {
-  const { t } = useTranslation()
-  if (era === null) {
-    return (
-      <Alert variant="destructive">
-        <ShieldAlert className="h-4 w-4" aria-hidden="true" />
-        <AlertTitle>{t('duplicateMerge.eraUnknownTitle')}</AlertTitle>
-        <AlertDescription>{t('duplicateMerge.eraUnknownBody')}</AlertDescription>
-      </Alert>
-    )
-  }
-  // An era string the service does not document falls to its own sentence
-  // rather than borrowing 2.x's or 3.x's — either would be a claim about which
-  // population discovery searched, and this build has no basis for one.
-  const scopeKey =
-    era === PANEL_ERA_3X
-      ? 'duplicateMerge.eraScope3x'
-      : era === PANEL_ERA_2X
-        ? 'duplicateMerge.eraScope2x'
-        : 'duplicateMerge.eraScopeOther'
-  return (
-    <div className="rounded-lg border p-3">
-      <p className="text-sm font-medium">{t('duplicateMerge.eraKnown', { era })}</p>
-      <p className="text-xs text-muted-foreground">{t(scopeKey)}</p>
     </div>
   )
 }
@@ -885,10 +811,10 @@ function PairTable({ rows }: { readonly rows: readonly KeyedMergeRow[] }): JSX.E
  * profile. An operator who tidies up the wrong-looking card issues a panel
  * DELETE against a paying customer.
  *
- * FOUR ANSWERS, NOT TWO, and the fourth is the dangerous one. A pair from the
- * shared-identity arm has BOTH halves bound to the same profile, and naming
- * either one of them alone would tell the operator the other is spare. It is
- * not, and deleting it takes the live profile with it.
+ * FOUR ANSWERS, NOT TWO, and the fourth is the dangerous one. A pair whose two
+ * rows already store the same identity has BOTH halves bound to the same
+ * profile, and naming either one of them alone would tell the operator the
+ * other is spare. It is not, and deleting it takes the live profile with it.
  *
  * After a real merge the answer has changed — the survivor holds it now — so a
  * merged row says so instead of reporting the pre-merge state as if it were

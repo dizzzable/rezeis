@@ -17,9 +17,7 @@ import { Label } from '@/components/ui/label'
 import { FadeIn } from '@/lib/motion'
 import { PageTitle } from '@/components/layout/page-title'
 import { AutoRenewPanel } from './auto-renew-panel'
-import { PanelLinkReconciliationPanel } from './panel-link-reconciliation-panel'
-import { DuplicateSubscriptionMergePanel } from './duplicate-subscription-merge-panel'
-import { UnknownSquadPanel } from './unknown-squad-panel'
+import { SubscriptionTools } from './tools/subscription-tools-sheet'
 import { activeLocale } from '@/lib/utils'
 import { useHasPermission } from '@/features/rbac'
 import { subscriptionPaymentsHref } from '@/features/payments/payments-filters'
@@ -127,14 +125,20 @@ export default function SubscriptionsPage() {
             <PageTitle icon={CreditCard} title={t('subscriptionsPage.title')} />
             <p className="text-muted-foreground">{t('subscriptionsPage.subtitle')}</p>
           </div>
-          <Button
-            variant="outline"
-            size="icon"
-            onClick={() => refetch()}
-            aria-label={t('subscriptionsPage.refreshSubscriptions')}
-          >
-            <RefreshCw className="h-4 w-4" />
-          </Button>
+          <div className="flex items-center gap-2">
+            {/* «Инструменты»: the merge, the dead-squad report, the link check's
+                lists and the lifetime census, in one sheet. Renders nothing for
+                an admin who may open none of its tabs. */}
+            <SubscriptionTools />
+            <Button
+              variant="outline"
+              size="icon"
+              onClick={() => refetch()}
+              aria-label={t('subscriptionsPage.refreshSubscriptions')}
+            >
+              <RefreshCw className="h-4 w-4" />
+            </Button>
+          </div>
         </div>
       </FadeIn>
 
@@ -162,29 +166,6 @@ export default function SubscriptionsPage() {
           support report says a renewal did not happen. Renders nothing
           without `auto_renew:view`. */}
       <AutoRenewPanel />
-
-      {/* Bulk repair for subscriptions whose panel profile exists but whose
-          stored panel identity is empty — the only caller of
-          POST /admin/profile-sync/panel-link-reconciliation. Same authority as
-          the single-row repair on the user detail page (subscriptions:edit),
-          so it sits with the rows it repairs. Renders nothing without it. */}
-      <PanelLinkReconciliationPanel />
-
-      {/* The action the sweep above deliberately stops short of: two live
-          subscriptions on ONE panel profile, merged into the older row that
-          carries the customer history. Only caller of
-          POST /admin/profile-sync/duplicate-subscription-merge, same authority
-          (subscriptions:edit) and the same rows — it finds its pairs by running
-          that very sweep. Renders nothing without the permission. */}
-      <DuplicateSubscriptionMergePanel />
-
-      {/* Read-only, and the only surface that answers for the WHOLE install:
-          which subscriptions still name a squad the panel no longer serves, and
-          which plans will keep recreating the problem. The other two notices
-          for this failure arrive too late (a sync that already failed) or only
-          once (a toast when a plan is saved). Asks for `plans:view`, renders
-          nothing without it. */}
-      <UnknownSquadPanel />
 
       {/* Filters */}
       <div className="flex items-center gap-4 flex-wrap">

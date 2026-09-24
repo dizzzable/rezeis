@@ -276,8 +276,8 @@ describe('a pop-up that can arrive more than once', () => {
   /**
    * THE THREE-DEEP MODAL.
    *
-   * Remnawave sends `expires_in_72_hours`, then `_48`, then `_24`, and the
-   * panel forwards all three — plus `user.expiration` — under the one type
+   * Remnawave sends `user.expiration` at each hour the operator set — 72, 48
+   * and 24, say — and the panel forwards every one of them under the one type
    * `remnawave.user.expire_soon`. A repeatable hint with no group turns each of
    * them into its own `UserHintDelivery` row, and nothing collapses them: a
    * customer away for three days opens the cabinet to three identical renewal

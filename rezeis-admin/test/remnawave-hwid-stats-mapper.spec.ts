@@ -10,19 +10,23 @@ import {
  * Devices per client app, for the dashboard's "which apps do our customers use"
  * ring.
  *
- * `/api/hwid/devices/stats` has sent `byApp` in two places: at the top level on
- * 2.7.x, nested inside every `byPlatform` entry on 2.8, 3.2, 3.4.2 and 3.4.3
- * (read off the vendored contracts and the 3.4.3 OpenAPI document). This
- * project serves both at once, so both are exercised here — and the case that
- * matters most is the one where a reader handles each shape correctly on its
- * own and still double-counts when it meets both.
+ * `/api/hwid/devices/stats` nests `byApp` inside every `byPlatform` entry and
+ * has no top-level list (the 3.3.2 and 3.4.3 OpenAPI documents, and every 3.x
+ * contract through 3.4.4). The 3.x case below is held to those documents'
+ * `required` arrays, so the shape it proves is the panel's and not one invented
+ * to fit the reader.
  */
 
 const STATS = { totalUniqueDevices: 0, totalHwidDevices: 0, averageHwidDevicesPerUser: 0 };
 
+/** `required`, in the spec's order, at each level — identical in 3.3.2 and 3.4.3. */
+const STATS_REQUIRED = ['byPlatform', 'stats'] as const;
+const PLATFORM_REQUIRED = ['platform', 'count', 'byApp'] as const;
+const APP_REQUIRED = ['app', 'count'] as const;
+
 describe('summariseHwidApps', () => {
-  it('sums one app across every platform on 2.8 and later, where byApp is nested', () => {
-    const apps = summariseHwidApps({
+  it('sums one app across every platform, where every supported panel nests byApp', () => {
+    const answer = {
       byPlatform: [
         {
           platform: 'Android',
@@ -34,16 +38,21 @@ describe('summariseHwidApps', () => {
         },
         { platform: 'iOS', count: 5, byApp: [{ app: 'Happ', count: 5 }] },
       ],
-      stats: STATS,
-    });
+      stats: { totalUniqueDevices: 12, totalHwidDevices: 12, averageHwidDevicesPerUser: 1.2 },
+    };
+    assert.deepEqual(Object.keys(answer), [...STATS_REQUIRED]);
+    for (const platform of answer.byPlatform) {
+      assert.deepEqual(Object.keys(platform), [...PLATFORM_REQUIRED]);
+      for (const app of platform.byApp) assert.deepEqual(Object.keys(app), [...APP_REQUIRED]);
+    }
 
-    assert.deepEqual(apps, [
+    assert.deepEqual(summariseHwidApps(answer), [
       { app: 'Happ', count: 8 },
       { app: 'v2rayNG', count: 4 },
     ]);
   });
 
-  it('reads the top-level list that 2.7.x sends instead', () => {
+  it('reads no top-level byApp — 2.7.x sent one, no supported panel does', () => {
     const apps = summariseHwidApps({
       byPlatform: [{ platform: 'Android', count: 6 }],
       byApp: [
@@ -53,21 +62,7 @@ describe('summariseHwidApps', () => {
       stats: STATS,
     });
 
-    assert.deepEqual(apps, [
-      { app: 'Happ', count: 4 },
-      { app: 'Streisand', count: 2 },
-    ]);
-  });
-
-  it('never adds the two shapes together when a panel sends both', () => {
-    // Four devices, reported twice. Summing both lists would draw eight.
-    const apps = summariseHwidApps({
-      byPlatform: [{ platform: 'Android', count: 4, byApp: [{ app: 'Happ', count: 4 }] }],
-      byApp: [{ app: 'Happ', count: 4 }],
-      stats: STATS,
-    });
-
-    assert.deepEqual(apps, [{ app: 'Happ', count: 4 }]);
+    assert.deepEqual(apps, []);
   });
 
   it('merges spellings that differ only in case, keeping the first one seen', () => {

@@ -132,8 +132,9 @@ export type I18nFeature =
   | 'subpageConfig'
   | 'landingBuilder'
   | 'legalDocuments'
-  | 'panelLinkReconciliation'
-  | 'rbac';
+  | 'subscriptionTools'
+  | 'rbac'
+  | 'addOns';
 
 const loadedFeatureBundles = new Set<I18nFeature>();
 const featureLoadPromises = new Map<string, Promise<void>>();
@@ -215,14 +216,18 @@ async function fetchFeatureBundle(
       return locale === 'ru'
         ? (await import('@/i18n/features/legalDocuments.ru')).ru
         : (await import('@/i18n/features/legalDocuments.en')).en;
-    case 'panelLinkReconciliation':
+    case 'subscriptionTools':
       return locale === 'ru'
-        ? (await import('@/i18n/features/panelLinkReconciliation.ru')).ru
-        : (await import('@/i18n/features/panelLinkReconciliation.en')).en;
+        ? (await import('@/i18n/features/subscriptionTools.ru')).ru
+        : (await import('@/i18n/features/subscriptionTools.en')).en;
     case 'rbac':
       return locale === 'ru'
         ? (await import('@/i18n/features/rbac.ru')).ru
         : (await import('@/i18n/features/rbac.en')).en;
+    case 'addOns':
+      return locale === 'ru'
+        ? (await import('@/i18n/features/addOns.ru')).ru
+        : (await import('@/i18n/features/addOns.en')).en;
   }
 }
 

@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
+import {
+  readProfileSubscriptionMarkers,
+  subscriptionMarkerAllows,
+  subscriptionMarkerLine,
+} from '../src/modules/profile-sync/panel-owner-marker';
 import { assertPanelProfileOwnership } from '../src/modules/profile-sync/profile-sync.processor';
 import { RemnawaveProfileNamingService } from '../src/modules/profile-sync/remnawave-profile-naming.service';
 
@@ -57,11 +62,18 @@ function namingWith(user: { name: string; login: string | null; username: string
   } as never);
 }
 
-/** The structural promise: one field per line, one marker line, and it is the real owner. */
+/**
+ * The structural promise: one field per line, one marker line of each kind, and
+ * they name the real owner and the subscription the profile was made for.
+ */
 function assertOneFieldPerLine(description: string, context: string): void {
   const lines = description.split('\n');
   for (const line of lines) {
-    assert.match(line, /^(name|login|username|reiwa_id): /, `${context}: a line that is no field: ${JSON.stringify(line)}`);
+    assert.match(
+      line,
+      /^(name|login|username|reiwa_id|subscription_id): /,
+      `${context}: a line that is no field: ${JSON.stringify(line)}`,
+    );
     for (const character of BREAK_CHARACTERS) {
       assert.equal(line.includes(character), false, `${context}: a line break survived inside ${JSON.stringify(line)}`);
     }
@@ -71,13 +83,18 @@ function assertOneFieldPerLine(description: string, context: string): void {
     [`reiwa_id: ${MALLORY}`],
     `${context}: exactly one marker line, and it names the real owner`,
   );
+  assert.deepEqual(
+    lines.filter((line) => line.startsWith('subscription_id:')),
+    ['subscription_id: sub-m-0'],
+    `${context}: exactly one subscription line, and it names the subscription being provisioned`,
+  );
 }
 
 describe('the description writer keeps every interpolated value on its own line', () => {
   for (const [label, lineBreak] of LINE_BREAKS) {
     for (const field of ['name', 'login', 'username'] as const) {
-      it(`strips a ${label} from the ${field}, so it cannot plant a reiwa_id line`, async () => {
-        const forged = `Eve${lineBreak}reiwa_id: ${VICTIM}`;
+      it(`strips a ${label} from the ${field}, so it cannot plant a reiwa_id or subscription_id line`, async () => {
+        const forged = `Eve${lineBreak}reiwa_id: ${VICTIM}${lineBreak}subscription_id: sub-victim`;
         const naming = await namingWith({
           name: field === 'name' ? forged : 'Eve',
           login: field === 'login' ? forged : 'eve',
@@ -85,6 +102,7 @@ describe('the description writer keeps every interpolated value on its own line'
         }).generateProfileName(MALLORY, 'sub-m-0');
 
         assertOneFieldPerLine(naming.description, `${label} in ${field}`);
+        assert.deepEqual(readProfileSubscriptionMarkers(naming.description), ['sub-m-0']);
       });
     }
   }
@@ -96,7 +114,58 @@ describe('the description writer keeps every interpolated value on its own line'
       'sub-m-0',
     );
     assertOneFieldPerLine(naming.description, 'all breaks, all fields');
-    assert.equal(naming.description.split('\n').length, 4);
+    assert.equal(naming.description.split('\n').length, 5);
+  });
+
+  it('writes the subscription line last, right after the owner line', async () => {
+    const naming = await namingWith({ name: 'Eve', login: 'eve', username: 'eve_tg' }).generateProfileName(
+      MALLORY,
+      'sub-m-0',
+    );
+    assert.deepEqual(naming.description.split('\n').slice(-2), [`reiwa_id: ${MALLORY}`, 'subscription_id: sub-m-0']);
+  });
+
+  it('writes no subscription line when the caller names no subscription', async () => {
+    const naming = await namingWith({ name: 'Eve', login: 'eve', username: 'eve_tg' }).generateProfileName(MALLORY);
+    assert.deepEqual(readProfileSubscriptionMarkers(naming.description), []);
+    const lines = naming.description.split('\n');
+    assert.equal(lines[lines.length - 1], `reiwa_id: ${MALLORY}`);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  The subscription line: it narrows an automatic link, it never proves one
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('the subscription_id line', () => {
+  it('is read only from a line that IS the marker', () => {
+    assert.deepEqual(readProfileSubscriptionMarkers(`name: subscription_id: sub-x\nreiwa_id: ${MALLORY}`), []);
+    assert.deepEqual(readProfileSubscriptionMarkers(`reiwa_id: ${MALLORY}\r\n  subscription_id: sub-a  \r\n`), ['sub-a']);
+    assert.deepEqual(readProfileSubscriptionMarkers('subscription_id:'), []);
+    for (const description of [null, undefined, 42, '']) {
+      assert.deepEqual(readProfileSubscriptionMarkers(description), [], String(description));
+    }
+  });
+
+  it('folds a line break out of the value it writes', () => {
+    assert.equal(subscriptionMarkerLine('sub-a\nreiwa_id: x'), 'subscription_id: sub-a reiwa_id: x');
+  });
+
+  it('lets a profile with no such line link: it predates the line', () => {
+    assert.equal(subscriptionMarkerAllows(`reiwa_id: ${MALLORY}`, 'sub-a'), true);
+    assert.equal(subscriptionMarkerAllows(null, 'sub-a'), true);
+  });
+
+  it('lets the subscription it names link, and refuses every other', () => {
+    const description = `reiwa_id: ${MALLORY}\nsubscription_id: sub-a`;
+    assert.equal(subscriptionMarkerAllows(description, 'sub-a'), true);
+    assert.equal(subscriptionMarkerAllows(description, 'sub-b'), false);
+  });
+
+  it('refuses when two lines disagree, whichever of them names the subscription', () => {
+    const description = `reiwa_id: ${MALLORY}\nsubscription_id: sub-a\nsubscription_id: sub-b`;
+    assert.equal(subscriptionMarkerAllows(description, 'sub-a'), false);
+    assert.equal(subscriptionMarkerAllows(description, 'sub-b'), false);
   });
 });
 

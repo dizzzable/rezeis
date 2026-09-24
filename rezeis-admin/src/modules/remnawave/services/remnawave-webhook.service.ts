@@ -69,24 +69,20 @@ const REMNAWAVE_WEBHOOK_EVENT_MAP: Record<
   'user.enabled': { type: EVENT_TYPES.REMNAWAVE_USER_ENABLED, category: 'REMNAWAVE', severity: 'INFO' },
   'user.disabled': { type: EVENT_TYPES.REMNAWAVE_USER_DISABLED, category: 'REMNAWAVE', severity: 'WARNING' },
   'user.traffic_reset': { type: EVENT_TYPES.REMNAWAVE_USER_TRAFFIC_RESET, category: 'REMNAWAVE', severity: 'INFO' },
-  // Expiry warnings. A 2.x panel still delivers its webhooks — rezeis refuses
-  // the commands it would send such a panel, not the events it receives — so
-  // both spellings have to be here:
-  //   * 2.7.4 raises one of four discrete names. Three are mapped below; the
-  //     fourth, `user.expired_24_hours_ago`, is deliberately NOT mapped —
-  //     `user.expired` has already produced a card by then and a second one a
-  //     day later is duplicate noise. That predates this map and stays as is.
-  //   * 2.8.0 REMOVED all four from `RemnawaveWebhookUserEventsDto.event` and
-  //     replaced them with a single `user.expiration`, moving the
-  //     distinguishing number into the envelope's `meta.expiration`
-  //     (see `extractEventMetadata`). Without the key below, an expire-soon
-  //     event on a 2.8.0 panel produced no audit entry, no realtime card, no
-  //     Telegram message and no outbound webhook.
-  'user.expires_in_24_hours': { type: EVENT_TYPES.REMNAWAVE_USER_EXPIRE_SOON, category: 'REMNAWAVE', severity: 'INFO' },
-  'user.expires_in_48_hours': { type: EVENT_TYPES.REMNAWAVE_USER_EXPIRE_SOON, category: 'REMNAWAVE', severity: 'INFO' },
-  'user.expires_in_72_hours': { type: EVENT_TYPES.REMNAWAVE_USER_EXPIRE_SOON, category: 'REMNAWAVE', severity: 'INFO' },
+  // Expiry warnings. Every panel rezeis serves (3.x) raises ONE name for all
+  // of them, `user.expiration`, at each of the hours the operator configured
+  // in Remnawave (`GET /api/system/configuration` →
+  // `notifications.expirationNotifications`), and says which one fired in the
+  // envelope's `meta.expiration` (see `extractEventMetadata`). Without the key
+  // below an expire-soon event produced no audit entry, no realtime card, no
+  // Telegram message and no outbound webhook.
+  //
+  // The four discrete names 2.7.4 raised instead (`user.expires_in_72_hours`,
+  // `…_48_hours`, `…_24_hours`, `user.expired_24_hours_ago`) are not mapped:
+  // no supported panel sends them. One that arrives anyway is stored in the
+  // Activity Feed like any other unmapped event.
   'user.expiration': { type: EVENT_TYPES.REMNAWAVE_USER_EXPIRE_SOON, category: 'REMNAWAVE', severity: 'INFO' },
-  // NOT in either version's `event` enum — no Remnawave panel raises this.
+  // NOT in any supported panel's `event` enum — no Remnawave panel raises this.
   // Kept purely as a defensive alias for relays/proxies that normalize the
   // name themselves: an unused key costs one property lookup, whereas deleting
   // it would silently drop such events for zero benefit. Do not read it as
@@ -126,14 +122,7 @@ const FORWARDED_WHATEVER_ITS_AGE: ReadonlySet<string> = new Set(['user.first_con
  * (`withLocalOpenEndKept`), and with it the report: a customer who bought a
  * plan for ever is not told «Подписка закончилась — Продлить».
  */
-const DATE_REPORTS: ReadonlySet<string> = new Set([
-  'user.expired',
-  'user.expires_in_24_hours',
-  'user.expires_in_48_hours',
-  'user.expires_in_72_hours',
-  'user.expiration',
-  'user.expire_soon',
-]);
+const DATE_REPORTS: ReadonlySet<string> = new Set(['user.expired', 'user.expiration', 'user.expire_soon']);
 
 /**
  * What the reconcile made of one `user.*` event, for everything that follows
@@ -240,10 +229,11 @@ function normalizeRemnawaveEventName(eventType: string): string {
 /**
  * A panel id as it may appear in webhook JSON: decimal digits and nothing else.
  * No sign, no separators, no exponent — the very shape `isNumericPanelIdentity`
- * (`panel-user-address.ts`) uses to tell a stored 3.x id from a 2.x uuid. The
- * identity minted below is later classified by THAT predicate, so a string this
- * one accepted but that one would not (`-5`, `1e3`, `12.0`) would be addressed
- * to a 3.x panel as though it were a uuid.
+ * (`panel-user-address.ts`) uses to tell a stored 3.x id from a link no 3.x
+ * panel issued (a 2.x-era uuid, `''`, imported junk). The identity minted below
+ * is later classified by THAT predicate, so a string this one accepted but that
+ * one would not (`-5`, `1e3`, `12.0`) would name a profile by a link no panel
+ * answers to.
  */
 const DECIMAL_PANEL_ID = /^\d+$/;
 
@@ -276,34 +266,6 @@ function readNumericPanelId(value: unknown): number | null {
 }
 
 /**
- * Reads the panel user's identity out of a webhook payload, in EXACTLY the form
- * `Subscription.remnawaveId` holds it — a 2.x UUID, or a 3.x numeric id in
- * decimal. Every consumer in this file compares the result against that column
- * (`reconcileSubscriptionFromEvent`'s `updateMany`, `resolveLocalUserContext`'s
- * `findFirst`, and through it the first-connection panel read), so a value in
- * any other shape names nobody and each of them silently does nothing.
- *
- * WHICH KEY IS THE IDENTITY depends on the panel era, and the payload itself
- * says which — the same rule, for the same reason, as `parsePanelUserRow` and
- * `parseStrictUser` in `remnawave-api.service.ts`:
- *   • `uuid` present → 2.7.4 / 2.8.x. That is the identity.
- *   • `uuid` ABSENT  → 3.x, which deleted the column outright and re-keyed every
- *                      user on the numeric `id`; no payload from such a panel
- *                      carries a uuid anywhere. The identity is `String(id)`.
- *
- * The test is ABSENCE (`=== undefined`), never emptiness, and collapsing the two
- * costs a customer: a 2.x payload whose `uuid` came back `''` (or null, or a
- * number) is DAMAGED, and falling back to its numeric id there would mint a key
- * that matches no `remnawaveId` stored in that era — turning "we could not read
- * this event" into "this event is about 4821", who is somebody else. Damaged
- * stays unidentified.
- *
- * Before this the read was `str('uuid') ?? str('userUuid')`, which a 3.x payload
- * satisfies neither half of, so the identity was simply never set and all three
- * consumers no-opped with no error and no log — an Activity Feed that filled
- * while nothing reconciled.
- */
-/**
  * The `where` that finds the local row a panel event is about.
  *
  * `remnawaveId` alone is not enough, and the gap is the mirror image of the one
@@ -326,17 +288,32 @@ export function panelIdentityWhere(identity: string): Prisma.SubscriptionWhereIn
   return { OR: [{ remnawaveId: identity }, { remnawavePanelId: panelId }] };
 }
 
+/**
+ * Reads the panel user's identity out of a webhook payload, in EXACTLY the form
+ * `Subscription.remnawaveId` holds it on 3.x: the numeric `id`, in decimal.
+ * Every consumer in this file compares the result against the subscription
+ * through `panelIdentityWhere` (`reconcileSubscriptionFromEvent`'s
+ * `updateMany`, `resolveLocalUserContext`'s `findFirst`, and through it the
+ * first-connection panel read), so a value in any other shape names nobody and
+ * each of them silently does nothing.
+ *
+ * Every panel rezeis serves keys a user on that `id`: 3.x deleted the user's
+ * uuid column outright, and no payload from it carries a user uuid anywhere. A
+ * `uuid` key beside the id is therefore not read — whatever still sends one is
+ * named by its numeric id like every other payload, which `panelIdentityWhere`
+ * also matches on `remnawavePanelId`, the number recorded for a row created on
+ * 2.x. `userId` stands in only when `id` is not a usable id.
+ *
+ * When this read was `str('uuid') ?? str('userUuid')`, a 3.x payload satisfied
+ * neither half of it, so the identity was simply never set and all three
+ * consumers no-opped with no error and no log — an Activity Feed that filled
+ * while nothing reconciled.
+ */
 function readWebhookPanelIdentity(payload: Record<string, unknown>): string | null {
   const data =
     payload['data'] !== null && typeof payload['data'] === 'object'
       ? (payload['data'] as Record<string, unknown>)
       : payload;
-  // `userUuid` is the legacy spelling and stands in only when `uuid` is not a
-  // key at all, so a damaged `uuid` cannot be rescued by it either.
-  const uuidSlot = data['uuid'] !== undefined ? data['uuid'] : data['userUuid'];
-  if (uuidSlot !== undefined) {
-    return typeof uuidSlot === 'string' && uuidSlot.length > 0 ? uuidSlot : null;
-  }
   const numericId = readNumericPanelId(data['id']) ?? readNumericPanelId(data['userId']);
   return numericId === null ? null : String(numericId);
 }
@@ -372,8 +349,8 @@ interface WebhookConnectReading {
  * Reads the connection evidence out of a user webhook.
  *
  * Every user event carries the whole user row in `data`, traffic block
- * included, on every era — so every one of them is a free look at the profile,
- * not only `user.first_connected`. Two event names say more than their block:
+ * included — so every one of them is a free look at the profile, not only
+ * `user.first_connected`. Two event names say more than their block:
  *
  *   `user.first_connected`  connected, even with no block to read (at the
  *                           event's time then);
@@ -462,13 +439,14 @@ const WEBHOOK_PAYLOAD_ALLOWED_KEYS: ReadonlySet<string> = new Set([
   'scope', 'event', 'type', 'timestamp', 'data', 'meta',
   'notConnectedAfterHours', 'expiration',
 
-  // Panel identity. `id` (3.x numeric), `uuid` (2.x) and the legacy
-  // `userUuid` are what `reconcileSubscriptionFromEvent` matches
-  // `Subscription.remnawaveId` on — strip them and reconciliation silently
-  // stops. `vlessUuid` is deliberately NOT one of them: despite the name it
-  // is the customer's VLESS credential, not an identifier. Never relax this
-  // into a substring match on "uuid".
-  'id', 'uuid', 'userUuid', 'userId', 'user', 'username', 'telegramId', 'email',
+  // Panel identity. `id` is what `reconcileSubscriptionFromEvent` matches
+  // `Subscription.remnawaveId` on — strip it and reconciliation silently
+  // stops. `uuid` names no user any more (3.x deleted that column), but it is
+  // still the identity of a node, a squad, a provider, a subpage config and an
+  // API token in the events that carry them. `vlessUuid` is deliberately NOT
+  // an identifier: despite the name it is the customer's VLESS credential.
+  // Never relax this into a substring match on "uuid".
+  'id', 'uuid', 'userId', 'user', 'username', 'telegramId', 'email',
   'description', 'tag', 'externalSquadUuid', 'activeInternalSquads',
 
   // Subscription runtime state — read by `reconcileSubscriptionFromEvent`
@@ -718,7 +696,7 @@ export class RemnawaveWebhookService {
       if (readWebhookPanelIdentity(payload) === null) {
         this.logger.warn(
           `Remnawave webhook ${eventType}: no panel user identity in the payload ` +
-            '(no uuid key, and no usable numeric id) — reconcile and the local user lookup are skipped',
+            '(no usable numeric id) — reconcile and the local user lookup are skipped',
         );
       }
       try {
@@ -887,9 +865,9 @@ export class RemnawaveWebhookService {
     metadata: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
     if (typeof metadata['usedTrafficBytes'] === 'number') return metadata;
-    // Whatever `extractEventMetadata` could name the profile by — a 2.x uuid or
-    // a 3.x numeric id. `getPanelUserUsage` takes a stored `remnawaveId` and
-    // builds the address for the panel's own era, so both forms are routable.
+    // The profile's numeric id, as `extractEventMetadata` named it — the very
+    // string a stored `remnawaveId` holds, which is what `getPanelUserUsage`
+    // takes and builds the panel address from.
     const remnawaveId =
       typeof metadata['remnawaveId'] === 'string' ? metadata['remnawaveId'] : null;
     if (remnawaveId === null || remnawaveId.length === 0) return metadata;
@@ -916,7 +894,7 @@ export class RemnawaveWebhookService {
   /**
    * Reconcile the local `Subscription` snapshot from a user-scoped panel
    * event. Pulls the panel's canonical runtime fields out of the webhook
-   * payload (`data`, 2.x) and overlays them onto every non-deleted
+   * payload (`data`) and overlays them onto every non-deleted
    * subscription whose `remnawaveId` matches. Partial: only fields present
    * in the payload are written; status falls back to the event name.
    *
@@ -941,9 +919,9 @@ export class RemnawaveWebhookService {
       return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
     };
 
-    // 2.x uuid or 3.x numeric id, whichever this payload's era provides — see
-    // `readWebhookPanelIdentity`. This is matched against `remnawaveId` below,
-    // so it must be the string that column holds and nothing else.
+    // The profile's numeric id, in decimal — see `readWebhookPanelIdentity`.
+    // This is matched against `remnawaveId` below, so it must be the string
+    // that column holds and nothing else.
     const remnawaveId = readWebhookPanelIdentity(payload);
     if (remnawaveId === null) return NOTHING_WITHHELD;
 
@@ -1381,21 +1359,21 @@ export class RemnawaveWebhookService {
    * object — NESTED SHAPE FIRST.
    *
    * `RemnawaveWebhookUserEventsDto.data` declares no top-level
-   * `usedTrafficBytes` in EITHER contract it was checked in: 2.7.4 and 2.8.0
-   * both put the counter inside the required `userTraffic` container, as
-   * `data.userTraffic.usedTrafficBytes`. Probing only the flat spelling
-   * therefore read `undefined` out of every real payload and silently
-   * disabled both consumers of this value — `User.firstTrafficAt` (nothing
-   * else writes that column) was never claimed, and `meta.usedTrafficBytes`
-   * was never set, so the card formatter's `typeof … === 'number'` gate
-   * dropped the traffic line from every Remnawave card, including
-   * `user.bandwidth_usage_threshold_reached`, whose entire purpose is
-   * reporting consumption.
+   * `usedTrafficBytes` in ANY spec it was checked in (3.3.2 and 3.4.3, and
+   * every 2.x one before them): each puts the counter inside the required
+   * `userTraffic` container, as `data.userTraffic.usedTrafficBytes`. Probing
+   * only the flat spelling therefore read `undefined` out of every real
+   * payload and silently disabled both consumers of this value —
+   * `User.firstTrafficAt` (nothing else writes that column) was never claimed,
+   * and `meta.usedTrafficBytes` was never set, so the card formatter's
+   * `typeof … === 'number'` gate dropped the traffic line from every Remnawave
+   * card, including `user.bandwidth_usage_threshold_reached`, whose entire
+   * purpose is reporting consumption.
    *
    * Probe order mirrors the REST reader
    * (`RemnawaveApiService.getPanelUserUsage`) rather than inventing a second
    * convention. The flat spellings are kept as a trailing fallback —
-   * they match nothing either spec sends, but they cost nothing and keep any
+   * they match nothing any spec sends, but they cost nothing and keep any
    * relayed/flattened payload working.
    */
   private readUsedTrafficBytes(data: Record<string, unknown>): number | null {
@@ -1609,7 +1587,7 @@ export class RemnawaveWebhookService {
 
   /**
    * Maps a raw Remnawave webhook payload onto the card metadata keys the
-   * formatter understands. Reads from `payload.data` (2.x) with a flat
+   * formatter understands. Reads from `payload.data` with a flat
    * fallback, plus the envelope `payload.meta`. Only documented,
    * non-sensitive fields are surfaced.
    */
@@ -1635,15 +1613,15 @@ export class RemnawaveWebhookService {
     // User-scoped fields
     const username = str('username');
     if (username) meta['remnawaveUsername'] = username;
-    const uuid = str('uuid') ?? str('userUuid');
-    // Panel identity, in the shape `Subscription.remnawaveId` holds — on a 3.x
-    // panel that is the numeric `id`, because there is no uuid to be had (see
+    const uuid = str('uuid');
+    // Panel identity, in the shape `Subscription.remnawaveId` holds — the
+    // numeric `id`, because a user has no uuid to be had (see
     // `readWebhookPanelIdentity`).
     //
-    // Node-scoped events deliberately keep the OLD, uuid-only read. A node row
-    // still carries a `uuid` in every supported version (3.2.x `NodesSchema`
-    // declares one next to its `id`), so the numeric fallback has nothing to do
-    // there — and it must not fire: this key is compared against
+    // Node-scoped events are read by `uuid` alone. A node row still carries a
+    // `uuid` in every supported version (3.3.2 and 3.4.3 declare one next to
+    // its `id`), so the numeric read has nothing to do there — and it must
+    // not fire: this key is compared against
     // `Subscription.remnawaveId`, where node `id: 12` and customer `id: 12` are
     // the same string, and a malformed node event would otherwise name a
     // customer chosen by coincidence.
@@ -1663,19 +1641,17 @@ export class RemnawaveWebhookService {
     // Envelope `meta` — the ONLY part of the payload outside `data` that
     // carries card detail, and the only reason this method looks at the root.
     //
-    // 2.8.0 collapsed 2.7.4's four expiry-warning event names into a single
-    // `user.expiration` and moved the distinguishing number out of the event
-    // name into `meta.expiration` (`number | null`). Mapping the name alone
-    // would therefore drop the one field that says WHICH warning fired. The
-    // event still renders usefully without it — `data.expireAt` is required in
-    // both versions and already feeds the card's expiry line — so this is
-    // added detail, not the whole card.
+    // Every expiry warning arrives under the one name `user.expiration`, with
+    // the distinguishing number in `meta.expiration` (`number | null`), not in
+    // the name. Mapping the name alone would therefore drop the one field that
+    // says WHICH warning fired. The event still renders usefully without it —
+    // `data.expireAt` is required and already feeds the card's expiry line —
+    // so this is added detail, not the whole card.
     //
-    // Surfaced under a prefixed key without a unit in the name: neither spec
-    // documents what the number counts, so naming it `…Hours` would be a
-    // guess. 2.7.4's `meta` has no `expiration` property at all, which makes
-    // this read a no-op on that version. Read-only, like the rest of this
-    // method — the raw payload must stay untouched for the reconcile path.
+    // Surfaced under a prefixed key without a unit in the name: the spec does
+    // not document what the number counts, so naming it `…Hours` would be a
+    // guess. Read-only, like the rest of this method — the raw payload must
+    // stay untouched for the reconcile path.
     const envelopeMeta = payload['meta'];
     if (envelopeMeta !== null && typeof envelopeMeta === 'object' && !Array.isArray(envelopeMeta)) {
       const expiration = (envelopeMeta as Record<string, unknown>)['expiration'];

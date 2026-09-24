@@ -197,7 +197,6 @@ function reportBody(overrides: Record<string, unknown> = {}): Record<string, unk
     rows: [MERGEABLE_PAIR, REFUSED_NEVER, REFUSED_RETRYABLE, REFUSED_BLOCKED],
     hasMore: false,
     nextCursor: 'sub-newer-2',
-    panelEra: '3.x',
     ...overrides,
   }
 }
@@ -268,7 +267,7 @@ async function runPreview(user: ReturnType<typeof userEvent.setup>): Promise<voi
 
 describe('duplicate subscription merge surface', () => {
   beforeAll(async () => {
-    await loadFeatureBundle('panelLinkReconciliation')
+    await loadFeatureBundle('subscriptionTools')
   })
 
   beforeEach(() => {
@@ -286,22 +285,27 @@ describe('duplicate subscription merge surface', () => {
     expect(postSpy).not.toHaveBeenCalled()
   })
 
-  it('is reachable from the subscriptions page', async () => {
+  it('is reachable from the subscriptions page, through «Инструменты»', async () => {
     // The defect was reachability. A spec that only mounts the panel directly
-    // would pass against the exact tree that shipped with no caller.
+    // would pass against the exact tree that shipped with no caller — and the
+    // panel now lives in the sheet the header button opens, so that press is
+    // part of the path.
     mockPageGets()
-    mockPost()
+    const postSpy = mockPost()
     grantPermissions([{ resource: 'subscriptions', action: 'edit' }])
+    const user = userEvent.setup()
 
-    renderWithProviders(<SubscriptionsPage />)
+    renderWithProviders(<SubscriptionsPage />, { route: '/subscriptions' })
+    await user.click(await screen.findByRole('button', { name: 'Tools' }))
 
-    expect(await screen.findByText('Duplicate subscription merge')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Preview the merge' })).toBeInTheDocument()
-    // ...and its neighbour is still there and still distinguishable. The two
-    // surfaces sit on one page, so a shared button label would make either
-    // one's controls unaddressable.
-    expect(screen.getByText('Panel link repair')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Run preview' })).toBeInTheDocument()
+    const sheet = await screen.findByRole('dialog', { name: 'Subscription tools' })
+    expect(within(sheet).getByRole('tab', { name: 'Duplicate subscription merge' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    )
+    await user.click(within(sheet).getByRole('button', { name: 'Preview the merge' }))
+    await waitFor(() => expect(postSpy).toHaveBeenCalledTimes(1))
+    expect(postSpy.mock.calls[0]?.[0]).toBe(ENDPOINT)
   })
 
   it('sends dryRun as the boolean true on a preview, never a string', async () => {
@@ -764,9 +768,12 @@ describe('duplicate subscription merge surface', () => {
     expect(
       screen.getByText(/^Wait for the running sync job to finish, then run the merge again\./),
     ).toBeInTheDocument()
-    expect(
-      screen.getByText(/^Run the panel link repair above first\. Neither of these rows is bound/),
-    ).toBeInTheDocument()
+    // The repair card this remedy used to send the operator to is gone; the
+    // remedy now names the tab that lists the row and the button that links it.
+    const neither = screen.getByText(/^Link one of them first\. Neither of these rows is bound/)
+    expect(neither).toHaveTextContent('“Subscriptions without a Remnawave link” tab')
+    expect(neither).toHaveTextContent('“Link profile”')
+    expect(neither).not.toHaveTextContent('repair above')
     expect(
       screen.getByText(/^Leave them alone\. Two rows belonging to two customers/),
     ).toBeInTheDocument()
@@ -915,35 +922,7 @@ describe('duplicate subscription merge surface', () => {
     expect(cells[4]).toHaveTextContent('It came off the duplicate.')
   })
 
-  it('does not let an unknown panel era read like a known one', async () => {
-    mockPost(reportBody({ panelEra: null, pairsExamined: 0, wouldMerge: 0, refused: 0, rows: [] }))
-    grantPermissions([{ resource: 'subscriptions', action: 'edit' }])
-    const user = userEvent.setup()
-
-    renderWithProviders(<DuplicateSubscriptionMergePanel />)
-    await runPreview(user)
-
-    expect(screen.getByText('Discovery could not identify the panel era')).toBeInTheDocument()
-    expect(screen.queryByText(/^Discovery panel era: /)).not.toBeInTheDocument()
-  })
-
-  it('names the panel era when discovery knew it', async () => {
-    // The control: without it, a component that rendered the warning
-    // unconditionally would pass the spec above.
-    mockPost(reportBody({ panelEra: '2.x' }))
-    grantPermissions([{ resource: 'subscriptions', action: 'edit' }])
-    const user = userEvent.setup()
-
-    renderWithProviders(<DuplicateSubscriptionMergePanel />)
-    await runPreview(user)
-
-    expect(screen.getByText('Discovery panel era: 2.x')).toBeInTheDocument()
-    expect(
-      screen.queryByText('Discovery could not identify the panel era'),
-    ).not.toBeInTheDocument()
-  })
-
-  it('puts the operator-typed bounds on the wire as numbers, or not at all', async () => {
+  it('puts the operator-typed bound on the wire as a number, and nothing about pages', async () => {
     // `userEvent.type` NORMALISES a number input; `fireEvent.change` is the
     // only way to pin what the raw string does.
     const postSpy = mockPost()
@@ -952,16 +931,17 @@ describe('duplicate subscription merge surface', () => {
 
     renderWithProviders(<DuplicateSubscriptionMergePanel />)
     fireEvent.change(screen.getByLabelText('Pairs per run'), { target: { value: '7' } })
-    fireEvent.change(screen.getByLabelText('Database page size'), { target: { value: '' } })
     await user.click(screen.getByRole('button', { name: 'Preview the merge' }))
 
     await waitFor(() => expect(postSpy).toHaveBeenCalledTimes(1))
     const body = sentBody(postSpy)
-    expect(typeof body.limit).toBe('number')
-    expect(body.limit).toBe(7)
     // The controller reads a bound as `typeof … === 'number' ? … : undefined`,
     // so a stringified one is SILENTLY replaced by the server default.
-    expect('chunkSize' in body).toBe(false)
+    expect(typeof body.limit).toBe('number')
+    expect(body.limit).toBe(7)
+    // Discovery reads the pairs straight from the database now; the server
+    // ignores a page size, so the surface neither asks for one nor sends one.
+    expect(Object.keys(body).sort()).toEqual(['dryRun', 'limit'])
   })
 
   it('shows no report at all when the response is not the shape it claims', async () => {

@@ -18,52 +18,29 @@ import {
 
 export function mapHwidTopUser(raw: unknown): RemnawaveHwidTopUserInterface {
   const r = (raw ?? {}) as Record<string, unknown>;
-  // 2.7.x ships `{ userUuid, id, username, devicesCount }` flat at the row
-  // level, no nested `user` block. We still tolerate the older nested shape.
-  const user = (r['user'] ?? r) as Record<string, unknown>;
   return {
-    // The identity, under whichever name this panel gives it.
+    // The identity is the row's numeric `id`, rendered as its decimal string.
+    // Every supported panel sends this row as `{ id, username, devicesCount }`
+    // and nothing else (the 3.3.2 and 3.4.3 specs); the field keeps its old
+    // name, `userUuid`, because the admin SPA's HWID card reads it by that name.
     //
-    // 2.7.4 and 2.8.x both send `userUuid` beside a numeric `id` (verified in
-    // the vendored contracts — the older comment here claimed 2.8 renamed it to
-    // `userId`, and no contract from 2.7 through 3.4.4 declares that field on
-    // this row). 3.x sends NEITHER uuid form: its row is `{ id, username,
-    // devicesCount }` and the identity is the numeric `id`. `userId` is still
-    // accepted below in case a build does spell it that way; it costs nothing
-    // to read.
-    //
-    // The 3.x branch has to be here, and it has to render the id as its decimal
-    // string, because the ONLY consumer — the HWID-overage detector — looks the
-    // row up in a map keyed by what rezeis stored in `remnawaveId`, which on 3.x
-    // is exactly that decimal string. Without it every 3.x row mapped to `''`,
-    // missed the map, took the `?? 0` limit and was filtered out: the detector
-    // returned "nobody is over their device limit" for every panel, and logged
-    // nothing on the way.
-    // Absence means 3.x; EMPTINESS means a damaged 2.x row. Tested with
-    // `in`, not with `??`: 2.7.4 and 2.8.x both send `userUuid` alongside a
-    // numeric `id`, so a row whose uuid came back empty would otherwise decode
-    // to the id and be silently attributed, when the honest answer is "this row
-    // cannot be read". The overage detector then drops it from its join instead
-    // of reporting an unreadable row — the same collapse this codebase has
-    // fixed twice elsewhere.
-    userUuid:
-      'userUuid' in r
-        ? toString(r['userUuid'])
-        : 'userId' in r
-          ? toString(r['userId'])
-          : 'uuid' in user
-            ? toString(user['uuid'])
-            : (toNullableIdString(r['id'] ?? user['id']) ?? ''),
-    username: toString(r['username'] ?? user['username']),
-    telegramId: toNullableString(r['telegramId'] ?? user['telegramId']),
+    // The decimal string, because that is what rezeis stores in `remnawaveId`
+    // on 3.x, so a row can be matched to a subscription without a translation
+    // step. When this mapper read only the uuid spellings 2.x used, every 3.x
+    // row mapped to `''` — a card of identical blank identities. An id that is
+    // not a safe integer still maps to `''` rather than to a number that has
+    // lost precision.
+    userUuid: toNullableIdString(r['id']) ?? '',
+    username: toString(r['username']),
+    telegramId: toNullableString(r['telegramId']),
     devicesCount: toNumber(r['devicesCount'] ?? r['count'] ?? r['hwidDevicesCount']),
-    lastSeenAt: toNullableString(r['lastSeenAt'] ?? r['lastUsedAt'] ?? user['lastSeenAt']),
+    lastSeenAt: toNullableString(r['lastSeenAt'] ?? r['lastUsedAt']),
   };
 }
 
 /**
  * Client family from the UA's leading product token: `v2rayNG/1.8.5 (Android)`
- * → `v2rayNG`. No contract from 2.7 through 3.4.4 puts a client field on a
+ * → `v2rayNG`. No contract from 3.2 through 3.4.4 puts a client field on a
  * request-log row, so this is derived rather than read — the alternative,
  * which shipped before, was a column that was blank for every row on every
  * version.
@@ -81,24 +58,19 @@ export function deriveClientType(userAgent: string | null): string | null {
 /**
  * One subscription-request row.
  *
- * The owner field is split by version rather than merged — see
- * {@link RemnawaveSubscriptionRequestEntryInterface} for why merging them was
- * a silent misattribution on 2.8.0. Field names below are the ones the 2.7.4
- * and 2.8.0 specs actually declare (`requestIp`, `requestAt`); the previously
+ * Field names below are the ones every supported panel's spec declares
+ * (`userId`, `requestIp`, `requestAt` — 3.3.2 and 3.4.3); the previously
  * accepted `ipAddress`/`requestedAt`/`createdAt`/`user.*` spellings appear in
- * neither and have been dropped rather than left as reassuring dead branches.
+ * none and have been dropped rather than left as reassuring dead branches. The
+ * owner is `userId`, carried as `panelUserId`; see
+ * {@link RemnawaveSubscriptionRequestEntryInterface} for why it is never
+ * folded into `userUuid`.
  */
 export function mapSubscriptionRequestEntry(raw: unknown): RemnawaveSubscriptionRequestEntryInterface {
   const r = (raw ?? {}) as Record<string, unknown>;
   const userAgent = toNullableString(r['userAgent']);
-  // 2.7.4 sends a uuid string here and 2.8.0 sends nothing; a numeric value
-  // would be 2.8.0's `userId` arriving under the wrong key, which is precisely
-  // the confusion this split exists to prevent — so it is refused, not coerced.
-  const rawUuid = r['userUuid'];
-  const userUuid =
-    typeof rawUuid === 'string' && rawUuid.trim().length > 0 ? rawUuid.trim() : null;
-  // 2.8.0's panel-internal integer. Accepted as a number or as a numeric
-  // string (JSON bigint transports vary), never as a uuid.
+  // The panel-internal integer. Accepted as a number or as a numeric string
+  // (JSON bigint transports vary), never as a uuid.
   const rawPanelId = r['userId'];
   const panelUserId =
     typeof rawPanelId === 'number' && Number.isFinite(rawPanelId)
@@ -107,13 +79,14 @@ export function mapSubscriptionRequestEntry(raw: unknown): RemnawaveSubscription
         ? Number(rawPanelId.trim())
         : null;
   return {
-    // `id` is a number in every contract, 2.7 through 3.4.4, and the shared
+    // `id` is a number in every contract, 3.2 through 3.4.4, and the shared
     // `toString` helper returns '' for anything that is not already a string —
     // so the previous `toString(r['id'])` produced an empty id for every row on
     // every version, which the admin table then used as its React key.
     // Stringify the number explicitly.
     id: typeof r['id'] === 'number' && Number.isFinite(r['id']) ? String(r['id']) : toString(r['id']),
-    userUuid,
+    // No supported panel names the owner by a uuid; see the interface note.
+    userUuid: null,
     panelUserId,
     userAgent,
     clientType: deriveClientType(userAgent),
@@ -123,13 +96,10 @@ export function mapSubscriptionRequestEntry(raw: unknown): RemnawaveSubscription
 }
 
 /**
- * One entry of a provider's `billingNodes`. The contracts nest this two ways
- * and BOTH are read, per the house rule of absorbing version drift in the
- * mapper rather than in the caller:
- *
- *   - 2.7 → `{ nodeUuid, name, countryCode }` (all three required)
- *   - 2.8, and every 3.x contract through 3.4.4 →
- *     `{ name, details: { nodeUuid, countryCode } | null }`
+ * One entry of a provider's `billingNodes`. Every supported panel nests the
+ * node under `details`: `{ name, details: { nodeUuid, countryCode } | null }`
+ * (the 3.3.2 and 3.4.3 specs, and every 3.x contract through 3.4.4). The flat
+ * `{ nodeUuid, name, countryCode }` row was 2.7's, and is not read.
  *
  * A row with `details: null` still has a name — it is a billing line
  * whose node is gone — so it is kept with a null uuid rather than dropped,
@@ -140,16 +110,16 @@ function mapInfraBillingNode(raw: unknown): RemnawaveInfraBillingNodeInterface {
   const n = (raw ?? {}) as Record<string, unknown>;
   const details = (n['details'] ?? {}) as Record<string, unknown>;
   return {
-    nodeUuid: toNullableString(n['nodeUuid'] ?? details['nodeUuid']),
+    nodeUuid: toNullableString(details['nodeUuid']),
     name: toString(n['name']),
-    countryCode: toNullableString(n['countryCode'] ?? details['countryCode']),
+    countryCode: toNullableString(details['countryCode']),
   };
 }
 
 /**
  * `GET /api/infra-billing/providers` → one provider.
  *
- * Reads only fields every contract from 2.7 through 3.4.4 declares. See
+ * Reads only fields every contract from 3.2 through 3.4.4 declares. See
  * {@link RemnawaveInfraProviderInterface} for the four that were being read
  * and exist upstream in none of them, and for why the amount carries no
  * currency.
@@ -195,7 +165,7 @@ export function mapSubpageConfig(raw: unknown): RemnawaveSubpageConfigInterface 
     uuid: toString(r['uuid']),
     name: toString(r['name']),
     viewPosition: toNumber(r['viewPosition']),
-    // `config` is declared nullable with no type in every contract, 2.7 through
+    // `config` is declared nullable with no type in every contract, 3.2 through
     // 3.4.4, so presence is the only honest thing to report about it.
     // `undefined` (key absent) and `null` (key present, empty) both mean "not
     // configured".
@@ -221,31 +191,20 @@ export function mapNodePlugin(raw: unknown): RemnawaveNodePluginInterface {
 
 export function mapUserSummary(raw: unknown): RemnawaveUserSummaryInterface {
   const r = (raw ?? {}) as Record<string, unknown>;
-  // Consumption lives in a nested block in every contract, 2.7 through 3.4.4.
+  // Consumption lives in a nested block in every contract, 3.2 through 3.4.4.
   // The row-level `trafficUsedBytes` this used to read belongs to the node
   // dtos, not to any of the four user lookups that feed this mapper — see the
   // interface note.
   const userTraffic = (r['userTraffic'] ?? {}) as Record<string, unknown>;
-  // A 3.x row has no `uuid` field at all, and `toString` yields `''` for a
-  // missing one — so every 3.x user came out of here with the SAME empty
-  // identity. Downstream that is a React key collision in the search results and
-  // an identifier the operator cannot act on. The row's own numeric `id` is the
-  // identity on that era; it is carried as its decimal string here for the same
-  // reason `RemnawavePanelUser.uuid` does — so the value can be compared with a
-  // stored `remnawaveId` without a translation step.
-  //
-  // Keyed on ABSENCE of the field, not on emptiness. A 2.x row whose `uuid`
-  // came back as `''` is DAMAGED, and falling through to its numeric id would
-  // attribute it anyway — the same collapse `parsePanelUserRow` and
-  // `parseStrictUser` refuse. An empty identity is the honest answer there.
-  const identity =
-    r['uuid'] === undefined
-      ? typeof r['id'] === 'number' && Number.isSafeInteger(r['id'])
-        ? String(r['id'])
-        : ''
-      : typeof r['uuid'] === 'string'
-        ? r['uuid']
-        : '';
+  // The row's identity is its numeric `id` — a 3.x user row has no `uuid`
+  // field at all. When this read `r['uuid']` through `toString`, which yields
+  // `''` for a missing field, every 3.x user came out of here with the SAME
+  // empty identity: a React key collision in the search results and an
+  // identifier the operator cannot act on. It is carried as its decimal string,
+  // the form `Subscription.remnawaveId` holds on 3.x, so the value compares
+  // with a stored link without a translation step. A `uuid` key beside it is
+  // not read. An id that is not a safe integer yields `''`.
+  const identity = typeof r['id'] === 'number' && Number.isSafeInteger(r['id']) ? String(r['id']) : '';
   return {
     uuid: identity,
     /** The panel's numeric id when it has one — what every 3.x route addresses by. */
@@ -402,25 +361,23 @@ export function mapSubscriptionSettings(raw: unknown): {
   //
   // Nothing here throws when a field is missing, so on a 3.x panel the six
   // readouts silently became "", null, 0 and off — a Settings screen that looks
-  // configured-but-empty rather than one that reports a problem. Reading the
-  // header map as a fallback is what keeps both shapes honest; the 2.x fields
-  // still win when present, so no 2.x behaviour moves.
+  // configured-but-empty rather than one that reports a problem. The header
+  // map is what every supported panel sends, and the only place they are read:
+  // the old top-level fields were 2.x's, and a 2.x panel is refused before this
+  // read goes out.
   const headers = readResponseHeaders(r['customResponseHeaders']);
   const header = (name: string): string | null => headers[name] ?? null;
   return {
     uuid: toString(r['uuid']),
-    profileTitle: toString(r['profileTitle'] ?? decodePanelHeaderValue(header('profile-title'))),
-    supportLink: toNullableString(r['supportLink'] ?? header('support-url')),
-    profileUpdateInterval: toNumber(r['profileUpdateInterval'] ?? header('profile-update-interval')),
+    profileTitle: toString(decodePanelHeaderValue(header('profile-title'))),
+    supportLink: toNullableString(header('support-url')),
+    profileUpdateInterval: toNumber(header('profile-update-interval')),
     serveJsonAtBaseSubscription: Boolean(r['serveJsonAtBaseSubscription']),
-    isProfileWebpageUrlEnabled:
-      r['isProfileWebpageUrlEnabled'] === undefined
-        ? header('profile-web-page-url') !== null
-        : Boolean(r['isProfileWebpageUrlEnabled']),
+    isProfileWebpageUrlEnabled: header('profile-web-page-url') !== null,
     isShowCustomRemarks: Boolean(r['isShowCustomRemarks']),
     randomizeHosts: Boolean(r['randomizeHosts']),
-    hasHappAnnounce: hasPanelText(r['happAnnounce']) || hasPanelText(header('announce')),
-    hasHappRouting: hasPanelText(r['happRouting']) || hasPanelText(header('routing')),
+    hasHappAnnounce: hasPanelText(header('announce')),
+    hasHappRouting: hasPanelText(header('routing')),
     hasResponseRules:
       typeof r['responseRules'] === 'object' && r['responseRules'] !== null,
     hasCustomRemarks:

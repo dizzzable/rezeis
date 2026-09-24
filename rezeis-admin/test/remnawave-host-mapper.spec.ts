@@ -225,6 +225,19 @@ describe('mapHost', () => {
     assert.equal(host.tag, 'premium');
   });
 
+  it('reads the tags list and names the first one `tag`; a lone `tag` string is not read', () => {
+    // 3.3.2 and 3.4.3 send `tags: string[]`. `tag` stays on the mapped host
+    // because the admin SPA reads it. The single `tag` string was 2.7's shape,
+    // which no supported panel sends.
+    const host = mapHost(rawHost({ tags: ['premium', '', 7, 'eu'] }));
+    assert.deepEqual(host.tags, ['premium', 'eu']);
+    assert.equal(host.tag, 'premium');
+
+    const lone = mapHost(rawHost({ tags: undefined, tag: 'LEGACY' }));
+    assert.deepEqual(lone.tags, []);
+    assert.equal(lone.tag, null);
+  });
+
   it('survives a row that is not a row', () => {
     for (const value of [null, undefined, 'host', 42]) {
       const host = mapHost(value);

@@ -98,22 +98,19 @@ function buildService(panelUsage: PanelUsage | null = null): {
 /**
  * A real `RemnawaveWebhookUserEventsDto` envelope.
  *
- * Shaped from the OpenAPI documents (`Remnawave API v274.json` /
- * `v280.json`): every name in `data.required` is present, and the traffic
- * counters sit where the panel actually puts them — inside the required
- * `userTraffic` container. NEITHER version defines a top-level
+ * Shaped from the OpenAPI documents of the panels rezeis serves
+ * (`Remnawave API v3.3.2.json` / `v3.4.3.json`, identical here): every name in
+ * `data.required` is present and nothing else — no user `uuid`, which 3.x
+ * deleted — and the traffic counters sit where the panel actually puts them,
+ * inside the required `userTraffic` container. No version defines a top-level
  * `data.usedTrafficBytes`, so no fixture here may invent one: a test built on
  * a payload shape the panel does not send proves nothing about production.
- *
- * `data` is identical between 2.7.4 and 2.8.0. The versions differ only in the
- * envelope `meta` (2.8.0 added `expiration`) and in the `event` enum, so the
- * `meta` argument is what selects the panel version.
  */
 function userEventPayload(options: {
   readonly event: string;
   readonly usedTrafficBytes?: number | string;
   readonly meta?: Record<string, unknown> | null;
-  readonly uuid?: string;
+  readonly id?: number;
   /** Replaces the whole traffic block (the connection evidence). */
   readonly userTraffic?: Record<string, unknown>;
   /** The envelope's time; the fixture's own by default. */
@@ -124,8 +121,7 @@ function userEventPayload(options: {
     event: options.event,
     timestamp: options.timestamp ?? '2026-08-05T09:14:22.000Z',
     data: {
-      uuid: options.uuid ?? '9d2f4c1e-7b3a-4f6d-9c58-2e1a7b4c9d30',
-      id: 4821,
+      id: options.id ?? 4821,
       shortUuid: 'aH3kQ9zR2mVt',
       username: 'anna_vpn',
       status: 'ACTIVE',
@@ -150,7 +146,7 @@ function userEventPayload(options: {
       activeInternalSquads: [
         { uuid: '3e8a2d17-9f04-4c6b-a512-8d0f3b7e1c94', name: 'EU-Premium' },
       ],
-      // The ONLY place either spec puts the used-traffic counter.
+      // The ONLY place any spec puts the used-traffic counter.
       userTraffic: options.userTraffic ?? {
         usedTrafficBytes: options.usedTrafficBytes ?? 1_024,
         lifetimeUsedTrafficBytes: 161_061_273_600,
@@ -159,9 +155,8 @@ function userEventPayload(options: {
         lastConnectedNodeUuid: '5b9c0e34-2a71-4d8f-9b06-1c7a4e2d8f50',
       },
     },
-    // 2.7.4 `meta` carries only `notConnectedAfterHours`; 2.8.0 added
-    // `expiration`. Both declare `meta` required and nullable.
-    meta: options.meta === undefined ? { notConnectedAfterHours: null } : options.meta,
+    // `meta` is required and nullable, `{ notConnectedAfterHours, expiration }`.
+    meta: options.meta === undefined ? { notConnectedAfterHours: null, expiration: null } : options.meta,
   };
 }
 
@@ -170,7 +165,7 @@ describe('RemnawaveWebhookService forwarding', () => {
     const { service, stored, emitted } = buildService();
     await service.handleEvent(
       'user.expired',
-      { event: 'user.expired', data: { username: 'anna_vpn', uuid: 'uuid-1', telegramId: 858568447 } },
+      { event: 'user.expired', data: { username: 'anna_vpn', id: 4821, telegramId: 858568447 } },
       null,
     );
     assert.deepEqual(stored, ['user.expired']);
@@ -178,7 +173,7 @@ describe('RemnawaveWebhookService forwarding', () => {
     assert.equal(emitted[0]!.category, 'REMNAWAVE');
     assert.equal(emitted[0]!.severity, 'WARNING');
     assert.equal(emitted[0]!.metadata?.['remnawaveUsername'], 'anna_vpn');
-    assert.equal(emitted[0]!.metadata?.['remnawaveId'], 'uuid-1');
+    assert.equal(emitted[0]!.metadata?.['remnawaveId'], '4821');
     assert.equal(emitted[0]!.metadata?.['telegramId'], '858568447');
   });
 
@@ -219,7 +214,7 @@ describe('RemnawaveWebhookService forwarding', () => {
     const catalogue = readCatalogueCategories();
     const names = [
       'user.first_connected', 'user.expired', 'user.limited', 'user.enabled', 'user.disabled',
-      'user.traffic_reset', 'user.expires_in_24_hours', 'user.expiration',
+      'user.traffic_reset', 'user.expiration',
       'user.bandwidth_usage_threshold_reached',
       'node.connection_lost', 'node.connection_restored', 'node.created', 'node.modified',
       'node.enabled', 'node.disabled', 'node.traffic_notify',
@@ -277,7 +272,7 @@ describe('RemnawaveWebhookService reconcile (panel → rezeis)', () => {
       'user.modified',
       {
         data: {
-          uuid: 'uuid-1',
+          id: 4821,
           status: 'DISABLED',
           expireAt: '2027-01-01T00:00:00.000Z',
           trafficLimitBytes: 0,
@@ -287,7 +282,7 @@ describe('RemnawaveWebhookService reconcile (panel → rezeis)', () => {
       null,
     );
     assert.equal(reconciled.length, 1);
-    assert.equal(reconciled[0]!.where['remnawaveId'], 'uuid-1');
+    assert.deepEqual(reconciled[0]!.where['OR'], [{ remnawaveId: '4821' }, { remnawavePanelId: 4821 }]);
     assert.equal(reconciled[0]!.data['status'], 'DISABLED');
     assert.equal(reconciled[0]!.data['deviceLimit'], 3);
     // 0 bytes (panel "unlimited") → null (local "unlimited").
@@ -299,7 +294,7 @@ describe('RemnawaveWebhookService reconcile (panel → rezeis)', () => {
     const { service, reconciled } = buildService();
     await service.handleEvent(
       'user.modified',
-      { data: { uuid: 'uuid-2', trafficLimitBytes: 50 * 1024 ** 3 } },
+      { data: { id: 4822, trafficLimitBytes: 50 * 1024 ** 3 } },
       null,
     );
     assert.equal(reconciled.length, 1);
@@ -308,12 +303,12 @@ describe('RemnawaveWebhookService reconcile (panel → rezeis)', () => {
 
   it('derives status from the event name when the payload omits it', async () => {
     const { service, reconciled } = buildService();
-    await service.handleEvent('user.expired', { data: { uuid: 'uuid-3' } }, null);
+    await service.handleEvent('user.expired', { data: { id: 4823 } }, null);
     assert.equal(reconciled.length, 1);
     assert.equal(reconciled[0]!.data['status'], 'EXPIRED');
   });
 
-  it('skips reconcile when the payload carries no user uuid', async () => {
+  it('skips reconcile when the payload carries no user identity', async () => {
     const { service, reconciled } = buildService();
     await service.handleEvent('user.modified', { data: { status: 'ACTIVE' } }, null);
     assert.equal(reconciled.length, 0);
@@ -321,26 +316,25 @@ describe('RemnawaveWebhookService reconcile (panel → rezeis)', () => {
 });
 
 /**
- * WHO the webhook is about, across the three panel versions a webhook can
- * still arrive from: a 2.x panel's commands are refused, its events are not.
+ * WHO the webhook is about.
  *
- * 2.7.4 and 2.8.x key a user by `uuid`. 3.x DELETED that column and keys every
- * user by the numeric `id`, so a 3.x panel sends no uuid anywhere — and the
- * extractor only ever looked for one. `meta.remnawaveId` was therefore never
- * set on a 3.x panel and the three consumers that key off it all did nothing,
- * with no error and no log: reconcile returned, the reverse lookup never ran,
- * and the first-connection card omitted its counter.
+ * 3.x DELETED the user's uuid column and keys every user by the numeric `id`,
+ * so a panel rezeis serves sends no user uuid anywhere — and the extractor once
+ * only ever looked for one. `meta.remnawaveId` was therefore never set and the
+ * three consumers that key off it all did nothing, with no error and no log:
+ * reconcile returned, the reverse lookup never ran, and the first-connection
+ * card omitted its counter.
  *
- * The value has to be what `Subscription.remnawaveId` HOLDS — a 2.x uuid or a
- * 3.x id in decimal — because that is the column every one of those consumers
- * compares against. These pin the rule and, just as importantly, its two edges:
- * a damaged 2.x payload must stay unidentified rather than fall through to a
- * numeric id that names somebody else, and a uuid-shaped string must never be
- * parsed into a number.
+ * The value has to be what `Subscription.remnawaveId` HOLDS on 3.x — the id in
+ * decimal — because that is the column every one of those consumers compares
+ * against. These pin the rule and, just as importantly, its edges: a `uuid`
+ * key beside the id names nobody, and a uuid-shaped string in the id slot must
+ * never be parsed into a number.
  */
-describe('panel user identity across panel versions', () => {
+describe('panel user identity', () => {
   /**
-   * A real Remnawave 3.2.x `RemnawaveWebhookUserEvents` envelope.
+   * A real Remnawave 3.x `RemnawaveWebhookUserEvents` envelope of a profile
+   * that never connected, whose `id` the case chooses.
    *
    * Shaped from `ExtendedUsersSchema` as the 3.x contracts declare it (e.g.
    * `@remnawave/contract-panel-3.2.3`, a devDependency): `id` is a number and
@@ -348,7 +342,7 @@ describe('panel user identity across panel versions', () => {
    * this fixture — nothing here may add a uuid "for completeness", or the test
    * stops being about a 3.x panel.
    */
-  function userEventPayloadV3(options: {
+  function payloadWithId(options: {
     readonly event: string;
     readonly id?: unknown;
     readonly usedTrafficBytes?: number;
@@ -479,28 +473,14 @@ describe('panel user identity across panel versions', () => {
     };
   }
 
-  it('names a 2.x profile by its uuid — reconcile, reverse lookup and card agree', async () => {
-    const { service, emitted, reconciled, lookups } = buildIdentityProbe();
-    await service.handleEvent(
-      'user.first_connected',
-      userEventPayload({ event: 'user.first_connected', usedTrafficBytes: 0 }),
-      null,
-    );
-
-    const uuid = '9d2f4c1e-7b3a-4f6d-9c58-2e1a7b4c9d30';
-    assert.equal(reconciled[0]?.where['remnawaveId'], uuid);
-    assert.equal(lookups[0]?.['remnawaveId'], uuid);
-    assert.equal(emitted[0]?.metadata?.['remnawaveId'], uuid);
-  });
-
-  it('names a 3.x profile by its numeric id, which is what remnawaveId holds', async () => {
+  it('names a profile by its numeric id, which is what remnawaveId holds', async () => {
     // The panel row has no uuid to offer, so `String(id)` IS the identity —
     // the same string `parsePanelUserRow` stores when it reads that row over
     // REST, which is why the reverse lookups still match.
     const { service, emitted, reconciled, lookups } = buildIdentityProbe();
     await service.handleEvent(
       'user.first_connected',
-      userEventPayloadV3({ event: 'user.first_connected' }),
+      payloadWithId({ event: 'user.first_connected' }),
       null,
     );
 
@@ -523,7 +503,7 @@ describe('panel user identity across panel versions', () => {
     const { service, emitted, reconciled } = buildIdentityProbe();
     await service.handleEvent(
       'user.expired',
-      userEventPayloadV3({ event: 'user.expired', id: '4821' }),
+      payloadWithId({ event: 'user.expired', id: '4821' }),
       null,
     );
 
@@ -534,27 +514,26 @@ describe('panel user identity across panel versions', () => {
     assert.equal(emitted[0]?.metadata?.['remnawaveId'], '4821');
   });
 
-  it('leaves a damaged 2.x payload unidentified instead of naming user 4821', async () => {
-    // The test in the service is ABSENCE of `uuid`, never emptiness of it. A
-    // 2.x payload whose uuid arrived unusable is DAMAGED, and keying it by the
-    // numeric id sitting next to it would mint an identity that matches no
-    // `remnawaveId` stored in that era — "we could not read this" would become
-    // "this is about 4821", who is a different customer.
-    for (const damaged of ['', null, 42]) {
+  it('reads no user uuid: a payload that still carries one is named by its id', async () => {
+    // No panel rezeis serves has a user uuid to send. Whatever still puts one
+    // beside the id — usable or not — is named by the id like every other
+    // payload, which `panelIdentityWhere` also matches on `remnawavePanelId`,
+    // the number a row created on 2.x recorded. A reader that let the uuid win
+    // would name nobody on a 3.x install; one that let a broken uuid win would
+    // drop the event.
+    const expectedWhere = [{ remnawaveId: '4821' }, { remnawavePanelId: 4821 }];
+    for (const uuid of ['9d2f4c1e-7b3a-4f6d-9c58-2e1a7b4c9d30', '', null]) {
       const { service, emitted, reconciled, lookups } = buildIdentityProbe();
       await service.handleEvent(
-        'user.first_connected',
-        {
-          scope: 'user',
-          event: 'user.first_connected',
-          data: { uuid: damaged, id: 4821, username: 'anna_vpn' },
-        },
+        'user.expired',
+        { scope: 'user', event: 'user.expired', data: { uuid, id: 4821, username: 'anna_vpn' } },
         null,
       );
 
-      assert.equal(reconciled.length, 0, `uuid ${JSON.stringify(damaged)} must not reconcile`);
-      assert.equal(lookups.length, 0, `uuid ${JSON.stringify(damaged)} must not be looked up`);
-      assert.equal(emitted[0]?.metadata?.['remnawaveId'], undefined);
+      const label = `uuid ${JSON.stringify(uuid)}`;
+      assert.deepEqual(reconciled[0]?.where['OR'], expectedWhere, label);
+      assert.deepEqual(lookups[0]?.['OR'], expectedWhere, label);
+      assert.equal(emitted[0]?.metadata?.['remnawaveId'], '4821', label);
     }
   });
 
@@ -564,7 +543,7 @@ describe('panel user identity across panel versions', () => {
     const { service, emitted, reconciled, lookups } = buildIdentityProbe();
     await service.handleEvent(
       'user.expired',
-      userEventPayloadV3({ event: 'user.expired', id: '330f2b38-9c41-4c7e-9c50-6bd0c1f2a7e4' }),
+      payloadWithId({ event: 'user.expired', id: '330f2b38-9c41-4c7e-9c50-6bd0c1f2a7e4' }),
       null,
     );
 
@@ -576,11 +555,11 @@ describe('panel user identity across panel versions', () => {
 
   it('refuses ids that are not whole non-negative decimals', async () => {
     // Every one of these would stringify into something
-    // `isNumericPanelIdentity` (panel-user-address.ts) reads as a 2.x uuid, so
-    // the address built from it would be sent to a 3.x panel in the wrong shape.
+    // `isNumericPanelIdentity` (panel-user-address.ts) reads as a link no 3.x
+    // panel issued, so the profile would be named by an id no panel answers to.
     for (const id of ['1e3', '12.0', '-5', ' ', '0x10', 9_007_199_254_740_993n.toString(), -5, 12.5]) {
       const { service, reconciled } = buildIdentityProbe();
-      await service.handleEvent('user.expired', userEventPayloadV3({ event: 'user.expired', id }), null);
+      await service.handleEvent('user.expired', payloadWithId({ event: 'user.expired', id }), null);
       assert.equal(reconciled.length, 0, `id ${String(id)} must not name a profile`);
     }
   });
@@ -625,7 +604,7 @@ describe('panel user identity across panel versions', () => {
     const captured = captureWarns();
     try {
       const { service } = buildIdentityProbe();
-      await service.handleEvent('user.expired', userEventPayloadV3({ event: 'user.expired' }), null);
+      await service.handleEvent('user.expired', payloadWithId({ event: 'user.expired' }), null);
       assert.deepEqual(
         captured.warns.filter((line) => line.includes('no panel user identity')),
         [],
@@ -633,6 +612,23 @@ describe('panel user identity across panel versions', () => {
     } finally {
       captured.restore();
     }
+  });
+
+  it('names a node by the uuid every node row keeps', async () => {
+    // 3.x deleted the USER's uuid, not the node's: 3.3.2 and 3.4.3 still send
+    // one on every node event, and the card and the feed label the node by it.
+    const { service, emitted, lookups } = buildIdentityProbe();
+    await service.handleEvent(
+      'node.connection_lost',
+      {
+        scope: 'node',
+        event: 'node.connection_lost',
+        data: { uuid: '2a6f8d13-4e07-4b95-8c2d-9f1e3a5b7c60', id: 12, name: 'DE-1' },
+      },
+      null,
+    );
+    assert.equal(emitted[0]?.metadata?.['nodeUuid'], '2a6f8d13-4e07-4b95-8c2d-9f1e3a5b7c60');
+    assert.deepEqual(lookups, [], 'a node event looks no customer up');
   });
 
   it('never mints a user identity from a node id', async () => {
@@ -744,8 +740,8 @@ describe('RemnawaveWebhookService first traffic usage', () => {
     };
   }
 
-  it('claims first traffic once from the nested counter — 2.7.4 envelope', async () => {
-    // `data.userTraffic` is where 2.7.4 puts the counter and the connection times.
+  it('claims first traffic once from the nested counter', async () => {
+    // `data.userTraffic` is where the panel puts the counter and the connection times.
     const { service, emitted, getFirstTrafficUpdates, claimWheres, claimData } = buildTrafficService();
     const fresh = freshConnection(7, 1_024);
     const payload = userEventPayload({ event: 'user.modified', ...fresh });
@@ -761,23 +757,6 @@ describe('RemnawaveWebhookService first traffic usage', () => {
     assert.deepEqual(claimWheres[0], { id: 'user-1', firstTrafficAt: null });
     // The column takes the panel's own first-connection time, not "now".
     assert.deepEqual(claimData[0], { firstTrafficAt: fresh.connectedAt });
-  });
-
-  it('claims first traffic once from the nested counter — 2.8.0 envelope', async () => {
-    // 2.8.0 keeps `data` identical and only reshapes `meta`; the counter must
-    // still be found, so one build serves both panel versions.
-    const { service, emitted, getFirstTrafficUpdates } = buildTrafficService();
-    const payload = userEventPayload({
-      event: 'user.modified',
-      ...freshConnection(3, 4_096),
-      meta: { notConnectedAfterHours: null, expiration: null },
-    });
-    await service.handleEvent('user.modified', payload, null);
-    await service.handleEvent('user.modified', payload, null);
-    const firstTrafficEvents = emitted.filter((event) => event.type === 'user.first_traffic');
-    assert.equal(firstTrafficEvents.length, 1);
-    assert.equal(firstTrafficEvents[0]?.metadata?.['usedTrafficBytes'], 4_096);
-    assert.equal(getFirstTrafficUpdates(), 2);
   });
 
   it('puts the nested counter on the bandwidth-threshold card metadata', async () => {
@@ -904,7 +883,7 @@ describe('RemnawaveWebhookService first traffic usage', () => {
     });
     await service.handleEvent(
       'user.modified',
-      userEventPayload({ event: 'user.modified', ...freshConnection(2, 999), uuid: 'unknown-uuid' }),
+      userEventPayload({ event: 'user.modified', ...freshConnection(2, 999), id: 9999 }),
       null,
     );
     assert.equal(emitted.filter((event) => event.type === 'user.first_traffic').length, 0);
@@ -913,33 +892,65 @@ describe('RemnawaveWebhookService first traffic usage', () => {
 });
 
 /**
- * Expiry-warning events across panel versions.
+ * Expiry-warning events.
  *
- * 2.7.4 raises one of four discrete names (`user.expires_in_72_hours`,
- * `…_48_hours`, `…_24_hours`, `user.expired_24_hours_ago`). 2.8.0 removed all
- * four and raises a single `user.expiration`, carrying the distinguishing
- * number in the envelope `meta.expiration` rather than in `data`. One build
- * serves both panels, so both spellings must map.
+ * Every panel rezeis serves raises ONE name for them, `user.expiration`, at the
+ * hours the operator configured in Remnawave, carrying the distinguishing
+ * number in the envelope `meta.expiration` rather than in `data` or in the
+ * name. The four discrete names 2.7.4 raised instead
+ * (`user.expires_in_72_hours`, `…_48_hours`, `…_24_hours`,
+ * `user.expired_24_hours_ago`) are no longer mapped.
  */
 describe('RemnawaveWebhookService expiry warnings', () => {
-  it('maps the 2.7.4 expire-soon events', async () => {
+  it('stores the discrete names 2.7.4 raised and forwards none of them', async () => {
     for (const name of [
       'user.expires_in_72_hours',
       'user.expires_in_48_hours',
       'user.expires_in_24_hours',
+      'user.expired_24_hours_ago',
     ]) {
-      const { service, emitted } = buildService();
+      const { service, stored, emitted } = buildService();
       await service.handleEvent(name, userEventPayload({ event: name, usedTrafficBytes: 0 }), null);
-      const card = emitted.find((event) => event.type === 'remnawave.user.expire_soon');
-      assert.ok(card, `expected an expire-soon card for ${name}`);
-      assert.equal(card.category, 'REMNAWAVE');
-      assert.equal(card.severity, 'INFO');
-      assert.equal(card.metadata?.['remnawaveUsername'], 'anna_vpn');
-      assert.equal(card.metadata?.['expireAt'], '2026-08-08T09:00:00.000Z');
+      assert.deepEqual(stored, [name], `${name} still reaches the Activity Feed`);
+      assert.deepEqual(emitted, [], `${name} was forwarded`);
     }
   });
 
-  it('maps 2.8.0 user.expiration to the same expire-soon card', async () => {
+  it('never tells a subscription with no end that it ends soon', async () => {
+    // A row with no end takes no date from Remnawave (`withLocalOpenEndKept`),
+    // and with it no report ABOUT the date: an expiry warning that reached only
+    // such rows is stored and not forwarded — no card, no pop-up, no outbound
+    // webhook. The double answers the dated statement with no row and the one
+    // for rows with no end with one, which is what a lifetime subscription's
+    // profile produces.
+    for (const event of ['user.expiration', 'user.expired']) {
+      const emitted: EmittedEvent[] = [];
+      const service = new RemnawaveWebhookService(
+        {
+          remnawaveWebhookEvent: { create: async () => ({}) },
+          subscription: {
+            updateMany: async (args: ReconcileCall) => ({ count: args.where['expiresAt'] === null ? 1 : 0 }),
+            findMany: async () => [],
+            findFirst: async () => null,
+          },
+          user: { updateMany: async () => ({ count: 0 }), findUnique: async () => null },
+        } as never,
+        { webhookSecret: null } as never,
+        { emit: (card: EmittedEvent) => emitted.push(card) } as never,
+        { getPanelUserUsage: async () => null } as never,
+        { build: async () => ({}) } as never,
+        { create: async () => undefined } as never,
+      );
+      await service.handleEvent(
+        event,
+        userEventPayload({ event, usedTrafficBytes: 0, meta: { notConnectedAfterHours: null, expiration: 24 } }),
+        null,
+      );
+      assert.deepEqual(emitted, [], `${event} about a subscription with no end was forwarded`);
+    }
+  });
+
+  it('maps user.expiration to the expire-soon card', async () => {
     const { service, stored, emitted } = buildService();
     await service.handleEvent(
       'user.expiration',
@@ -956,13 +967,13 @@ describe('RemnawaveWebhookService expiry warnings', () => {
     assert.equal(card.category, 'REMNAWAVE');
     assert.equal(card.severity, 'INFO');
     assert.equal(card.metadata?.['remnawaveUsername'], 'anna_vpn');
-    assert.equal(card.metadata?.['remnawaveId'], '9d2f4c1e-7b3a-4f6d-9c58-2e1a7b4c9d30');
+    assert.equal(card.metadata?.['remnawaveId'], '4821');
     assert.equal(card.metadata?.['expireAt'], '2026-08-08T09:00:00.000Z');
   });
 
-  it('carries the 2.8.0 envelope meta.expiration onto the card', async () => {
-    // 2.8.0 moved the warning window OUT of `data` into `meta.expiration`;
-    // mapping the name alone would drop it, since nothing else reads `meta`.
+  it('carries the envelope meta.expiration onto the card', async () => {
+    // The warning window travels in `meta.expiration`, not in `data`; mapping
+    // the name alone would drop it, since nothing else reads `meta`.
     const { service, emitted } = buildService();
     await service.handleEvent(
       'user.expiration',
@@ -979,7 +990,7 @@ describe('RemnawaveWebhookService expiry warnings', () => {
   });
 
   it('tolerates a null meta envelope', async () => {
-    // Both specs declare `meta` nullable, so the read must not throw.
+    // The spec declares `meta` nullable, so the read must not throw.
     const { service, emitted } = buildService();
     await service.handleEvent(
       'user.expiration',
@@ -1003,7 +1014,7 @@ describe('RemnawaveWebhookService expiry warnings', () => {
  *
  * These pin the fallback and, just as importantly, its boundaries: it must not
  * override a number the webhook did carry, must not fail the webhook when the
- * panel is down, and must not make a REST call it has no uuid for.
+ * panel is down, and must not make a REST call it has no id for.
  */
 describe('first-connection traffic counter', () => {
   const usage = (over: Partial<PanelUsage> = {}): PanelUsage => ({
@@ -1020,11 +1031,11 @@ describe('first-connection traffic counter', () => {
     const { service, emitted, usageCalls } = buildService(usage({ usedTrafficBytes: 0 }));
     await service.handleEvent(
       'user.first_connected',
-      { event: 'user.first_connected', data: { uuid: 'uuid-9', username: 'anna_vpn' } },
+      { event: 'user.first_connected', data: { id: 9, username: 'anna_vpn' } },
       null,
     );
 
-    assert.deepEqual(usageCalls, ['uuid-9'], 'the panel is asked exactly once, for this uuid');
+    assert.deepEqual(usageCalls, ['9'], 'the panel is asked exactly once, for this profile');
     assert.equal(emitted.length, 1);
     // Zero is the answer, not the absence of one: «0 Б / 100 ГБ» is what
     // "connected, nothing used yet" looks like, and it is the common case here.
@@ -1037,7 +1048,7 @@ describe('first-connection traffic counter', () => {
     const { service, emitted } = buildService(usage({ usedTrafficBytes: 954_204 }));
     await service.handleEvent(
       'user.first_connected',
-      { event: 'user.first_connected', data: { uuid: 'uuid-9' } },
+      { event: 'user.first_connected', data: { id: 9 } },
       null,
     );
     assert.equal(emitted[0]!.metadata?.['usedTrafficBytes'], 954_204);
@@ -1064,17 +1075,17 @@ describe('first-connection traffic counter', () => {
     const { service, emitted, stored, usageCalls } = buildService(null);
     await service.handleEvent(
       'user.first_connected',
-      { event: 'user.first_connected', data: { uuid: 'uuid-9', username: 'anna_vpn' } },
+      { event: 'user.first_connected', data: { id: 9, username: 'anna_vpn' } },
       null,
     );
-    assert.deepEqual(usageCalls, ['uuid-9']);
+    assert.deepEqual(usageCalls, ['9']);
     assert.deepEqual(stored, ['user.first_connected']);
     assert.equal(emitted.length, 1, 'the card is delivered anyway');
     assert.equal(emitted[0]!.metadata?.['usedTrafficBytes'], undefined);
     assert.equal(emitted[0]!.metadata?.['remnawaveUsername'], 'anna_vpn');
   });
 
-  it('makes no panel call for a payload with no uuid to ask about', async () => {
+  it('makes no panel call for a payload with no id to ask about', async () => {
     const { service, emitted, usageCalls } = buildService(usage());
     await service.handleEvent(
       'user.first_connected',
@@ -1090,8 +1101,8 @@ describe('first-connection traffic counter', () => {
     // adding a REST read to each one would put a network call on the hot path
     // of the whole webhook firehose.
     const { service, usageCalls } = buildService(usage());
-    await service.handleEvent('user.expired', { data: { uuid: 'uuid-9' } }, null);
-    await service.handleEvent('user.disabled', { data: { uuid: 'uuid-9' } }, null);
+    await service.handleEvent('user.expired', { data: { id: 9 } }, null);
+    await service.handleEvent('user.disabled', { data: { id: 9 } }, null);
     assert.deepEqual(usageCalls, []);
   });
 });
@@ -1132,7 +1143,7 @@ describe('the first-connection panel read cannot hold the webhook open', () => {
     const startedAt = Date.now();
     await service.handleEvent(
       'user.first_connected',
-      { event: 'user.first_connected', data: { uuid: 'uuid-hung', username: 'anna_vpn' } },
+      { event: 'user.first_connected', data: { id: 7, username: 'anna_vpn' } },
       null,
     );
     const elapsed = Date.now() - startedAt;

@@ -1,12 +1,13 @@
 import { promises as fsp } from 'node:fs';
 
 import { Processor, WorkerHost, OnWorkerEvent } from '@nestjs/bullmq';
-import { Logger } from '@nestjs/common';
+import { Logger, Optional } from '@nestjs/common';
 import { ImportStatus, Prisma, SubscriptionStatus, SyncAction, SyncJobStatus } from '@prisma/client';
 import { Job } from 'bullmq';
 
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { EVENT_TYPES, SystemEventsService } from '../../common/services/system-events.service';
+import { PanelLinkCheckService } from '../profile-sync/panel-link-check.service';
 import { ProfileSyncQueueService } from '../profile-sync/profile-sync-queue.service';
 import { IMPORT_QUEUE, IMPORT_JOBS } from './imports.constants';
 import { AltshopImporterService } from './services/altshop-importer.service';
@@ -51,6 +52,12 @@ export class ImportProcessor extends WorkerHost {
     private readonly bedolagaImporterService: BedolagaImporterService,
     private readonly bulkPlanAssignmentService: BulkPlanAssignmentService,
     private readonly profileSyncQueueService: ProfileSyncQueueService,
+    /**
+     * The automatic panel-link check, told that an import finished. Optional
+     * only for the specs that build this processor by hand; Nest always
+     * supplies it.
+     */
+    @Optional() private readonly panelLinkCheck?: PanelLinkCheckService,
   ) {
     super();
   }
@@ -233,6 +240,20 @@ export class ImportProcessor extends WorkerHost {
         `Import completed: ${sourceType} (${mode})`,
         { importRecordId, sourceType, mode, result },
       );
+
+      // The automatic panel-link check runs after every import that writes
+      // links (owner, 24.09.2026) and sends ONE card with what it could not
+      // prove. Only a REQUEST is recorded here — the worker runs the check. The
+      // import has committed and its behaviour does not change, so a failure
+      // here must not reach the outer catch that marks the import FAILED. The
+      // check itself decides which sources write links.
+      try {
+        await this.panelLinkCheck?.requestAfterImport({ importRecordId, sourceType });
+      } catch (checkErr) {
+        this.logger.warn(
+          `Panel link check not requested after import ${importRecordId}: ${(checkErr as Error).message}`,
+        );
+      }
 
       // Optional post-import reconciliation: file imports only READ from the
       // panel by default. When the operator opted in (`syncToPanel`), push every

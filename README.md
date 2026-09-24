@@ -36,7 +36,7 @@ Rezeis — продвинутая админ-панель для управле�
 **Что выделяет Rezeis:**
 
 - 🏗 **Монорепо** — backend, worker, и SPA в одном проекте, единый Docker-образ
-- 🔗 **Remnawave 3.2–3.4** — собственная таблица команд панели, в тестах сверяется с официальным контрактом каждой версии 3.x; вендорных пакетов в рантайме нет. Панели 2.x не поддерживаются: команды синхронизации профилей, устройств и инфраструктуры отклоняются с кодом `REZEIS_PANEL_TOO_OLD`, пока панель не обновлена до 3.x
+- 🔗 **Remnawave 3.2–3.4** — собственная таблица команд панели, в тестах сверяется с официальным контрактом каждой версии 3.x; вендорных пакетов в рантайме нет. Панели 2.x не поддерживаются: любой запрос к такой панели, кроме чтения её версии, отклоняется с кодом `REZEIS_PANEL_TOO_OLD`, пока панель не обновлена до 3.x
 - 📊 **Real-time everything** — WebSocket-инвалидация кеша, live-метрики, optimistic UI
 - 🛡 **Anti-Abuse** с 8 детекторами и lifecycle сигналов
 - 💰 **15 платёжных шлюзов** с per-gateway аналитикой
@@ -398,7 +398,7 @@ rezeis/
 | Swagger | 12 | API documentation |
 | Socket.IO | 4 | Real-time WebSocket |
 | Helmet | 8 | Security headers |
-| `@remnawave/backend-contract` | 3.2–3.4 (+ 2.7/2.8 for era-decoding specs), dev | Contract oracles (tests only): the panel command table is checked against every 3.x contract; 2.x panels are refused at runtime |
+| `@remnawave/backend-contract` | 3.2–3.4, dev | Contract oracles (tests only): the panel command table is checked against every 3.x contract; 2.x panels are refused at runtime |
 | fast-check | 4 | Property-based testing |
 
 ### Frontend

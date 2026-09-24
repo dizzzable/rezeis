@@ -46,7 +46,9 @@ export const SEARCH_KEY_TARGETS: Readonly<Record<string, string>> = {
   subscriptionsPage: '/subscriptions',
   autoRenewPanel: '/subscriptions',
   duplicateMerge: '/subscriptions',
-  panelLinkReconciliation: '/subscriptions',
+  // The «Инструменты» sheet of the same page. It opens from `?tools=`, not a
+  // `#tab`, and a hash here has to name a HUB_TABS tab — so the page.
+  subscriptionTools: '/subscriptions',
   unknownSquads: '/subscriptions',
   paymentsPage: '/payments',
   paymentsAccess: '/payments',
@@ -64,6 +66,8 @@ export const SEARCH_KEY_TARGETS: Readonly<Record<string, string>> = {
   plansPage: '/plans',
   planForm: '/plans',
   addOnsPage: '/add-ons',
+  // The «Настройки» tab of the same page; its tabs keep no hash, so the page.
+  addOnSwitches: '/add-ons',
   promocodesIndex: '/promocodes',
   promocodeForm: '/promocodes',
   promocodeFormExtras: '/promocodes',

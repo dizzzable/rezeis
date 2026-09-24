@@ -27,20 +27,15 @@ import {
 /**
  * AdminDuplicateSubscriptionMergeController
  * ─────────────────────────────────────────
- * The ACTION half of the duplicate-pair story, deliberately on its own route
- * rather than as a flag on `POST /admin/profile-sync/panel-link-reconciliation`.
+ * The ACTION half of the duplicate-pair story: «Подписки» → «Инструменты» →
+ * «Слияние подписок-дубликатов». The panel-link check that DIAGNOSES the pairs
+ * runs by itself (`PanelLinkCheckService`); merging two subscriptions moves a
+ * customer's payments between rows, so it stays an operator's action, asked
+ * for by name on its own route, preview first.
  *
- * WHY A SEPARATE ROUTE. The reconciliation endpoint is the one an operator runs
- * to LOOK — repeatedly, at the whole population, to read the report. A merge
- * flag on that endpoint would put "preview everything" and "move a customer's
- * payments between rows" one mistyped field apart, on the request an operator
- * has already learned to fire without much thought. The two surfaces answer to
- * the same authority and the same permission, but a merge has to be asked for
- * by name.
- *
- * SAME PERMISSION SURFACE as the sweep and as the single-row link repair
- * (`subscriptions:edit`). No new permission is invented: an operator who may
- * rewrite one subscription's panel link is the operator who may resolve the
+ * SAME PERMISSION SURFACE as the check's lists and as the single-row link
+ * repair (`subscriptions:edit`). No new permission is invented: an operator who
+ * may rewrite one subscription's panel link is the operator who may resolve the
  * pair that link repair refuses to touch.
  */
 @Controller('admin/profile-sync')
@@ -55,10 +50,10 @@ export class AdminDuplicateSubscriptionMergeController {
   ) {}
 
   /**
-   * Merges the duplicate pairs the 2.x → 3.x identity split produced: the
-   * survivor (the OLDER row) takes the live panel identity, everything that
-   * referenced the duplicate is reattached to it, and the duplicate is retired
-   * with its identity already cleared.
+   * Merges duplicate pairs — two live subscriptions of one customer on one
+   * panel profile: the survivor (the OLDER row) takes the live panel identity,
+   * everything that referenced the duplicate is reattached to it, and the
+   * duplicate is retired with its identity already cleared.
    *
    * DRY BY DEFAULT. The body must carry `dryRun: false` — the boolean, not a
    * string — for anything to be written. An omitted, misspelled or mistyped
@@ -74,11 +69,12 @@ export class AdminDuplicateSubscriptionMergeController {
   @HttpCode(HttpStatus.OK)
   public async mergeDuplicateSubscriptions(
     @Body()
+    // `chunkSize` is no longer read: the walk pages itself. An SPA that still
+    // sends it is not refused for it.
     body: {
       dryRun?: unknown;
       pairs?: unknown;
       limit?: unknown;
-      chunkSize?: unknown;
       startAfterId?: unknown;
     },
     @CurrentAdmin() admin: CurrentAdminInterface,
@@ -88,14 +84,14 @@ export class AdminDuplicateSubscriptionMergeController {
       dryRun: body.dryRun !== false,
       pairs: readPairs(body.pairs),
       limit: typeof body.limit === 'number' ? body.limit : undefined,
-      chunkSize: typeof body.chunkSize === 'number' ? body.chunkSize : undefined,
       startAfterId: typeof body.startAfterId === 'string' ? body.startAfterId : null,
     });
 
     // AUDITED WHENEVER IT WROTE, with no threshold on top.
     //
-    // The sweep next door audits only when `linked > 0`, which is right for a
-    // repair that may legitimately find nothing to do. It is wrong here. A merge
+    // The panel-link check audits only when it linked something, which is
+    // right for a repair that may legitimately find nothing to do. It is wrong
+    // here. A merge
     // run is an operator moving a paying customer's history between rows, and
     // the run that merged nothing but REFUSED four pairs is the run somebody
     // will need to read later. So the only gate is "this was not a dry run".
@@ -121,7 +117,6 @@ export class AdminDuplicateSubscriptionMergeController {
             pairsExamined: report.pairsExamined,
             merged: report.merged,
             refused: report.refused,
-            panelEra: report.panelEra,
             hasMore: report.hasMore,
             nextCursor: report.nextCursor,
             // WHETHER THE BATCH RAN OUT OR BROKE OFF — and if it broke off, on

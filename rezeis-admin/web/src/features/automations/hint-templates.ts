@@ -82,14 +82,14 @@ export interface HintTemplate {
    * Pop-ups about the same fact, so a newer one replaces an older one nobody
    * has seen yet instead of queueing behind it.
    *
-   * THIS IS NOT COSMETIC. One panel warning cycle emits `expires_in_72_hours`,
-   * then `_48`, then `_24`, and the panel forwards all three — plus
-   * `user.expiration` — under the SINGLE type `remnawave.user.expire_soon`.
-   * With no group and `repeatable: true`, a customer who does not open the app
-   * for three days is met by three identical renewal modals in a row, each
-   * needing its own dismissal, the first two of them about a deadline that has
-   * already moved. The same is true of every bandwidth threshold Remnawave is
-   * configured with.
+   * THIS IS NOT COSMETIC. One panel warning cycle emits `user.expiration` at
+   * each of the hours the operator set in Remnawave — 72, 48 and 24, say — and
+   * the panel forwards every one of them under the SINGLE type
+   * `remnawave.user.expire_soon`. With no group and `repeatable: true`, a
+   * customer who does not open the app for three days is met by three
+   * identical renewal modals in a row, each needing its own dismissal, the
+   * first two of them about a deadline that has already moved. The same is
+   * true of every bandwidth threshold Remnawave is configured with.
    *
    * Supersession only lapses UNSHOWN deliveries, so nothing a person has
    * actually read is ever rewritten, and lapsing (rather than deleting) keeps
@@ -355,8 +355,9 @@ export const HINT_TEMPLATES: readonly HintTemplate[] = [
     // ONE DAY, WHICH IS THE LAST WARNING'S OWN DISTANCE FROM EXPIRY.
     //
     // 48 was reasoned from the wrong end of the window. Remnawave's warnings
-    // arrive at 72, 48 and 24 hours, all four forwarded under this one type,
-    // and the LAST one is what sets the ceiling: a hint raised at the 24-hour
+    // (`user.expiration`) arrive at the hours the operator set in Remnawave —
+    // 72, 48 and 24 is the usual cycle — all forwarded under this one type, and
+    // the LAST one is what sets the ceiling: a hint raised at the 24-hour
     // mark and kept showable for 48 is still showable a full day AFTER the
     // subscription ended. The customer then meets "your subscription ends
     // soon" on an account that already expired — while `subscription_expired`,
@@ -379,11 +380,10 @@ export const HINT_TEMPLATES: readonly HintTemplate[] = [
     route: '/renew',
     repeatable: true,
     // ITS OWN GROUP, which it needs for exactly the reason the modal does.
-    // Remnawave sends `expires_in_72_hours`, `_48`, `_24` and
-    // `user.expiration`, and the panel forwards all four under this one type —
-    // so an operator who read "the same warning, quietly" and picked this one
-    // got three identical toasts per cycle, the first two about a deadline that
-    // had already moved.
+    // Remnawave sends `user.expiration` at every hour the operator set, and the
+    // panel forwards each of them under this one type — so an operator who
+    // read "the same warning, quietly" and picked this one got three identical
+    // toasts per cycle, the first two about a deadline that had already moved.
     //
     // Not the modal's group: an alternative must not depend on which of the
     // pair raised last, and a MODAL lapsing a TOAST is destructive on a cabinet

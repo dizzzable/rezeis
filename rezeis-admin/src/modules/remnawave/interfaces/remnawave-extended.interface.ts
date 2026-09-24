@@ -16,6 +16,11 @@ export interface RemnawaveHealthInterface {
 }
 
 export interface RemnawaveHwidTopUserInterface {
+  /**
+   * The row's numeric panel id, in decimal (`''` when the row has none). The
+   * name is the admin SPA's, which reads it; no supported panel has a uuid for
+   * a user.
+   */
   readonly userUuid: string;
   readonly username: string;
   readonly telegramId: string | null;
@@ -26,33 +31,30 @@ export interface RemnawaveHwidTopUserInterface {
 /**
  * One row of the panel's subscription-request log (a hit on `/sub/<shortUuid>`).
  *
- * THE OWNER FIELD IS VERSION-DEPENDENT AND THE TWO ARE NOT INTERCHANGEABLE.
- * Per the OpenAPI specs of the two 2.x builds this was written against, a
- * record carries exactly `id`, `requestIp`, `userAgent`, `requestAt` plus ONE
- * owner field:
+ * Per the 3.3.2 and 3.4.3 specs a record carries `id`, `userId`,
+ * `srrResponseType`, `srrRuleName`, `requestIp`, `userAgent` and `requestAt`.
+ * The owner is `userId`, `{ "type": "number" }` — the panel-internal row id,
+ * the same integer `RemnawavePanelUser.panelId` carries — and it arrives here
+ * as `panelUserId`.
  *
- *   - 2.7.4 → `userUuid`, `{ "type": "string", "format": "uuid" }`
- *   - 2.8.0 → `userId`,   `{ "type": "number" }` — the panel-internal row id,
- *     the same integer `RemnawavePanelUser.panelId` carries.
- *
- * They are modelled as two fields on purpose. An earlier mapper folded
+ * `userUuid` stays on the wire, always `null`, because the admin SPA still
+ * reads it: 2.7.4 named the owner by a uuid there, and no supported panel
+ * does. The two are separate fields on purpose. An earlier mapper folded
  * `userId` into `userUuid`, which put a stringified integer into a
- * uuid-shaped field: on 2.8.0 every consumer keyed by subscription uuid
- * silently missed, and the admin request log rendered `12345…` as though it
- * were the first octet of a uuid. Exactly one of these is non-`null` on any
- * given panel; a consumer that needs a uuid on 2.8.0 must map `panelUserId`
- * through the panel user list rather than assume.
+ * uuid-shaped field: every consumer keyed by a uuid silently missed, and the
+ * admin request log rendered `12345…` as though it were the first octet of a
+ * uuid.
  *
- * `username` and `clientType` used to be declared here and existed in NEITHER
+ * `username` and `clientType` used to be declared here and existed in no
  * spec, so both were unconditionally `null` — the admin table's "client"
  * column was permanently blank. `clientType` is now derived from the UA
  * instead of imagined; `username` is simply not in the payload and is gone.
  */
 export interface RemnawaveSubscriptionRequestEntryInterface {
   readonly id: string;
-  /** Populated on 2.7.4 only. `null` on 2.8.0 — see the note above. */
+  /** Always `null` — kept for the SPA; see the note above. */
   readonly userUuid: string | null;
-  /** Populated on 2.8.0 only. Maps to `RemnawavePanelUser.panelId`. */
+  /** The panel's `userId`. Maps to `RemnawavePanelUser.panelId`. */
   readonly panelUserId: number | null;
   readonly userAgent: string | null;
   /**
@@ -67,7 +69,7 @@ export interface RemnawaveSubscriptionRequestEntryInterface {
 /** One node a provider bills for. See {@link RemnawaveInfraProviderInterface}. */
 export interface RemnawaveInfraBillingNodeInterface {
   /**
-   * `null` on a 2.8.0 row whose `details` block is null — the panel keeps the
+   * `null` on a row whose `details` block is null — the panel keeps the
    * billing line after the node it referenced is gone, and reports the orphan
    * by nulling `details` rather than by dropping the row.
    */
@@ -78,13 +80,13 @@ export interface RemnawaveInfraBillingNodeInterface {
 
 /**
  * One infra-billing provider, as `GET /api/infra-billing/providers` really
- * ships it on 2.7.4 and 2.8.0:
+ * ships it (the 3.3.2 and 3.4.3 specs, identical here):
  *
  *   `{ uuid, name, faviconLink, loginUrl, createdAt, updatedAt,
  *      billingHistory: { totalAmount, totalBills }, billingNodes: [...] }`
  *
  * WHAT IS NOT HERE, AND WHY. `type`, `currency`, `monthlyCost` and
- * `nodesCount` were declared here and exist in NEITHER spec. Every one of them
+ * `nodesCount` were declared here and exist in no spec. Every one of them
  * therefore resolved to `null`/`0` on every panel, and the Costs tab rendered
  * a provider type of `—`, a node count of `0` and a blank monthly cost for
  * every row — a screen that looked like data and was not. They are removed
@@ -92,14 +94,12 @@ export interface RemnawaveInfraBillingNodeInterface {
  *
  * A cost figure IS available, just not per month and not per currency:
  * `billingHistory` is the provider's lifetime bill tally. **The panel reports
- * no currency anywhere in either spec** (`grep currency` over both files:
- * zero hits), so the amount is deliberately carried as a bare number and must
+ * no currency anywhere in any spec** (`grep currency` over every dump: zero
+ * hits), so the amount is deliberately carried as a bare number and must
  * never be rendered next to a currency symbol the panel did not send.
  *
- * `billingNodes` is the only shape that differs between the two builds, and
- * both are absorbed by {@link RemnawaveInfraBillingNodeInterface}:
- *   - 2.7.4 → `{ nodeUuid, name, countryCode }`
- *   - 2.8.0 → `{ name, details: { nodeUuid, countryCode } | null }`
+ * `billingNodes[]` is `{ name, details: { nodeUuid, countryCode } | null }`,
+ * flattened by {@link RemnawaveInfraBillingNodeInterface}.
  */
 export interface RemnawaveInfraProviderInterface {
   readonly uuid: string;
@@ -118,7 +118,7 @@ export interface RemnawaveInfraProviderInterface {
 /**
  * One row of `GET /api/snippets`.
  *
- * A snippet record is `{ name, snippet }` and NOTHING ELSE on both builds —
+ * A snippet record is `{ name, snippet }` and NOTHING ELSE on every build —
  * there is no `uuid`, no `description`, no `type` and no timestamps. All four
  * were declared, all four were unconditionally empty, and `uuid` in particular
  * was `''` for every row, which the catalog table then used as its React key:
@@ -137,12 +137,12 @@ export interface RemnawaveSnippetInterface {
 /**
  * One row of `GET /api/subscription-page-configs`.
  *
- * Spec rows are `{ uuid, viewPosition, name, config }` on both builds.
- * `title`, `description`, `logoUrl`, `faviconUrl` and `customCss` were
- * declared here and exist in neither — the catalog card's per-page subtitle
- * read `title` and so never rendered on any panel. Whatever branding the page
- * carries lives inside the opaque `config` blob, which the panel does not
- * describe, so only its presence is reported.
+ * Spec rows are `{ uuid, viewPosition, name, config }` (3.3.2; 3.4 adds a
+ * `tags` list, not surfaced). `title`, `description`, `logoUrl`, `faviconUrl`
+ * and `customCss` were declared here and exist in no spec — the catalog
+ * card's per-page subtitle read `title` and so never rendered on any panel.
+ * Whatever branding the page carries lives inside the opaque `config` blob,
+ * which the panel does not describe, so only its presence is reported.
  */
 export interface RemnawaveSubpageConfigInterface {
   readonly uuid: string;
@@ -155,8 +155,9 @@ export interface RemnawaveSubpageConfigInterface {
 /**
  * One row of `GET /api/node-plugins`.
  *
- * Spec rows are `{ uuid, viewPosition, name, pluginConfig }` on both builds.
- * `version`, `nodeUuid`, `createdAt` and `updatedAt` exist in neither. Worse,
+ * Spec rows are `{ uuid, viewPosition, name, pluginConfig }` (3.3.2; 3.4 adds a
+ * `tags` list, not surfaced). `version`, `nodeUuid`, `createdAt` and
+ * `updatedAt` exist in no spec. Worse,
  * `enabled` did not either: `Boolean(undefined)` is `false`, so the settings
  * tab rendered EVERY registered plugin as disabled — the one reading an
  * operator would act on, and it was false by construction. There is no
@@ -183,14 +184,13 @@ export interface RemnawaveUserResolveQuery {
  *
  * TWO FIELDS USED TO BE READ FROM PLACES THE PANEL NEVER WRITES.
  *
- *   - `trafficUsedBytes` was read at the row level. Both specs put consumption
+ *   - `trafficUsedBytes` was read at the row level. Every spec puts consumption
  *     in a nested block: `userTraffic: { usedTrafficBytes, … }`. A row-level
  *     `trafficUsedBytes` does exist in these files, but only on the NODE dtos
  *     and on the subscription-info `user` sub-object (where it is a string) —
- *     never on the four user lookups this summary is built from. The panel
+ *     never on the user lookups this summary is built from. The panel
  *     therefore showed `0 B` used for every user on every version.
- *   - `telegramId` is `{"type": ["integer", "null"]}` on 2.7.4 and
- *     `{"type": "integer", "nullable": true}` on 2.8.0 — a NUMBER either way.
+ *   - `telegramId` is `{"type": "number", "nullable": true}` — a NUMBER.
  *     It was read with a string-only helper, so it was `null` for every user
  *     that had one. It is kept as a string here (Telegram ids exceed the safe
  *     integer range in principle and the SPA only ever prints it) but is now
@@ -198,10 +198,11 @@ export interface RemnawaveUserResolveQuery {
  */
 export interface RemnawaveUserSummaryInterface {
   /**
-   * The panel's identity for this row, as a string: the UUID on 2.x, the
-   * numeric id in decimal on 3.x — which has no uuid at all. Same dual meaning
-   * as `RemnawavePanelUser.uuid` and `Subscription.remnawaveId`, so the three
-   * compare without translation. It is an identity string, not a UUID.
+   * The panel's identity for this row, as a string: the numeric id in decimal
+   * (`''` when the row has no usable id) — a 3.x user has no uuid at all. The
+   * form `Subscription.remnawaveId` holds on 3.x, so the two compare without
+   * translation. The name is the admin SPA's; it is an identity string, not a
+   * UUID.
    */
   readonly uuid: string;
   /** The panel's numeric id, when it exposes one. What 3.x routes address by. */

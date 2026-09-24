@@ -3,15 +3,12 @@ import { RemnawaveNodeInterface } from '../interfaces/remnawave-node.interface';
 /**
  * Maps a raw `/api/nodes` row to `RemnawaveNodeInterface`.
  *
- * Tolerates two distinct upstream layouts seen across Remnawave versions:
- *
- *   • 2.7.x and earlier: `activeConfigProfileUuid` is nested inside a
- *     `configProfile` block; counters like `xrayUptime` and `usersOnline`
- *     are not exposed on `/api/nodes` at all (the Remnawave UI fetches them
- *     from a separate realtime endpoint).
- *
- *   • 2.8+ (newer panels): the same fields surface at the top level; 3.2.3
- *     also includes per-node `ips` status rows.
+ * `activeConfigProfileUuid` is NESTED, inside the required `configProfile`
+ * block (`{ activeConfigProfileUuid, activeInbounds }`), on every panel rezeis
+ * serves — the 3.3.2 and 3.4.3 specs, and every 2.x one before them. No spec
+ * puts it on the row itself, so the row is not read for it. The counters
+ * `xrayUptime` and `usersOnline` and the per-node `ips` status rows are on the
+ * row.
  *
  * Everything that's missing falls back to neutral defaults (0 for counters,
  * null for ids), so the admin SPA always sees a uniform shape regardless of
@@ -41,7 +38,6 @@ interface RawNode {
   readonly updatedAt?: unknown;
   readonly xrayUptime?: unknown;
   readonly usersOnline?: unknown;
-  readonly activeConfigProfileUuid?: unknown;
   readonly ips?: unknown;
   readonly configProfile?: {
     readonly activeConfigProfileUuid?: unknown;
@@ -73,9 +69,7 @@ export function mapNode(raw: unknown): RemnawaveNodeInterface {
     updatedAt: toString(r.updatedAt),
     xrayUptime: toNumber(r.xrayUptime),
     usersOnline: toNumber(r.usersOnline),
-    activeConfigProfileUuid:
-      toNullableString(r.activeConfigProfileUuid) ??
-      toNullableString(r.configProfile?.activeConfigProfileUuid),
+    activeConfigProfileUuid: toNullableString(r.configProfile?.activeConfigProfileUuid),
     ips: mapNodeIps(r.ips),
   };
 }

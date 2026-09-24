@@ -3,19 +3,13 @@
  *
  * ── Why this exists ─────────────────────────────────────────────────────────
  *
- * `/api/hwid/devices/stats` has answered in two shapes, and both are in the
- * field — installs still run 2.x panels, and this read is not one the 2.x
- * refusal (`LegacyPanelRefusal`) turns away:
+ * `/api/hwid/devices/stats` NESTS the per-app counts: every `byPlatform` entry
+ * carries its own `byApp`, and there is no top-level list at all (the 3.3.2
+ * and 3.4.3 specs, and every 3.x contract through 3.4.4). The sum across
+ * platforms is what the dashboard needs, and nothing upstream computes it.
  *
- *   - 2.7.x puts `byApp` at the TOP level, beside `byPlatform`;
- *   - 2.8, 3.2, contract 3.4.10 and panel 3.4.3 NEST it: every `byPlatform` entry carries its
- *     own `byApp`, and there is no top-level list at all.
- *
- * `RemnawaveHwidStatsInterface` described only the first, and nothing read the
- * field, so the mismatch cost nothing until a screen wanted "which apps do our
- * customers use". This reads both, and never adds them together: a panel that
- * sent both would otherwise count every device twice. When any nested list is
- * present the nested lists are the answer; the top-level one is the fallback.
+ * The top-level `byApp` 2.7.x sent instead is not read: no supported panel
+ * sends it.
  *
  * ── What is counted ─────────────────────────────────────────────────────────
  *
@@ -40,13 +34,10 @@ export function summariseHwidApps(raw: unknown): HwidAppCount[] {
   if (root === null) return [];
 
   const platforms = Array.isArray(root['byPlatform']) ? root['byPlatform'] : [];
-  const nested = platforms
+  const source = platforms
     .map((platform) => asRecord(platform)?.['byApp'])
-    .filter((list): list is unknown[] => Array.isArray(list));
-
-  const topLevel = Array.isArray(root['byApp']) ? (root['byApp'] as unknown[]) : [];
-  const source: unknown[] =
-    nested.length > 0 ? nested.reduce<unknown[]>((all, list) => all.concat(list), []) : topLevel;
+    .filter((list): list is unknown[] => Array.isArray(list))
+    .reduce<unknown[]>((all, list) => all.concat(list), []);
 
   const byKey = new Map<string, { app: string; count: number }>();
   for (const entry of source) {
