@@ -8,6 +8,7 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 // (through `WebPushService`), so importing it directly adds no cycle.
 import { clipHtmlCard } from '../../../common/services/system-events.service';
 import { readAdminBotToken, readEnvBotToken } from '../../../common/utils/admin-bot-token.util';
+import { literalCardText, literalPlainText } from '../../../common/utils/operator-card-text.util';
 import { WebPushService } from '../../push/services/web-push.service';
 import { CustomEmojiService } from '../../custom-emoji/services/custom-emoji.service';
 
@@ -29,7 +30,7 @@ import {
   type NotificationLocale,
 } from '../utils/notification-template-locale.util';
 import { readPlatformBranding } from '../../settings/utils/platform-branding.util';
-import { buildSubscriptionFacts } from '../utils/subscription-facts.util';
+import { buildAddOnFacts, buildSubscriptionFacts } from '../utils/subscription-facts.util';
 import { EmailDeliveryService } from '../../email/services/email-delivery.service';
 import { isRetryableRelayOutcome } from '../../backup/backup-delivery-retry.util';
 import type { NotifyDeliveryResult } from './bot-notifier.client';
@@ -465,6 +466,66 @@ export class UserNotificationsService {
     });
 
     return event.id;
+  }
+
+  /**
+   * {@link create}, with the feed row written in the CALLER's transaction.
+   *
+   * For a sender that records "this notice was sent" itself: the record and
+   * the feed row commit together or not at all, so a retry or a restart finds
+   * the record and sends nothing twice, and never a record without its row
+   * (`AddOnExpiryNoticeService`). The channels are not run here — inside a
+   * transaction they could go out for a row that then rolls back — but by
+   * `deliver`, which the caller calls once it has committed. Its promise
+   * settles when the channels have run; it never rejects.
+   */
+  public async createInTransaction(
+    tx: Prisma.TransactionClient,
+    input: CreateUserNotificationInput,
+  ): Promise<{ readonly eventId: string; readonly deliver: () => Promise<void> }> {
+    const event = await tx.userNotificationEvent.create({
+      data: {
+        userId: input.userId,
+        type: input.type,
+        payload: input.payload as Prisma.InputJsonObject,
+      },
+      select: { id: true, userId: true, type: true, payload: true },
+    });
+    return {
+      eventId: event.id,
+      deliver: () =>
+        this.fanout({
+          eventId: event.id,
+          userId: event.userId,
+          type: event.type,
+          payload: event.payload,
+          preRenderedText: input.preRenderedText,
+          buttons: input.buttons,
+          skipTelegram: input.skipTelegram,
+        }),
+    };
+  }
+
+  /**
+   * The channels of a feed row written before, run again — for a sender whose
+   * own record says they may not have run: `AddOnExpiryNoticeService`, when a
+   * crash fell between its commit and `deliver`. The same fanout on the same
+   * row id, which the channels deduplicate on where they can (the bot on the
+   * event id, the letter on its `notify:<id>` job, the browser on the push's
+   * tag), so a rare second copy is the worst case — at least once, never lost.
+   *
+   * A template notice only: a `preRenderedText` send keeps its text nowhere to
+   * be read again. `false` when the row is gone; a channel's failure is logged
+   * by the fanout, as for `deliver`, and never rejects.
+   */
+  public async redeliver(eventId: string): Promise<boolean> {
+    const event = await this.prismaService.userNotificationEvent.findUnique({
+      where: { id: eventId },
+      select: { id: true, userId: true, type: true, payload: true },
+    });
+    if (event === null) return false;
+    await this.fanout({ eventId: event.id, userId: event.userId, type: event.type, payload: event.payload });
+    return true;
   }
 
   /**
@@ -1167,9 +1228,9 @@ export class UserNotificationsService {
           : template === null
             ? undefined
             : (() => {
-                const resolved = resolveTemplateButtons(
-                  { buttons: (template as { buttons?: unknown }).buttons ?? null },
-                  locale,
+                const resolved = linkButtonsToSubscription(
+                  resolveTemplateButtons({ buttons: (template as { buttons?: unknown }).buttons ?? null }, locale),
+                  input.payload,
                 );
                 return resolved.length > 0 ? resolved : undefined;
               })();
@@ -1292,7 +1353,7 @@ export class UserNotificationsService {
       // The subscriber's own switch is already honoured: it returns above,
       // before any channel runs.
       if (rendered !== null && template !== null) {
-        await this.deliverEmail(input.userId, input.type, rendered, input.eventId);
+        await this.deliverEmail(input.userId, input.type, rendered, input.eventId, locale);
       }
 
       // Operator mirror — when the operator enabled "mirror user
@@ -1642,6 +1703,8 @@ export class UserNotificationsService {
     type: string,
     rendered: { readonly title: string; readonly body: string; readonly html: string },
     eventId: string,
+    /** The language the letter is written in: the branded layout's `lang`. */
+    locale?: NotificationLocale,
   ): Promise<void> {
     try {
       if (this.emailDelivery === undefined) return;
@@ -1672,6 +1735,8 @@ export class UserNotificationsService {
         // one reader whose client refused the HTML part.
         text: renderBroadcastEmailText(null, rendered.body),
         dedupeKey: `notify:${eventId}`,
+        // An English letter in the branded layout says so (`<html lang>`).
+        ...(locale === undefined ? {} : { locale }),
       });
     } catch (err: unknown) {
       this.logger.warn(
@@ -1754,6 +1819,18 @@ export class UserNotificationsService {
         },
         locale === 'en' ? 'en' : 'ru',
       ),
+      // An add-on notice's words — «+2 устройства», when it ends — for the
+      // locale in hand, from the raw facts its sender stored
+      // (`AddOnExpiryNoticeService`); nothing for any other payload.
+      ...buildAddOnFacts(
+        {
+          type: payloadRecord['addonType'],
+          total: payloadRecord['addonTotal'],
+          endsAt: payloadRecord['addonEndsAt'],
+          timezone: branding.timezone,
+        },
+        locale === 'en' ? 'en' : 'ru',
+      ),
       // After the payload, and only when the payload has no string `currency`
       // of its own — so an emitter that names the unit keeps its word. See
       // `rewardUnitFacts` for what the unit of a referral reward is.
@@ -1763,8 +1840,6 @@ export class UserNotificationsService {
       projectName,
     };
     const localized = resolveTemplateLocale(template, locale);
-    const titleRaw = substitute(localized.title, ctx);
-    const bodyRaw = substitute(localized.body, ctx);
     // Resolve `:slug:` custom-emoji pack tokens the operator inserted via the
     // notification editor's emoji picker — same premium treatment broadcasts
     // already get, so pack emoji render consistently everywhere:
@@ -1779,14 +1854,20 @@ export class UserNotificationsService {
     // notification path stays a single allocation with no settings read.
     // The HTML body is substituted SEPARATELY, with each value escaped,
     // while the plain one keeps the values as they are for the cabinet feed
-    // and web-push. Reusing `bodyRaw` here is what let a customer's or an
+    // and web-push. Reusing the plain body here is what let a customer's or an
     // operator's `<` reach Telegram's parser.
     const bodyHtmlRaw = substituteHtml(localized.body, ctx);
+    // The title is text, not markup: its words escaped, and — like the body's —
+    // a value the subscriber typed as typed (`SUBSCRIBER_TYPED_VALUES`).
     const html = `<b>${await this.customEmojiService.substituteTelegramHtml(
-      escapeHtml(titleRaw),
+      substituteHtml(localized.title, ctx, false),
     )}</b>\n\n${await this.customEmojiService.substituteTelegramHtml(bodyHtmlRaw)}`;
-    const title = await this.customEmojiService.substituteFallbacks(titleRaw);
-    const body = await this.customEmojiService.substituteFallbacks(bodyRaw);
+    // The plain copy — the subscriber's own feed, web push, a letter's text
+    // part — likewise: the operator's tokens resolved, the subscriber's own
+    // values as typed (`substitutePlain`). Their name `:fire:` was a 🔥 here.
+    const fallbacks = (text: string): Promise<string> => this.customEmojiService.substituteFallbacks(text);
+    const title = await substitutePlain(localized.title, ctx, fallbacks);
+    const body = await substitutePlain(localized.body, ctx, fallbacks);
     return { title, body, html };
   }
 
@@ -1837,22 +1918,48 @@ function readOptionalNumber(value: unknown): number | null {
 
 const PLACEHOLDER_PATTERN = /\{\{\s*([\w.]+)\s*\}\}/g;
 
+/** Private-use marks around the index of a value held out of the emoji pass: no token pattern can span them. */
+const HELD_OPEN = String.fromCharCode(0xe000);
+const HELD_CLOSE = String.fromCharCode(0xe001);
+const HELD_VALUE = new RegExp(`${HELD_OPEN}(\\d+)${HELD_CLOSE}`, 'g');
+
 /**
+ * The plain copy of a template — the subscriber's own feed, web push, the text
+ * part of a letter.
+ *
  * Tiny Handlebars-style substitution. Matches `{{key}}` and replaces
  * with `String(ctx[key])`. Missing keys collapse to empty string —
  * the alternative (leaving `{{key}}` in the output) leaks template
- * internals into user-facing copy and looks broken.
+ * internals into user-facing copy and looks broken. No expression eval, no
+ * sub-paths, no helpers — keep it cosmetically compatible with the existing
+ * template authoring style without inheriting any of Handlebars' attack
+ * surface.
  *
- * No expression eval, no sub-paths, no helpers — keep it cosmetically
- * compatible with the existing template authoring style without
- * inheriting any of Handlebars' attack surface.
+ * Then the operator's emoji tokens are resolved by `resolve` (their glyphs),
+ * and a value the subscriber typed (`SUBSCRIBER_TYPED_VALUES`) is left as
+ * typed. The HTML copy keeps such a value out of the emoji pass with
+ * `literalCardText`. Plain text has no character references, so here the value
+ * is held out of the text while the pass runs — a private-use mark stands in
+ * its place — and put in after it, through `literalPlainText` for the cabinet's
+ * feed, which draws `:slug:` by itself. The operator's own values (`{{plan}}`,
+ * `{{reason}}`, …) resolve as before.
  */
-function substitute(template: string, ctx: Record<string, unknown>): string {
-  return template.replace(PLACEHOLDER_PATTERN, (_match, key: string) => {
+async function substitutePlain(
+  template: string,
+  ctx: Record<string, unknown>,
+  resolve: (text: string) => Promise<string>,
+): Promise<string> {
+  const held: string[] = [];
+  const text = template.replace(PLACEHOLDER_PATTERN, (_match, key: string) => {
     const value = ctx[key];
     if (value === undefined || value === null) return '';
-    return String(value);
+    if (!SUBSCRIBER_TYPED_VALUES.has(key)) return String(value);
+    held.push(literalPlainText(value));
+    return `${HELD_OPEN}${held.length - 1}${HELD_CLOSE}`;
   });
+  const resolved = await resolve(text);
+  if (held.length === 0) return resolved;
+  return resolved.replace(HELD_VALUE, (_match, index: string) => held[Number(index)] ?? '');
 }
 
 /**
@@ -1871,14 +1978,45 @@ function substitute(template: string, ctx: Record<string, unknown>): string {
  * succeed. The title was already escaped; the body was not — and the expiry
  * templates are what put a plan name and a panel username into a body for the
  * first time.
+ *
+ * `templateIsHtml: false` — the title — escapes the template's words as well.
  */
-function substituteHtml(template: string, ctx: Record<string, unknown>): string {
-  return template.replace(PLACEHOLDER_PATTERN, (_match, key: string) => {
+function substituteHtml(template: string, ctx: Record<string, unknown>, templateIsHtml = true): string {
+  const words = (text: string): string => (templateIsHtml ? text : escapeHtml(text));
+  let out = '';
+  let last = 0;
+  for (const match of template.matchAll(PLACEHOLDER_PATTERN)) {
+    out += words(template.slice(last, match.index));
+    const key = match[1];
     const value = ctx[key];
-    if (value === undefined || value === null) return '';
-    return escapeHtml(String(value));
-  });
+    if (value !== undefined && value !== null) {
+      out += SUBSCRIBER_TYPED_VALUES.has(key) ? literalCardText(value) : escapeHtml(String(value));
+    }
+    last = (match.index ?? 0) + match[0].length;
+  }
+  return out + words(template.slice(last));
 }
+
+/**
+ * The values a subscriber typed: their Telegram name, an address, a login, a
+ * ticket subject, the name of whoever invited them or whom they invited.
+ *
+ * They go into the Telegram body AS TYPED (`literalCardText`). Both emoji
+ * passes that follow — the panel's (`substituteTelegramHtml`) and the bot's on
+ * `/notify` — resolve the operator's tokens across the whole body, and a
+ * subscriber named `:fire:` or `{{VIP}}` wrote neither: their name came back to
+ * them as 🔥 or •, and so did it to the operator, since this body is also the
+ * operator's copy of the notification (`mirrorToOperatorChat`). The operator's
+ * own words — the template, a refusal's `{{reason}}` — keep their tokens.
+ */
+const SUBSCRIBER_TYPED_VALUES: ReadonlySet<string> = new Set([
+  'name',
+  'email',
+  'login',
+  'subject',
+  'referrerName',
+  'referralName',
+]);
 
 function escapeHtml(input: string): string {
   return input
@@ -1891,9 +2029,27 @@ function escapeHtml(input: string): string {
  * Drop every HTML tag from the input. Used for web-push notification
  * bodies because browsers don't render markup inside the OS-level
  * Notification surface — `<b>` etc. would just appear literally.
+ *
+ * And read the entities, which that surface would print as they are: a
+ * pre-rendered Telegram body (a support reply's) escapes `&`, `<` and `>`, and
+ * writes a client's own words with numeric references (`literalCardText`) —
+ * `Тема&#58; оплата` on the lock screen is not what the client typed. `&amp;`
+ * last, so an escaped reference stays text.
  */
 function stripHtml(input: string): string {
-  return input.replace(/<[^>]*>/g, '');
+  return input
+    .replace(/<[^>]*>/g, '')
+    .replace(/&#(\d{1,7});/g, (match, code: string) => codePointText(Number(code), match))
+    .replace(/&#x([0-9a-f]{1,6});/gi, (match, code: string) => codePointText(Number.parseInt(code, 16), match))
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&amp;/g, '&');
+}
+
+/** The character of a numeric reference, or the reference itself when it names none. */
+function codePointText(code: number, reference: string): string {
+  return Number.isInteger(code) && code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : reference;
 }
 
 /**
@@ -1955,11 +2111,13 @@ function formatMirrorRecipient(userId: string, recipient: MirrorRecipient | null
   lines.push(`👾 Reiwa ID: <code>${escapeHtml(userId)}</code>`);
   const name = recipient?.name?.trim() ?? '';
   const username = recipient?.username?.trim() ?? '';
+  // As typed: a name `:fire:` is the subscriber's, not an emoji token of the
+  // operator's for the bot to resolve (`literalCardText`).
   if (name.length > 0) {
-    const handle = username.length > 0 ? ` (@${escapeHtml(username)})` : '';
-    lines.push(`👤 Имя: ${escapeHtml(name)}${handle}`);
+    const handle = username.length > 0 ? ` (@${literalCardText(username)})` : '';
+    lines.push(`👤 Имя: ${literalCardText(name)}${handle}`);
   } else if (username.length > 0) {
-    lines.push(`👤 Username: @${escapeHtml(username)}`);
+    lines.push(`👤 Username: @${literalCardText(username)}`);
   }
   return `👤 <b>Получатель:</b>\n<blockquote>${lines.join('\n')}</blockquote>`;
 }
@@ -2076,21 +2234,71 @@ function connectHelpPushUrl(payload: unknown): string {
     : '/dashboard?connect=help';
 }
 
+/** The payload's `subscriptionId`, when it names one. */
+function payloadSubscriptionId(payload: unknown): string | null {
+  const value =
+    payload !== null && typeof payload === 'object' && !Array.isArray(payload)
+      ? (payload as Record<string, unknown>)['subscriptionId']
+      : undefined;
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+/** The cabinet's add-on purchase: `/addons`, on the subscription a notice is about when it names one. */
+const ADD_ONS_PAGE = '/addons';
+
+/**
+ * A notice about a subscription opens the add-on page ON that subscription:
+ * `?subscriptionId=` is added to a Mini App button to `/addons` (typed with its
+ * slash or without it), the query the cabinet's add-on page reads to skip
+ * «which subscription?» (reiwa `web/src/features/addons/addons-page.tsx`). A
+ * button that already names one, or another page, is left as the operator
+ * saved it — the rule the support ticket's link follows
+ * (`applyTicketDeepLink`). «Купить снова» of the add-on notices is such a
+ * button (`AddOnExpiryNoticeService`).
+ */
+function linkButtonsToSubscription(buttons: NotifyButton[], payload: unknown): NotifyButton[] {
+  const subscriptionId = payloadSubscriptionId(payload);
+  if (subscriptionId === null) return buttons;
+  return buttons.map((button) => {
+    const path = button.webAppPath;
+    if (path === undefined) return button;
+    const cut = path.indexOf('?');
+    const page = cut === -1 ? path : path.slice(0, cut);
+    const query = cut === -1 ? '' : path.slice(cut + 1);
+    if ((page.startsWith('/') ? page : `/${page}`) !== ADD_ONS_PAGE) return button;
+    if (/(^|&)subscriptionId=/.test(query)) return button;
+    const joined = `${path}${cut === -1 ? '?' : query.length > 0 ? '&' : ''}subscriptionId=${encodeURIComponent(subscriptionId)}`;
+    return { ...button, webAppPath: joined };
+  });
+}
+
+/** A dated add-on's notice (`AddOnExpiryNoticeService`): all six of its types. */
+function isAddOnNoticeType(type: string): boolean {
+  return resolveToggleKey(type).startsWith('addon_');
+}
+
 /**
  * Resolve the cabinet route a web-push notification should deep-link to when
  * clicked, mirroring reiwa web's `resolveNotificationTarget` so the PWA push
  * and the in-app bell agree on destinations:
  *   • «Помощь с подключением»           → the dashboard's connect deep link
+ *   • an add-on's end, or its approach  → the add-on page, on its subscription
  *   • expiry / traffic-limit reminders → the renewal page
  *   • referral / partner program       → the referrals cabinet
  *   • broadcasts / news                 → the notifications feed
  *   • everything else                   → the dashboard
  *
- * The connect branch is an EXACT match on the canonical type, ahead of the
- * substring rules below, and it is the only one that reads the payload.
+ * The connect and add-on branches are matched on the canonical type, ahead of
+ * the substring rules below, and they are the ones that read the payload.
  */
 function resolveNotificationPushUrl(type: string, payload?: unknown): string {
   if (resolveToggleKey(type) === 'connect_help') return connectHelpPushUrl(payload);
+  if (isAddOnNoticeType(type)) {
+    const subscriptionId = payloadSubscriptionId(payload);
+    return subscriptionId === null
+      ? ADD_ONS_PAGE
+      : `${ADD_ONS_PAGE}?subscriptionId=${encodeURIComponent(subscriptionId)}`;
+  }
   const t = type.toLowerCase();
   if (t.includes('support')) return '/support';
   if (t.includes('expir') || t.includes('limited')) return '/renew';

@@ -20,6 +20,8 @@
  * sparse error payload.
  */
 
+import { literalCardText } from '../utils/operator-card-text.util';
+
 export interface ErrorReportEvent {
   /** Audit row id when known (download path); undefined at emit time. */
   readonly id?: string;
@@ -177,18 +179,22 @@ function defaultNextSteps(hasStack: boolean, txtAttached: boolean): string {
 export function formatUserBlockLines(meta: Record<string, unknown>): readonly string[] | null {
   if (!meta['userId'] && !meta['telegramId']) return null;
   const text = (value: unknown): string => escapeHtml(String(value));
+  // What the subscriber typed — a name, a username, a login, an address — is
+  // shown as typed: the bot resolves the operator's emoji tokens in the whole
+  // card, and a name `:fire:` or `{{VIP}}` is not one (`literalCardText`).
+  const typed = (value: unknown): string => literalCardText(value);
   const userLines: string[] = [];
   if (meta['telegramId']) userLines.push(`🪪 Telegram ID: <code>${text(meta['telegramId'])}</code>`);
   if (meta['userId']) userLines.push(`👾 Reiwa ID: <code>${text(meta['userId'])}</code>`);
   const displayName = meta['userName'] ?? meta['firstName'];
   if (displayName) {
-    const handle = meta['username'] ? ` (@${text(meta['username'])})` : '';
-    userLines.push(`👤 Имя: ${text(displayName)}${handle}`);
+    const handle = meta['username'] ? ` (@${typed(meta['username'])})` : '';
+    userLines.push(`👤 Имя: ${typed(displayName)}${handle}`);
   } else if (meta['username']) {
-    userLines.push(`👤 Username: @${text(meta['username'])}`);
+    userLines.push(`👤 Username: @${typed(meta['username'])}`);
   }
-  if (meta['login']) userLines.push(`🔑 Login: <code>${text(meta['login'])}</code>`);
-  if (meta['email'] && !meta['fraudUserEmail']) userLines.push(`📧 Email: ${text(meta['email'])}`);
+  if (meta['login']) userLines.push(`🔑 Login: <code>${typed(meta['login'])}</code>`);
+  if (meta['email'] && !meta['fraudUserEmail']) userLines.push(`📧 Email: ${typed(meta['email'])}`);
   return ['👤 <b>Пользователь:</b>', `<blockquote>${userLines.join('\n')}</blockquote>`];
 }
 
