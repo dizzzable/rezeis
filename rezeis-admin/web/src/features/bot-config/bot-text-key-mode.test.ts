@@ -31,6 +31,8 @@ describe('botTextKeyMode — plain text', () => {
     'channel.verified',
     'quests.channel.not_subscribed',
     'quests.channel.verified',
+    // «Меню обновилось» over the main menu for an old button (`showMainMenu`, `start.ts`).
+    'menu.updated',
     // A refused Stars checkout's `error_message` (`payments.ts`).
     'payments.stars.unknown_invoice',
     'payments.stars.already_handled',

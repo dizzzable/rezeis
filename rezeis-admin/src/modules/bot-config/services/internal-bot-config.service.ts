@@ -991,6 +991,11 @@ const DEFAULT_TEXTS: readonly DefaultTextSeed[] = [
       '❌ You are not subscribed to the channel yet. Subscribe and try again.'
   },
   { key: 'channel.verified', value: '✅ Подписка подтверждена!' , valueEn: '✅ Subscription confirmed!' },
+  // The toast over the main menu when a customer presses a button the bot no
+  // longer knows — one the operator removed or changed, left on an old message;
+  // the menu is drawn in place of that message (reiwa `bot/pages/stale-button.ts`,
+  // from 24.09.2026). Plain text: a toast carries no entities.
+  { key: 'menu.updated', value: 'Меню обновилось', valueEn: 'Menu updated' },
   // Referral / Partner hub (bot "Пригласить" button). Editable so operators
   // can localize / rebrand the program copy without a redeploy.
   { key: 'referral.hub.title', value: '🔗 Реферальная программа' , valueEn: '🔗 Referral program' },

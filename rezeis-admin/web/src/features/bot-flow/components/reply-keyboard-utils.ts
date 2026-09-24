@@ -125,9 +125,13 @@ export interface RouteContext {
  *     map: `close` (deletes the message), leaving AI support, «Я подписался»
  *     (`menu.ts`), the language picker (`lang.ts`), a channel quest's check;
  *   • `screenPrefix` — `screen:<shortId>` (`dynamic-screen.ts`).
- * Last, a callback that is exactly the shortId of a flow screen opens that
- * screen too (`dynamic-screen.ts`, the handler registered last, so the words
- * above win over a screen spelled like them). Anything else nothing answers.
+ * Then, a callback that is exactly the shortId of a flow screen opens that
+ * screen too (`dynamic-screen.ts`, registered after every page above, so the
+ * words above win over a screen spelled like them). Anything else — an old
+ * button the bot no longer knows — gets the pop-up «Меню обновилось» and the
+ * main menu in place of its message (`stale-button.ts`, the very last handler,
+ * from 24.09.2026; it used to spin and get nothing). Still a button that does
+ * not do what it says: the map draws it red.
  */
 export const CALLBACK_VOCABULARY = {
   builtInScreens: ['help', 'rules', 'invite'],
@@ -198,9 +202,9 @@ export type CallbackRoute =
   | { readonly kind: 'mainMenu' }
   /** Answered, and not with a screen of the map. */
   | { readonly kind: 'answered'; readonly data: string }
-  /** `screen:<shortId>` of a screen the flow does not have: the bot answers «экран не найден». */
+  /** `screen:<shortId>` of a screen the flow does not have: the bot answers «Меню обновилось» and the main menu. */
   | { readonly kind: 'missingScreen'; readonly shortId: string }
-  /** Nothing in the bot answers it: the tap spins and does nothing. */
+  /** No word the bot knows: it answers «Меню обновилось» and the main menu, not what the button says. */
   | { readonly kind: 'unanswered'; readonly data: string }
 
 export type MenuButtonRoute =

@@ -70,8 +70,8 @@ export const en = {
       unsafeUrl: '✕ Unsafe URL',
       // The same answers «Diagram» writes under a main-menu button with the same route.
       site: '→ Cabinet website {{path}}',
-      unanswered: '✕ The bot does not answer this button',
-      missingScreen: '✕ No such screen — the bot answers «screen not found»',
+      unanswered: '✕ The bot does not know this button — it answers «Menu updated» and shows the main menu',
+      missingScreen: '✕ No such screen — the bot answers «Menu updated» and shows the main menu',
       missingPage: '✕ The Mini App has no such page',
     },
     // «Схема»: something typed in the inspector is not saved yet, or its save
@@ -226,6 +226,8 @@ export const en = {
         welcomeMessage: 'The greeting — when the start screen has no text (otherwise the bot shows the start screen’s text)',
         chooseAction: 'Instead of the greeting when it is empty (hidden), and the answer to the old «Back to menu» button',
         subscriptionLine: 'The subscription lines under the greeting — for subscribers (except in the minimal format)',
+        menuUpdated:
+          'An old button pressed — the pop-up over the main menu the bot draws in place of that message',
       },
     },
     systemButtons: {
@@ -284,9 +286,9 @@ export const en = {
       miniApp: 'Mini App {{path}}',
       site: 'cabinet website {{path}}',
       url: '{{host}}',
-      unhandled: 'the bot does not answer this button',
+      unhandled: 'the bot does not know this button — it answers «Menu updated» and shows the main menu',
       mainMenu: 'main menu',
-      missingScreen: 'no screen {{shortId}} — the bot answers «screen not found»',
+      missingScreen: 'no screen {{shortId}} — the bot answers «Menu updated» and shows the main menu',
       missingPage: 'the Mini App has no page {{path}}',
       unsafeUrl: 'the bot leaves this button out: Telegram refuses {{host}}',
     },
@@ -346,9 +348,10 @@ export const en = {
         title: 'Command list',
         trigger: 'The commands Telegram lists for «/» and in the bot’s menu, with their descriptions',
       },
-      screenNotFound: {
-        title: 'Screen not found',
-        trigger: 'A button led to a screen that is no longer in the published flow',
+      staleButton: {
+        title: 'An old button',
+        trigger:
+          'A button on an old message that the bot no longer has was pressed: it was removed or changed, or the screen it led to was deleted. The bot shows the «Menu updated» pop-up and draws the main menu in place of that message. The bot does not retarget old buttons, and does not rewrite messages nobody touched',
       },
       serviceReplies: {
         title: 'Short answers',
@@ -386,6 +389,7 @@ export const en = {
         starsReceived: 'Telegram Stars payment — the message after paying',
         starsRefused: 'Telegram Stars payment — why the payment form refused',
         commandDescription: 'The command’s description in the «/» list',
+        menuUpdated: 'The pop-up over the main menu',
       },
     },
   },

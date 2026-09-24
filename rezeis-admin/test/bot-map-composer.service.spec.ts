@@ -652,7 +652,8 @@ describe('the main menu on «Карта бота»', () => {
  * `screen:<shortId>`, a callback that is exactly a screen's shortId, the
  * built-in `invite` / `rules` / `help` and a few service words (`start.ts`,
  * `dynamic-screen.ts` and the rest of `src/bot/pages/**` since 23.09.2026);
- * anything else nothing answers, and the map draws it red.
+ * anything else gets «Меню обновилось» and the main menu instead of what the
+ * button says (`stale-button.ts`, since 24.09.2026), and the map draws it red.
  */
 describe('a notification callback on «Карта бота»', () => {
   const now = new Date();
@@ -698,7 +699,7 @@ describe('a notification callback on «Карта бота»', () => {
     assert.deepStrictEqual(edge.destination, { kind: 'screen', shortId: 'sc_promo' });
   });
 
-  it('draws `screen:` with no such screen red: the bot answers «экран не найден»', () => {
+  it('draws `screen:` with no such screen red: the bot answers «Меню обновилось», not that screen', () => {
     const edge = edgeFor('screen:sc_gone');
     assert.equal(edge.valid, false);
     assert.equal(edge.reason, 'unknown-shortid');

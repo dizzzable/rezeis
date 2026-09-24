@@ -102,7 +102,7 @@ const SUPPORT_USERNAME_TEXT_KEY = 'bot.support_username';
  *   • One edge per button — including `URL` / `WEBAPP` / `CALLBACK` /
  *     `BACK` graph buttons that never produced edges before. Invalid
  *     destinations (dangling shortIds, unsafe URLs, empty webApp paths,
- *     callbacks nothing in the bot answers) are flagged with `valid: false`
+ *     callbacks no handler in the bot knows) are flagged with `valid: false`
  *     so the SPA renders them red. A main-menu button and a callback are
  *     routed by `menu-button-route.ts`, the rules «Схема» captions with.
  *
@@ -495,10 +495,11 @@ function composeNotificationButtonEdge(
   // The callback as reiwa answers it (`callbackRoute`, reiwa's vocabulary):
   // `menu:main`, `menu` and `back_to_menu` → the main menu; `screen:<shortId>`
   // and a callback that is exactly a screen's shortId → that screen (red when
-  // `screen:` names none — the bot answers «экран не найден»); `invite` /
-  // `rules` / `help` → the screen of that name; the answered service words
-  // (`close`, `lang:…`, …) → a callback with no node; anything else nothing in
-  // the bot answers → red.
+  // `screen:` names none — the bot answers «Меню обновилось» and the main
+  // menu); `invite` / `rules` / `help` → the screen of that name; the answered
+  // service words (`close`, `lang:…`, …) → a callback with no node; any other
+  // word — the bot answers it «Меню обновилось» and the main menu too, not what
+  // the button says → red.
   return routeEdge(id, source, label, callbackRoute(target, routes.context), 'link', routes);
 }
 

@@ -133,3 +133,44 @@ describe('English bot-text seeding', () => {
     assert.deepEqual(created, [], 'seeding wrote rows into a fully seeded database');
   });
 });
+
+/**
+ * «Меню обновилось» — the toast the bot answers a button it no longer knows with
+ * (reiwa `bot/pages/stale-button.ts`, 24.09.2026). A text the bot sends is not
+ * done until the panel lets the operator change it: seeded here, it is in
+ * «Тексты» and under «Карта бота» on every installation after the upgrade, in
+ * both languages.
+ */
+describe('the stale-button toast among the default texts', () => {
+  it('is created on an installation that has every other text, Russian and English', async () => {
+    const created: Created[] = [];
+    const service = new InternalBotConfigService(
+      {
+        settings: { findFirst: async () => null, create: async () => ({}) },
+        botButton: { count: async () => 1 },
+        botEmoji: { findUnique: async () => ({ id: 'seeded' }) },
+        botText: {
+          findUnique: async ({ where }: { where: { key: string } }) =>
+            where.key === 'menu.updated' || where.key === 'menu.updated@en' ? null : { id: 'seeded' },
+        },
+      } as never,
+      { listAll: async () => [], count: async () => 1 } as never,
+      { listAll: async () => [] } as never,
+      {
+        listAll: async () => [],
+        create: async (input: Created) => {
+          created.push({ key: input.key, value: input.value });
+          return { id: 'x' };
+        },
+      } as never,
+      { getActive: async () => null } as never,
+    );
+
+    await service.onApplicationBootstrap();
+
+    assert.deepEqual(created, [
+      { key: 'menu.updated', value: 'Меню обновилось' },
+      { key: 'menu.updated@en', value: 'Menu updated' },
+    ]);
+  });
+});

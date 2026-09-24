@@ -155,6 +155,10 @@ const PLAIN_TEXT_KEYS: ReadonlySet<string> = new Set([
   'channel.verified',
   'quests.channel.not_subscribed',
   'quests.channel.verified',
+  // «Меню обновилось», the toast over the main menu for an old button the bot no
+  // longer knows — `plainCopy` in `showMainMenu`, reiwa `bot/pages/start.ts`
+  // (called from `bot/pages/stale-button.ts` and `dynamic-screen.ts`).
+  'menu.updated',
   // A refused Stars checkout's `error_message`, which Telegram shows as plain
   // text — reiwa `bot/pages/payments.ts`.
   'payments.stars.unknown_invoice',

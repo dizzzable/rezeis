@@ -11,8 +11,8 @@
  *     message reiwa sends from `src/bot/pages/**` that no flow screen stands
  *     in for: the language picker, the channel gate's prompt, the channel
  *     quest, the return from a payment, the password reset, `/paysupport`,
- *     the error message, AI support, the `/` command list, the answer to a
- *     button onto a deleted screen and the one-line service answers.
+ *     the error message, AI support, the `/` command list, the answer to an
+ *     old button the bot no longer knows and the one-line service answers.
  *
  * Every text key and button here is one reiwa reads; each entry names where.
  * A button's `iconKey` is given only where reiwa renders it through
@@ -57,8 +57,10 @@ export const MAIN_MENU_CHIPS: readonly SystemButtonPreview[] = MAIN_MENU_SYSTEM_
  * The texts the bot writes around the greeting: the greeting itself when the
  * start screen has none (`bot.welcome_message`), the line it sends instead of
  * an empty one (`menu.choose_action`, also the answer to the old `back_to_menu`
- * button, `menu.ts`), and the subscription lines under it
- * (`buildProfileSummary`).
+ * button, `menu.ts`), the subscription lines under it (`buildProfileSummary`),
+ * and the pop-up over it when an old button the bot no longer knows was
+ * pressed (`menu.updated`, `stale-button.ts`, from 24.09.2026 — see also
+ * `SYSTEM_SCREENS` `staleButton`).
  */
 export const MAIN_MENU_TEXT_KEYS: readonly string[] = [
   'bot.welcome_message',
@@ -70,6 +72,7 @@ export const MAIN_MENU_TEXT_KEYS: readonly string[] = [
   'profile.unlimited',
   'profile.until',
   'common.not_available',
+  'menu.updated',
 ]
 
 /**
@@ -337,21 +340,17 @@ export const SYSTEM_SCREENS: readonly SystemScreen[] = [
     })),
   },
   {
-    // `dynamic-screen.ts`: a `screen:<shortId>` button onto a screen the
-    // published flow no longer has — the message and a way back.
-    id: 'screenNotFound',
-    titleKey: 'botFlow.systemScreens.screenNotFound.title',
-    triggerKey: 'botFlow.systemScreens.screenNotFound.trigger',
-    buttons: [
-      {
-        key: 'screen-not-found-back',
-        labelKey: 'botFlow.systemButtons.back',
-        isBack: true,
-        iconKey: 'back',
-        textKey: 'back_to_menu',
-      },
-    ],
-    texts: [{ key: 'screen.not_found' }],
+    // `stale-button.ts`, and `dynamic-screen.ts` for a `screen:<shortId>` button
+    // onto a screen the published flow no longer has (24.09.2026): a button the
+    // bot no longer knows gets the pop-up «Меню обновилось» and the main menu in
+    // place of its message — which buttons that menu has, the main menu says.
+    // It used to be «экран не найден» with a way back, and silence for any
+    // other data.
+    id: 'staleButton',
+    titleKey: 'botFlow.systemScreens.staleButton.title',
+    triggerKey: 'botFlow.systemScreens.staleButton.trigger',
+    buttons: [],
+    texts: [{ key: 'menu.updated', captionKey: `${CAPTION}.menuUpdated` }],
   },
   {
     // One-line answers with no buttons: the access mode on `/start`

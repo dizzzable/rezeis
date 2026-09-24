@@ -78,6 +78,8 @@ describe('the texts the bot writes around the greeting', () => {
     'profile.unlimited',
     'profile.until',
     'common.not_available',
+    // «Меню обновилось» over the menu, for an old button (24.09.2026).
+    'menu.updated',
   ])('lists %s', async (key) => {
     mockTextsApi()
     renderWithProviders(<MainMenuSystemPanel />)
@@ -93,5 +95,9 @@ describe('the texts the bot writes around the greeting', () => {
     expect(screen.getByText(i18n.t('botFlow.screenTexts.captions.chooseAction'))).toBeInTheDocument()
     // One caption for the whole block of subscription lines, above each of them.
     expect(screen.getAllByText(i18n.t('botFlow.screenTexts.captions.subscriptionLine'))).toHaveLength(7)
+    // The pop-up an old button gets says when it is shown: its key says nothing.
+    const staleCaption = i18n.t('botFlow.screenTexts.captions.menuUpdated')
+    expect(staleCaption).not.toBe('botFlow.screenTexts.captions.menuUpdated')
+    expect(screen.getByText(staleCaption)).toBeInTheDocument()
   })
 })

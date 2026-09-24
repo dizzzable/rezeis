@@ -104,8 +104,9 @@ const REIWA: Record<string, { texts: string[]; buttons: Array<[string, string | 
     ],
     buttons: [],
   },
-  // dynamic-screen.ts, a `screen:` button onto a screen that is gone
-  screenNotFound: { texts: ['screen.not_found'], buttons: [['back_to_menu', 'back']] },
+  // stale-button.ts (and dynamic-screen.ts for a `screen:` button onto a screen
+  // that is gone): the toast over the main menu, whose buttons are the menu's
+  staleButton: { texts: ['menu.updated'], buttons: [] },
   // start.ts (access mode, link code), payments.ts
   serviceReplies: {
     texts: [
@@ -165,6 +166,8 @@ describe('the bot’s screens without a block', () => {
       ['menu.btn_trial_paid', null],
     ])
     expect(MAIN_MENU_TEXT_KEYS).toContain('menu.choose_action')
+    // «Меню обновилось» is edited with the main menu's texts too: it shows over the menu.
+    expect(MAIN_MENU_TEXT_KEYS).toContain('menu.updated')
   })
 })
 

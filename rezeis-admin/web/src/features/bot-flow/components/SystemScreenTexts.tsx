@@ -76,6 +76,9 @@ const KEY_CAPTIONS: Readonly<Record<string, string>> = {
   'profile.unlimited': 'botFlow.screenTexts.captions.subscriptionLine',
   'profile.until': 'botFlow.screenTexts.captions.subscriptionLine',
   'common.not_available': 'botFlow.screenTexts.captions.subscriptionLine',
+  // «Меню обновилось» — only when an old button the bot no longer knows is
+  // pressed (reiwa `stale-button.ts`); by its key nobody would look for it.
+  'menu.updated': 'botFlow.screenTexts.captions.menuUpdated',
   'invite.share_button': 'botFlow.screenTexts.captions.shareButton',
   'invite.share_prompt': 'botFlow.screenTexts.captions.sharePrompt',
   'invite.share_web_line': 'botFlow.screenTexts.captions.shareWebLine',
