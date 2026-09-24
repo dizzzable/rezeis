@@ -14,6 +14,7 @@ import { SubscriptionTermHooksService } from '../../add-on-entitlements/services
 import type { PlanChangeTarget } from '../../add-on-entitlements/services/subscription-term.service';
 import { numericColumnsFromProjection } from '../../plans/migrations/plan-migration-compute.util';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
+import { carryImportDomainKeys } from '../utils/import-domain-snapshot.util';
 
 /** `snapshotSource` of the term a bulk assignment rotates a subscription onto. */
 export const BULK_PLAN_ASSIGNMENT_TERM = 'BULK_PLAN_ASSIGNMENT_TERM';
@@ -26,9 +27,10 @@ export const BULK_PLAN_ASSIGNMENT_TERM = 'BULK_PLAN_ASSIGNMENT_TERM';
  *  - `ALREADY_ASSIGNED`: the snapshot names a plan under EITHER key — `id`,
  *    which every panel writer puts there (a payment, «Назначить план», a plan
  *    migration, this assignment, the plan cloner), or `planId`, the import
- *    domain's link marker, which the importers that rebuild a snapshot from
- *    donor facts (altshop, remnashop, bedolaga) carry across a re-import while
- *    dropping `id`. Asked FIRST: a row this assignment linked before no longer
+ *    domain's link marker. A backup re-import used to rebuild the snapshot from
+ *    donor facts and carry `planId` alone across, dropping `id`; it merges now
+ *    (`reimportPlanSnapshot`), but the rows it stripped still carry `planId`
+ *    alone. Asked FIRST: a row this assignment linked before no longer
  *    carries the import marker, and is "already assigned", not "not imported".
  *  - `NOT_IMPORTED`: no import marker — `importedFrom`, which every importer
  *    writes, or the legacy «IMPORTED» placeholder name. A subscription given by
@@ -37,9 +39,11 @@ export const BULK_PLAN_ASSIGNMENT_TERM = 'BULK_PLAN_ASSIGNMENT_TERM';
  *    of its own was fulfilled in this panel — a payment row, or an applied line
  *    of a combined renewal. THE SNAPSHOT ALONE CANNOT TELL: the Remnawave import
  *    MERGES `importedFrom` into rows it matches by panel identity, bought ones
- *    included; a rebuilding import replaces the snapshot wholesale; and a
- *    renewal of a never-assigned import keeps its import snapshot. The payment
- *    row is immutable history, the one signal nothing rewrites.
+ *    included, and the backup re-imports do too; a backup re-import used to
+ *    replace the snapshot wholesale, leaving a bought row looking like a fresh
+ *    import; and a renewal of a never-assigned import keeps its import
+ *    snapshot. The payment row is immutable history, the one signal nothing
+ *    rewrites.
  *  - `ASSIGN`: none of those.
  */
 export type BulkAssignmentVerdict = 'ASSIGN' | 'ALREADY_ASSIGNED' | 'NOT_IMPORTED' | 'PURCHASED_HERE';
@@ -351,21 +355,23 @@ export class BulkPlanAssignmentService {
         // marker, and three readers depend on it:
         //   - `readBulkAssignmentSnapshot` above, which (with `id`) is what stops
         //     a second run of this assignment from re-planning a subscription an
-        //     operator already assigned — also after a re-import dropped `id`;
+        //     operator already assigned — also on a row an older re-import
+        //     stripped to `planId` alone;
         //   - `BackupPlanClonerService`, which skips a row that already carries
         //     one;
-        //   - `AltshopImporterService` / `RemnashopImporterService`, whose
-        //     `buildSubscriptionPlanSnapshot` rebuilds the snapshot from donor
-        //     facts and carries `planId` — and ONLY `planId` — across, so a
-        //     re-import of an assigned subscription keeps its plan link.
-        // Dropping it here would make a re-import silently unlink the plan.
+        //   - the backup importers (`reimportPlanSnapshot`), which write a
+        //     donor's `tag` and reset strategy only onto a snapshot that names
+        //     no plan, by `id` or by this key.
+        // Dropping it here would let the plan cloner re-link a row this
+        // assignment linked.
         planId: plan.id,
         name: plan.name,
         tag: plan.tag,
         type: plan.type,
-        // This is a FULL snapshot replacement, so the icon has to be written
-        // here too — attaching a real plan to imported subscriptions is exactly
-        // the case where the card should stop showing the status-glyph fallback.
+        // Every key but the import's own is replaced, so the icon has to be
+        // written here too — attaching a real plan to imported subscriptions is
+        // exactly the case where the card should stop showing the status-glyph
+        // fallback.
         icon: plan.icon,
         trafficLimit: plan.trafficLimit,
         deviceLimit: plan.deviceLimit,
@@ -425,7 +431,12 @@ export class BulkPlanAssignmentService {
             deviceLimit: carry.columns.deviceLimit,
             internalSquads: [...plan.internalSquads],
             externalSquad: plan.externalSquad,
-            planSnapshot: newPlanSnapshot,
+            // The plan's snapshot, with the import's own keys of the one read
+            // under the lock carried across (`carryImportDomainKeys`): replaced
+            // wholesale it lost `sourceSubscriptionId`, and on an installation
+            // moved from another panel the next import of the same backup
+            // created a second subscription for every assigned customer.
+            planSnapshot: carryImportDomainKeys(current?.planSnapshot ?? null, newPlanSnapshot),
           },
         });
 

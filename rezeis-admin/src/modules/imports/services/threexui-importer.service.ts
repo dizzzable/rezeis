@@ -4,6 +4,7 @@ import { ImportStatus, Prisma, SyncAction, SubscriptionStatus } from '@prisma/cl
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { ImportSummary } from '../interfaces/import-summary.interface';
 import { panelTrafficLimitToGb } from '../../remnawave/utils/panel-traffic-limit.util';
+import { reimportPlanSnapshot } from '../utils/reimport-plan-snapshot.util';
 
 /**
  * Shape of a 3x-ui client record as exported from the panel's SQLite/PG DB.
@@ -247,14 +248,15 @@ export class ThreeXuiImporterService {
     const externalId = client.subId || client.uuid || client.email;
     if (!externalId) return 'skipped';
 
-    // Look for existing subscription imported from 3x-ui with matching configUrl or planSnapshot
+    // Look for existing subscription imported from 3x-ui with matching configUrl or planSnapshot.
+    // With its snapshot, which a re-import merges into rather than rebuilds.
     const existing = await this.prismaService.subscription.findFirst({
       where: {
         userId,
         planSnapshot: { path: ['importedFrom'], equals: '3xui' },
         configUrl: client.subscriptionUrl || undefined,
       },
-      select: { id: true },
+      select: { id: true, planSnapshot: true },
     });
 
     const status = this.mapStatus(client);
@@ -266,17 +268,22 @@ export class ThreeXuiImporterService {
       ? new Date(client.expiryTime)
       : null;
 
-    const planSnapshot: Prisma.InputJsonValue = {
-      importedFrom: '3xui',
-      // Durable link for bulk plan re-assignment (see BulkPlanAssignmentService).
-      ...(importRecordId ? { importRecordId } : {}),
-      email: client.email,
-      subId: client.subId,
-      uuid: client.uuid,
-      inboundRemark: client.inboundRemark,
-      inboundProtocol: client.inboundProtocol,
-      trafficResetDays: client.reset,
-    };
+    // Merged into what an existing row already holds (`reimportPlanSnapshot`),
+    // as the backup importers do: a plan an operator assigned since — its `id`,
+    // name and limits — and every key this importer does not write stay.
+    const planSnapshot = reimportPlanSnapshot(existing?.planSnapshot, {
+      own: {
+        importedFrom: '3xui',
+        // Durable link for bulk plan re-assignment (see BulkPlanAssignmentService).
+        ...(importRecordId ? { importRecordId } : {}),
+        email: client.email,
+        subId: client.subId,
+        uuid: client.uuid,
+        inboundRemark: client.inboundRemark,
+        inboundProtocol: client.inboundProtocol,
+        trafficResetDays: client.reset,
+      },
+    });
 
     if (existing) {
       await this.prismaService.subscription.update({

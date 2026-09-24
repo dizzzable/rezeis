@@ -24,6 +24,8 @@ import {
   RemnashopPlanDuration,
   RemnashopPlanPrice,
 } from '../utils/remnashop-backup-parser';
+import { stealthnetCatalogPlanIdOf } from '../utils/stealthnet-catalog-id.util';
+import { readBulkAssignmentSnapshot } from './bulk-plan-assignment.service';
 
 // ── Public types ────────────────────────────────────────────────────────────
 
@@ -134,6 +136,17 @@ interface NormalizedSourcePrice {
   readonly price: string;
 }
 
+/** A plan of this panel, as the clone's reuse decision reads it. */
+interface ExistingPlanForReuse {
+  readonly id: string;
+  readonly name: string;
+  readonly type: PlanType;
+  readonly trafficLimit: number | null;
+  readonly deviceLimit: number;
+  readonly trafficLimitStrategy: TrafficLimitStrategy;
+  readonly deletedAt: Date | null;
+}
+
 interface NormalizedCatalog {
   readonly plans: ReadonlyArray<NormalizedSourcePlan>;
   readonly durations: ReadonlyArray<NormalizedSourceDuration>;
@@ -150,8 +163,10 @@ interface NormalizedCatalog {
  *
  * Design notes:
  *   1. Idempotent — running twice with the same input is a no-op:
- *      existing Plan rows with matching names are reused, subscriptions
- *      whose `planId` is already set are not overwritten.
+ *      existing Plan rows with the same name that sell the same product are
+ *      reused (`cloneTarget`), and subscriptions already on a plan are not
+ *      overwritten. (The reuse test used to be one that could never pass, so
+ *      a second clone made «Имя2» of every plan.)
  *   2. Suffix-on-conflict — when a target Plan name already exists with
  *      DIFFERENT settings (e.g. operator hand-rolled "Standard" before
  *      cloning), we append `2`, `3`, … so the source plan does not
@@ -164,9 +179,9 @@ interface NormalizedCatalog {
  *      to plans NOT in the selected subset are dropped silently
  *      (logged) rather than producing dangling foreign-keyish strings.
  *   5. Subscriptions — linked only when `linkSubscriptions: true` AND
- *      `Subscription.planSnapshot.importedFrom === sourceType` AND
- *      `Subscription.planId === null`. Operator-set planIds are never
- *      overwritten.
+ *      `Subscription.planSnapshot.importedFrom === sourceType` AND the
+ *      snapshot names no plan (neither `planId` nor `id`). A plan an
+ *      operator or a payment put the row on is never overwritten.
  */
 /**
  * Import sources whose `result.catalog` this service knows how to read.
@@ -201,21 +216,20 @@ export class BackupPlanClonerService {
     const subscriptionCounts = await this.countSubscriptionsBySourcePlan(record);
 
     // Pre-compute final names so the operator sees exactly what we'd
-    // create, including the conflict suffix logic.
-    const existingNames = new Set(
-      (
-        await this.prismaService.plan.findMany({ select: { name: true } })
-      ).map((p) => p.name),
-    );
+    // create, including the conflict suffix logic — by the same decision the
+    // clone takes (`cloneTarget`).
+    const existingByName = await this.loadExistingPlansByName();
+    const existingNames = new Set(existingByName.keys());
     // Track names we'll occupy within this same preview call so two
     // source plans with the same name in the catalog don't both claim
     // the bare name.
     const claimedThisRound = new Set<string>();
 
     const plans = catalog.plans.map((plan) => {
-      const finalName = this.allocateFinalName(plan.name, existingNames, claimedThisRound);
+      const target = this.cloneTarget(plan, existingByName, existingNames, claimedThisRound);
+      const finalName = target.finalName;
       claimedThisRound.add(finalName);
-      const willReuseExisting = finalName === plan.name && existingNames.has(plan.name);
+      const willReuseExisting = target.reuse !== null;
       const recommendDeselect = plan.name.toUpperCase() === 'IMPORTED';
 
       return {
@@ -263,17 +277,16 @@ export class BackupPlanClonerService {
 
     // ── Phase 1: create / reuse Plan rows ──────────────────────────────────
     //
-    // We cache existing plan names BEFORE the transaction so the
-    // suffix logic is deterministic. Names created during this same
-    // run are tracked in `claimedThisRound` and added to existing as
-    // we go to keep dedup correct across multiple rows.
-    const existingNames = new Set(
-      (
-        await this.prismaService.plan.findMany({ select: { name: true } })
-      ).map((p) => p.name),
-    );
+    // We cache existing plans BEFORE the loop so the reuse and suffix
+    // decisions are deterministic. Names created during this same run are
+    // tracked in `claimedThisRound` and added to existing as we go to keep
+    // dedup correct across multiple rows.
+    const existingByName = await this.loadExistingPlansByName();
+    const existingNames = new Set(existingByName.keys());
     const claimedThisRound = new Set<string>();
     const sourceIdToTargetCuid = new Map<number, string>();
+    // Source plans mapped onto a plan that was here before this run.
+    const reusedSourceIds = new Set<number>();
     const namesCreated: Array<{ sourcePlanId: number; finalName: string }> = [];
     const errors: string[] = [];
     let plansCreated = 0;
@@ -283,24 +296,19 @@ export class BackupPlanClonerService {
 
     for (const plan of plansToClone) {
       try {
-        const finalName = this.allocateFinalName(plan.name, existingNames, claimedThisRound);
+        const target = this.cloneTarget(plan, existingByName, existingNames, claimedThisRound);
+        const finalName = target.finalName;
         claimedThisRound.add(finalName);
 
-        // Reuse only when name AND core settings match — otherwise
-        // suffix-on-conflict above already produced a unique name.
-        const isReuse = finalName === plan.name && existingNames.has(plan.name);
-        if (isReuse) {
-          const existing = await this.prismaService.plan.findUnique({
-            where: { name: plan.name },
-            select: { id: true },
-          });
-          if (existing) {
-            sourceIdToTargetCuid.set(plan.id, existing.id);
-            plansReused += 1;
-            namesCreated.push({ sourcePlanId: plan.id, finalName });
-            continue;
-          }
-          // findUnique can race — fall through to create() below.
+        // Reuse when the name AND the product match (`cloneTarget`): a second
+        // clone of the same backup lands on the plans the first one made,
+        // instead of making «Имя2».
+        if (target.reuse !== null) {
+          sourceIdToTargetCuid.set(plan.id, target.reuse.id);
+          reusedSourceIds.add(plan.id);
+          plansReused += 1;
+          namesCreated.push({ sourcePlanId: plan.id, finalName });
+          continue;
         }
 
         // Build the durations + prices for this plan. Dedupe by day-count:
@@ -358,9 +366,11 @@ export class BackupPlanClonerService {
     // are integer references into the same source catalog. We translate
     // them through `sourceIdToTargetCuid`, dropping references to
     // source plans that the operator deselected (or that errored above).
+    // Only on plans this run CREATED: a reused plan was here before, and its
+    // references are the operator's to keep.
     for (const plan of plansToClone) {
       const targetCuid = sourceIdToTargetCuid.get(plan.id);
-      if (!targetCuid) continue;
+      if (!targetCuid || reusedSourceIds.has(plan.id)) continue;
       const upgradeIds = this.translateIds(plan.upgradeToPlanIds, sourceIdToTargetCuid);
       const replacementIds = this.translateIds(plan.replacementPlanIds, sourceIdToTargetCuid);
       if (upgradeIds.length === 0 && replacementIds.length === 0) continue;
@@ -384,12 +394,15 @@ export class BackupPlanClonerService {
     // preserving the original keys but pointing planId at the cloned
     // Plan and refreshing the cached `name`/`tag`/limit fields.
     //
-    // Dedup: skip if `planSnapshot.planId` is already a CUID-shaped
-    // string (means the operator or a previous run already linked
-    // this subscription); only fill in nulls.
+    // Dedup: skip a row whose snapshot already names a plan — by `planId`
+    // (an earlier clone or «Назначить план импортированным» linked it) or by
+    // `id` (an operator's «Назначить план», a payment). Both writers now keep
+    // the import's keys, so such a row is a candidate below by its
+    // `importedFrom`; re-linking it would write the donor plan's clone over
+    // the operator's choice. Only rows on no plan are filled in.
     let subscriptionsLinked = 0;
     if (input.linkSubscriptions) {
-      const sourceType = record.sourceType; // 'altshop' | 'remnashop'
+      const sourceType = record.sourceType; // one of CLONEABLE_SOURCES
 
       // Pre-load every cloned plan once so we can build the snapshot
       // without round-tripping for each subscription.
@@ -411,10 +424,11 @@ export class BackupPlanClonerService {
       });
       for (const sub of candidateSubs) {
         const snap = (sub.planSnapshot ?? {}) as Record<string, unknown>;
-        // Already linked by hand or by an earlier clone? leave it.
-        if (typeof snap.planId === 'string' && snap.planId.length > 0) continue;
+        // Already on a plan — linked by hand, by an earlier clone or by a
+        // payment? leave it.
+        if (readBulkAssignmentSnapshot(snap) === 'ALREADY_ASSIGNED') continue;
 
-        const sourcePlanId = this.extractSourcePlanId(sub.planSnapshot);
+        const sourcePlanId = this.extractSourcePlanId(sub.planSnapshot, sourceType);
         if (sourcePlanId === null) continue;
         const targetCuid = sourceIdToTargetCuid.get(sourcePlanId);
         if (!targetCuid) continue;
@@ -440,10 +454,9 @@ export class BackupPlanClonerService {
           // `planId` STAYS, and is not a duplicate to be tidied away: it is the
           // import domain's "this imported row has been linked to a real plan"
           // marker. `readBulkAssignmentSnapshot` tests it, the re-link loop above
-          // skips a row that already carries one, and the altshop / remnashop
-          // importers rebuild the snapshot from donor facts carrying `planId`
-          // and only `planId` — so dropping it would make a re-import silently
-          // unlink the plan.
+          // skips a row that already carries one, and the backup importers
+          // (`reimportPlanSnapshot`) write a donor's `tag` and reset strategy
+          // only onto a snapshot that names no plan by it or by `id`.
           planId: targetPlan.id,
           name: targetPlan.name,
           tag: targetPlan.tag,
@@ -608,16 +621,25 @@ export class BackupPlanClonerService {
       select: { planSnapshot: true },
     });
     for (const sub of subs) {
-      const id = this.extractSourcePlanId(sub.planSnapshot);
+      const id = this.extractSourcePlanId(sub.planSnapshot, record.sourceType);
       if (id === null) continue;
       counts.set(id, (counts.get(id) ?? 0) + 1);
     }
     return counts;
   }
 
-  private extractSourcePlanId(planSnapshot: unknown): number | null {
-    if (!planSnapshot || typeof planSnapshot !== 'object') return null;
+  /**
+   * The donor catalog's id of the plan a subscription was on in the donor bot.
+   *
+   * STEALTHNET's catalog names a tariff by the hash of its CUID
+   * (`stealthnetCatalogPlanIdOf`), so its subscriptions are read that way: read
+   * as a number like the other donors' integer ids, every one of them came out
+   * `NaN` and none was ever linked to its clone.
+   */
+  private extractSourcePlanId(planSnapshot: unknown, sourceType: string): number | null {
+    if (!planSnapshot || typeof planSnapshot !== 'object' || Array.isArray(planSnapshot)) return null;
     const root = planSnapshot as Record<string, unknown>;
+    if (sourceType === 'stealthnet') return stealthnetCatalogPlanIdOf(root);
     const original = root.originalPlanSnapshot as Record<string, unknown> | undefined;
     const candidate = original?.id ?? root.planId ?? null;
     if (typeof candidate === 'number') return candidate;
@@ -626,6 +648,57 @@ export class BackupPlanClonerService {
       return Number.isFinite(parsed) ? parsed : null;
     }
     return null;
+  }
+
+  /** Every plan of this panel, by its (unique) name, with what {@link cloneTarget} compares. */
+  private async loadExistingPlansByName(): Promise<Map<string, ExistingPlanForReuse>> {
+    const plans = await this.prismaService.plan.findMany({
+      select: {
+        id: true,
+        name: true,
+        type: true,
+        trafficLimit: true,
+        deviceLimit: true,
+        trafficLimitStrategy: true,
+        deletedAt: true,
+      },
+    });
+    return new Map(plans.map((plan) => [plan.name, plan]));
+  }
+
+  /**
+   * What a clone does with one donor plan: REUSE the plan of this panel that
+   * has its name and is the same product, or create one under the first free
+   * name (`name`, `name2`, …).
+   *
+   * "The same product" is what a plan sells, as the clone would write it: its
+   * type, traffic and device limits, and reset strategy. Not its price,
+   * squads, tag, description or placement — the things an operator sets on a
+   * clone after it was made (on a move from another panel the squads MUST be
+   * set anew), and that must not make the next clone of the same backup create
+   * «Имя2». A plan an operator hand-rolled under the same name that sells
+   * something else keeps its name, and the donor plan gets a suffix. A deleted
+   * plan is never reused, and a name claimed earlier in this run is not either.
+   */
+  private cloneTarget(
+    plan: NormalizedSourcePlan,
+    existingByName: ReadonlyMap<string, ExistingPlanForReuse>,
+    existingNames: ReadonlySet<string>,
+    claimed: ReadonlySet<string>,
+  ): { readonly reuse: ExistingPlanForReuse | null; readonly finalName: string } {
+    const existing = existingByName.get(plan.name);
+    if (
+      existing !== undefined &&
+      !claimed.has(plan.name) &&
+      existing.deletedAt === null &&
+      existing.type === this.coercePlanType(plan.type) &&
+      existing.trafficLimit === (plan.trafficLimit > 0 ? plan.trafficLimit : null) &&
+      existing.deviceLimit === plan.deviceLimit &&
+      existing.trafficLimitStrategy === this.coerceStrategy(plan.trafficLimitStrategy)
+    ) {
+      return { reuse: existing, finalName: plan.name };
+    }
+    return { reuse: null, finalName: this.allocateFinalName(plan.name, existingNames, claimed) };
   }
 
   /**

@@ -42,6 +42,8 @@ import {
   type PanelRelationship,
   type PanelWriteOutcome,
 } from '../utils/panel-relationship.util';
+import { reimportPlanSnapshot } from '../utils/reimport-plan-snapshot.util';
+import { stableHashId } from '../utils/stealthnet-catalog-id.util';
 import {
   StealthnetClient,
   StealthnetPayment,
@@ -576,9 +578,11 @@ export class StealthnetImporterService {
     //
     // With what `judgePanelRowReadback` needs below: a row in the term model
     // takes the panel overlay by the rule every Remnawave read-back shares.
+    // And the snapshot, which a re-import merges into rather than rebuilds.
     const existingSelect = {
       id: true,
       userId: true,
+      planSnapshot: true,
       remnawaveId: true,
       trafficLimit: true,
       deviceLimit: true,
@@ -603,33 +607,40 @@ export class StealthnetImporterService {
     const extraDevices = Math.max(0, sub.extra_devices ?? 0);
     const backupDeviceLimit = baseDevices + extraDevices;
 
-    const planSnapshot: Prisma.InputJsonValue = {
-      importedFrom: 'stealthnet',
-      // Durable link for bulk plan re-assignment (see BulkPlanAssignmentService).
-      ...(importRecordId ? { importRecordId } : {}),
-      sourceSubscriptionId: sub.id,
-      sourceTariffId: sub.tariff_id,
-      // Mirror altshop's `originalPlanSnapshot.id` shape so the Plan
-      // Cloner's `extractSourcePlanId()` walks both seamlessly.
-      originalPlanSnapshot: tariff
-        ? {
-            id: tariff.id,
-            name: tariff.name,
-            duration_days: tariff.duration_days,
-            included_devices: tariff.included_devices,
-            max_extra_devices: tariff.max_extra_devices,
-            price_per_extra_device: tariff.price_per_extra_device,
-          }
-        : null,
-      tariffName: tariff?.name ?? null,
-      currency: tariff?.currency ?? null,
-      durationDays: tariff?.duration_days ?? null,
-      // STEALTHNET "extra devices" are per-subscription, not a separate
-      // entitlement table — surface them for clone/analytics + device sum.
-      extraDevices,
-      extraDevicesMonthlyPrice: sub.extra_devices_monthly_price ?? 0,
-      backupExpireAt: sub.expire_at,
-    };
+    // Merged into what an existing row already holds (`reimportPlanSnapshot`):
+    // a plan an operator assigned since the first import — its `id`, name,
+    // limits and the `planId` link, which this importer used not to carry
+    // across at all — and every key it does not write stay as they are.
+    const planSnapshot = reimportPlanSnapshot(existing?.planSnapshot, {
+      own: {
+        importedFrom: 'stealthnet',
+        // Durable link for bulk plan re-assignment (see BulkPlanAssignmentService).
+        ...(importRecordId ? { importRecordId } : {}),
+        sourceSubscriptionId: sub.id,
+        sourceTariffId: sub.tariff_id,
+        // Mirror altshop's `originalPlanSnapshot.id` shape so the Plan
+        // Cloner's `extractSourcePlanId()` walks both seamlessly.
+        originalPlanSnapshot: tariff
+          ? {
+              id: tariff.id,
+              name: tariff.name,
+              duration_days: tariff.duration_days,
+              included_devices: tariff.included_devices,
+              max_extra_devices: tariff.max_extra_devices,
+              price_per_extra_device: tariff.price_per_extra_device,
+            }
+          : null,
+        tariffName: tariff?.name ?? null,
+        durationDays: tariff?.duration_days ?? null,
+        // STEALTHNET "extra devices" are per-subscription, not a separate
+        // entitlement table — surface them for clone/analytics + device sum.
+        extraDevices,
+        extraDevicesMonthlyPrice: sub.extra_devices_monthly_price ?? 0,
+        backupExpireAt: sub.expire_at,
+      },
+      // The key a payment made here writes its own currency under.
+      planFacts: { currency: tariff?.currency ?? null },
+    });
 
     // Remnawave is the source of truth. If the panel still has this profile,
     // overlay its FRESH state (active subscriptions become accurate). If the
@@ -1192,22 +1203,6 @@ function mapResetMode(mode: string): string {
     default:
       return 'NO_RESET';
   }
-}
-
-/**
- * Deterministic 31-bit hash of a CUID-like string. Used to fabricate
- * integer source-plan ids that the cloner's catalog expects. Two
- * CUIDs colliding would degrade the user experience (clone preview
- * shows the wrong subscription count) but never corrupts data — the
- * cloner identifies real plans through the catalog payload, never
- * through these synthetic ids beyond Map lookups.
- */
-function stableHashId(value: string): number {
-  let hash = 0;
-  for (let i = 0; i < value.length; i += 1) {
-    hash = ((hash << 5) - hash + value.charCodeAt(i)) | 0;
-  }
-  return Math.abs(hash);
 }
 
 function safeParseJson(value: string): Prisma.InputJsonValue | undefined {

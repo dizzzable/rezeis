@@ -45,6 +45,7 @@ import {
   type PanelRelationship,
   type PanelWriteOutcome,
 } from '../utils/panel-relationship.util';
+import { reimportPlanSnapshot } from '../utils/reimport-plan-snapshot.util';
 import {
   RemnashopPlan,
   RemnashopPlanDuration,
@@ -964,30 +965,26 @@ export class RemnashopImporterService {
     existingSnapshot?: Prisma.JsonValue,
   ): Prisma.InputJsonValue {
     // A plan cloned or selected locally after a previous import is target
-    // state, not donor state. Keep that CUID on a retry so the catalog linker
-    // cannot overwrite an operator's choice.
-    const existingPlanId =
-      existingSnapshot &&
-      typeof existingSnapshot === 'object' &&
-      !Array.isArray(existingSnapshot) &&
-      typeof existingSnapshot.planId === 'string' &&
-      existingSnapshot.planId.length > 0
-        ? existingSnapshot.planId
-        : undefined;
-
-    return {
-      importedFrom: 'remnashop',
-      // Durable link for bulk plan re-assignment (see BulkPlanAssignmentService).
-      ...(importRecordId ? { importRecordId } : {}),
-      ...(existingPlanId ? { planId: existingPlanId } : {}),
-      // The donor's own row id. On a panel that never issued these identifiers
-      // it is the ONLY key a second import can find this row by — without it a
-      // re-run mints a duplicate subscription for every customer.
-      sourceSubscriptionId: sub.id,
-      tag: sub.tag,
-      trafficLimitStrategy: sub.traffic_limit_strategy,
-      originalPlanSnapshot: sub.plan_snapshot as Prisma.InputJsonValue,
-    };
+    // state, not donor state: merged into what the row holds
+    // (`reimportPlanSnapshot`), a retry keeps that plan — its `planId` link,
+    // `id`, name and limits — so the catalog linker cannot overwrite an
+    // operator's choice and the customer keeps their plan's name.
+    return reimportPlanSnapshot(existingSnapshot, {
+      own: {
+        importedFrom: 'remnashop',
+        // Durable link for bulk plan re-assignment (see BulkPlanAssignmentService).
+        ...(importRecordId ? { importRecordId } : {}),
+        // The donor's own row id. On a panel that never issued these identifiers
+        // it is the ONLY key a second import can find this row by — without it a
+        // re-run mints a duplicate subscription for every customer.
+        sourceSubscriptionId: sub.id,
+        originalPlanSnapshot: sub.plan_snapshot as Prisma.InputJsonValue,
+      },
+      planFacts: {
+        tag: sub.tag,
+        trafficLimitStrategy: sub.traffic_limit_strategy,
+      },
+    });
   }
 
   private mapStatus(status: string): SubscriptionStatus {

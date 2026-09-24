@@ -50,6 +50,7 @@ import {
   type PanelRelationship,
   type PanelWriteOutcome,
 } from '../utils/panel-relationship.util';
+import { reimportPlanSnapshot } from '../utils/reimport-plan-snapshot.util';
 import type {
   AltshopPlan,
   AltshopPlanDuration,
@@ -1120,29 +1121,33 @@ export class AltshopImporterService {
     return { created, existing, referralsCreated, referralsExisting, transactionsCreated, transactionsExisting };
   }
 
+  /**
+   * Merged into what an existing row already holds (`reimportPlanSnapshot`):
+   * the plan an operator assigned since the first import, its `planId` link
+   * and every key this importer does not write stay as they are.
+   */
   private buildSubscriptionPlanSnapshot(
     source: AltshopSubscription,
     importRecordId: string | null,
     existingSnapshot?: Prisma.JsonValue,
   ): Prisma.InputJsonValue {
-    const planId =
-      isPlainObject(existingSnapshot) && typeof existingSnapshot.planId === 'string'
-        ? existingSnapshot.planId
-        : undefined;
-    return jsonInput({
-      importedFrom: 'altshop',
-      // Durable link back to the import (bulk plan re-assignment targets this
-      // instead of a fragile created-at time window). See BulkPlanAssignmentService.
-      ...(importRecordId ? { importRecordId } : {}),
-      ...(planId ? { planId } : {}),
-      // The donor's own row id. On a panel that never issued these identifiers
-      // it is the ONLY key a second import can find this row by — without it a
-      // re-run mints a duplicate subscription for every customer.
-      sourceSubscriptionId: source.id,
-      tag: source.tag,
-      trafficLimitStrategy: source.traffic_limit_strategy,
-      deviceType: source.device_type,
-      originalPlanSnapshot: source.plan_snapshot,
+    return reimportPlanSnapshot(existingSnapshot, {
+      own: {
+        importedFrom: 'altshop',
+        // Durable link back to the import (bulk plan re-assignment targets this
+        // instead of a fragile created-at time window). See BulkPlanAssignmentService.
+        ...(importRecordId ? { importRecordId } : {}),
+        // The donor's own row id. On a panel that never issued these identifiers
+        // it is the ONLY key a second import can find this row by — without it a
+        // re-run mints a duplicate subscription for every customer.
+        sourceSubscriptionId: source.id,
+        deviceType: source.device_type,
+        originalPlanSnapshot: jsonInput(source.plan_snapshot),
+      },
+      planFacts: {
+        tag: source.tag,
+        trafficLimitStrategy: source.traffic_limit_strategy,
+      },
     });
   }
 

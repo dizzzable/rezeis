@@ -19,6 +19,7 @@ import { RemnashopImporterService } from './services/remnashop-importer.service'
 import { RemnawaveImporterService } from './services/remnawave-importer.service';
 import { StealthnetImporterService } from './services/stealthnet-importer.service';
 import { StealthnetReferralSyncService } from './services/stealthnet-referral-sync.service';
+import { StrippedPlanSnapshotRepairService } from './services/stripped-plan-snapshot-repair.service';
 import { ThreeXuiImporterService } from './services/threexui-importer.service';
 
 @Module({
@@ -45,6 +46,7 @@ import { ThreeXuiImporterService } from './services/threexui-importer.service';
     BedolagaImporterService,
     BackupPlanClonerService,
     BulkPlanAssignmentService,
+    StrippedPlanSnapshotRepairService,
   ],
   exports: [ImportsService, ImportQueueService, BackupPlanClonerService, StealthnetReferralSyncService],
 })

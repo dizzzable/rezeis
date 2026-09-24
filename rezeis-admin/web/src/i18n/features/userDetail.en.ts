@@ -340,6 +340,28 @@ export const en = {
           trafficPanelUnlimited: 'Traffic: panel unlimited, assigned {{assigned}} GB',
           trafficAssignedUnlimited: 'Traffic: panel {{panel}} GB, assigned unlimited',
         },
+        // The server's verdict on a subscription in the term model
+        // (`subscription-sync-readback.ts`). Every other line of this block
+        // calls Remnawave "the panel"; these name it, because the limits they
+        // speak of are the ones sent from here.
+        readback: {
+          expiryNotTaken: 'The expiry from Remnawave was not taken: the latest change to this subscription has not reached it yet.',
+          putBack: 'Remnawave had different limits — the assigned ones are being sent there: {{limits}}.',
+          notSentBack: {
+            PROFILE_DELETED: 'The assigned limits were not sent to Remnawave: it reports the profile deleted.',
+            SHARED_PROFILE:
+              'The assigned limits were not sent to Remnawave: this profile belongs to another subscription too. Merge them: Subscriptions → “Duplicate subscription merge”.',
+            UNLINKED: 'The assigned limits were not sent to Remnawave: the subscription has no link to a Remnawave profile.',
+          },
+          limits: {
+            both: '{{devices}}, {{traffic}}',
+            devices_one: '{{count}} device',
+            devices_other: '{{count}} devices',
+            devicesUnlimited: 'unlimited devices',
+            traffic: '{{gb}} GB',
+            trafficUnlimited: 'unlimited traffic',
+          },
+        },
         field: {
           configUrl: 'subscription link',
           remnawavePanelId: 'panel id',

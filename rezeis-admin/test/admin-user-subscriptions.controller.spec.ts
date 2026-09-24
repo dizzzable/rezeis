@@ -1403,7 +1403,9 @@ function syncedPanelProfile(overrides: Record<string, unknown> = {}) {
     telegramId: 42,
     panelId: 4471,
     email: null,
-    expireAt: '2099-01-01T00:00:00.000Z',
+    // An ordinary far date. Not 2099: a profile in 2099 has no end
+    // (`panel-expiry.ts`), which the refresh does not copy as a date.
+    expireAt: '2098-01-01T00:00:00.000Z',
     createdAt: '2026-01-01T00:00:00.000Z',
     lastTrafficResetAt: null,
     trafficLimitBytes: 0,
@@ -1516,7 +1518,7 @@ describe('syncSubscription — a refresh adopts panel facts without rewriting th
       configUrl: 'https://panel.example.test/sub/fresh',
       remnawavePanelId: 4471,
       remnawavePanelUsername: 'rz_bob_1',
-      expiresAt: new Date('2099-01-01T00:00:00.000Z'),
+      expiresAt: new Date('2098-01-01T00:00:00.000Z'),
     });
     assert.equal(stored.configUrl, 'https://panel.example.test/sub/fresh');
     // Not cosmetic: `ProfileSyncProcessor.panelProfileClaimedByAnother` is the
@@ -1620,14 +1622,45 @@ describe('syncSubscription — a refresh adopts panel facts without rewriting th
     const { controller, stored } = syncOver({
       outcome: {
         kind: 'ok',
-        user: syncedPanelProfile({ expireAt: '2099-01-01T00:00:00.000Z' }),
+        user: syncedPanelProfile({ expireAt: '2098-01-01T00:00:00.000Z' }),
       },
     });
 
     const result = await controller.syncSubscription('sub-1', ACTING_ADMIN, ACTING_REQUEST);
 
-    assert.deepEqual(stored.expiresAt, new Date('2099-01-01T00:00:00.000Z'));
-    assert.deepEqual(result.refreshed?.expiresAt, new Date('2099-01-01T00:00:00.000Z'));
+    assert.deepEqual(stored.expiresAt, new Date('2098-01-01T00:00:00.000Z'));
+    assert.deepEqual(result.refreshed?.expiresAt, new Date('2098-01-01T00:00:00.000Z'));
+  });
+
+  it('copies no date from a profile with no end: 2099 is Remnawave’s «for ever»', async () => {
+    const { controller, stored } = syncOver({
+      outcome: {
+        kind: 'ok',
+        user: syncedPanelProfile({ expireAt: '2099-12-31T00:00:00.000Z' }),
+      },
+    });
+
+    const result = await controller.syncSubscription('sub-1', ACTING_ADMIN, ACTING_REQUEST);
+
+    assert.equal('expiresAt' in (result.refreshed ?? {}), false);
+    assert.deepEqual(stored.expiresAt, new Date('2027-03-01T00:00:00.000Z'), 'the row keeps the date it was sold');
+  });
+
+  it('writes no date over a subscription with no end: the thirty days an older CREATE gave its profile are not its own', async () => {
+    const { controller, stored } = syncOver({
+      outcome: {
+        kind: 'ok',
+        user: syncedPanelProfile({ expireAt: '2026-10-24T00:00:00.000Z' }),
+      },
+      stored: { expiresAt: null },
+    });
+
+    const result = await controller.syncSubscription('sub-1', ACTING_ADMIN, ACTING_REQUEST);
+
+    assert.equal(result.synced, true);
+    assert.equal('expiresAt' in (result.refreshed ?? {}), false);
+    assert.equal(stored.expiresAt, null, 'still sold for ever');
+    assert.equal(stored.configUrl, 'https://panel.example.test/sub/fresh', 'the rest is refreshed as before');
   });
 });
 

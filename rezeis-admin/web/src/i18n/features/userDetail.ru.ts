@@ -349,6 +349,26 @@ export const ru = {
           trafficPanelUnlimited: 'Трафик: в панели безлимит, назначено {{assigned}} ГБ',
           trafficAssignedUnlimited: 'Трафик: в панели {{panel}} ГБ, назначено безлимит',
         },
+        readback: {
+          expiryNotTaken: 'Срок из Remnawave не принят: туда ещё не дошло последнее изменение подписки.',
+          putBack: 'Лимиты в Remnawave отличались — туда отправляются назначенные: {{limits}}.',
+          notSentBack: {
+            PROFILE_DELETED: 'Назначенные лимиты в Remnawave не отправлены: Remnawave сообщает, что профиль удалён.',
+            SHARED_PROFILE:
+              'Назначенные лимиты в Remnawave не отправлены: этот профиль числится ещё за одной подпиской. Объедините их: страница «Подписки» → «Слияние подписок-дубликатов».',
+            UNLINKED: 'Назначенные лимиты в Remnawave не отправлены: у подписки нет привязки к профилю Remnawave.',
+          },
+          limits: {
+            both: '{{devices}}, {{traffic}}',
+            devices_one: '{{count}} устройство',
+            devices_few: '{{count}} устройства',
+            devices_many: '{{count}} устройств',
+            devices_other: '{{count}} устройств',
+            devicesUnlimited: 'без ограничения устройств',
+            traffic: '{{gb}} ГБ',
+            trafficUnlimited: 'безлимитный трафик',
+          },
+        },
         field: {
           configUrl: 'ссылка на конфиг',
           remnawavePanelId: 'идентификатор в панели',

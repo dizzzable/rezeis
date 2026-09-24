@@ -54,6 +54,7 @@ import { extractRequestMetadata } from '../../auth/utils/request-metadata.util';
 import { readProfileOwnerMarkers } from '../../profile-sync/panel-owner-marker';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { sameSquadSet } from '../../plans/utils/plan-squads.util';
+import { withLocalOpenEndKept } from '../../remnawave/services/panel-expiry';
 import {
   panelRefreshWrites,
   panelReportedRezeisOwnedFields,
@@ -73,10 +74,14 @@ import {
   describeLimitsVerdict,
   finishTermModelReadback,
   judgePanelRowReadback,
+  recordOperatorTrafficReset,
   TERM_MODEL_MARKER_SELECT,
   withoutWithheldReadbackFields,
+  type PanelLimitsVerdict,
 } from '../../remnawave/services/term-model-readback';
+import { readPanelUserStatus, takePanelAnswerStatus } from '../../profile-sync/panel-answer-status';
 import { panelProfileClaims } from '../../imports/services/remnawave-importer.service';
+import { carryImportDomainKeys } from '../../imports/utils/import-domain-snapshot.util';
 import { requirePanelDeviceList } from '../../remnawave/utils/panel-device-read.util';
 import { selectGrantableTrialPlan } from '../../subscriptions/services/grantable-trial-plan.util';
 import type {
@@ -94,6 +99,7 @@ import { SystemEventsService, EVENT_TYPES } from '../../../common/services/syste
 import { planNamesMetadata } from '../../../common/utils/plan-snapshot.util';
 import { buildPlanSnapshot } from '../utils/plan-snapshot.util';
 import { PLAN_ASSIGNMENT_REFUSAL_CODES } from './plan-assignment-refusals';
+import type { SubscriptionSyncPanelLimits, SubscriptionSyncReadback } from './subscription-sync-readback';
 import { SUBSCRIPTION_SYNC_REFUSAL_CODES } from './subscription-sync-refusals';
 import { OPERATOR_LIMIT_SOURCE } from '../../anti-fraud/detectors/sharing-detectors';
 
@@ -224,6 +230,21 @@ const SUBSCRIPTION_LIMITS_CHANGED_ACTION = 'user.subscription.limits_changed';
  * `PLAN_MIGRATION_TERM`, a paid upgrade its own).
  */
 export const ADMIN_PLAN_ASSIGNMENT_TERM = 'ADMIN_PLAN_ASSIGNMENT_TERM';
+
+/**
+ * The ↻ answer's spelling of each limits verdict (`subscription-sync-readback.ts`).
+ * Exhaustive by construction: a verdict added to `PanelLimitsVerdict` does not
+ * compile here until the wire list — which the SPA's words are tested against —
+ * names it too.
+ */
+const SYNC_PANEL_LIMITS: Readonly<Record<PanelLimitsVerdict, SubscriptionSyncPanelLimits>> = {
+  IN_STEP: 'IN_STEP',
+  PUT_BACK: 'PUT_BACK',
+  OUTRANKED: 'OUTRANKED',
+  PROFILE_DELETED: 'PROFILE_DELETED',
+  SHARED_PROFILE: 'SHARED_PROFILE',
+  UNLINKED: 'UNLINKED',
+};
 
 /**
  * What produced the change — see {@link SUBSCRIPTION_LIMITS_CHANGED_ACTION}.
@@ -502,6 +523,9 @@ export class AdminUserSubscriptionsController {
     let assignedPlanId: string | null = null;
     // The assigned plan: what a subscription in the term model is rotated onto.
     let assignedPlan: Plan | null = null;
+    // Its snapshot. Written in the transaction below, with the import's own
+    // keys of the snapshot read under the row lock carried across.
+    let assignedPlanSnapshot: Prisma.InputJsonValue | null = null;
     // The assigned plan's own two quantity limits. What the row WRITES is
     // resolved inside the transaction below — see the carry there.
     let assignedPlanLimits: QuantityLimits | null = null;
@@ -538,7 +562,7 @@ export class AdminUserSubscriptionsController {
       // plan nobody can renew.
       const plan = await this.prismaService.plan.findUnique({ where: { id: planId, deletedAt: null } });
       if (!plan) throw new NotFoundException('Plan not found');
-      data.planSnapshot = buildPlanSnapshot(plan);
+      assignedPlanSnapshot = buildPlanSnapshot(plan);
       // Plans dictate the squads at the moment of assignment, and the limits
       // too — plus what the row held above its old plan, which is resolved in
       // the transaction below, under the row lock.
@@ -611,6 +635,7 @@ export class AdminUserSubscriptionsController {
       || body.status !== undefined;
     const carryOnto = assignedPlanLimits;
     const rotateOnto = assignedPlan;
+    const planSnapshotOnto = assignedPlanSnapshot;
     // Who moved it, on the add-on events a term re-timing writes.
     const termEdit: AlignTailOptions = {
       correlationId: `admin-subscription-edit:${subscriptionId}`,
@@ -633,6 +658,19 @@ export class AdminUserSubscriptionsController {
         data.deviceLimit = carry.columns.deviceLimit;
         writtenLimits.trafficLimit = carry.columns.trafficLimit;
         writtenLimits.deviceLimit = carry.columns.deviceLimit;
+      }
+      if (planSnapshotOnto !== null) {
+        // The plan's snapshot replaces the stored one, less the import's own
+        // keys, which are carried across (`carryImportDomainKeys`), read under
+        // the row lock the carry above took. Replaced wholesale, the snapshot
+        // lost `sourceSubscriptionId`: on an installation moved from another
+        // panel the next import of the same backup found the row by nothing
+        // and created a second subscription beside it.
+        const stored = await tx.subscription.findUnique({
+          where: { id: subscriptionId },
+          select: { planSnapshot: true },
+        });
+        data.planSnapshot = carryImportDomainKeys(stored?.planSnapshot ?? null, planSnapshotOnto);
       }
       if (data.deviceLimit !== undefined) {
         // WHO IS MOVING THE LIMIT, told to the trigger that stamps the
@@ -1120,11 +1158,51 @@ export class AdminUserSubscriptionsController {
       // handed to the panel adapter. Without them a profile created on 2.x is
       // unnameable once the panel is upgraded to 3.x, which drops the uuid this
       // row still stores.
-      select: { remnawaveId: true, remnawavePanelId: true, remnawavePanelUsername: true, configUrl: true },
+      select: {
+        remnawaveId: true,
+        remnawavePanelId: true,
+        remnawavePanelUsername: true,
+        configUrl: true,
+        user: { select: { isBlocked: true } },
+      },
     });
     const identity = storedIdentityOf(sub);
     if (identity === null) return { reset: false, message: 'No Remnawave profile linked' };
     await this.remnawaveApiService.resetPanelUserTraffic(identity);
+    // THE RESET IS A PUSH OF OURS (the owner, 24.09.2026). Recorded as one —
+    // completed now, after the panel answered — so a `user.limited` Remnawave
+    // stamped before the reset and delivered after it no longer puts LIMITED
+    // back on a subscription in the term model (`term-model-readback.ts`).
+    // The `user.enabled` the reset itself sets off is outranked the same way,
+    // so the status the reset produced is read back here, at once, and written
+    // by the rule every push's answer follows (`panel-answer-status.ts`) —
+    // which also lifts LIMITED on an install whose webhooks are off.
+    // Best-effort: the counter is zeroed whatever this bookkeeping does.
+    try {
+      const reset = await recordOperatorTrafficReset(this.prismaService, subscriptionId);
+      const after = await this.remnawaveApiService.getPanelUserOutcome(identity);
+      const answer = after.kind === 'ok' ? readPanelUserStatus(after.user.status) : null;
+      const moved =
+        answer === null
+          ? null
+          : await takePanelAnswerStatus(this.prismaService, {
+              job: reset,
+              answer,
+              now: new Date(),
+              push: { sent: null, ownerBlocked: sub?.user?.isBlocked === true },
+            });
+      if (moved !== null) {
+        this.logger.log(
+          `Subscription ${subscriptionId} is ${moved.to} (was ${moved.from}): Remnawave's answer to the traffic reset`,
+        );
+      }
+    } catch (err: unknown) {
+      this.logger.warn(
+        `Traffic reset of ${subscriptionId}: the reset was not recorded, or its status not read back: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
     // AFTER the panel call, like every other audited action in this file: a
     // row written first would answer "who reset this" about a reset that
     // threw. The same action name the bulk toolbar writes, so one query
@@ -1152,6 +1230,8 @@ export class AdminUserSubscriptionsController {
         trafficLimit: true,
         deviceLimit: true,
         ...TERM_MODEL_MARKER_SELECT,
+        // What `expiryTaken` below compares Remnawave's date with.
+        expiresAt: true,
       },
     });
     const identity = storedIdentityOf(sub);
@@ -1225,8 +1305,15 @@ export class AdminUserSubscriptionsController {
         ...(sub?.remnawaveId == null ? [] : [{ remnawaveId: sub.remnawaveId }]),
       ],
     });
+    // Outside the model too, a subscription with no end takes no date from
+    // Remnawave (`withLocalOpenEndKept`): the date an older CREATE gave a
+    // lifetime profile (thirty days), or one set in Remnawave's own UI, would
+    // have ended a subscription sold for ever. In the model the verdict says so
+    // (`keepsOpenEnd`).
     const refreshed: PanelRefreshWrites =
-      verdict === null ? stated : withoutWithheldReadbackFields(stated, verdict);
+      verdict === null
+        ? withLocalOpenEndKept(stated, sub?.expiresAt)
+        : withoutWithheldReadbackFields(stated, verdict);
     if (Object.keys(refreshed).length > 0) {
       await this.prismaService.$transaction(async (tx) => {
         await tx.subscription.update({
@@ -1280,17 +1367,46 @@ export class AdminUserSubscriptionsController {
             ...(limitsNote === null ? {} : { panelLimitsNote: limitsNote }),
           }),
     });
-    return {
-      synced: true,
-      // What actually changed, so the operator is not told "synced" and left to
-      // guess. Keys are present only when the panel stated the field.
-      refreshed,
-      // And what the panel says about the columns rezeis owns. Echoed so the
-      // drift is VISIBLE, never written — an operator who sees the panel
-      // reporting a different device limit has a real problem to act on, and
-      // the act is to fix the plan, not to let the panel rewrite it.
-      panelReports: panelReportedRezeisOwnedFields(panelUser),
-    };
+    // The same verdict, for the card the operator pressed ↻ on — which would
+    // otherwise go on printing a drift the put-back is already fixing. Only in
+    // the term model, where the verdict exists at all; `sub` is the row it was
+    // judged on, so its columns are the limits the put-back sends.
+    //
+    // `expiryTaken` is `false` only when a push of rezeis' own WITHHELD an
+    // expiry: the read is outranked, and Remnawave stated one (a date, or no
+    // end) that differs from the row's. The card then says the change has
+    // not reached Remnawave yet, which is the reason in exactly that case. The
+    // audit row above keeps the verdict itself. Told "not taken" over two
+    // equal dates, the card warned on every press while any push was queued,
+    // running or failed — and after a failed one, for good.
+    const statedExpiry = stated.expiresAt;
+    const expiryWithheld =
+      verdict !== null &&
+      !verdict.takeExpiry &&
+      statedExpiry !== undefined &&
+      (statedExpiry?.getTime() ?? null) !== (sub?.expiresAt?.getTime() ?? null);
+    const readback: SubscriptionSyncReadback | null =
+      verdict === null || sub === null
+        ? null
+        : {
+            panelLimits: SYNC_PANEL_LIMITS[verdict.limits],
+            expiryTaken: !expiryWithheld,
+            limitsPutBack:
+              limitsPutBack === null
+                ? null
+                : { syncJobId: limitsPutBack, trafficLimit: sub.trafficLimit, deviceLimit: sub.deviceLimit },
+          };
+    // What the panel says about the columns rezeis owns. Echoed so the drift is
+    // VISIBLE, never written — an operator who sees the panel reporting a
+    // different device limit has a real problem to act on, and the act is to
+    // fix the plan, not to let the panel rewrite it.
+    const panelReports = panelReportedRezeisOwnedFields(panelUser);
+    // `refreshed`: what actually changed, so the operator is not told "synced"
+    // and left to guess. Keys are present only when the panel stated the field.
+    // `readback` only in the term model: any other answer is exactly what an
+    // older client already reads.
+    if (readback === null) return { synced: true, refreshed, panelReports };
+    return { synced: true, refreshed, panelReports, readback };
   }
 
   /**

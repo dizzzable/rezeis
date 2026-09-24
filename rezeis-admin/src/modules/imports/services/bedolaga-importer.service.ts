@@ -47,6 +47,7 @@ import {
   type PanelRelationship,
   type PanelWriteOutcome,
 } from '../utils/panel-relationship.util';
+import { reimportPlanSnapshot } from '../utils/reimport-plan-snapshot.util';
 import {
   BedolagaBackupData,
   BedolagaPromoGroup,
@@ -557,37 +558,38 @@ export class BedolagaImporterService {
     // null, and theirs with a zero that reads exactly like "no quota at all".
     const backupTraffic = sub.traffic_limit_gb > 0 ? sub.traffic_limit_gb : null;
 
+    // Merged into what an existing row already holds (`reimportPlanSnapshot`).
     // `planId` is the CUID an operator's clone or bulk-assign wrote here after
-    // the first import. Rebuilding the snapshot from the donor alone would drop
-    // it on every re-run, and every migrated subscription would report itself
-    // unassigned again.
-    const assignedPlanId = readAssignedPlanId(existing?.planSnapshot);
-    const planSnapshot: Prisma.InputJsonValue = {
-      importedFrom: 'bedolaga',
-      ...(importRecordId ? { importRecordId } : {}),
-      ...(assignedPlanId === null ? {} : { planId: assignedPlanId }),
-      sourceSubscriptionId: sub.id,
-      sourceTariffId: sub.tariff_id,
-      // Same shape the other importers emit, so the plan cloner's
-      // `extractSourcePlanId()` walks all of them the same way.
-      originalPlanSnapshot: tariff
-        ? {
-            id: tariff.id,
-            name: tariff.name,
-            traffic_limit_gb: tariff.traffic_limit_gb,
-            device_limit: tariff.device_limit,
-            period_prices: tariff.period_prices,
-          }
-        : null,
-      tariffName: tariff?.name ?? null,
-      // Bedolaga tops traffic up per purchase with its own 30-day expiry; we
-      // have no home for an expiring top-up, so it is folded into the limit
-      // and recorded here so nobody later wonders where the extra came from.
-      purchasedTrafficGb: sub.purchased_traffic_gb,
-      autopayEnabled: sub.autopay_enabled,
-      backupExpireAt: sub.end_date,
-      backupTrafficUsedGb: sub.traffic_used_gb,
-    };
+    // the first import, beside the plan's `id`, name and limits; rebuilt from
+    // the donor alone, the snapshot dropped all but `planId` on every re-run,
+    // and the customer's plan name went with them.
+    const planSnapshot = reimportPlanSnapshot(existing?.planSnapshot, {
+      own: {
+        importedFrom: 'bedolaga',
+        ...(importRecordId ? { importRecordId } : {}),
+        sourceSubscriptionId: sub.id,
+        sourceTariffId: sub.tariff_id,
+        // Same shape the other importers emit, so the plan cloner's
+        // `extractSourcePlanId()` walks all of them the same way.
+        originalPlanSnapshot: tariff
+          ? {
+              id: tariff.id,
+              name: tariff.name,
+              traffic_limit_gb: tariff.traffic_limit_gb,
+              device_limit: tariff.device_limit,
+              period_prices: tariff.period_prices,
+            }
+          : null,
+        tariffName: tariff?.name ?? null,
+        // Bedolaga tops traffic up per purchase with its own 30-day expiry; we
+        // have no home for an expiring top-up, so it is folded into the limit
+        // and recorded here so nobody later wonders where the extra came from.
+        purchasedTrafficGb: sub.purchased_traffic_gb,
+        autopayEnabled: sub.autopay_enabled,
+        backupExpireAt: sub.end_date,
+        backupTrafficUsedGb: sub.traffic_used_gb,
+      },
+    });
 
     // Which identity to ask THIS panel about.
     //
@@ -1278,19 +1280,6 @@ export function promocodeAction(
         ? { type: 'TRAFFIC', value: Math.min(donor.traffic_gb, MAX_PROMOCODE_VALUE) }
         : null;
   }
-}
-
-/**
- * The plan CUID an operator assigned to this subscription after the import.
- *
- * Written into `planSnapshot.planId` by the clone-plans and bulk-assign steps,
- * and read by both of them plus the promocode plan filter. It is the operator's
- * answer, not the donor's, so a re-import carries it forward untouched.
- */
-function readAssignedPlanId(snapshot: unknown): string | null {
-  if (typeof snapshot !== 'object' || snapshot === null) return null;
-  const planId = (snapshot as Record<string, unknown>).planId;
-  return typeof planId === 'string' && planId.length > 0 ? planId : null;
 }
 
 function toDate(raw: string | null): Date | null {

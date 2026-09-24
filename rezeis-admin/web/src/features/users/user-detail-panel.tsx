@@ -120,6 +120,11 @@ import {
   SYNC_REFUSAL_BY_MESSAGE,
 } from './subscription-sync-refusals'
 import {
+  LIMITS_NOT_SENT_BACK,
+  readSyncReadback,
+  type SyncReadback,
+} from './subscription-sync-readback'
+import {
   readSubscriptionDeleteRefusal,
   type SubscriptionDeleteRefusal,
 } from './subscription-delete-refusals'
@@ -1030,6 +1035,8 @@ type SubscriptionSyncOutcome =
       /** Only the keys the panel positively stated and the backend wrote. */
       readonly refreshed: readonly PanelRefreshKey[]
       readonly panelReports: PanelReportedLimits | null
+      /** The server's verdict on the read, for a subscription in the term model; `null` outside it. */
+      readonly readback: SyncReadback | null
     }
   /** No panel profile is linked. Nothing to sync — NOT an error condition. */
   | { readonly kind: 'notLinked' }
@@ -1062,6 +1069,7 @@ function readSyncOutcome(payload: unknown): SubscriptionSyncOutcome {
               trafficLimitBytes: readReportedLimit(reports.trafficLimitBytes),
               hwidDeviceLimit: readReportedLimit(reports.hwidDeviceLimit),
             },
+      readback: readSyncReadback(body.readback),
     }
   }
   const message = typeof body.message === 'string' ? body.message : ''
@@ -1160,6 +1168,26 @@ function SubscriptionSyncOutcomeNotice({
       assignedTrafficGb !== undefined &&
       panelTrafficGb !== assignedTrafficGb
 
+    // IN THE TERM MODEL THE SERVER'S VERDICT DECIDES what is said about the
+    // limits (`subscription-sync-readback.ts`). It compared them in the units it
+    // pushes in, it may already be sending the assigned ones back, and a read
+    // older than its own last push says nothing about what Remnawave will hold.
+    // The card's own comparison there cried drift over limits that were being
+    // fixed, or had never differed. With no verdict — outside the model, or one
+    // this build has no words for — the card compares them itself, as before.
+    const readback = outcome.readback
+    const verdict = readback === null ? null : readback.panelLimits
+    const putBack = verdict === 'PUT_BACK' && readback !== null ? readback.limitsPutBack : null
+    const notSentBack = verdict !== null && LIMITS_NOT_SENT_BACK.has(verdict)
+    // What Remnawave held against what is assigned, line by line: for the card's
+    // own comparison, beside a put-back, and beside a reason for none.
+    const showDetail = verdict === null || putBack !== null || notSentBack
+    // «Other limits are in effect» stays true where nothing is sent back, and
+    // is said even without a line the card can compute: the server found a
+    // difference. Beside a put-back the sentence above says it instead.
+    const showDriftHeadline = notSentBack || (verdict === null && (deviceDrift || trafficDrift))
+    const detailTone = putBack === null ? 'text-amber-600 dark:text-amber-500' : 'text-muted-foreground'
+
     return (
       <div role="status" className={`${base} border-border bg-muted/40`}>
         <p className="font-medium text-foreground">
@@ -1171,21 +1199,46 @@ function SubscriptionSyncOutcomeNotice({
                   .join(', '),
               })}
         </p>
-        {!deviceDrift && !trafficDrift ? null : (
+        {readback === null || readback.expiryTaken ? null : (
+          <p className="mt-0.5 text-amber-600 dark:text-amber-500">
+            {t('userDetailPanel.subscriptions.syncOutcome.readback.expiryNotTaken')}
+          </p>
+        )}
+        {putBack === null ? null : (
+          <p className="mt-0.5 text-muted-foreground">
+            {t('userDetailPanel.subscriptions.syncOutcome.readback.putBack', {
+              limits: t('userDetailPanel.subscriptions.syncOutcome.readback.limits.both', {
+                devices:
+                  putBack.deviceLimit <= 0
+                    ? t('userDetailPanel.subscriptions.syncOutcome.readback.limits.devicesUnlimited')
+                    : t('userDetailPanel.subscriptions.syncOutcome.readback.limits.devices', {
+                        count: putBack.deviceLimit,
+                      }),
+                traffic:
+                  putBack.trafficLimit === null
+                    ? t('userDetailPanel.subscriptions.syncOutcome.readback.limits.trafficUnlimited')
+                    : t('userDetailPanel.subscriptions.syncOutcome.readback.limits.traffic', {
+                        gb: putBack.trafficLimit,
+                      }),
+              }),
+            })}
+          </p>
+        )}
+        {!showDriftHeadline ? null : (
           <p className="mt-0.5 text-muted-foreground">
             {t('userDetailPanel.subscriptions.syncOutcome.drift.headline')}
           </p>
         )}
-        {!deviceDrift ? null : (
-          <p className="mt-0.5 pl-2 text-amber-600 dark:text-amber-500">
+        {!showDetail || !deviceDrift ? null : (
+          <p className={`mt-0.5 pl-2 ${detailTone}`}>
             {t('userDetailPanel.subscriptions.syncOutcome.drift.devices', {
               panel: panelDevices,
               assigned: assignedDevices,
             })}
           </p>
         )}
-        {!trafficDrift ? null : (
-          <p className="mt-0.5 pl-2 text-amber-600 dark:text-amber-500">
+        {!showDetail || !trafficDrift ? null : (
+          <p className={`mt-0.5 pl-2 ${detailTone}`}>
             {/*
               Three sentences, because "unlimited" cannot be interpolated into
               one that ends in " GB". Reaching this branch means both sides
@@ -1201,6 +1254,11 @@ function SubscriptionSyncOutcomeNotice({
                   : 'userDetailPanel.subscriptions.syncOutcome.drift.traffic',
               { panel: panelTrafficGb, assigned: assignedTrafficGb },
             )}
+          </p>
+        )}
+        {!notSentBack || verdict === null ? null : (
+          <p className="mt-0.5 text-muted-foreground">
+            {t(`userDetailPanel.subscriptions.syncOutcome.readback.notSentBack.${verdict}`)}
           </p>
         )}
       </div>
