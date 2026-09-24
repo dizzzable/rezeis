@@ -620,6 +620,57 @@ describe('ExpiredProfileCleanupService', () => {
 
     assert.equal(findManyCalled, false);
   });
+
+  // The one-off "no end" re-push (`reassertPanelNoEnd`; its selection and its
+  // push are `remnawave-lifetime-postgres`): a pass as soon as the worker is
+  // up and one every half hour, whatever the deletion policy says, and none on
+  // the API process.
+  function noEndRepush(queued: string[]) {
+    let passes = 0;
+    const service = new ExpiredProfileCleanupService(
+      {
+        subscription: {
+          findMany: async () => {
+            passes += 1;
+            return [{ id: `sub-${passes}` }];
+          },
+        },
+        profileSyncJob: { create: async () => ({ id: `job-${passes}` }) },
+      } as never,
+      eventsMock(),
+      settingsMock({ deleteEnabled: false }),
+      panelUsersMock(-30 * DAY_MS),
+      deletionMock([]),
+      { enqueue: async (syncJobId: string) => void queued.push(syncJobId) } as never,
+    );
+    return { service, passes: () => passes };
+  }
+
+  it('re-pushes "no end" as soon as the worker is up, and every half hour, with profile deletion switched off', async () => {
+    process.env['RUID_PROCESS_ROLE'] = 'worker';
+    _resetProcessRoleCacheForTests();
+    const queued: string[] = [];
+    const { service } = noEndRepush(queued);
+
+    service.onApplicationBootstrap();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(queued, ['job-1'], 'at boot, without waiting for it');
+    await service.sweepPanelNoEnd();
+    assert.deepEqual(queued, ['job-1', 'job-2']);
+  });
+
+  it('does not re-push "no end" on the API process role', async () => {
+    process.env['RUID_PROCESS_ROLE'] = 'api';
+    _resetProcessRoleCacheForTests();
+    const queued: string[] = [];
+    const { service, passes } = noEndRepush(queued);
+
+    service.onApplicationBootstrap();
+    await service.sweepPanelNoEnd();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(passes(), 0);
+    assert.deepEqual(queued, []);
+  });
 });
 
 /**

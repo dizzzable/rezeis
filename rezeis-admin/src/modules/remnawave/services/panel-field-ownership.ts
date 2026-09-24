@@ -1,3 +1,4 @@
+import { panelExpiryToLocal } from './panel-expiry';
 import type { RemnawavePanelUser } from './remnawave-api.service';
 
 /**
@@ -152,10 +153,14 @@ export function panelRefreshWrites(panelUser: RemnawavePanelUser): PanelRefreshW
   // `RangeError` at the driver rather than storing anything — the unguarded
   // `new Date(panelUser.expireAt)` this replaces turned a panel row with no
   // expiry into a 500 on an endpoint whose whole job is to be reassuring.
-  if (panelUser.expireAt.length > 0) {
-    const parsed = new Date(panelUser.expireAt);
-    if (!Number.isNaN(parsed.getTime())) writes.expiresAt = parsed;
-  }
+  //
+  // A date in 2099 is Remnawave's "no end" (`panel-expiry.ts`) and is never
+  // copied as a date. Nor is it written as `null` here: the refresh's caller
+  // reads this field as a date. So a profile with no end leaves the row's own
+  // expiry as it is, where the webhook and the imports make a dated row
+  // open-ended on it.
+  const expiresAt = panelExpiryToLocal(panelUser.expireAt);
+  if (expiresAt instanceof Date) writes.expiresAt = expiresAt;
 
   return writes;
 }

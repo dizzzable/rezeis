@@ -29,6 +29,8 @@ import {
   type PanelUser,
   type UpdatePanelUserBody,
 } from '../remnawave/services/panel-users.client';
+import { toPanelExpireAt } from '../remnawave/services/panel-expiry';
+import { RemnawaveWebhookService } from '../remnawave/services/remnawave-webhook.service';
 import {
   isUuidShapedPanelIdentity,
   SUBSCRIPTION_DELETE_STALE_PANEL_LINK_CODE,
@@ -39,6 +41,12 @@ import {
   PROFILE_SYNC_MAX_ATTEMPTS,
   PROFILE_SYNC_QUEUE,
 } from './profile-sync.constants';
+import {
+  readPanelUserStatus,
+  STATUS_SENT_KEY,
+  takePanelAnswerStatus,
+  type PanelAnswerPush,
+} from './panel-answer-status';
 import { readProfileOwnerMarker, readProfileOwnerMarkers } from './panel-owner-marker';
 import { ProfileSyncQueueService } from './profile-sync-queue.service';
 import { RemnawaveProfileNamingService } from './remnawave-profile-naming.service';
@@ -91,6 +99,16 @@ export class ProfileSyncProcessor extends WorkerHost {
      * cannot run. Absent, the error keeps the wording it has today.
      */
     @Optional() private readonly panelInfra?: PanelInfraClient,
+    /**
+     * The customer's «трафик закончился», for a crossing into LIMITED that
+     * Remnawave's answer to a push reports (`takeAnswerStatus`) — the webhook's
+     * own notice, so both say it in the same words. `RemnawaveModule`, which
+     * this module imports, exports it.
+     *
+     * `@Optional()` and last, for the specs that build this processor
+     * positionally; absent, the status is still written and nobody is told.
+     */
+    @Optional() private readonly trafficLimitNotices?: RemnawaveWebhookService,
   ) {
     super();
   }
@@ -516,6 +534,81 @@ export class ProfileSyncProcessor extends WorkerHost {
   }
 
   /**
+   * THE STATUS REMNAWAVE ANSWERED THIS PUSH WITH, written back onto a
+   * subscription in the term model when the rule allows it
+   * (`panel-answer-status.ts`), and the customer told when it moved the
+   * subscription into LIMITED.
+   *
+   * Called with the LAST answer the job received — the reset's, when a
+   * renewal zeroed the counter after its PATCH, since that one describes the
+   * profile after both — and with the row's status as last read, so the usual
+   * push, whose answer says what the row already says, costs no query. `push`
+   * says which status the PATCH itself carried, which is what tells a
+   * DISABLED made in Remnawave from our own (`panel-answer-status.ts`).
+   *
+   * WHY THE ANSWER'S LIMITED TELLS THE CUSTOMER. Remnawave never derives
+   * LIMITED on a PATCH, so an answer that says so means the customer ran out
+   * before this push landed. The `user.limited` sent at that moment is stamped
+   * before the push completed, so the rule every read-back shares withheld it
+   * together with its notice; this answer is the only carrier that crossing
+   * has left. It fires once: only a move INTO LIMITED from another status, made
+   * under the row's lock, sends it — exactly the webhook's own condition.
+   *
+   * Best-effort: the push itself has landed, and a status left unwritten is
+   * corrected by the next answer or the next event, where failing the job
+   * would repeat the PATCH and, on a renewal, the reset.
+   */
+  private async takeAnswerStatus(
+    syncJob: SyncJobRecord,
+    answer: { readonly status?: unknown } | null | undefined,
+    lastReadStatus: SubscriptionStatus | undefined,
+    push: PanelAnswerPush,
+  ): Promise<void> {
+    const reported = readPanelUserStatus(answer?.status);
+    if (reported === null || reported === lastReadStatus) return;
+    const subscriptionId = syncJob.subscription.id;
+    try {
+      const moved = await takePanelAnswerStatus(this.prismaService, {
+        job: { id: syncJob.id, subscriptionId, createdAt: syncJob.createdAt },
+        answer: reported,
+        now: new Date(),
+        push,
+      });
+      if (moved === null) return;
+      this.logger.log(
+        `Subscription ${subscriptionId} is ${moved.to} (was ${moved.from}): Remnawave's answer to sync job ${syncJob.id}`,
+      );
+      if (moved.to === SubscriptionStatus.LIMITED) {
+        await this.trafficLimitNotices?.notifyTrafficLimitedFromPushAnswer(subscriptionId);
+      }
+    } catch (err: unknown) {
+      this.logger.warn(
+        `Subscription ${subscriptionId}: the status Remnawave answered sync job ${syncJob.id} with was not ` +
+          `written: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /**
+   * Writes onto the job the status its PATCH carried
+   * ({@link STATUS_SENT_KEY}), once that PATCH has succeeded. Best-effort: a
+   * decision whose value is missing reads as "may have been DISABLED", which
+   * only ever keeps a switch-off in place.
+   */
+  private async recordStatusSent(job: SyncJobRecord, sent: 'ACTIVE' | 'DISABLED'): Promise<void> {
+    try {
+      await this.prismaService.profileSyncJob.update({
+        where: { id: job.id },
+        data: { payload: { ...readRecord(job.payload), [STATUS_SENT_KEY]: sent } as Prisma.InputJsonObject },
+      });
+    } catch (err: unknown) {
+      this.logger.warn(
+        `Sync job ${job.id}: the status it sent (${sent}) was not recorded: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /**
    * Versioned desired-state write (T-009/T-010). Returns `true` when it fully
    * handled the update (caller stops). Flag-gated by `projectionSync` and only
    * for versioned jobs (aggregateKey + desiredRevision) with an existing panel
@@ -630,6 +723,12 @@ export class ProfileSyncProcessor extends WorkerHost {
           observedContractVersion: null,
           driftClass: null,
         },
+      });
+      // The read-back is the profile after the PATCH: its status too. This
+      // PATCH carries limits only, never a status.
+      await this.takeAnswerStatus(syncJob, observed, subscription.status, {
+        sent: null,
+        ownerBlocked: subscription.user?.isBlocked === true,
       });
       const deleteJobId = await this.ensureDeleteJobIfDeleted(
         subscription.id,
@@ -837,8 +936,13 @@ export class ProfileSyncProcessor extends WorkerHost {
     const tag = readOptionalString(planSnapshot, 'tag');
     const trafficLimitStrategy = readOptionalString(planSnapshot, 'trafficLimitStrategy');
 
-    // Calculate expiry as ISO string
-    const expireAt = subscription.expiresAt?.toISOString() ?? new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+    // The expiry as the panel is told it: the row's own date, or — for a
+    // subscription with no end — the date the panel reads as "for ever"
+    // (`panel-expiry.ts`). It used to be now + 30 days, and Remnawave cut a
+    // customer who had bought a plan for ever off at day 30.
+    const panelExpireAt = toPanelExpireAt(subscription.expiresAt);
+    // And as the operator's card shows it: no date line for one with no end.
+    const expireAt = subscription.expiresAt?.toISOString();
 
     // Idempotency guard: a prior attempt may have created the panel profile
     // but failed to persist the link (e.g. crash between API call and DB
@@ -944,7 +1048,7 @@ export class ProfileSyncProcessor extends WorkerHost {
         ...(readOptionalString(planSnapshot, 'name') !== undefined
           ? { planName: readOptionalString(planSnapshot, 'name') }
           : {}),
-        expireAt,
+        ...(expireAt === undefined ? {} : { expireAt }),
         ...(typeof subscription.deviceLimit === 'number'
           ? { deviceLimit: subscription.deviceLimit }
           : {}),
@@ -1043,7 +1147,7 @@ export class ProfileSyncProcessor extends WorkerHost {
       email: contacts.email,
       description: naming.description,
       tag,
-      expireAt,
+      expireAt: panelExpireAt,
       trafficLimitBytes: toPanelTrafficLimitBytes(subscription.trafficLimit), // GB → bytes
       hwidDeviceLimit: toPanelDeviceLimit(subscription.deviceLimit),
       // Optional and never nullable upstream: a plan snapshot with no strategy
@@ -1103,6 +1207,12 @@ export class ProfileSyncProcessor extends WorkerHost {
     this.logger.log(
       `Created Remnawave profile '${remnawaveId}' (username: ${createUsername}) for subscription ${subscription.id}`,
     );
+    // A fresh profile has passed no traffic: a LIMITED row is lifted. The POST
+    // sent DISABLED for a blocked owner, and nothing otherwise.
+    await this.takeAnswerStatus(syncJob, panelUser, subscription.status, {
+      sent: ownerBlocked ? 'DISABLED' : null,
+      ownerBlocked,
+    });
 
     // Emit event
     //
@@ -1114,6 +1224,7 @@ export class ProfileSyncProcessor extends WorkerHost {
     // missing from the notification about buying a plan.
     // `planSnapshot` and `expireAt` are the ones already read above for the
     // panel payload — the same values, not a second reading of the same row.
+    // No date line for a subscription with no end: the panel was told 2099.
     const planName = readOptionalString(planSnapshot, 'name');
     this.events.info(EVENT_TYPES.SUBSCRIPTION_CREATED, 'SUBSCRIPTION', `Remnawave profile created: ${createUsername}`, {
       subscriptionId: subscription.id,
@@ -1121,7 +1232,7 @@ export class ProfileSyncProcessor extends WorkerHost {
       remnawaveId,
       remnawaveUsername: createUsername,
       ...(planName !== undefined ? { planName } : {}),
-      expireAt,
+      ...(expireAt === undefined ? {} : { expireAt }),
       ...(typeof subscription.deviceLimit === 'number'
         ? { deviceLimit: subscription.deviceLimit }
         : {}),
@@ -1652,7 +1763,11 @@ export class ProfileSyncProcessor extends WorkerHost {
         description: naming.description,
         ...(panelStatus !== null ? { status: panelStatus } : {}),
         tag,
-        expireAt: subscription.expiresAt?.toISOString(),
+        // ALWAYS a date: the sentinel for a subscription with no end
+        // (`panel-expiry.ts`). Leaving the key out, as this did for one, kept
+        // whatever date the profile had — the thirty days its CREATE gave it —
+        // and Remnawave cut the customer off when it passed.
+        expireAt: toPanelExpireAt(subscription.expiresAt),
         // The same two functions the webhook compares a panel event against
         // (`panel-limit-wire.util.ts`): the echo of this PATCH must read as
         // "in step", or the webhook would push it again.
@@ -1712,6 +1827,10 @@ export class ProfileSyncProcessor extends WorkerHost {
         continue;
       }
 
+      // The last thing Remnawave said about the profile, for its status (see
+      // `takeAnswerStatus` below): the PATCH's answer, or the reset's after it.
+      let lastAnswer: PanelUser = panelUser;
+
       // ── The counter the PATCH cannot touch ──────────────────────────────
       //
       // `PATCH /api/users` carries the limit, never the usage, so a renewal
@@ -1755,7 +1874,17 @@ export class ProfileSyncProcessor extends WorkerHost {
         this.logger.log(
           `Reset traffic counter for subscription ${subscription.id} after a paid renewal`,
         );
+        lastAnswer = reset.data.response;
       }
+
+      // The panel's own status decision, recorded: a later answer that finds
+      // the row DISABLED reads it to tell our switch-off from Remnawave's
+      // (`panel-answer-status.ts`).
+      if (panelStatus !== null) await this.recordStatusSent(current, panelStatus);
+      await this.takeAnswerStatus(syncJob, lastAnswer, latest.subscription.status, {
+        sent: panelStatus,
+        ownerBlocked,
+      });
 
       const deleteJobId = await this.ensureDeleteJobIfDeleted(
         subscription.id,

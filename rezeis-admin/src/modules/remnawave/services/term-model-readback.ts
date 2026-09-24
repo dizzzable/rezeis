@@ -7,6 +7,7 @@ import {
 } from '@prisma/client';
 
 import { toPanelDeviceLimit, toPanelTrafficLimitBytes } from '../utils/panel-limit-wire.util';
+import { panelExpiryToLocal, withLocalOpenEndKept } from './panel-expiry';
 import type { RemnawavePanelUser } from './remnawave-api.service';
 
 /**
@@ -36,7 +37,21 @@ import type { RemnawavePanelUser } from './remnawave-api.service';
  *    would push gets rezeis' own pushed back (`queuePanelLimitsPutBack`).
  *  - EXPIRY is taken, as Remnawave-side extensions always were, unless the
  *    panel's own last change is newer than the read (`panelPushOutranksRead`).
- *  - STATUS is each writer's business, as before.
+ *  - STATUS follows the expiry. It is Remnawave's runtime state — LIMITED and
+ *    EXPIRED are derived from usage and the clock there — so a read that is
+ *    newer than everything rezeis pushed is the only way to learn it. But a
+ *    read the panel's own push outranks describes the profile BEFORE that
+ *    push: a renewal lifted EXPIRED, a top-up lifted LIMITED, and a
+ *    `user.expired` stamped earlier and delivered later put «Истекла» on a
+ *    subscription the customer had just paid for, until some later event. The
+ *    fresh status after a push is the panel's own answer to it, which
+ *    `ProfileSyncProcessor` writes (`profile-sync/panel-answer-status.ts`).
+ *    A traffic reset of ours that landed after the read — the operator's
+ *    «Сбросить» — outranks its status as well (`trafficResetOutranksStatus`).
+ *  - A SUBSCRIPTION WITH NO END (`expiresAt = null`) takes no date from a read,
+ *    nor an EXPIRED Remnawave derived from one (`keepsOpenEnd`,
+ *    `panel-expiry.ts`). A read that states "no end" — the year 2099 — is
+ *    `null` like the row's own.
  *
  * ── The time of a read ─────────────────────────────────────────────────────
  *
@@ -52,6 +67,14 @@ import type { RemnawavePanelUser } from './remnawave-api.service';
  * into a Remnawave profile found holding other ones.
  */
 export const REMNAWAVE_LIMIT_DRIFT_CAUSE = 'REMNAWAVE_LIMIT_DRIFT';
+
+/**
+ * `cause` and `payload.source` of the record an operator's «Сбросить» leaves:
+ * a TRAFFIC_RESET job, COMPLETED when the panel has answered
+ * ({@link recordOperatorTrafficReset}). Made directly, not through the
+ * processor, and a push of ours all the same.
+ */
+export const OPERATOR_TRAFFIC_RESET_CAUSE = 'OPERATOR_TRAFFIC_RESET';
 
 /** A `where` fragment: the row is in the durable term model. */
 export const IN_TERM_MODEL = {
@@ -120,7 +143,7 @@ export function panelLimitsInStep(
 /**
  * Whether the panel's own state for this subscription is at least as new as
  * anything a read made at `readAt` can describe — in which case the read's
- * limits and expiry are an echo of an older state, not news.
+ * limits, expiry and status are an echo of an older state, not news.
  *
  * rezeis' state reaches Remnawave only through profile-sync UPDATE and CREATE
  * jobs, each built from the columns when it runs, and every panel write that
@@ -147,7 +170,15 @@ export async function panelPushOutranksRead(
   subscriptionId: string,
   readAt: Date,
 ): Promise<boolean> {
-  const latest = await client.profileSyncJob.findFirst({
+  return latestPushOutranks(await latestPanelPush(client, subscriptionId), readAt);
+}
+
+/** The latest non-superseded UPDATE or CREATE for a row: what {@link panelPushOutranksRead} weighs. */
+async function latestPanelPush(
+  client: Pick<Prisma.TransactionClient, 'profileSyncJob'>,
+  subscriptionId: string,
+): Promise<{ readonly status: SyncJobStatus; readonly completedAt: Date | null } | null> {
+  return client.profileSyncJob.findFirst({
     where: {
       subscriptionId,
       supersededAt: null,
@@ -156,9 +187,108 @@ export async function panelPushOutranksRead(
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     select: { status: true, completedAt: true },
   });
+}
+
+function latestPushOutranks(
+  latest: { readonly status: SyncJobStatus; readonly completedAt: Date | null } | null,
+  readAt: Date,
+): boolean {
   if (latest === null) return false;
   if (latest.status !== SyncJobStatus.COMPLETED || latest.completedAt === null) return true;
   return readAt.getTime() <= latest.completedAt.getTime();
+}
+
+/**
+ * Whether a traffic reset of ours LANDED after a read made at `readAt` — the
+ * operator's «Сбросить» (the owner, 24.09.2026), or a TRAFFIC_RESET job. A
+ * reset lifts LIMITED, so a `user.limited` stamped before it and delivered
+ * after it describes the profile before the reset. It outranks the read's
+ * STATUS only: a reset carries neither our expiry nor our limits, which is why
+ * {@link panelPushOutranksRead} leaves resets out. One that has not completed
+ * has changed nothing yet; one that has, superseded or not, has — the
+ * operator's record is born superseded ({@link recordOperatorTrafficReset}).
+ */
+async function trafficResetOutranksStatus(
+  client: Pick<Prisma.TransactionClient, 'profileSyncJob'>,
+  subscriptionId: string,
+  readAt: Date,
+): Promise<boolean> {
+  const reset = await client.profileSyncJob.findFirst({
+    where: {
+      subscriptionId,
+      action: SyncAction.TRAFFIC_RESET,
+      status: SyncJobStatus.COMPLETED,
+      completedAt: { gte: readAt },
+    },
+    select: { id: true },
+  });
+  return reset !== null;
+}
+
+/**
+ * Records an operator's traffic reset as the push of ours it is, once the
+ * panel has answered it: COMPLETED at this instant, so a read stamped before
+ * it is outranked for the status ({@link trafficResetOutranksStatus}). Returns
+ * the job, for the answer's status (`takePanelAnswerStatus`).
+ *
+ * BORN SUPERSEDED, so that it never stands for the subscription's sync state.
+ * Everything that reads that state takes the latest job that is not
+ * superseded: the subscription card's «Не применилось в панели: …» (the only
+ * warning that limits, expiry or squads are not reaching Remnawave), the
+ * sweeps, a merge's count of live jobs. A reset says nothing about whether the
+ * panel's own state landed, and as the latest job it would have hidden that
+ * warning after a failed push.
+ */
+export async function recordOperatorTrafficReset(
+  client: Pick<Prisma.TransactionClient, 'profileSyncJob'>,
+  subscriptionId: string,
+): Promise<{ readonly id: string; readonly subscriptionId: string; readonly createdAt: Date }> {
+  const now = new Date();
+  return client.profileSyncJob.create({
+    data: {
+      subscriptionId,
+      action: SyncAction.TRAFFIC_RESET,
+      status: SyncJobStatus.COMPLETED,
+      startedAt: now,
+      completedAt: now,
+      supersededAt: now,
+      cause: OPERATOR_TRAFFIC_RESET_CAUSE,
+      payload: { source: OPERATOR_TRAFFIC_RESET_CAUSE } as Prisma.InputJsonObject,
+    },
+    select: { id: true, subscriptionId: true, createdAt: true },
+  });
+}
+
+/**
+ * THE SAME TEST IN REVERSE, for Remnawave's answer to a push of rezeis' own:
+ * whether a push NEWER than `job` — created after it, in the order
+ * {@link panelPushOutranksRead} reads "latest" — is not COMPLETED yet
+ * (queued, running or failed). That push carries a later state of ours, and
+ * its own answer describes the profile after it; this answer, however fresh
+ * about Remnawave, predates it. Taking it would let an older push overwrite
+ * what a newer one is about to establish — a renewal's ACTIVE by the answer
+ * of a push queued before the payment. A newer push that has COMPLETED
+ * outranks nothing here: its answer was written when it came, and which of the
+ * two PATCHes Remnawave applied last is not ours to know.
+ *
+ * The same jobs count as in {@link panelPushOutranksRead}: UPDATE and CREATE,
+ * not superseded.
+ */
+export async function newerPanelPushPending(
+  client: Pick<Prisma.TransactionClient, 'profileSyncJob'>,
+  job: { readonly id: string; readonly subscriptionId: string; readonly createdAt: Date },
+): Promise<boolean> {
+  const newer = await client.profileSyncJob.findFirst({
+    where: {
+      subscriptionId: job.subscriptionId,
+      supersededAt: null,
+      action: { in: [SyncAction.UPDATE, SyncAction.CREATE] },
+      status: { not: SyncJobStatus.COMPLETED },
+      OR: [{ createdAt: { gt: job.createdAt } }, { createdAt: job.createdAt, id: { gt: job.id } }],
+    },
+    select: { id: true },
+  });
+  return newer !== null;
 }
 
 /** One row in the term model, and what a read said about its profile. */
@@ -174,6 +304,13 @@ export interface TermModelReadback {
   readonly sharedProfile: boolean;
   /** The panel reports the profile deleted. */
   readonly profileDeleted: boolean;
+  /**
+   * The row's own `expiresAt`: `null` for a subscription with no end.
+   * `undefined` when the writer did not read it, which decides nothing.
+   */
+  readonly localExpiresAt?: Date | null;
+  /** The expiry the read stated, through `panelExpiryToLocal`; `undefined` when it stated none. */
+  readonly statedExpiresAt?: Date | null;
 }
 
 /**
@@ -199,21 +336,50 @@ export type PanelLimitsVerdict = 'IN_STEP' | 'PUT_BACK' | 'OUTRANKED' | 'PROFILE
 export interface TermModelReadbackVerdict {
   /** False when the panel's own state outranks the read: its expiry is not written. */
   readonly takeExpiry: boolean;
+  /**
+   * False on the same condition: the read's status is not written either, and
+   * nothing that reports it as news — a customer notice, a card, an
+   * automation — goes out on its strength.
+   */
+  readonly takeStatus: boolean;
+  /**
+   * The row has no end date and the read states one: that date is not
+   * written, nor an EXPIRED Remnawave derived from it (`withLocalOpenEndKept`).
+   * Independent of `takeExpiry`, which stays "not outranked".
+   */
+  readonly keepsOpenEnd: boolean;
+  /**
+   * The read is outranked because the latest push of ours FAILED — not queued,
+   * not running, not landed after it. The one case where a reader may still
+   * take a status on evidence of its own (the webhook's LIMITED, when the
+   * traffic used is at or over the row's own limit).
+   */
+  readonly outrankedByFailedPush: boolean;
   readonly limits: PanelLimitsVerdict;
 }
 
 /**
  * THE RULE, for one row in the term model. Asked BEFORE the writer's own write,
- * which then leaves the limits out, and the expiry too unless `takeExpiry`.
- * A `PUT_BACK` is queued AFTER that write, so the push — built from the columns
- * when it runs — carries an expiry the same read may just have brought in.
+ * which then leaves the limits out, and the expiry and the status too unless
+ * the verdict takes them. A `PUT_BACK` is queued AFTER that write, so the push
+ * — built from the columns when it runs — carries an expiry the same read may
+ * just have brought in.
  */
 export async function judgeTermModelReadback(
   client: Pick<Prisma.TransactionClient, 'profileSyncJob'>,
   input: TermModelReadback,
 ): Promise<TermModelReadbackVerdict> {
-  const outranked = await panelPushOutranksRead(client, input.subscriptionId, input.readAt);
-  return { takeExpiry: !outranked, limits: limitsVerdict(input, outranked) };
+  const latest = await latestPanelPush(client, input.subscriptionId);
+  const outranked = latestPushOutranks(latest, input.readAt);
+  const resetSince = await trafficResetOutranksStatus(client, input.subscriptionId, input.readAt);
+  return {
+    takeExpiry: !outranked,
+    takeStatus: !outranked && !resetSince,
+    keepsOpenEnd: input.localExpiresAt === null && input.statedExpiresAt instanceof Date,
+    // Not when a reset landed since: the counter the read reports is gone.
+    outrankedByFailedPush: outranked && latest?.status === SyncJobStatus.FAILED && !resetSince,
+    limits: limitsVerdict(input, outranked),
+  };
 }
 
 function limitsVerdict(input: TermModelReadback, outranked: boolean): PanelLimitsVerdict {
@@ -258,6 +424,8 @@ export interface ReadbackRow {
   readonly remnawaveId: string | null;
   readonly trafficLimit: number | null;
   readonly deviceLimit: number;
+  /** The row's own expiry, when the writer selected it; read here otherwise. */
+  readonly expiresAt?: Date | null;
   readonly terms?: readonly unknown[];
 }
 
@@ -273,7 +441,7 @@ export async function judgePanelRowReadback(
   client: Pick<Prisma.TransactionClient, 'profileSyncJob' | 'subscription'>,
   input: {
     readonly existing: ReadbackRow | null;
-    readonly panel: Pick<RemnawavePanelUser, 'status' | 'trafficLimitBytes' | 'hwidDeviceLimit'> | null;
+    readonly panel: Pick<RemnawavePanelUser, 'status' | 'trafficLimitBytes' | 'hwidDeviceLimit' | 'expireAt'> | null;
     readonly readAt: Date;
     readonly claims: readonly Prisma.SubscriptionWhereInput[];
   },
@@ -288,21 +456,37 @@ export async function judgePanelRowReadback(
     readAt: input.readAt,
     sharedProfile: await otherLiveRowsNameProfile(client, existing.id, input.claims),
     profileDeleted: panel.status.trim().toUpperCase() === 'DELETED',
+    // Read here when the writer did not select it: a subscription with no end
+    // must be known as one on every path, the backup re-imports' included.
+    localExpiresAt:
+      existing.expiresAt !== undefined
+        ? existing.expiresAt
+        : (await client.subscription.findUnique({ where: { id: existing.id }, select: { expiresAt: true } }))
+            ?.expiresAt,
+    statedExpiresAt: panelExpiryToLocal(panel.expireAt),
   });
 }
 
 /**
  * A writer's own data for an UPDATE of a row in the term model, less what the
- * verdict withholds: the limits always, the expiry unless `takeExpiry`. Every
- * other field goes out as the writer built it.
+ * verdict withholds: the limits always, the expiry unless `takeExpiry`, the
+ * status unless `takeStatus` — and, on a row with no end (`keepsOpenEnd`), a
+ * stated date and an EXPIRED derived from it. Every other field goes out as
+ * the writer built it.
  */
 export function withoutWithheldReadbackFields<T extends object>(data: T, verdict: TermModelReadbackVerdict): T {
-  const { trafficLimit: _limitTraffic, deviceLimit: _limitDevices, expiresAt, ...rest } = data as T & {
+  const { trafficLimit: _limitTraffic, deviceLimit: _limitDevices, expiresAt, status, ...rest } = data as T & {
     readonly trafficLimit?: unknown;
     readonly deviceLimit?: unknown;
     readonly expiresAt?: unknown;
+    readonly status?: unknown;
   };
-  return (verdict.takeExpiry && expiresAt !== undefined ? { ...rest, expiresAt } : rest) as T;
+  const kept = {
+    ...rest,
+    ...(verdict.takeExpiry && expiresAt !== undefined ? { expiresAt } : {}),
+    ...(verdict.takeStatus && status !== undefined ? { status } : {}),
+  } as T;
+  return verdict.keepsOpenEnd ? withLocalOpenEndKept(kept, null) : kept;
 }
 
 /**

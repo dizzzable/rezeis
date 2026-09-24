@@ -38,6 +38,7 @@ import {
   RemnawaveApiService,
   type PanelUserTraffic,
 } from '../../remnawave/services/remnawave-api.service';
+import { panelExpiryToLocal, withLocalOpenEndKept } from '../../remnawave/services/panel-expiry';
 import { panelIdentityWhere } from '../../remnawave/services/remnawave-webhook.service';
 import { panelTrafficLimitToGb } from '../../remnawave/utils/panel-traffic-limit.util';
 import { AcceptInternalUserRulesDto } from '../dto/accept-internal-user-rules.dto';
@@ -107,8 +108,8 @@ interface IssuedEmailVerificationChallenge {
  */
 interface PanelSubscriptionOverlay {
   status?: SubscriptionStatus;
-  /** Present → override expiry; absent → keep local. */
-  expiresAt?: Date;
+  /** Present → override expiry (`null`: no end); absent → keep local. */
+  expiresAt?: Date | null;
   /** GB; `null` = unlimited (panel reported 0 bytes); absent → keep local. */
   trafficLimit?: number | null;
   deviceLimit?: number;
@@ -975,7 +976,7 @@ export class InternalUserService {
    * and hides the bar instead of rendering a misleading 0%.
    */
   private async resolvePanelUsage(
-    subscription: PanelIdentityColumns | null,
+    subscription: (PanelIdentityColumns & { readonly expiresAt?: Date | null }) | null,
   ): Promise<{
     profileName: string | null;
     trafficUsedGb: number | null;
@@ -1012,10 +1013,9 @@ export class InternalUserService {
       typeof usage.status === 'string' ? usage.status : null,
     );
     if (status !== undefined) overlay.status = status;
-    if (typeof usage.expireAt === 'string' && usage.expireAt.length > 0) {
-      const parsed = new Date(usage.expireAt);
-      if (!Number.isNaN(parsed.getTime())) overlay.expiresAt = parsed;
-    }
+    // A date in 2099 is "no end" (`panel-expiry.ts`).
+    const expiresAt = panelExpiryToLocal(usage.expireAt);
+    if (expiresAt !== undefined) overlay.expiresAt = expiresAt;
     // The presence check stays HERE, outside the converter: a limit the panel
     // never mentioned must leave the local snapshot alone (`undefined` = keep),
     // which is not the same answer as the panel saying "unlimited".
@@ -1029,7 +1029,14 @@ export class InternalUserService {
     ) {
       overlay.deviceLimit = usage.hwidDeviceLimit;
     }
-    return { profileName: usage.username, trafficUsedGb, overlay, userTraffic: usage.userTraffic };
+    // A subscription with no end shows none: not the profile's date, nor an
+    // EXPIRED Remnawave derived from it — the rule every read-back writes by.
+    return {
+      profileName: usage.username,
+      trafficUsedGb,
+      overlay: withLocalOpenEndKept(overlay, subscription?.expiresAt),
+      userTraffic: usage.userTraffic,
+    };
   }
 
   private async getRequiredUser(

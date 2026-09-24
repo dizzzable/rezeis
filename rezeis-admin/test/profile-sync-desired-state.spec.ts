@@ -35,6 +35,9 @@ function versionedJob() {
       internalSquads: ['internal-deferred'], externalSquad: 'external-deferred',
       expiresAt: new Date('2099-01-01T00:00:00Z'),
       planSnapshot: { tag: 'deferred-premium', trafficLimitStrategy: 'MONTH_ROLLING' },
+      // Selected on every real load; the panel's answer below says the same,
+      // so the processor has no status to write back.
+      status: SubscriptionStatus.ACTIVE,
     },
   };
 }

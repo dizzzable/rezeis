@@ -28,12 +28,15 @@ import {
 } from '../../connect-signal/connect-evidence.util';
 import { decodePanelUserTraffic, RemnawaveApiService } from './remnawave-api.service';
 import { SubscriptionNoticePayloadService } from './subscription-notice-payload.service';
+import { panelExpiryToLocal, withLocalOpenEndKept } from './panel-expiry';
 import {
   finishTermModelReadback,
   IN_TERM_MODEL,
   judgeTermModelReadback,
   OUTSIDE_TERM_MODEL,
+  withoutWithheldReadbackFields,
 } from './term-model-readback';
+import { toPanelTrafficLimitBytes } from '../utils/panel-limit-wire.util';
 import { panelTrafficLimitToGb } from '../utils/panel-traffic-limit.util';
 
 /**
@@ -105,6 +108,80 @@ const REMNAWAVE_WEBHOOK_EVENT_MAP: Record<
   // tick-box lives under «Remnawave» — while the card went to the NODE topic.
   'service.panel_started': { type: EVENT_TYPES.REMNAWAVE_PANEL_STARTED, category: 'REMNAWAVE', severity: 'INFO' },
 };
+
+/**
+ * The forwarded `user.*` events that report a ONE-OFF FACT, and are forwarded
+ * however late they arrive: a first connection happened, a counter was reset.
+ *
+ * Every other forwarded `user.*` event reports the subscription's STATE at the
+ * moment the panel stamped it — expired, limited, switched on or off, expiring
+ * soon, running out of traffic — and a state the panel's own push has since
+ * replaced is not news: see `EventReconcileOutcome.stale`.
+ */
+const FORWARDED_WHATEVER_ITS_AGE: ReadonlySet<string> = new Set(['user.first_connected', 'user.traffic_reset']);
+
+/**
+ * The forwarded `user.*` events whose whole meaning is the profile's DATE: it
+ * ended, it ends soon. A subscription with no end refuses that date
+ * (`withLocalOpenEndKept`), and with it the report: a customer who bought a
+ * plan for ever is not told «Подписка закончилась — Продлить».
+ */
+const DATE_REPORTS: ReadonlySet<string> = new Set([
+  'user.expired',
+  'user.expires_in_24_hours',
+  'user.expires_in_48_hours',
+  'user.expires_in_72_hours',
+  'user.expiration',
+  'user.expire_soon',
+]);
+
+/**
+ * What the reconcile made of one `user.*` event, for everything that follows
+ * it in `handleEvent`.
+ */
+interface EventReconcileOutcome {
+  /**
+   * The event named subscriptions and reached none of them, so a state report
+   * is not forwarded. A row is not reached when:
+   *  - it is in the durable term model and the panel's own last push outranks
+   *    the event (`panelPushOutranksRead`): neither its status nor its expiry
+   *    was taken. Its card, its automations and its outbound webhook would
+   *    announce a state rezeis has already replaced — «истекла» to a customer
+   *    who has just renewed. So when a traffic reset of ours landed after it
+   *    (`trafficResetOutranksStatus`, the operator's «Сбросить»): its status
+   *    was not taken — «трафик закончился» about a counter already zeroed;
+   *  - it has no end date and the event is a date report (`DATE_REPORTS`)
+   *    stating a date: it took neither.
+   * False whenever some row took the event, and whenever it named no row.
+   */
+  readonly reachedNoRow: boolean;
+}
+
+const NOTHING_WITHHELD: EventReconcileOutcome = { reachedNoRow: false };
+
+/** What `reconcileRowsInTermModel` did with the rows in the model an event named. */
+interface TermModelRowsOutcome {
+  /** How many rows in the model the event named. */
+  readonly rows: number;
+  /** How many it wrote a status or an expiry to. */
+  readonly written: number;
+  /** How many took the event as news (see `EventReconcileOutcome.reachedNoRow`). */
+  readonly reached: number;
+  /** The rows that did not take the status the event stated: no notice for them. */
+  readonly statusWithheld: ReadonlySet<string>;
+}
+
+const NO_ROWS_IN_MODEL: TermModelRowsOutcome = { rows: 0, written: 0, reached: 0, statusWithheld: new Set() };
+
+/**
+ * Whether the traffic Remnawave reports used is at or over the row's OWN
+ * limit — the column, add-ons included, in the bytes a push would send.
+ * Unlimited (`0` on the wire) and an unreported counter prove nothing.
+ */
+function trafficAtOrOverOwnLimit(usedTrafficBytes: number | null, trafficLimitGb: number | null): boolean {
+  const limitBytes = toPanelTrafficLimitBytes(trafficLimitGb);
+  return usedTrafficBytes !== null && limitBytes > 0 && usedTrafficBytes >= limitBytes;
+}
 
 /**
  * Maps a Remnawave panel user `status` string onto the local
@@ -626,6 +703,7 @@ export class RemnawaveWebhookService {
     // than our own state", and nothing is pushed for it. See
     // `reconcileSubscriptionFromEvent` and `term-model-readback.ts`, the rule
     // every Remnawave read-back shares.
+    let reconciled: EventReconcileOutcome = NOTHING_WITHHELD;
     if (normalized.startsWith('user.')) {
       // Attribution first, and out loud. Everything below keys the local
       // profile off the panel identity, and when that cannot be read they ALL
@@ -644,7 +722,7 @@ export class RemnawaveWebhookService {
         );
       }
       try {
-        await this.reconcileSubscriptionFromEvent(normalized, payload);
+        reconciled = await this.reconcileSubscriptionFromEvent(normalized, payload);
       } catch (err: unknown) {
         this.logger.warn(
           `Subscription reconcile failed for ${eventType}: ${
@@ -668,7 +746,23 @@ export class RemnawaveWebhookService {
     // Forward curated events to the system-event bus (audit log + realtime +
     // Telegram cards). Unmapped/noisy events are stored only — no Telegram
     // spam. Best-effort: emit() is fire-and-forget and never throws.
-    const mapped = REMNAWAVE_WEBHOOK_EVENT_MAP[normalized];
+    //
+    // A STATE REPORT THE RECONCILE WITHHELD IS NOT FORWARDED. The bus is also
+    // where automations (a customer's pop-up), outbound webhooks and the
+    // email bridge hear an event, so forwarding a `user.expired` that the
+    // panel's own renewal push has outranked would tell a customer who has
+    // just paid that their subscription ended — while their row, rightly,
+    // still says ACTIVE. The same holds for a date report about a subscription
+    // with no end. The event stays in the Activity Feed (stored above). A
+    // one-off fact is forwarded however late it is.
+    const withheld = reconciled.reachedNoRow && !FORWARDED_WHATEVER_ITS_AGE.has(normalized);
+    if (withheld && REMNAWAVE_WEBHOOK_EVENT_MAP[normalized] !== undefined) {
+      this.logger.log(
+        `Remnawave webhook ${eventType} not forwarded: no subscription it names took it — stamped before ` +
+          "the panel's own last change or traffic reset reached Remnawave, or a date for a subscription with no end",
+      );
+    }
+    const mapped = withheld ? undefined : REMNAWAVE_WEBHOOK_EVENT_MAP[normalized];
     // The first-traffic claim follows the SAME evidence rule as the connection
     // state (`connectEvidenceOf`), not a positive `usedTrafficBytes` alone:
     // that counter resets every month, while `firstConnectedAt`, `onlineAt`
@@ -826,14 +920,14 @@ export class RemnawaveWebhookService {
    * subscription whose `remnawaveId` matches. Partial: only fields present
    * in the payload are written; status falls back to the event name.
    *
-   * A subscription in the durable term model takes its status the same way,
-   * but its limits and its expiry by the rules under "In the term model"
-   * below (`reconcileRowsInTermModel`).
+   * A subscription in the durable term model takes its limits, its expiry and
+   * its status by the rules under "In the term model" below
+   * (`reconcileRowsInTermModel`); what that withheld is in the outcome.
    */
   private async reconcileSubscriptionFromEvent(
     normalizedEvent: string,
     payload: Record<string, unknown>,
-  ): Promise<void> {
+  ): Promise<EventReconcileOutcome> {
     const data =
       payload['data'] !== null && typeof payload['data'] === 'object'
         ? (payload['data'] as Record<string, unknown>)
@@ -851,7 +945,7 @@ export class RemnawaveWebhookService {
     // `readWebhookPanelIdentity`. This is matched against `remnawaveId` below,
     // so it must be the string that column holds and nothing else.
     const remnawaveId = readWebhookPanelIdentity(payload);
-    if (remnawaveId === null) return;
+    if (remnawaveId === null) return NOTHING_WITHHELD;
 
     const update: Prisma.SubscriptionUpdateManyMutationInput = {};
 
@@ -864,17 +958,12 @@ export class RemnawaveWebhookService {
         : undefined) ?? statusFromEventName(normalizedEvent);
     if (status !== undefined) update.status = status;
 
-    // Expiry: ISO string → Date. Kept as a plain value too, for the rows in
-    // the term model (see below), which do not take it from `update`.
-    let mirroredExpiresAt: Date | undefined;
-    const expireAt = str('expireAt');
-    if (expireAt !== undefined) {
-      const parsed = new Date(expireAt);
-      if (!Number.isNaN(parsed.getTime())) {
-        mirroredExpiresAt = parsed;
-        update.expiresAt = parsed;
-      }
-    }
+    // Expiry: ISO string → Date, or `null` for a profile with no end — the
+    // year 2099, which is how rezeis and Remnawave's own UI write "for ever"
+    // (`panel-expiry.ts`). Kept as a plain value too, for the rows in the term
+    // model (see below), which do not take it from `update`.
+    const mirroredExpiresAt = panelExpiryToLocal(data['expireAt']);
+    if (mirroredExpiresAt !== undefined) update.expiresAt = mirroredExpiresAt;
 
     // Traffic limit: panel is bytes (0 = unlimited); local is GB (null =
     // unlimited). `panelTrafficLimitToGb` is the single rule every writer of
@@ -900,7 +989,7 @@ export class RemnawaveWebhookService {
       update.deviceLimit = mirroredDeviceLimit;
     }
 
-    if (Object.keys(update).length === 0) return;
+    if (Object.keys(update).length === 0) return NOTHING_WITHHELD;
 
     // ── A panel-side limit change is recorded, but it does not outrank the plan
     //
@@ -964,8 +1053,20 @@ export class RemnawaveWebhookService {
     // it is not harmless either: the term and its «until the end of the
     // subscription» add-ons follow `expiresAt`, so a paid renewal or bonus
     // days rolled back to an earlier date would end those add-ons for good.
-    // STATUS is taken as before: Remnawave derives it from usage and the
-    // clock, and only the event can tell it.
+    //
+    // Its STATUS follows the expiry. Remnawave derives LIMITED and EXPIRED
+    // from usage and the clock, and a newer event is how rezeis learns them;
+    // an event the panel's own push outranks describes the profile before
+    // that push — the renewal that lifted EXPIRED, the top-up that lifted
+    // LIMITED — and put «Истекла» on a subscription just paid for, until some
+    // later event. What such an event would have SAID goes with it: no
+    // «трафик закончился», no card, no automation (`EventReconcileOutcome`).
+    // The fresh status after a push is Remnawave's answer to that push, which
+    // the profile-sync processor writes. A traffic reset of ours — the
+    // operator's «Сбросить» — outranks an older event's status the same way
+    // (a `user.limited` about the counter it zeroed), and the status after it
+    // is the one Remnawave reports right after the reset, which the reset's
+    // endpoint writes.
     //
     // The same rule governs every other Remnawave read-back — the import sync,
     // the ↻ refresh, the backup re-imports — and lives in one place,
@@ -974,7 +1075,11 @@ export class RemnawaveWebhookService {
     // A subscription OUTSIDE the model keeps exactly the behaviour described
     // above and below: the same statement, narrowed to rows with no ACTIVE
     // term. An event that states neither a limit nor an expiry leaves the
-    // model nothing to decide and stays one statement for every row.
+    // model nothing to decide and stays one statement for every row — its
+    // status included, which judging would cost a read of the rows in the
+    // model on the hottest path this service has. No conforming panel sends
+    // one: 3.x requires `expireAt`, `status` and both limits in every user
+    // event's `data`.
     const modelDecides = mirrorsALimit || mirroredExpiresAt !== undefined;
     const outsideModel: Prisma.SubscriptionWhereInput = modelDecides ? { ...where, ...OUTSIDE_TERM_MODEL } : where;
 
@@ -991,7 +1096,31 @@ export class RemnawaveWebhookService {
           })
         : [];
 
-    const result = await this.prismaService.subscription.updateMany({ where: outsideModel, data: update });
+    // A ROW WITH NO END TAKES NO DATE FROM REMNAWAVE, outside the model too
+    // (`withLocalOpenEndKept`): when this event states a date, those rows are
+    // written apart, without it and without an EXPIRED derived from it. That
+    // is the date an older CREATE gave a lifetime row (thirty days), or an edit
+    // made in Remnawave's UI; either would have ended a subscription sold for
+    // ever. An event with no date, or "no end", stays the single statement it
+    // always was, and so does the common one — a dated row reached — which is
+    // what keeps the hottest path this service has on one write: the second
+    // statement runs only when the first reached no row. A profile names one
+    // row but for a duplicate pair, and a row with no end beside a dated
+    // duplicate takes nothing from such an event (merge the pair).
+    const statesADate = mirroredExpiresAt instanceof Date;
+    const result = await this.prismaService.subscription.updateMany({
+      where: statesADate ? { ...outsideModel, expiresAt: { not: null } } : outsideModel,
+      data: update,
+    });
+    const openEndedUpdate = withLocalOpenEndKept(update, null);
+    const openEnded =
+      statesADate && result.count === 0 && Object.keys(openEndedUpdate).length > 0
+        ? await this.prismaService.subscription.updateMany({
+            where: { ...outsideModel, expiresAt: null },
+            data: openEndedUpdate,
+          })
+        : { count: 0 };
+    const dateReport = DATE_REPORTS.has(normalizedEvent) && statesADate;
 
     // Additive second pass, never a replacement for the write above. It exists
     // only to move `planSnapshot` to wherever the columns just landed, and it
@@ -1007,9 +1136,11 @@ export class RemnawaveWebhookService {
     // `panel-user-address.ts`'s plural sibling. A stale limit that the next
     // renewal corrects anyway is the smaller hazard than a divergent identity
     // predicate, which would silently reconcile the wrong customer.
-    if (result.count > 0 && mirrorsALimit) {
+    if (result.count + openEnded.count > 0 && mirrorsALimit) {
       const targets = await this.prismaService.subscription.findMany({
-        where: outsideModel,
+        // The rows the statements above wrote: when only the dated one ran,
+        // not a row with no end beside it, whose columns did not move.
+        where: statesADate && result.count > 0 ? { ...outsideModel, expiresAt: { not: null } } : outsideModel,
         select: { id: true, planSnapshot: true },
       });
       for (const target of targets) {
@@ -1037,9 +1168,11 @@ export class RemnawaveWebhookService {
           expiresAt: mirroredExpiresAt,
           trafficLimitBytes,
           hwidDeviceLimit: mirroredDeviceLimit,
-          rowsOutsideModel: result.count,
+          usedTrafficBytes: this.readUsedTrafficBytes(data),
+          dateReport,
+          rowsOutsideModel: result.count + openEnded.count,
         })
-      : 0;
+      : NO_ROWS_IN_MODEL;
 
     // ONE MESSAGE PER CUSTOMER, not one per row.
     //
@@ -1050,20 +1183,32 @@ export class RemnawaveWebhookService {
     // rows for one panel profile would therefore be told twice, by one
     // webhook, that their traffic ran out. The expiry emitters already dedup
     // per user; this one did not.
+    //
+    // And only a row that TOOK the LIMITED: a row in the model whose status
+    // the panel's own push outranks has crossed nothing — the top-up it just
+    // paid for is what the event predates.
     const notified = new Set<string>();
     for (const subscription of beforeLimited) {
       if (subscription.status === SubscriptionStatus.LIMITED) continue;
+      if (inModel.statusWithheld.has(subscription.id)) continue;
       if (notified.has(subscription.userId)) continue;
       notified.add(subscription.userId);
       await this.notifyTrafficLimited(subscription);
     }
 
-    if (result.count + inModel > 0) {
+    const outsideWritten = result.count + openEnded.count;
+    if (outsideWritten + inModel.written > 0) {
       this.logger.log(
-        `Reconciled ${result.count + inModel} subscription(s) from panel event ${normalizedEvent} ` +
-          `(remnawaveId=${remnawaveId}${inModel > 0 ? `, ${inModel} in the term model` : ''})`,
+        `Reconciled ${outsideWritten + inModel.written} subscription(s) from panel event ${normalizedEvent} ` +
+          `(remnawaveId=${remnawaveId}${inModel.written > 0 ? `, ${inModel.written} in the term model` : ''})`,
       );
     }
+    // Outside the model a row takes the event as it always did — except a row
+    // with no end, which takes nothing of a date report.
+    const outsideReached = result.count + (dateReport ? 0 : openEnded.count);
+    return {
+      reachedNoRow: outsideWritten + inModel.rows > 0 && outsideReached + inModel.reached === 0,
+    };
   }
 
   /**
@@ -1072,15 +1217,23 @@ export class RemnawaveWebhookService {
    * model" in `reconcileSubscriptionFromEvent`, and they are the rule every
    * Remnawave read-back shares (`term-model-readback.ts`). Per row:
    *
-   *  - STATUS is written, as for every subscription;
-   *  - EXPIRY is written unless the panel's own state outranks the event;
+   *  - STATUS and EXPIRY are written unless the panel's own state outranks
+   *    the event — one decision for both — and a row with no end takes no
+   *    stated date, nor an EXPIRED derived from it (`keepsOpenEnd`);
+   *  - while the panel's latest push has FAILED, a LIMITED is still taken when
+   *    the traffic the event reports used is at or over the row's OWN limit
+   *    (the owner, 24.09.2026): that push may never land, and the counter
+   *    proves the customer is out of traffic on our own terms. When only our
+   *    unpushed top-up puts the limit above the usage, it stays withheld, and
+   *    so does everything else the event says;
    *  - LIMITS are never written. When the event is newer than the panel's own
    *    state and the profile holds other limits than rezeis would push, ONE
    *    UPDATE is queued to push rezeis' own again — never for a profile two
    *    live rows name, a row with no panel link, or a profile the event
    *    reports deleted (`judgeTermModelReadback` says why for each).
    *
-   * Returns how many rows it wrote.
+   * Returns how many rows it found, wrote and reached, and which did not take
+   * the status.
    */
   private async reconcileRowsInTermModel(input: {
     readonly normalizedEvent: string;
@@ -1089,21 +1242,28 @@ export class RemnawaveWebhookService {
     /** When the panel stamped the event (`webhookEventTime`). */
     readonly eventAt: Date;
     readonly status: SubscriptionStatus | undefined;
-    readonly expiresAt: Date | undefined;
+    /** `null`: the event states "no end" (`panelExpiryToLocal`); `undefined`: no expiry stated. */
+    readonly expiresAt: Date | null | undefined;
     /** As the panel stated them — bytes, and devices `>= 0` — or `undefined`. */
     readonly trafficLimitBytes: number | undefined;
     readonly hwidDeviceLimit: number | undefined;
+    /** The traffic the event reports used (`readUsedTrafficBytes`), or `null`. */
+    readonly usedTrafficBytes: number | null;
+    /** The event is a date report stating a date (`DATE_REPORTS`). */
+    readonly dateReport: boolean;
     /** How many rows outside the model the same identity named. */
     readonly rowsOutsideModel: number;
-  }): Promise<number> {
+  }): Promise<TermModelRowsOutcome> {
     const rows = await this.prismaService.subscription.findMany({
       where: { ...input.where, ...IN_TERM_MODEL },
-      select: { id: true, remnawaveId: true, trafficLimit: true, deviceLimit: true },
+      select: { id: true, remnawaveId: true, trafficLimit: true, deviceLimit: true, status: true, expiresAt: true },
     });
-    if (rows.length === 0) return 0;
+    if (rows.length === 0) return NO_ROWS_IN_MODEL;
     const sharedProfile = rows.length + input.rowsOutsideModel > 1;
 
     let written = 0;
+    let reached = 0;
+    const statusWithheld = new Set<string>();
     for (const row of rows) {
       const verdict = await judgeTermModelReadback(this.prismaService, {
         subscriptionId: row.id,
@@ -1116,11 +1276,27 @@ export class RemnawaveWebhookService {
         readAt: input.eventAt,
         sharedProfile,
         profileDeleted: input.normalizedEvent === 'user.deleted',
+        localExpiresAt: row.expiresAt,
+        statedExpiresAt: input.expiresAt,
       });
 
-      const data: Prisma.SubscriptionUpdateManyMutationInput = {};
-      if (input.status !== undefined) data.status = input.status;
-      if (input.expiresAt !== undefined && verdict.takeExpiry) data.expiresAt = input.expiresAt;
+      const data: Prisma.SubscriptionUpdateManyMutationInput = {
+        ...withoutWithheldReadbackFields(
+          {
+            ...(input.status === undefined ? {} : { status: input.status }),
+            ...(input.expiresAt === undefined ? {} : { expiresAt: input.expiresAt }),
+          },
+          verdict,
+        ),
+      };
+      const provenLimited =
+        verdict.outrankedByFailedPush &&
+        input.status === SubscriptionStatus.LIMITED &&
+        trafficAtOrOverOwnLimit(input.usedTrafficBytes, row.trafficLimit);
+      if (provenLimited) data.status = SubscriptionStatus.LIMITED;
+      if (input.status !== undefined && data.status === undefined) statusWithheld.add(row.id);
+      if (verdict.takeStatus && !(verdict.keepsOpenEnd && input.dateReport)) reached += 1;
+      this.logWithheld(input, row, data, verdict, provenLimited);
       if (Object.keys(data).length > 0) {
         const result = await this.prismaService.subscription.updateMany({
           where: { id: row.id, status: { not: SubscriptionStatus.DELETED } },
@@ -1142,7 +1318,40 @@ export class RemnawaveWebhookService {
         ...(queue === null ? {} : { enqueue: (syncJobId: string) => queue.enqueue(syncJobId) }),
       });
     }
-    return written;
+    return { rows: rows.length, written, reached, statusWithheld };
+  }
+
+  /**
+   * One line for a row in the model that did not take what the event said —
+   * only when that changed something: the echo of every push of ours is
+   * outranked by definition, and says what the row already holds.
+   */
+  private logWithheld(
+    input: { readonly normalizedEvent: string; readonly status: SubscriptionStatus | undefined; readonly expiresAt: Date | null | undefined },
+    row: { readonly id: string; readonly status: SubscriptionStatus; readonly expiresAt: Date | null },
+    written: Prisma.SubscriptionUpdateManyMutationInput,
+    verdict: { readonly takeStatus: boolean },
+    provenLimited: boolean,
+  ): void {
+    const withheld = [
+      ...(input.status !== undefined && written.status === undefined && input.status !== row.status
+        ? [`status ${input.status} (keeps ${row.status})`]
+        : []),
+      ...(input.expiresAt !== undefined &&
+      written.expiresAt === undefined &&
+      input.expiresAt?.getTime() !== row.expiresAt?.getTime()
+        ? [`expiry ${input.expiresAt?.toISOString() ?? 'none'} (keeps ${row.expiresAt?.toISOString() ?? 'none'})`]
+        : []),
+    ];
+    if (withheld.length === 0) return;
+    const why = !verdict.takeStatus
+      ? "stamped before the panel's own last change or traffic reset reached Remnawave" +
+        (provenLimited ? ' (a failed push; LIMITED taken on the traffic used)' : '')
+      : "the subscription has no end date, and the profile's date is not one of ours";
+    this.logger.log(
+      `Remnawave webhook ${input.normalizedEvent} not taken for subscription ${row.id} (in the term model): ` +
+        `${withheld.join(', ')} — ${why}`,
+    );
   }
 
 
@@ -1306,6 +1515,35 @@ export class RemnawaveWebhookService {
     } catch (err) {
       this.logger.warn(
         `Traffic-limit notice failed for ${subscription.id}: ${(err as Error).message}`,
+      );
+    }
+  }
+
+  /**
+   * The same notice, for a crossing into LIMITED that Remnawave's ANSWER to a
+   * push of rezeis' own reported (`ProfileSyncProcessor`, through
+   * `profile-sync/panel-answer-status.ts`).
+   *
+   * That answer is the only carrier such a crossing has left. Remnawave never
+   * derives LIMITED on a PATCH, so an answer saying LIMITED means the customer
+   * ran out BEFORE the push landed — and the `user.limited` sent at that
+   * moment is stamped before the push completed, so the rule every read-back
+   * shares withheld it, with its notice. One notice per crossing, as here: the
+   * caller moves the row to LIMITED from another status, under its lock.
+   *
+   * Best-effort, like the webhook's own: the status is already written.
+   */
+  public async notifyTrafficLimitedFromPushAnswer(subscriptionId: string): Promise<void> {
+    try {
+      const subscription = await this.prismaService.subscription.findUnique({
+        where: { id: subscriptionId },
+        select: SubscriptionNoticePayloadService.SELECT,
+      });
+      if (subscription === null) return;
+      await this.notifyTrafficLimited(subscription);
+    } catch (err: unknown) {
+      this.logger.warn(
+        `Traffic-limit notice failed for ${subscriptionId}: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }

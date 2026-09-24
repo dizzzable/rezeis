@@ -278,11 +278,15 @@ describe('RemnawaveWebhookService payload sanitization — user events', () => {
     // in `handleEvent` only holds while `sanitizePayload` stays non-mutating.
     assert.equal(reconciled.length, 1);
     // The event states limits, so this statement takes the rows OUTSIDE the
-    // term model; a row in it is reconciled by its own rules, apart.
+    // term model; a row in it is reconciled by its own rules, apart. And it
+    // states a date, so a row with no end is not in it either: such a row
+    // takes no date from Remnawave (`panel-expiry.ts`), and is written apart
+    // only when this statement reached no row.
     assert.deepEqual(reconciled[0]!.where, {
       remnawaveId: '9d2f4c1e-7b3a-4f6d-9c58-2e1a7b4c9d30',
       status: { not: 'DELETED' },
       terms: { none: { status: 'ACTIVE' } },
+      expiresAt: { not: null },
     });
     assert.equal(reconciled[0]!.data['status'], 'EXPIRED');
     assert.deepEqual(reconciled[0]!.data['expiresAt'], new Date('2026-08-05T09:00:00.000Z'));

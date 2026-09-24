@@ -6,6 +6,7 @@ import {
   describeStrictOutcome,
   RemnawaveStrictOutcome,
 } from '../../remnawave/interfaces/remnawave-strict-outcome.interface';
+import { panelExpiryToLocal, withLocalOpenEndKept } from '../../remnawave/services/panel-expiry';
 import {
   RemnawaveApiService,
   RemnawavePanelUser,
@@ -542,6 +543,8 @@ export class RemnawaveImporterService {
         remnawaveId: true,
         trafficLimit: true,
         deviceLimit: true,
+        // A subscription with no end keeps it (`withLocalOpenEndKept`).
+        expiresAt: true,
         ...TERM_MODEL_MARKER_SELECT,
       },
     });
@@ -552,7 +555,10 @@ export class RemnawaveImporterService {
     // because `0` here means zero gigabytes, not unlimited — this line used
     // to lack that floor and disagreed with the webhook mirror on 0.4 GB.
     const trafficLimitGb = panelTrafficLimitToGb(panelUser.trafficLimitBytes);
-    const expiresAt = panelUser.expireAt ? new Date(panelUser.expireAt) : null;
+    // A date in 2099 is "no end", `null` as rezeis holds it; a profile that
+    // states no readable date leaves an existing row's alone (`panel-expiry.ts`).
+    const statedExpiresAt = panelExpiryToLocal(panelUser.expireAt);
+    const expiresAt = statedExpiresAt ?? null;
     // The supplementary identity columns, written from a panel row that carries
     // them on BOTH eras (2.x returns the numeric id beside the uuid; 3.x keys
     // everything by it). Never written as null: a value we could not read must
@@ -578,7 +584,7 @@ export class RemnawaveImporterService {
       trafficLimit: trafficLimitGb,
       deviceLimit: panelUser.hwidDeviceLimit,
       configUrl: panelUser.subscriptionUrl || null,
-      expiresAt,
+      ...(statedExpiresAt === undefined ? {} : { expiresAt: statedExpiresAt }),
       internalSquads: panelUser.activeInternalSquads?.map((s) => s.uuid) ?? [],
       externalSquad: panelUser.externalSquadUuid ?? null,
       ...panelIdentityColumns,
@@ -608,10 +614,15 @@ export class RemnawaveImporterService {
         readAt,
         claims: panelProfileClaims(panelUser),
       });
-      // Update existing subscription
+      // Update existing subscription. Outside the model too, a subscription
+      // with no end keeps it: the profile's date is not taken over it, nor an
+      // EXPIRED derived from that date (`withLocalOpenEndKept`).
       await this.prismaService.subscription.update({
         where: { id: existing.id },
-        data: verdict === null ? subscriptionData : withoutWithheldReadbackFields(subscriptionData, verdict),
+        data:
+          verdict === null
+            ? withLocalOpenEndKept(subscriptionData, existing.expiresAt)
+            : withoutWithheldReadbackFields(subscriptionData, verdict),
       });
       if (verdict !== null) {
         // After the write: the push is built from the columns when it runs.

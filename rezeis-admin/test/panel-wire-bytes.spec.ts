@@ -295,6 +295,22 @@ describe('profile-sync CREATE puts the same bytes on the wire', () => {
     });
     assert.deepStrictEqual(wires, EXPECTED['create-no-strategy']);
   });
+
+  it('a subscription with no end date', async () => {
+    const wires = await runProcessor({
+      job: jobOf(SyncAction.CREATE, {
+        remnawaveId: null,
+        trafficLimit: 100,
+        deviceLimit: 3,
+        internalSquads: [U1],
+        externalSquad: null,
+        expiresAt: null,
+        planSnapshot: { tag: 'FOREVER' },
+      }),
+      respond: (config) => (config.url.startsWith('/api/users/by-username/') ? USER_NOT_FOUND : USER_ROW),
+    });
+    assert.deepStrictEqual(wires, EXPECTED['create-open-ended']);
+  });
 });
 
 describe('profile-sync UPDATE puts the same bytes on the wire', () => {
@@ -633,6 +649,18 @@ const EXPECTED: Readonly<Record<string, readonly WireRequest[]>> = {
         '{"username":"rz_login_sub","status":"ACTIVE","trafficLimitBytes":1073741824,"trafficLimitStrategy":"NO_RESET","expireAt":"2099-03-04T05:06:07.089Z","description":"name: Buyer\\nreiwa_id: user-1","tag":"TRIAL","telegramId":null,"email":null,"hwidDeviceLimit":1,"activeInternalSquads":["2f1c9a44-0000-4000-8000-000000000001"],"externalSquadUuid":null}',
     },
   ],
+  // A subscription with no end: the sentinel, where this used to be now + 30
+  // days and Remnawave cut the customer off at day 30.
+  'create-open-ended': [
+    { method: 'GET', url: '/api/users/by-username/rz_login_sub', contentType: null, body: null },
+    {
+      method: 'POST',
+      url: '/api/users/',
+      contentType: 'application/json',
+      body:
+        '{"username":"rz_login_sub","status":"ACTIVE","trafficLimitBytes":107374182400,"trafficLimitStrategy":"NO_RESET","expireAt":"2099-12-31T00:00:00.000Z","description":"name: Buyer\\nreiwa_id: user-1","tag":"FOREVER","telegramId":null,"email":null,"hwidDeviceLimit":3,"activeInternalSquads":["2f1c9a44-0000-4000-8000-000000000001"],"externalSquadUuid":null}',
+    },
+  ],
   'update-full': [
     {
       method: 'PATCH',
@@ -643,13 +671,15 @@ const EXPECTED: Readonly<Record<string, readonly WireRequest[]>> = {
     },
     { method: 'POST', url: '/api/users/4711/actions/reset-traffic', contentType: null, body: null },
   ],
+  // "No end" goes out as the sentinel (`panel-expiry.ts`). The key used to be
+  // left out, and the profile kept the thirty days its CREATE had given it.
   'update-blocked-open-ended': [
     {
       method: 'PATCH',
       url: '/api/users/',
       contentType: 'application/json',
       body:
-        '{"id":4711,"status":"DISABLED","trafficLimitBytes":0,"description":"name: Buyer\\nreiwa_id: user-1","tag":null,"telegramId":null,"email":null,"hwidDeviceLimit":0,"activeInternalSquads":[],"externalSquadUuid":null}',
+        '{"id":4711,"status":"DISABLED","trafficLimitBytes":0,"expireAt":"2099-12-31T00:00:00.000Z","description":"name: Buyer\\nreiwa_id: user-1","tag":null,"telegramId":null,"email":null,"hwidDeviceLimit":0,"activeInternalSquads":[],"externalSquadUuid":null}',
     },
   ],
   'update-resolve-short-uuid': [

@@ -1,11 +1,12 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnApplicationBootstrap, Optional } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
-import { SubscriptionStatus, SyncAction, SyncJobStatus } from '@prisma/client';
+import { Prisma, SubscriptionStatus, SyncAction, SyncJobStatus } from '@prisma/client';
 
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { shouldRunSchedules } from '../../common/runtime/process-role.util';
 import { EVENT_TYPES, SystemEventsService } from '../../common/services/system-events.service';
 import { planNamesMetadata } from '../../common/utils/plan-snapshot.util';
+import { panelExpiryToLocal } from '../remnawave/services/panel-expiry';
 import { storedIdentityOf } from '../remnawave/services/panel-user-address';
 import { PanelUsersClient } from '../remnawave/services/panel-users.client';
 import {
@@ -15,10 +16,29 @@ import {
 } from '../remnawave/services/term-model-readback';
 import { SettingsService } from '../settings/services/settings.service';
 import { SubscriptionDeletionService } from '../subscriptions/services/subscription-deletion.service';
+import { ProfileSyncQueueService } from './profile-sync-queue.service';
 import { readPanelFailure, resolvePanelUserId } from './profile-sync.processor';
 
 /** Max subscriptions cleaned per sweep — bounds the load on the panel. */
 const CLEANUP_BATCH = 100;
+
+/**
+ * `cause` and `payload.source` of the one UPDATE each linked subscription with
+ * no end gets, to carry "no end" (`panel-expiry.ts`) into a profile an older
+ * build created with thirty days. Its presence is also the record that the
+ * row has had it: {@link ExpiredProfileCleanupService.reassertPanelNoEnd}
+ * never queues a second.
+ */
+export const PANEL_NO_END_REASSERT_CAUSE = 'PANEL_NO_END_REASSERT';
+
+/**
+ * UPDATEs queued per pass. Each is one PATCH, run at the processor's own
+ * concurrency; lifetime subscriptions are few, so the first pass at boot
+ * usually covers them all, and a larger book drains by this much every half
+ * hour — oldest first: a profile created more than thirty days ago has already
+ * been cut off by Remnawave, and its customer is waiting now.
+ */
+const NO_END_REASSERT_BATCH = 500;
 
 /**
  * True when a row with no `remnawaveId` nonetheless owns a live panel profile.
@@ -51,24 +71,6 @@ function hasLostPanelLink(row: {
     typeof row.configUrl === 'string' &&
     row.configUrl.length > 0
   );
-}
-
-/**
- * A panel instant in milliseconds, or `null` when it is not one.
- *
- * The panel client hands back the panel's own JSON, so `expireAt` arrives as
- * the ISO string; a `Date` is accepted too. This sweep DELETES on the strength
- * of that date, so an unreadable one must defer rather than fall through to
- * `NaN` — which compares false against every cutoff and would take the
- * deletion branch.
- */
-function readInstantMs(value: unknown): number | null {
-  if (value instanceof Date) {
-    return Number.isNaN(value.getTime()) ? null : value.getTime();
-  }
-  if (typeof value !== 'string' || value.length === 0) return null;
-  const parsed = Date.parse(value);
-  return Number.isNaN(parsed) ? null : parsed;
 }
 
 /**
@@ -105,7 +107,7 @@ function readInstantMs(value: unknown): number | null {
  * See `.kiro/specs/trial-aware-profile-cleanup`.
  */
 @Injectable()
-export class ExpiredProfileCleanupService {
+export class ExpiredProfileCleanupService implements OnApplicationBootstrap {
   private readonly logger = new Logger(ExpiredProfileCleanupService.name);
 
   public constructor(
@@ -114,12 +116,97 @@ export class ExpiredProfileCleanupService {
     private readonly settingsService: SettingsService,
     private readonly panelUsers: PanelUsersClient,
     private readonly subscriptionDeletionService: SubscriptionDeletionService,
+    /**
+     * Hands the "no end" UPDATEs to the queue at once
+     * ({@link reassertPanelNoEnd}). `@Optional()` and last for the specs that
+     * build this service positionally; without it the five-minute
+     * profile-sync sweep picks the PENDING rows up.
+     */
+    @Optional() private readonly profileSyncQueue?: ProfileSyncQueueService,
   ) {}
 
   @Cron(CronExpression.EVERY_30_MINUTES, { name: 'expired-profile-cleanup' })
   public async sweepExpiredProfiles(): Promise<void> {
     if (!shouldRunSchedules()) return;
     await this.runSweep();
+  }
+
+  /** The first "no end" pass as soon as the worker is up, then every half hour. */
+  public onApplicationBootstrap(): void {
+    if (!shouldRunSchedules()) return;
+    void this.reassertPanelNoEnd().catch((err: unknown) => {
+      this.logger.warn(`"No end" re-push failed at boot: ${err instanceof Error ? err.message : String(err)}`);
+    });
+  }
+
+  @Cron(CronExpression.EVERY_30_MINUTES, { name: 'panel-no-end-reassert' })
+  public async sweepPanelNoEnd(): Promise<void> {
+    if (!shouldRunSchedules()) return;
+    await this.reassertPanelNoEnd();
+  }
+
+  /**
+   * THE ONE-OFF RE-PUSH OF "NO END" into profiles an older build created with
+   * thirty days (R1-01, 24.09.2026).
+   *
+   * Every CREATE and UPDATE now sends the sentinel for a subscription with no
+   * end (`panel-expiry.ts`). A profile made before that still holds the
+   * thirty days its CREATE gave it — later UPDATEs left the date out — and
+   * Remnawave cuts the customer off when they pass. So each live row with no
+   * end and a panel link gets ONE ordinary UPDATE, built from the columns when
+   * it runs like every push: it carries the sentinel, lifts an EXPIRED profile
+   * back to ACTIVE, and re-asserts limits, squads and contacts as any push
+   * does. No status is propagated.
+   *
+   * WHERE: here, in the worker, independent of the deletion policy — a pass at
+   * boot and every thirty minutes. Profile deletion switched off must not stop
+   * a customer's access being restored.
+   *
+   * IDEMPOTENT by its own record: the job's `cause` marks the row as done, and
+   * a row that has one — whatever became of it — is never selected again. A
+   * failed one is retried and reported like every push. A row made after this
+   * release gets one redundant PATCH at most; a check of the profile first
+   * would cost the same round trip.
+   *
+   * Returns how many UPDATEs it queued.
+   */
+  public async reassertPanelNoEnd(limit: number = NO_END_REASSERT_BATCH): Promise<number> {
+    const rows = await this.prismaService.subscription.findMany({
+      where: {
+        status: { not: SubscriptionStatus.DELETED },
+        expiresAt: null,
+        remnawaveId: { not: null },
+        syncJobs: { none: { cause: PANEL_NO_END_REASSERT_CAUSE } },
+      },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      take: limit,
+      select: { id: true },
+    });
+    for (const row of rows) {
+      const job = await this.prismaService.profileSyncJob.create({
+        data: {
+          subscriptionId: row.id,
+          action: SyncAction.UPDATE,
+          status: SyncJobStatus.PENDING,
+          cause: PANEL_NO_END_REASSERT_CAUSE,
+          payload: { source: PANEL_NO_END_REASSERT_CAUSE } as Prisma.InputJsonObject,
+        },
+        select: { id: true },
+      });
+      try {
+        await this.profileSyncQueue?.enqueue(job.id);
+      } catch (err: unknown) {
+        this.logger.warn(
+          `"No end" UPDATE ${job.id} not queued, the profile-sync sweep will: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+    if (rows.length > 0) {
+      this.logger.log(`Queued ${rows.length} UPDATE(s) carrying "no end" to Remnawave profiles of subscriptions with no end date`);
+    }
+    return rows.length;
   }
 
   /**
@@ -353,21 +440,23 @@ export class ExpiredProfileCleanupService {
             ? readPanelFailure(panelOutcome)
             : null;
 
-      let panelExpiryMs: number | null = null;
+      // `null`: the profile has no end — a date in 2099 (`panel-expiry.ts`).
+      // `undefined`: nothing read, as for a profile the panel says is gone.
+      let panelExpiry: Date | null | undefined;
       let panelSubscriptionUrl: string | null = null;
       if (panelOutcome !== null && panelOutcome.kind === 'ok') {
         const profile = panelOutcome.data.response;
         // The panel's RAW body: nothing validates it on the way here, so
         // `expireAt` is whatever the panel sent. A string or a `Date` is read,
         // and anything else DEFERS rather than deleting on a date this could
-        // not read.
-        const expireAtMs = readInstantMs(profile.expireAt);
-        if (expireAtMs === null) {
+        // not read — `NaN` compares false against every cutoff and would take
+        // the deletion branch.
+        panelExpiry = panelExpiryToLocal(profile.expireAt);
+        if (panelExpiry === undefined) {
           deferred += 1;
           deferredKinds.add('unreadableExpiry');
           continue;
         }
-        panelExpiryMs = expireAtMs;
         panelSubscriptionUrl =
           typeof profile.subscriptionUrl === 'string' && profile.subscriptionUrl.length > 0
             ? profile.subscriptionUrl
@@ -388,9 +477,10 @@ export class ExpiredProfileCleanupService {
         continue;
       }
 
-      // Panel says the subscription is NOT expired past the grace cutoff — the
-      // local `expiresAt` was stale. Self-heal it and skip deletion.
-      if (panelExpiryMs !== null && panelExpiryMs >= cutoff.getTime()) {
+      // Panel says the subscription is NOT expired past the grace cutoff, or
+      // has no end at all — the local `expiresAt` was stale. Self-heal it and
+      // skip deletion.
+      if (panelExpiry !== undefined && (panelExpiry === null || panelExpiry.getTime() >= cutoff.getTime())) {
         // Unless the row is in the term model and a push of rezeis' own is
         // newer than this read — the rule every Remnawave read-back shares
         // (`term-model-readback.ts`). Then the later date is the one that
@@ -406,12 +496,12 @@ export class ExpiredProfileCleanupService {
           deferredKinds.add('pushOfOursNewer');
           continue;
         }
-        const reviveActive = panelExpiryMs > Date.now();
+        const reviveActive = panelExpiry === null || panelExpiry.getTime() > Date.now();
         try {
           await this.prismaService.subscription.update({
             where: { id: subscription.id },
             data: {
-              expiresAt: new Date(panelExpiryMs),
+              expiresAt: panelExpiry,
               ...(panelSubscriptionUrl !== null ? { configUrl: panelSubscriptionUrl } : {}),
               ...(reviveActive ? { status: SubscriptionStatus.ACTIVE } : {}),
             },
@@ -433,15 +523,15 @@ export class ExpiredProfileCleanupService {
             userId: subscription.userId,
             isTrial: subscription.isTrial,
             ...planNamesMetadata([subscription.planSnapshot]),
-            panelExpiresAt: new Date(panelExpiryMs).toISOString(),
+            panelExpiresAt: panelExpiry?.toISOString() ?? null,
             revived: reviveActive,
             source: 'EXPIRED_PROFILE_CLEANUP',
           },
         );
         this.logger.log(
-          `Expired-profile cleanup: skipped ${subscription.id} — panel expiry ${new Date(
-            panelExpiryMs,
-          ).toISOString()} is newer than the stale local date; self-healed`,
+          `Expired-profile cleanup: skipped ${subscription.id} — panel expiry ${
+            panelExpiry?.toISOString() ?? 'none (no end)'
+          } is newer than the stale local date; self-healed`,
         );
         continue;
       }

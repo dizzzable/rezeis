@@ -3520,6 +3520,84 @@ describe('InternalUserService', () => {
       'impossible',
     );
   });
+
+  // ── "No end date" in the card (`panel-expiry.ts`) ────────────────────────
+  //
+  // The card shows the panel's date over the row's. A subscription with no end
+  // shows none: not the thirty days an older build gave its profile, nor the
+  // EXPIRED Remnawave derived from them; and a profile in 2099 is "no end".
+
+  function cardWith(row: { readonly status: SubscriptionStatus; readonly expiresAt: Date | null }, usage: Record<string, unknown>) {
+    const now = Date.now();
+    const prismaService: MockPrismaService = {
+      authChallenge: {
+        findFirst: async (): Promise<unknown> => null,
+        create: async (): Promise<unknown> => null,
+        update: async (): Promise<unknown> => null,
+      },
+      plan: { findMany: async (): Promise<readonly unknown[]> => [] },
+      webAccount: { updateMany: async (): Promise<unknown> => ({ count: 0 }) },
+      user: {
+        findUnique: async (): Promise<unknown> => createInternalUserRecord({}),
+        findFirst: async (): Promise<unknown> => createInternalUserRecord({}),
+        updateMany: async (): Promise<unknown> => ({ count: 0 }),
+      },
+      subscription: {
+        findMany: async (): Promise<readonly unknown[]> => [
+          {
+            id: 'subscription-lifetime',
+            userId: 'user-1',
+            status: row.status,
+            isTrial: false,
+            planSnapshot: { name: 'Forever', type: 'BOTH' },
+            trafficLimit: 100,
+            deviceLimit: 3,
+            remnawaveId: '4471',
+            remnawavePanelId: 4471,
+            remnawavePanelUsername: 'rz_bob_1',
+            configUrl: 'https://current.example.com',
+            startedAt: new Date(now - 60_000),
+            expiresAt: row.expiresAt,
+            createdAt: new Date(now - 60_000),
+            updatedAt: new Date(now - 1_000),
+          },
+        ],
+      },
+    };
+    return new InternalUserService(
+      prismaService as never,
+      createPasswordHashServiceMock(),
+      createEmailServiceMock(),
+      undefined,
+      {
+        getPanelUserUsage: async (): Promise<unknown> => ({
+          username: 'rz_bob_1',
+          usedTrafficBytes: 0,
+          trafficLimitBytes: 100 * 1024 ** 3,
+          hwidDeviceLimit: 3,
+          ...usage,
+        }),
+      } as never,
+    );
+  }
+
+  it('shows no end for a subscription with none, whatever date and EXPIRED its profile still holds', async () => {
+    const thirtyDays = new Date(Date.now() - 86_400_000).toISOString();
+    const card = await cardWith(
+      { status: SubscriptionStatus.ACTIVE, expiresAt: null },
+      { status: 'EXPIRED', expireAt: thirtyDays },
+    ).getSubscription({ email: 'user@example.com' });
+    assert.equal(card?.expiresAt, null);
+    assert.equal(card?.status, SubscriptionStatus.ACTIVE);
+  });
+
+  it('shows a profile dated 2099 as no end', async () => {
+    const card = await cardWith(
+      { status: SubscriptionStatus.ACTIVE, expiresAt: new Date(Date.now() + 86_400_000) },
+      { status: 'ACTIVE', expireAt: '2099-12-31T00:00:00.000Z' },
+    ).getSubscription({ email: 'user@example.com' });
+    assert.equal(card?.expiresAt, null);
+  });
 });
 
 function createPasswordHashServiceMock(): PasswordHashService {

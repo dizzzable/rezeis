@@ -26,6 +26,7 @@ import {
   describeStrictOutcome,
   type RemnawaveStrictOutcome,
 } from '../../remnawave/interfaces/remnawave-strict-outcome.interface';
+import { panelExpiryToLocal } from '../../remnawave/services/panel-expiry';
 import { panelTrafficLimitToGb } from '../../remnawave/utils/panel-traffic-limit.util';
 
 /** Fresh subscription fields projected from a live Remnawave panel profile. */
@@ -83,7 +84,8 @@ export function reconcileMissingPanelStatus(
 export function panelSubscriptionState(panel: RemnawavePanelUser): PanelSubscriptionState {
   return {
     status: mapPanelStatus(panel.status),
-    expiresAt: panel.expireAt ? new Date(panel.expireAt) : null,
+    // A date in 2099 is "no end", `null` as rezeis holds it (`panel-expiry.ts`).
+    expiresAt: panelExpiryToLocal(panel.expireAt) ?? null,
     trafficLimit: panelTrafficLimitToGb(panel.trafficLimitBytes),
     deviceLimit:
       typeof panel.hwidDeviceLimit === 'number' && panel.hwidDeviceLimit >= 0

@@ -36,7 +36,7 @@ import { PANEL_COMMANDS } from './panel-commands';
  * The `{ response: … }` envelope is handed back as it arrived, typed by
  * {@link PanelUserResponse} for the fields rezeis reads and validated by nobody.
  * Every consumer already reads those fields defensively — `readPanelUserId`,
- * `panelTimestamp`, `readInstantMs`, the ownership check — because that is what
+ * `panelTimestamp`, `panelExpiryToLocal`, the ownership check — because that is what
  * the executor's old drift path handed them on some panel releases anyway. The
  * consumer audit behind this change found no users caller that depended on the
  * vendor parse's `Date` objects or stripped keys.
@@ -233,8 +233,8 @@ export class PanelUsersClient {
  * `test/fixtures/remnawave/3.3.2/user.json`), and nothing strips it any more.
  *
  * Dates are the wire strings. Every reader goes through a helper that accepts a
- * string or a `Date` (`panelTimestamp`, `readInstantMs`), so a test double that
- * hands over a `Date` still exercises the real path.
+ * string or a `Date` (`panelTimestamp`, `panelExpiryToLocal`), so a test double
+ * that hands over a `Date` still exercises the real path.
  */
 export type PanelUser = {
   readonly id: number;
@@ -246,6 +246,14 @@ export type PanelUser = {
   readonly trafficLimitBytes: number;
   /** `null` and `0` both mean unlimited on 3.x. */
   readonly hwidDeviceLimit: number | null;
+  /**
+   * `ACTIVE`, `DISABLED`, `LIMITED` or `EXPIRED` — required in `UserResponseDto`
+   * on 3.2.1 to 3.4.4, and, in the answer to a PATCH, the status AFTER the
+   * change: the panel lifts LIMITED and EXPIRED in the same call when the
+   * change warrants it. Optional here because nothing validates the body;
+   * read it through `readPanelDerivedStatus`.
+   */
+  readonly status?: string;
 };
 
 /** The `{ response: … }` envelope every single-user route answers with. */

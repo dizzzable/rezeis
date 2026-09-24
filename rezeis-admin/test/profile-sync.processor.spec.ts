@@ -380,8 +380,19 @@ describe('ProfileSyncProcessor', () => {
 
     await processor.process({ data: { syncJobId: 'sync-job-1' } } as never);
 
-    assert.equal((profileSyncUpdates[0] as { readonly data: { readonly status: SyncJobStatus } }).data.status, SyncJobStatus.RUNNING);
-    assert.equal((profileSyncUpdates[1] as { readonly data: { readonly status: SyncJobStatus } }).data.status, SyncJobStatus.COMPLETED);
+    // The job's own lifecycle: RUNNING, then COMPLETED. Between the two, once
+    // the PATCH carrying a status has succeeded, the status it sent is
+    // recorded on the job — what `panel-answer-status.ts` reads to tell the
+    // panel's own switch-off from Remnawave's.
+    type JobWrite = { readonly data: { readonly status?: SyncJobStatus; readonly payload?: unknown } };
+    const writes = profileSyncUpdates as JobWrite[];
+    const lifecycle = writes.filter((write) => write.data.status !== undefined);
+    assert.equal(lifecycle[0]?.data.status, SyncJobStatus.RUNNING);
+    assert.equal(lifecycle[1]?.data.status, SyncJobStatus.COMPLETED);
+    assert.deepStrictEqual(
+      writes.filter((write) => write.data.payload !== undefined).map((write) => write.data.payload),
+      [{ propagateStatus: true, statusSent: 'DISABLED' }],
+    );
     // ONE BODY, IDENTITY INCLUDED. `PATCH /api/users` carries the target in
     // the body as the numeric `id` the route declares — there is no path
     // segment and no separate identity argument to get out of step with it.

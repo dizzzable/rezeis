@@ -46,7 +46,8 @@ import {
  *    rows name (D1, D2), one deleted in Remnawave (X1) or a row with no panel
  *    link (U1);
  *  - expiry: taken as before, unless the panel's own last push outranks the
- *    event (E1–E4, N1);
+ *    event (E1–E4, N1); the status follows the same rule (E1, and
+ *    `remnawave-status-term-model-postgres`);
  *  - a subscription OUTSIDE the model: exactly as before (O1).
  *
  * Every flag is pinned in each case, so the rules hold whatever the defaults.
@@ -476,7 +477,7 @@ run('a Remnawave webhook against a subscription in the term model (PostgreSQL)',
     assert.equal((await row(owner)).deviceLimit, 3);
   });
 
-  it('E1 while a push of ours is queued, an earlier expiry in the event is not taken; the status is', async () => {
+  it('E1 while a push of ours is queued, neither the event’s earlier expiry nor its status is taken', async () => {
     const plan = await createPlan(fx, PLAN);
     const owner = await panelSubscription(plan);
     await enterModel(owner);
@@ -490,7 +491,11 @@ run('a Remnawave webhook against a subscription in the term model (PostgreSQL)',
     );
     const after = await row(owner);
     assert.equal(after.expiresAt?.getTime(), before?.getTime(), 'the paid days are not rolled back');
-    assert.equal(after.status, SubscriptionStatus.DISABLED, 'the status is the panel’s to report');
+    // The status follows the expiry (`remnawave-status-term-model-postgres`):
+    // the queued push's own answer brings the fresh one — DISABLED included,
+    // because that push sends no status of its own and the owner is not
+    // blocked (S15 there).
+    assert.equal(after.status, SubscriptionStatus.ACTIVE, 'nor is the status of a state our push replaces');
     assert.equal(after.deviceLimit, 3);
     assert.equal((await putBacks(owner)).length, 0, 'the queued push carries our state');
   });

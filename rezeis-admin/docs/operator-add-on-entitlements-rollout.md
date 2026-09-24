@@ -178,11 +178,16 @@ Decided by the term row, whatever the flags say.
   the last term ends — after first aligning that term with the subscription's
   expiry, so days a writer left to the hourly drift sweep (referral days, bulk
   «Продлить подписку») are not lost to the add-ons sold "until the end".
-  - A **lifetime** subscription's open-ended term is closed at the payment, and
-    the renewal's term follows it: the renewal gives the subscription an end
-    date, as it always did on the columns. Its add-ons with no end date now end
-    with the renewal's term (audit reason `LIFETIME_TERM_CLOSED_BY_RENEWAL`).
-    Before, such a payment failed and stayed unfulfilled.
+  - A **lifetime** subscription (`expiresAt` empty) is not renewed at all (the
+    owner, 24.09.2026). Every checkout refuses it (`SUBSCRIPTION_IS_LIFETIME`),
+    and a payment that arrives anyway changes nothing, in the model or not:
+    its open-ended term stays open, nothing is appended, and its add-ons with
+    no end keep none. The payment is settled, and the operator gets «Платёж
+    получен, нужна проверка» asking for the refund (code
+    `LIFETIME_RENEWAL_NOT_APPLIED`). A renewal that meets an open-ended tail on
+    a subscription that does have a date — the expiry moved before a queued
+    lifetime term, see «Shortening across a queued SCHEDULED term» — fails
+    closed with `RENEWAL_AFTER_OPEN_ENDED_TERM` and stays unfulfilled.
 - **Renewal priced before a plan change** (every subscription, in the model or
   not). The checkout was drafted, then the plan changed: a paid upgrade,
   «Назначить план» or a bulk assignment. The renewal keeps the plan the
@@ -359,15 +364,69 @@ model (it has a term), decided by the term row and not by any flag:
     refund's end, an operator's shortening). It counts the subscription as
     deferred — `pushOfOursNewer` in its «deferred N of M candidate(s)» warning —
     and asks again at the next pass, after the push.
-- **The status is written as each path wrote it before.** The webhook and the
-  imports take it (Remnawave derives LIMITED and EXPIRED); the ↻ button never
-  wrote it; the cleanup sets ACTIVE on a subscription it heals to a future date.
+- **The status follows the expiry.** The webhook and the imports take the
+  status from a read that is not an echo (Remnawave derives LIMITED and EXPIRED
+  from usage and its own clock); from an echo they take neither. The ↻ button
+  never writes it; the cleanup sets ACTIVE on a subscription it heals to a
+  future date or to no end.
+  - An echo is not news, so the webhook tells nobody about it: no «Трафик
+    исчерпан» to the customer, no card, no automation, no outbound webhook.
+    The event stays in the Activity Feed, and the log says «not taken» or «not
+    forwarded». The one-off facts `user.first_connected` and
+    `user.traffic_reset` are forwarded however late they arrive.
+  - The status after a push is Remnawave's answer to that push: the answer to
+    the PATCH or the POST, to the counter reset a renewal makes after its PATCH,
+    or the read-back of a versioned write. The profile-sync worker writes it,
+    unless a newer push of the panel's is still queued, running or failed. It
+    never goes against the panel's own date: never ACTIVE → EXPIRED (autopay may
+    still be retrying), never EXPIRED while the date runs, never ACTIVE or
+    LIMITED once it has passed. A move into LIMITED tells the customer once.
+  - DISABLED comes from an answer only when the push sent no status and the
+    client is not blocked: the profile was switched off in Remnawave's own UI
+    while the push was on its way. An answer lifts DISABLED only to ACTIVE, and
+    only when the push itself sent ACTIVE (the operator switched the
+    subscription on, or unblocked the client), or when it sent no status and the
+    DISABLED was Remnawave's (the panel's last status decision was not a
+    switch-off). A switch-off made in the panel — «Отключить» on the
+    subscription, or a block — is never undone by an answer; nor is one made
+    before this release, whose value the panel did not record.
+  - While the panel's latest push has FAILED («Не применилось в панели: …»),
+    the status stays withheld with the expiry until a push goes through. The one
+    exception is LIMITED: it is taken, with its notice, when the traffic
+    Remnawave reports used is at or over the subscription's own limit (add-ons
+    included). It stays withheld when only the panel's unpushed top-up puts the
+    limit above the usage. To send the push again: ↻ on the subscription, or
+    «Синхронизировать все».
+  - The operator's reset («Быстрые действия» → «Сброс трафика» → «Сбросить»)
+    counts as a push of the panel's for the status. A `user.limited` Remnawave
+    stamped before the reset does not limit the subscription again, and the
+    status after the reset is read from Remnawave right after it (the reset
+    lifts LIMITED). It outranks neither the expiry nor the limits.
+- **A subscription with no end keeps none.** The panel sends Remnawave
+  `2099-12-31T00:00:00Z` for it — 2099 is the year Remnawave itself treats as
+  no end — and reads any date from 2099 on as "no end". No Remnawave read-back
+  writes a date over a subscription with no end, nor an EXPIRED derived from
+  such a date: not the webhook, «Импорт из Remnawave» or the ↻ button, in the
+  model or outside it, nor a backup re-import in the model; and the cabinet
+  shows none. A backup re-import onto a subscription outside the model writes
+  what it always wrote, which reads as "no end" once the profile carries 2099.
+  - Profiles provisioned before this release carry thirty days from their
+    creation. The worker pushes every live linked subscription with no end
+    once: at its start and then every 30 minutes, 500 per pass, oldest first,
+    as UPDATE sync jobs with cause `PANEL_NO_END_REASSERT` — one per
+    subscription, never repeated. Subscriptions a read-back already re-dated
+    from those thirty days keep their date until an operator restores them
+    («Инструменты» → «Вернуть бессрочность», planned).
 - **Where the verdict is recorded.** The worker or API log names each put-back
   and each refusal to push («… holds other limits than subscription …»). For the
   ↻ button the «Журнал аудита» entry `user.sync.requested` carries `panelLimits`
   (`IN_STEP`, `PUT_BACK`, `OUTRANKED`, `PROFILE_DELETED`, `SHARED_PROFILE`,
-  `UNLINKED`) and `expiryTaken`. An import's put-backs are queued rows the
-  five-minute profile-sync sweep sends.
+  `UNLINKED`) and `expiryTaken`, and the subscription's card shows the same
+  verdict under the ↻ result: «Лимиты в Remnawave отличались — туда
+  отправляются назначенные: …» for a put-back, the reason when none was sent,
+  and «Срок из Remnawave не принят: туда ещё не дошло последнее изменение
+  подписки.» when a push of the panel's withheld a date that differs. An
+  import's put-backs are queued rows the five-minute profile-sync sweep sends.
 
 The comparison of "stamped" and "completed" uses Remnawave's clock against the
 panel's for a webhook, so keep both hosts on NTP; a read the panel made on
@@ -528,10 +587,18 @@ plan's limits to the panel.
     - `entitlement-deletion-hygiene-postgres`
     - `duplicate-merge-cutover-postgres`
     - `durable-payment-paths-postgres`
+    - `lifetime-renewal-postgres`
     - `durable-disposal-postgres`
     - `term-baseline-own-share-postgres`
     - `remnawave-webhook-term-model-postgres`
     - `panel-readback-term-model-postgres`
+    - `remnawave-status-term-model-postgres`
+    - `remnawave-lifetime-postgres`
+    - `backup-reimport-plan-snapshot-postgres`
+    - `subscription-refresh-verdict-postgres`
+    - `plan-writers-keep-import-keys-postgres`
+    - `backup-plan-cloner-postgres`
+    - `stripped-plan-snapshot-repair-postgres`
 - **Wiring.** Run `npm run build && npm run smoke:boot`.
 
 ## Merging duplicates and deleting accounts
