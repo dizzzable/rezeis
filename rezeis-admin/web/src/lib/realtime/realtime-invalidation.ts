@@ -39,6 +39,23 @@ const TYPE_TO_QUERY_KEYS: Record<string, readonly InvalidationKey[]> = {
     adminQueryKeys.payments.analytics.all,
     adminQueryKeys.dashboard.summary,
   ],
+  // A payment received and applied to nothing («Не применён»), and its refund.
+  // Operator-only on the server — no rule, webhook or customer hears of them —
+  // but broadcast to the panel, so an open «Платежи» page shows them as it
+  // shows any payment.
+  'payment.withheld': [
+    adminQueryKeys.payments.transactions.all,
+    adminQueryKeys.payments.analytics.all,
+    adminQueryKeys.dashboard.summary,
+  ],
+  'payment.withheld_refunded': [
+    adminQueryKeys.payments.transactions.all,
+    adminQueryKeys.payments.analytics.all,
+    adminQueryKeys.dashboard.summary,
+  ],
+  // The operator's «Отменить автосписание» once the provider answered: the
+  // user card's «Автосписание» drops its «Отменяется» mark without a reload.
+  'payment.autopay_stopped_by_operator': [adminQueryKeys.users.all],
   'payment.webhook_received': [
     adminQueryKeys.payments.webhooks.all,
     adminQueryKeys.payments.analytics.all,

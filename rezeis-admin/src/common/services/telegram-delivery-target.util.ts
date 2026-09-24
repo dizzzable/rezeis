@@ -118,11 +118,16 @@ export function isEventTelegramAllowed(
  * `payment.chargeback_unmatched` is a new type, not a split: a chargeback the
  * panel could not pin on a payment, which an operator has to settle by hand.
  * It is the refund cards' news, so whoever ticked those gets it too.
+ *
+ * `payment.autopay_stopped_by_operator` is new as well: an operator ended a
+ * customer's autopay from the user's card. It is autopay news, so whoever
+ * ticked the customer's own switch (`payment.method_autopay_updated`) gets it.
  */
 export const DELIVERED_WITH: ReadonlyMap<string, readonly string[]> = new Map([
   ['payment.withheld', ['payment.completed']],
   ['payment.withheld_refunded', ['payment.refunded', 'payment.refund_partial', 'payment.withheld']],
   ['payment.chargeback_unmatched', ['payment.refunded', 'payment.refund_partial']],
+  ['payment.autopay_stopped_by_operator', ['payment.method_autopay_updated']],
 ]);
 
 /**

@@ -149,7 +149,7 @@ export const DANGEROUS_PERMISSIONS: Readonly<Record<string, readonly RbacAction[
  * false and the test says which.
  */
 export const INERT_PERMISSIONS: Readonly<Record<string, readonly RbacAction[]>> = {
-  payments: ['edit', 'delete', 'export'],
+  payments: ['delete', 'export'],
   analytics: ['export'],
   referral_settings: ['edit'],
   partners: ['bulk_operations'],

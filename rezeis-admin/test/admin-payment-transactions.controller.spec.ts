@@ -47,6 +47,7 @@ const BASE_PATH = 'admin/payments/transactions';
  */
 type RefundInput = Parameters<PaymentRefundService['refundTransaction']>[0];
 type WithheldRefundInput = Parameters<PaymentRefundService['recordWithheldRefund']>[0];
+type ProviderRefundInput = Parameters<PaymentRefundService['recordProviderRefund']>[0];
 
 const CURRENT_ADMIN: CurrentAdminInterface = {
   id: 'admin-1',
@@ -93,6 +94,7 @@ describe('AdminPaymentTransactionsController', () => {
       'getRefundEligibility',
       'refundTransaction',
       'recordWithheldRefund',
+      'recordProviderRefund',
     ]);
 
     const listRoute = `${routeLabel(BASE_PATH, RequestMethod.GET, '/')} (list transactions)`;
@@ -167,6 +169,25 @@ describe('AdminPaymentTransactionsController', () => {
       { resource: 'payments', action: 'refund' },
       withheldRefundRoute,
     );
+    // «Отметить возврат» for any payment the panel does not refund itself:
+    // the same permission — it books money as returned, and reverses the
+    // commission and the cashback with it (the panel files «Мой налог» receipts
+    // for ЮKassa payments only).
+    const providerRefundRoute = `${routeLabel(
+      BASE_PATH,
+      RequestMethod.POST,
+      ':transactionId/provider-refund',
+    )} (record a refund made at the provider)`;
+    assertRoute(
+      AdminPaymentTransactionsController.prototype.recordProviderRefund,
+      { method: RequestMethod.POST, path: ':transactionId/provider-refund' },
+      providerRefundRoute,
+    );
+    assertRoutePermission(
+      AdminPaymentTransactionsController.prototype.recordProviderRefund,
+      { resource: 'payments', action: 'refund' },
+      providerRefundRoute,
+    );
     // The rows above say what each LISTED route costs; this says no route
     // escaped having a cost at all. The two are not the same check: the
     // enumeration forces a new route to be noticed, but it is satisfied by
@@ -212,7 +233,10 @@ describe('AdminPaymentTransactionsController', () => {
         };
       },
     };
-    const refundService: Pick<PaymentRefundService, 'getEligibility' | 'refundTransaction' | 'recordWithheldRefund'> = {
+    const refundService: Pick<
+      PaymentRefundService,
+      'getEligibility' | 'refundTransaction' | 'recordWithheldRefund' | 'recordProviderRefund'
+    > = {
       getEligibility: async (transactionId: string) => {
         calls.push(['refundEligibility', transactionId]);
         return {
@@ -241,6 +265,10 @@ describe('AdminPaymentTransactionsController', () => {
       recordWithheldRefund: async (input: WithheldRefundInput) => {
         calls.push(['withheldRefund', input]);
         return { transactionId: input.transactionId, recorded: true, refundedAt: '2026-09-23T12:00:00.000Z' };
+      },
+      recordProviderRefund: async (input: ProviderRefundInput) => {
+        calls.push(['providerRefund', input]);
+        return { transactionId: input.transactionId, recorded: true, refundedAt: '2026-09-24T12:00:00.000Z' };
       },
     };
     // Both services are classes with private members, so no structural stub can
@@ -286,6 +314,10 @@ describe('AdminPaymentTransactionsController', () => {
       (await controller.recordWithheldRefund('transaction-2', CURRENT_ADMIN, buildRefundRequest())).recorded,
       true,
     );
+    assert.equal(
+      (await controller.recordProviderRefund('transaction-3', CURRENT_ADMIN, buildRefundRequest())).recorded,
+      true,
+    );
 
     // Refunds move real money, so the audit trail is asserted on its own and
     // BEFORE the delegation array below: a controller that stops forwarding one
@@ -328,6 +360,14 @@ describe('AdminPaymentTransactionsController', () => {
         'withheldRefund',
         {
           transactionId: 'transaction-2',
+          currentAdmin: CURRENT_ADMIN,
+          requestMetadata: EXPECTED_REQUEST_METADATA,
+        },
+      ],
+      [
+        'providerRefund',
+        {
+          transactionId: 'transaction-3',
           currentAdmin: CURRENT_ADMIN,
           requestMetadata: EXPECTED_REQUEST_METADATA,
         },

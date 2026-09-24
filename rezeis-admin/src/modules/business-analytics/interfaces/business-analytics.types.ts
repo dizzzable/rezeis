@@ -304,10 +304,11 @@ export interface AdvancedAnalyticsReportInterface {
  * What a payment's money paid for: `renewal` (RENEW), `addon` (an ADDITIONAL
  * payment whose snapshot is `ADDON_PURCHASE`), `new` (NEW, another
  * subscription, and the first money a subscription ever brought in — a trial
- * turned paid) and `change` (an UPGRADE of a subscription that had already
- * brought money in).
+ * turned paid), `change` (an UPGRADE of a subscription that had already
+ * brought money in) and `withheld` (a payment received and applied to
+ * nothing, to be refunded — until its refund takes it out of the money).
  */
-export type PurchaseKind = 'new' | 'renewal' | 'change' | 'addon';
+export type PurchaseKind = 'new' | 'renewal' | 'change' | 'addon' | 'withheld';
 
 export interface RevenueSeriesPointInterface {
   readonly total: number;

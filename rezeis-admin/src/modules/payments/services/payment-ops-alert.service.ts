@@ -74,8 +74,16 @@ export class PaymentOpsAlertService {
     private readonly moduleRef?: ModuleRef,
   ) {}
 
+  /**
+   * An inbox event failed. Sent ONCE per event — at its first failure, not at
+   * every retry (`PaymentReconciliationService.reconcileWebhookEvent`): a
+   * dispute retried over three days while Platega is down would otherwise
+   * send a card each time. `retry` says what follows, so the one card is
+   * enough: whether the panel retries by itself, or «Повторить» is the way on.
+   */
   public async notifyWebhookFailed(input: {
     readonly event: PaymentWebhookEvent;
+    readonly retry?: WebhookRetryOutlook;
   }): Promise<void> {
     await this.sendWebhookAlert({
       event: input.event,
@@ -83,6 +91,48 @@ export class PaymentOpsAlertService {
       details: [
         `kind:webhook_failed`,
         `error:${redactPaymentDiagnosticMessage(input.event.lastError) ?? 'unknown'}`,
+        ...(input.retry === undefined ? [] : describeRetryOutlook(input.retry)),
+      ],
+    });
+  }
+
+  /**
+   * An event whose failure was told succeeded on a later automatic run: the
+   * one card that closes it, so the operator knows nothing is left to do.
+   */
+  public async notifyWebhookRecovered(input: {
+    readonly event: PaymentWebhookEvent;
+    /** Runs it took, this one included. */
+    readonly runs: number;
+  }): Promise<void> {
+    await this.sendWebhookAlert({
+      event: input.event,
+      eventTag: '#event_webhook_recovered',
+      details: [
+        `kind:webhook_recovered`,
+        `runs:${input.runs}`,
+        `Обработка прошла с попытки №${input.runs} — делать ничего не нужно.`,
+      ],
+    });
+  }
+
+  /**
+   * An event failed its last automatic run: the one card that says so, and
+   * that «Повторить» is the way on. The failures in between send none.
+   */
+  public async notifyWebhookGivenUp(input: {
+    readonly event: PaymentWebhookEvent;
+    /** Runs it had, this one included. */
+    readonly runs: number;
+  }): Promise<void> {
+    await this.sendWebhookAlert({
+      event: input.event,
+      eventTag: '#event_webhook_given_up',
+      details: [
+        `kind:webhook_given_up`,
+        `runs:${input.runs}`,
+        `error:${redactPaymentDiagnosticMessage(input.event.lastError) ?? 'unknown'}`,
+        `Автоматические повторы кончились (попыток: ${input.runs}). ${MANUAL_REPLAY_HINT}`,
       ],
     });
   }
@@ -337,6 +387,31 @@ export class PaymentOpsAlertService {
  * `link:configured`, told the operator nothing; this tells them where to go.
  */
 const WEBHOOK_EVENTS_NAVIGATION_HINT = 'Подробности: панель → Платежи → Вебхуки';
+
+/** Where an operator runs an event again by hand; the button is «Повторить» in the event's row. */
+const MANUAL_REPLAY_HINT = 'Повторите вручную: «Платежи» → «Вебхуки» → «Повторить».';
+
+/** What follows an event's first failure (`PaymentOpsAlertService.notifyWebhookFailed`). */
+export interface WebhookRetryOutlook {
+  /** The panel runs it again by itself; false when its automatic runs are spent. */
+  readonly automatic: boolean;
+  /** A Platega dispute: retried for about three days, not half an hour. */
+  readonly dispute: boolean;
+}
+
+/** The lines a first failure's card says about what follows. */
+function describeRetryOutlook(retry: WebhookRetryOutlook): string[] {
+  if (!retry.automatic) {
+    return ['retry:manual', `Автоматических повторов не будет. ${MANUAL_REPLAY_HINT}`];
+  }
+  return [
+    'retry:auto',
+    retry.dispute
+      ? 'Панель будет повторять обработку сама около трёх суток.'
+      : 'Панель повторит обработку сама в ближайшие полчаса.',
+    'Следующая карточка придёт, только когда обработка пройдёт или повторы кончатся.',
+  ];
+}
 
 /**
  * Idempotency key for one relayed alert.

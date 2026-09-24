@@ -197,11 +197,12 @@ export const en = {
       kinds: {
         title: 'Where the money comes from',
         description: 'Revenue by kind of purchase.',
-        info: '“New subscriptions” — {{newSubscription}}. “Renewals” pay for the next term. “Plan changes” move a subscription already paid for — a paid trial included — to another plan. “Add-ons” are add-ons bought separately, such as traffic or devices.',
+        info: '“New subscriptions” — {{newSubscription}}. “Renewals” pay for the next term. “Plan changes” move a subscription already paid for — a paid trial included — to another plan. “Add-ons” are add-ons bought separately, such as traffic or devices. “Not applied (to refund)” is money that came in and gave the customer nothing (a second conversion of the same trial, an autopay charge after a refund): it has to be returned. The row shows only while there are such payments; once refunded, a payment leaves the revenue.',
         new: 'New subscriptions',
         renewal: 'Renewals',
         change: 'Plan changes',
         addon: 'Add-ons',
+        withheld: 'Not applied (to refund)',
         kindColumn: 'Kind of purchase',
       },
       byPlan: {

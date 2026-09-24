@@ -18,6 +18,7 @@ import { SettingsModule } from '../settings/settings.module';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
 import { PAYMENT_RECONCILIATION_QUEUE } from './constants/payment-reconciliation.constant';
 import { MOY_NALOG_QUEUE } from './constants/moy-nalog.constant';
+import { AdminPaymentAutopayController } from './controllers/admin-payment-autopay.controller';
 import { AdminPaymentGatewaysController } from './controllers/admin-payment-gateways.controller';
 import { AdminPaymentReconciliationController } from './controllers/admin-payment-reconciliation.controller';
 import { AdminPaymentTransactionsController } from './controllers/admin-payment-transactions.controller';
@@ -28,6 +29,8 @@ import { InternalAddOnsPurchaseController } from './controllers/internal-addons-
 import { PublicPaymentWebhooksController } from './controllers/public-payment-webhooks.controller';
 import { PaymentReconciliationProcessor } from './processors/payment-reconciliation.processor';
 import { MoyNalogProcessor } from './processors/moy-nalog.processor';
+import { AdminAutopayService } from './services/admin-autopay.service';
+import { AddOnRefundService } from './services/addon-refund.service';
 import { PaymentAutoRetryService } from './services/payment-auto-retry.service';
 import { PaymentPendingExpiryService } from './services/payment-pending-expiry.service';
 import { PaymentOpsAlertService } from './services/payment-ops-alert.service';
@@ -93,6 +96,7 @@ import { YookassaPaymentVerificationService } from './services/yookassa-payment-
     }),
   ],
   controllers: [
+    AdminPaymentAutopayController,
     AdminPaymentGatewaysController,
     AdminPaymentTransactionsController,
     AdminPaymentWebhooksController,
@@ -103,6 +107,8 @@ import { YookassaPaymentVerificationService } from './services/yookassa-payment-
     InternalAddOnsPurchaseController,
   ],
   providers: [
+    AdminAutopayService,
+    AddOnRefundService,
     PaymentGatewayRegistryService,
     PaymentsTransactionsService,
     PaymentRefundService,

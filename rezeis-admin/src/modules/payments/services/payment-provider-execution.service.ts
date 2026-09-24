@@ -218,6 +218,14 @@ export class PaymentProviderExecutionService {
     readonly customerEmail?: string | null;
     /** Buyer's request IP, forwarded verbatim to providers that ask for it. */
     readonly customerIp?: string | null;
+    /**
+     * Ends the request when it fires. An off-session charge with a saved
+     * method is submitted under that method's lock, which lasts a bounded time
+     * (`SavedPaymentMethodService.withActiveForCharge`): the POST has to end
+     * before the lock does, and the HTTP client's own timeout is an idle one.
+     * Only ЮKassa charges a saved method.
+     */
+    readonly signal?: AbortSignal;
   }): Promise<ProviderCheckoutResult> {
     try {
       switch (input.gateway.type) {
@@ -276,6 +284,7 @@ export class PaymentProviderExecutionService {
     readonly savedPaymentMethodId?: string | null;
     readonly savePaymentMethod?: boolean | null;
     readonly savePaymentMethodConsent?: boolean | null;
+    readonly signal?: AbortSignal;
   }): Promise<ProviderCheckoutResult> {
     const settings = readGatewaySettings(input.gateway.settings);
     const shopId = requireSetting(settings, 'shopId');
@@ -343,6 +352,8 @@ export class PaymentProviderExecutionService {
           'Idempotence-Key': input.transaction.paymentId,
         },
         validateStatus: () => true,
+        // A saved method's charge ends by its lock's deadline (`withActiveForCharge`).
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
       }),
     );
     if (response.status < 200 || response.status >= 300) {

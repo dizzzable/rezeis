@@ -1,13 +1,101 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  Inject,
+  Injectable,
+  Logger,
+  NotFoundException,
+  Optional,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { PaymentGatewayType, Prisma } from '@prisma/client';
 
+import { OUTBOUND_HTTP_TIMEOUT_MS } from '../../../common/http/outbound-http-options';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
 import { planNamesFromTransactionSnapshot } from '../../../common/utils/plan-snapshot.util';
 import { SAVED_CARD_AUTOPAY_OFF_AT_KEY } from '../utils/refund-autopay.util';
 import { writeTransactionGatewayData } from '../utils/transaction-gateway-data.util';
 
-const CHARGE_LOCK_TIMEOUT_MS = 30_000;
+/**
+ * How an off-session charge holds its saved method's lock, and for how long
+ * ({@link SavedPaymentMethodService.withActiveForCharge}).
+ *
+ * The lock is a row lock inside an interactive transaction, and it lasts as
+ * long as that transaction: Prisma rolls the transaction back at its timeout,
+ * whatever the callback is still doing. The timeout was 30 s, and the ЮKassa
+ * POST inside it may run 45 s (`OUTBOUND_HTTP_TIMEOUT_MS`) — and that is an
+ * idle timeout on the socket, not a deadline. So the lock could lapse while
+ * the charge was still being submitted, and everything that waits for a charge
+ * by waiting for this lock — a refund's switch-off of the autopay above all —
+ * went ahead with the charge still in flight.
+ *
+ * Now the three parts of the transaction are bounded each, and add up to less
+ * than its timeout ({@link chargeLockHoldMs}): the wait for the lock
+ * (`lock_timeout`), the submission (aborted at its deadline, and the POST ends
+ * with it), and a margin for the abort to land and the commit to start. The
+ * lock therefore ends after the submission, never before it.
+ */
+export interface ChargeLockTiming {
+  /** The longest a charge waits for the method's lock; then it gives up without submitting. */
+  readonly lockWaitMs: number;
+  /** The longest the provider submission may run: it is aborted at this deadline. */
+  readonly submitMs: number;
+  /** Kept free after the deadline: the abort landing, the callback returning, the commit starting. */
+  readonly marginMs: number;
+}
+
+export const CHARGE_LOCK_TIMING: ChargeLockTiming = {
+  lockWaitMs: 15_000,
+  submitMs: OUTBOUND_HTTP_TIMEOUT_MS,
+  marginMs: 5_000,
+};
+
+/** Overrides {@link CHARGE_LOCK_TIMING}; only a spec provides it. */
+export const CHARGE_LOCK_TIMING_OVERRIDE = 'CHARGE_LOCK_TIMING_OVERRIDE';
+
+/** How long a charge's transaction, and so its lock, may last: longer than its three parts together. */
+export function chargeLockHoldMs(timing: ChargeLockTiming): number {
+  return timing.lockWaitMs + timing.submitMs + timing.marginMs;
+}
+
+/**
+ * The timeout of a transaction that waits for the lock a charge may hold —
+ * unbind, the customer's autopay switch, a revoked method, a refund's switch
+ * that waits: the charge's whole hold, and its own work after it. Shorter, a
+ * waiter behind a slow charge was rolled back the moment it got the lock.
+ */
+export function chargeLockWaiterTimeoutMs(timing: ChargeLockTiming): number {
+  return chargeLockHoldMs(timing) + timing.marginMs;
+}
+
+/** The code a charge that could not have its method's lock in time is refused with. */
+export const SAVED_PAYMENT_METHOD_BUSY = 'SAVED_PAYMENT_METHOD_BUSY';
+
+/**
+ * How long the customer's own «Автосписание» switch and «Отвязать» (the
+ * cabinet's «Способы оплаты») wait for the method's lock before answering 409
+ * {@link SAVED_PAYMENT_METHOD_BUSY}: a payment with it is in progress, try
+ * again in a minute.
+ *
+ * Long enough for every short holder — another switch, a refund's switch-off,
+ * a charge deciding — and far shorter than a charge being submitted, which
+ * holds it for as long as its POST runs ({@link chargeLockHoldMs}). Waiting for
+ * that one, the request outlived the 30 s cut on it
+ * (`request-timeout.middleware.ts`): the cabinet showed an error for a switch
+ * that then went through. Refused at once instead of deferred: the switch
+ * cannot stop the charge in flight anyway, a refusal keeps no state that a
+ * stop could lose or a second click could reorder, and the switch on the
+ * screen stays what the method really is.
+ */
+export const CUSTOMER_SWITCH_LOCK_WAIT_MS = 2_000;
+
+/** A saved method whose autopay a switch turned off, as the operator's card names it. */
+export interface SwitchedOffMethod {
+  readonly id: string;
+  readonly methodType: string;
+  readonly title: string;
+}
 
 /**
  * Persists provider-saved payment instruments (YooKassa `payment_method`) and
@@ -19,11 +107,23 @@ const CHARGE_LOCK_TIMEOUT_MS = 30_000;
 @Injectable()
 export class SavedPaymentMethodService {
   private readonly logger = new Logger(SavedPaymentMethodService.name);
+  private readonly chargeLockTiming: ChargeLockTiming;
 
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly systemEvents: SystemEventsService,
-  ) {}
+    /** A spec's shorter {@link CHARGE_LOCK_TIMING}; the module provides none. */
+    @Optional()
+    @Inject(CHARGE_LOCK_TIMING_OVERRIDE)
+    chargeLockTiming?: ChargeLockTiming,
+  ) {
+    this.chargeLockTiming = chargeLockTiming ?? CHARGE_LOCK_TIMING;
+  }
+
+  /** {@link chargeLockWaiterTimeoutMs} of this service's timing. */
+  private get waiterTimeoutMs(): number {
+    return chargeLockWaiterTimeoutMs(this.chargeLockTiming);
+  }
 
   public async listActiveForUser(userId: string) {
     const methods = await this.prismaService.savedPaymentMethod.findMany({
@@ -74,28 +174,30 @@ export class SavedPaymentMethodService {
     userId: string,
     methodId: string,
   ): Promise<{ unbound: true; id: string }> {
-    const { updated, changed } = await this.prismaService.$transaction(
-      async (tx) => {
-        await this.lockForChargeDecision(tx, methodId);
-        const existing = await tx.savedPaymentMethod.findFirst({
-          where: { id: methodId, userId },
-        });
-        if (existing === null) {
-          throw new NotFoundException('Saved payment method not found');
-        }
-        if (!existing.isActive) {
-          return { updated: existing, changed: false };
-        }
-        const updated = await tx.savedPaymentMethod.update({
-          where: { id: existing.id },
-          data: {
-            isActive: false,
-            unboundAt: new Date(),
-          },
-        });
-        return { updated, changed: true };
-      },
-      { timeout: CHARGE_LOCK_TIMEOUT_MS },
+    const { updated, changed } = await this.customerSwitch(() =>
+      this.prismaService.$transaction(
+        async (tx) => {
+          await this.lockForCustomerSwitch(tx, methodId);
+          const existing = await tx.savedPaymentMethod.findFirst({
+            where: { id: methodId, userId },
+          });
+          if (existing === null) {
+            throw new NotFoundException('Saved payment method not found');
+          }
+          if (!existing.isActive) {
+            return { updated: existing, changed: false };
+          }
+          const updated = await tx.savedPaymentMethod.update({
+            where: { id: existing.id },
+            data: {
+              isActive: false,
+              unboundAt: new Date(),
+            },
+          });
+          return { updated, changed: true };
+        },
+        { timeout: this.waiterTimeoutMs },
+      ),
     );
 
     if (!changed) {
@@ -128,33 +230,35 @@ export class SavedPaymentMethodService {
     methodId: string,
     autopayEnabled: boolean,
   ): Promise<{ id: string; autopayEnabled: boolean }> {
-    const { updated, changed } = await this.prismaService.$transaction(
-      async (tx) => {
-        await this.lockForChargeDecision(tx, methodId);
-        const existing = await tx.savedPaymentMethod.findFirst({
-          where: { id: methodId, userId, isActive: true },
-        });
-        if (existing === null) {
-          throw new NotFoundException('Saved payment method not found');
-        }
-        if (existing.autopayEnabled === autopayEnabled) {
-          return { updated: existing, changed: false };
-        }
-        const updated = await tx.savedPaymentMethod.update({
-          where: { id: existing.id },
-          data: { autopayEnabled },
-          select: {
-            id: true,
-            autopayEnabled: true,
-            gatewayType: true,
-            methodType: true,
-            cardLast4: true,
-            providerMethodId: true,
-          },
-        });
-        return { updated, changed: true };
-      },
-      { timeout: CHARGE_LOCK_TIMEOUT_MS },
+    const { updated, changed } = await this.customerSwitch(() =>
+      this.prismaService.$transaction(
+        async (tx) => {
+          await this.lockForCustomerSwitch(tx, methodId);
+          const existing = await tx.savedPaymentMethod.findFirst({
+            where: { id: methodId, userId, isActive: true },
+          });
+          if (existing === null) {
+            throw new NotFoundException('Saved payment method not found');
+          }
+          if (existing.autopayEnabled === autopayEnabled) {
+            return { updated: existing, changed: false };
+          }
+          const updated = await tx.savedPaymentMethod.update({
+            where: { id: existing.id },
+            data: { autopayEnabled },
+            select: {
+              id: true,
+              autopayEnabled: true,
+              gatewayType: true,
+              methodType: true,
+              cardLast4: true,
+              providerMethodId: true,
+            },
+          });
+          return { updated, changed: true };
+        },
+        { timeout: this.waiterTimeoutMs },
+      ),
     );
 
     if (!changed) {
@@ -206,7 +310,7 @@ export class SavedPaymentMethodService {
       if (method === null) return null;
       await tx.savedPaymentMethod.update({ where: { id: method.id }, data: { autopayEnabled: false } });
       return method;
-    }, { timeout: CHARGE_LOCK_TIMEOUT_MS });
+    }, { timeout: this.waiterTimeoutMs });
     if (updated === null) return null;
 
     this.systemEvents.warn(
@@ -257,11 +361,62 @@ export class SavedPaymentMethodService {
     readonly providerSubscriptionId?: string;
     readonly waitForCharges?: boolean;
   }): Promise<{ readonly switched: number; readonly busy: number }> {
+    const outcome = await this.switchOffYookassaAutopay({
+      userId: input.userId,
+      waitForCharges: input.waitForCharges,
+      stampTransactionId: input.transactionId,
+      by: `a refund (${input.transactionId ?? input.providerSubscriptionId ?? 'unnamed'})`,
+    });
+    return { switched: outcome.switched.length, busy: outcome.busy };
+  }
+
+  /**
+   * «Выключить автосписание ЮKassa» on the user's card in the panel: an
+   * operator stops the customer's ЮKassa autopay without a refund — on every
+   * active method, as a refund does ({@link disableAutopayForRefund}), and by
+   * the same switch the customer has in the cabinet («Способы оплаты» →
+   * «Автосписание»), which stays theirs to turn back on. The methods stay saved.
+   *
+   * Raises no event: `payment.method_autopay_updated` is the customer's own
+   * switch, and rules, outbound webhooks and the email bridge act on it — a
+   * letter saying the customer turned it off would be wrong. The operator's
+   * card is the caller's (`payment.autopay_stopped_by_operator`).
+   *
+   * `waitForCharges: false` from the operator's request, as for a refund: a
+   * method a charge is being submitted with is left `busy`, for the call after
+   * the answer that waits. Returns the methods switched off.
+   */
+  public async disableAutopayForOperator(input: {
+    readonly userId: string;
+    readonly adminId: string;
+    readonly waitForCharges: boolean;
+  }): Promise<{ readonly switched: readonly SwitchedOffMethod[]; readonly busy: number }> {
+    return this.switchOffYookassaAutopay({
+      userId: input.userId,
+      waitForCharges: input.waitForCharges,
+      by: `admin ${input.adminId} in the panel`,
+    });
+  }
+
+  /**
+   * Switches off `autopayEnabled` on every active ЮKassa method of `userId`
+   * that has it on, each under the lock the charge decision takes. Without
+   * waiting (`waitForCharges: false`), a method a charge holds is left and
+   * counted `busy`. `stampTransactionId` is stamped in the same database
+   * transaction as each switch (see {@link disableAutopayForRefund}).
+   */
+  private async switchOffYookassaAutopay(input: {
+    readonly userId: string;
+    readonly waitForCharges?: boolean;
+    readonly stampTransactionId?: string;
+    /** Who asked, for the log line. */
+    readonly by: string;
+  }): Promise<{ readonly switched: SwitchedOffMethod[]; readonly busy: number }> {
     const candidates = await this.prismaService.savedPaymentMethod.findMany({
       where: { userId: input.userId, gatewayType: PaymentGatewayType.YOOKASSA, isActive: true, autopayEnabled: true },
       select: { id: true },
     });
-    let switched = 0;
+    const switched: SwitchedOffMethod[] = [];
     let busy = 0;
     for (const candidate of candidates) {
       const method = await this.prismaService.$transaction(async (tx) => {
@@ -272,26 +427,30 @@ export class SavedPaymentMethodService {
         }
         const current = await tx.savedPaymentMethod.findFirst({
           where: { id: candidate.id, isActive: true, autopayEnabled: true },
-          select: { id: true, gatewayType: true, methodType: true, cardLast4: true, providerMethodId: true },
+          select: { id: true, gatewayType: true, methodType: true, title: true, cardLast4: true, providerMethodId: true },
         });
         if (current === null) return null;
         await tx.savedPaymentMethod.update({ where: { id: current.id }, data: { autopayEnabled: false } });
-        if (input.transactionId !== undefined) {
-          await writeTransactionGatewayData(tx, input.transactionId, {
+        if (input.stampTransactionId !== undefined) {
+          await writeTransactionGatewayData(tx, input.stampTransactionId, {
             merge: { [SAVED_CARD_AUTOPAY_OFF_AT_KEY]: new Date().toISOString() },
           });
         }
         return current;
-      }, { timeout: CHARGE_LOCK_TIMEOUT_MS });
+      }, { timeout: this.waiterTimeoutMs });
       if (method === 'BUSY') {
         busy += 1;
         continue;
       }
       if (method === null) continue;
-      switched += 1;
+      switched.push({
+        id: method.id,
+        methodType: method.methodType,
+        title: method.title ?? buildDisplayTitle({ methodType: method.methodType, cardLast4: method.cardLast4 }),
+      });
       this.logger.log(
         `Autopay of saved ${method.gatewayType} method ${method.id} (${method.methodType}) of user ${input.userId} ` +
-          `switched off by a refund (${input.transactionId ?? input.providerSubscriptionId ?? 'unnamed'})`,
+          `switched off by ${input.by}`,
       );
     }
     return { switched, busy };
@@ -367,6 +526,16 @@ export class SavedPaymentMethodService {
   /**
    * Serializes provider submission with disable/unbind on the saved-method row.
    * The callback must cover only the provider submission, not later fulfillment.
+   *
+   * The lock ends after the submission, never before it ({@link ChargeLockTiming}):
+   * - the wait for it is bounded (`lock_timeout`). A charge that does not get it
+   *   in time is refused ({@link SAVED_PAYMENT_METHOD_BUSY}) before anything is
+   *   submitted, and so is one that got it too late to have its whole
+   *   submission time left inside the transaction;
+   * - `submit` is handed a signal that aborts at `submitMs`, and the ЮKassa POST
+   *   ends with it (`PaymentProviderExecutionService.createCheckout`, `signal`);
+   * - the transaction's timeout — when Prisma rolls it back and lets the lock
+   *   go, whatever the callback is doing — is longer than both by `marginMs`.
    */
   public async withActiveForCharge<T>(
     input: {
@@ -374,29 +543,52 @@ export class SavedPaymentMethodService {
       readonly savedPaymentMethodId: string;
       readonly gatewayType: PaymentGatewayType;
     },
-    submit: (method: { readonly id: string; readonly providerMethodId: string }) => Promise<T>,
+    submit: (method: { readonly id: string; readonly providerMethodId: string }, signal: AbortSignal) => Promise<T>,
   ): Promise<T> {
-    return this.prismaService.$transaction(
-      async (tx) => {
-        await this.lockForChargeDecision(tx, input.savedPaymentMethodId);
-        const method = await tx.savedPaymentMethod.findFirst({
-          where: {
-            id: input.savedPaymentMethodId,
-            userId: input.userId,
-            isActive: true,
-          },
-          select: {
-            id: true,
-            gatewayType: true,
-            providerMethodId: true,
-            autopayEnabled: true,
-          },
-        });
-        const resolved = this.assertChargeableMethod(method, input.gatewayType);
-        return submit(resolved);
-      },
-      { timeout: CHARGE_LOCK_TIMEOUT_MS },
-    );
+    const timing = this.chargeLockTiming;
+    try {
+      return await this.prismaService.$transaction(
+        async (tx) => {
+          const startedAt = Date.now();
+          // Ends with this transaction; never reaches the pool's next borrower.
+          await tx.$executeRaw(Prisma.raw(`SET LOCAL lock_timeout = '${Math.max(1, Math.floor(timing.lockWaitMs))}ms'`));
+          await this.lockForChargeDecision(tx, input.savedPaymentMethodId);
+          const method = await tx.savedPaymentMethod.findFirst({
+            where: {
+              id: input.savedPaymentMethodId,
+              userId: input.userId,
+              isActive: true,
+            },
+            select: {
+              id: true,
+              gatewayType: true,
+              providerMethodId: true,
+              autopayEnabled: true,
+            },
+          });
+          const resolved = this.assertChargeableMethod(method, input.gatewayType);
+          if (Date.now() - startedAt > timing.lockWaitMs) {
+            throw chargeRefusedAsBusy();
+          }
+          const deadline = new AbortController();
+          const timer = setTimeout(
+            () => deadline.abort(new Error(`The charge was not submitted within ${timing.submitMs} ms`)),
+            timing.submitMs,
+          );
+          try {
+            return await submit(resolved, deadline.signal);
+          } finally {
+            clearTimeout(timer);
+          }
+        },
+        { timeout: chargeLockHoldMs(timing) },
+      );
+    } catch (error: unknown) {
+      // The lock was not free within `lock_timeout` (SQLSTATE 55P03, which the
+      // pg adapter reports as P2010 on a raw query): nothing was submitted.
+      if (isLockNotAvailable(error)) throw chargeRefusedAsBusy();
+      throw error;
+    }
   }
 
   private assertChargeableMethod(
@@ -448,6 +640,26 @@ export class SavedPaymentMethodService {
     await tx.$queryRaw(
       Prisma.sql`SELECT "id" FROM "saved_payment_methods" WHERE "id" = ${methodId} FOR UPDATE`,
     );
+  }
+
+  /**
+   * {@link lockForChargeDecision} for the customer's own switch, waiting at
+   * most {@link CUSTOMER_SWITCH_LOCK_WAIT_MS}; past that PostgreSQL gives up
+   * with 55P03, which {@link customerSwitch} answers as busy.
+   */
+  private async lockForCustomerSwitch(tx: Prisma.TransactionClient, methodId: string): Promise<void> {
+    await tx.$executeRaw(Prisma.raw(`SET LOCAL lock_timeout = '${CUSTOMER_SWITCH_LOCK_WAIT_MS}ms'`));
+    await this.lockForChargeDecision(tx, methodId);
+  }
+
+  /** Runs a customer's switch; a lock a charge holds past the wait answers 409 busy. */
+  private async customerSwitch<T>(run: () => Promise<T>): Promise<T> {
+    try {
+      return await run();
+    } catch (error: unknown) {
+      if (isLockNotAvailable(error)) throw customerSwitchRefusedAsBusy();
+      throw error;
+    }
   }
 
   /** {@link lockForChargeDecision} without waiting: false when a charge decision holds it. */
@@ -630,6 +842,45 @@ export class SavedPaymentMethodService {
       rawPayload: { payment_method: input.rawPaymentMethod },
     });
   }
+}
+
+/** A charge that did not have its saved method's lock in time: nothing was submitted, it may be tried again. */
+function chargeRefusedAsBusy(): ServiceUnavailableException {
+  return new ServiceUnavailableException({
+    code: SAVED_PAYMENT_METHOD_BUSY,
+    message: 'The saved payment method is busy with another charge; nothing was submitted',
+  });
+}
+
+/**
+ * The customer's switch or unbind met a payment in progress with the method
+ * ({@link CUSTOMER_SWITCH_LOCK_WAIT_MS}): nothing changed, and it can be done
+ * again in a minute. The cabinet says so in «Способы оплаты».
+ */
+function customerSwitchRefusedAsBusy(): ConflictException {
+  return new ConflictException({
+    code: SAVED_PAYMENT_METHOD_BUSY,
+    message: 'A payment with this saved payment method is in progress; nothing was changed, try again in a minute',
+  });
+}
+
+/**
+ * PostgreSQL gave up waiting for a row lock at `lock_timeout` (SQLSTATE
+ * 55P03). Read the way `isRetryableTransactionConflict` reads a deadlock: with
+ * the pg driver adapter the SQLSTATE is in `meta.driverAdapterError.cause`, and
+ * the Prisma code is P2010 for a raw query, not a code of its own.
+ */
+function isLockNotAvailable(error: unknown): boolean {
+  if (!(error instanceof Prisma.PrismaClientKnownRequestError)) return false;
+  const meta = error.meta as
+    | {
+        readonly code?: unknown;
+        readonly driverAdapterError?: { readonly cause?: { readonly code?: unknown; readonly originalCode?: unknown } };
+      }
+    | undefined;
+  const cause = meta?.driverAdapterError?.cause;
+  const sqlState = cause?.code ?? cause?.originalCode ?? meta?.code;
+  return sqlState === '55P03' || /Code: `55P03`/.test(error.message);
 }
 
 function extractYookassaPaymentObject(rawPayload: unknown): Record<string, unknown> | null {

@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ModuleRef } from '@nestjs/core';
 
+import { OPERATOR_ONLY_EVENT_TYPES } from '../../../common/services/system-events.service';
 import {
   RealtimeEventInterface,
 } from '../interfaces/realtime-event.interface';
@@ -120,6 +121,10 @@ export class UserRealtimeService {
   }
 
   private fanOut(event: RealtimeEventInterface): void {
+    // Never to a payer, whatever the list below comes to hold: an
+    // operator-only type is on this broadcast for the admin panel alone
+    // (`SystemEventsService.emit`).
+    if (OPERATOR_ONLY_EVENT_TYPES.has(event.type)) return;
     const projection = USER_EVENT_WHITELIST[event.type];
     if (!projection) return;
     if (this.subscribersById.size === 0) return;

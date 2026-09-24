@@ -102,6 +102,7 @@ const NEWLY_CATALOGUED: readonly string[] = [
   'payment.withheld',
   'payment.withheld_refunded',
   'payment.chargeback_unmatched',
+  'payment.autopay_stopped_by_operator',
   'payment.refund_partial',
   'payment.refunded',
   'promocode.archived',

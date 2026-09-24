@@ -174,7 +174,12 @@ export interface AdvancedAnalyticsReport {
   previousSeries: OverviewSeries
 }
 
-export type PurchaseKind = 'new' | 'renewal' | 'change' | 'addon'
+/**
+ * What a payment's money paid for. `withheld`: received and applied to
+ * nothing, to be refunded («Не применён (к возврату)») — its own row until the
+ * refund takes it out of the money. A server older than it sends no `withheld`.
+ */
+export type PurchaseKind = 'new' | 'renewal' | 'change' | 'addon' | 'withheld'
 
 export interface RevenueSeriesPoint {
   total: number

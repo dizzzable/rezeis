@@ -62,12 +62,17 @@ export function currencyColor(currency: string): string {
   return Object.hasOwn(CURRENCY_COLORS, currency) ? (CURRENCY_COLORS[currency] as string) : OTHER_COLOR
 }
 
-/** What a payment bought, in the order the stacks are drawn (and the legend reads). */
+/**
+ * What a payment bought, in the order the stacks are drawn (and the legend
+ * reads). Money withheld for refund bought nothing, so it wears the neutral,
+ * not a hue that could read as one more kind of sale.
+ */
 export const PURCHASE_KIND_COLORS: Readonly<Record<PurchaseKind, string>> = {
   new: SURFACE_HUES.blue,
   renewal: SURFACE_HUES.sky,
   change: SURFACE_HUES.plum,
   addon: SURFACE_HUES.pink,
+  withheld: SURFACE_OTHER_COLOR,
 }
 
 /**

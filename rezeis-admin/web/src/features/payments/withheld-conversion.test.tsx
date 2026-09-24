@@ -1,6 +1,5 @@
 /**
- * A trial's conversion withheld for refund, in the panel (R3-support-money N4
- * and laterList 3).
+ * A trial's conversion withheld for refund, in the panel.
  *
  * The payment is COMPLETED and stamped delivered, so every list showed it as an
  * ordinary sale; and nothing in the panel could record that its money had gone
@@ -133,7 +132,7 @@ describe('a withheld payment in its details', () => {
   })
 
   it('explains an autopay charge taken after a refund as what it is, not as a trial’s conversion', async () => {
-    // Wave 6: the same mark, withheld for another reason, and a sentence of its own.
+    // The same mark, withheld for another reason, and a sentence of its own.
     grant([VIEW, REFUND])
 
     renderSheet({
@@ -159,8 +158,14 @@ describe('a withheld payment in its details', () => {
     renderSheet(ORDINARY)
 
     expect(await screen.findByText(ORDINARY.gatewayId!)).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Record refund' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: /Payment received but not applied/ })).not.toBeInTheDocument()
     expect(screen.queryByText('Not applied')).not.toBeInTheDocument()
+    // Its one «Record refund» is the one every Platega payment has now: a
+    // refund made at the provider, on its own route (provider-refund.test.tsx).
+    const refundAtProvider = screen.getByRole('region', { name: 'Refund made at the provider' })
+    expect(screen.getAllByRole('button', { name: 'Record refund' })).toEqual([
+      within(refundAtProvider).getByRole('button', { name: 'Record refund' }),
+    ])
   })
 
   it('offers nothing once its refund is recorded, and says when it was', async () => {
@@ -298,7 +303,7 @@ describe('a withheld payment where payments are listed', () => {
     expect(within(card(ORDINARY.paymentId)).queryByText('Not applied')).not.toBeInTheDocument()
   })
 
-  it('says on the «Not applied» mark itself why it was withheld (R5 H2)', () => {
+  it('says on the «Not applied» mark itself why it was withheld', () => {
     // The mark's hover text is all a list row shows of the reason.
     renderWithProviders(
       <>

@@ -11,6 +11,8 @@ import { EffectiveProjectionService } from '../src/modules/add-on-entitlements/s
 import { AutoRenewService } from '../src/modules/auto-renew/auto-renew.service';
 import { SubscriptionTermService } from '../src/modules/add-on-entitlements/services/subscription-term.service';
 import { PAYMENT_RECONCILIATION_JOB } from '../src/modules/payments/constants/payment-reconciliation.constant';
+import { moneyReceivedSql } from '../src/modules/business-analytics/utils/analytics-money-received.util';
+import { AdminAutopayService } from '../src/modules/payments/services/admin-autopay.service';
 import { PaymentReconciliationService } from '../src/modules/payments/services/payment-reconciliation.service';
 import { PaymentRefundService } from '../src/modules/payments/services/payment-refund.service';
 import { PaymentSubscriptionMutationService } from '../src/modules/payments/services/payment-subscription-mutation.service';
@@ -18,6 +20,7 @@ import { PaymentWebhookInboxService } from '../src/modules/payments/services/pay
 import { PaymentWebhookPayloadRedactionService } from '../src/modules/payments/services/payment-webhook-payload-redaction.service';
 import { SavedPaymentMethodService } from '../src/modules/payments/services/saved-payment-method.service';
 import {
+  OPERATOR_CANCELLED_BY,
   ProviderSubscriptionService,
   STRANDED_SWEEP_PAGE,
 } from '../src/modules/payments/services/provider-subscription.service';
@@ -150,7 +153,7 @@ run('provider_subscriptions on PostgreSQL', () => {
 });
 
 /**
- * «все возвраты … удаляют автосписания» (wave 6), on PostgreSQL, through the
+ * «все возвраты … удаляют автосписания», on PostgreSQL, through the
  * real reconciliation, fulfilment, refund and provider-subscription services;
  * only the provider's HTTP, the queue and the post-payment hooks are stand-ins.
  *
@@ -557,7 +560,7 @@ run('a refund ends the autopay, on PostgreSQL', () => {
     assert.ok(!hooks.partner.includes(charge.id), 'no commission on money that goes back');
 
     // Fulfilled once more — a retry after a crash between the withhold and
-    // its acknowledgement: the operator is not told twice (R5 H3).
+    // its acknowledgement: the operator is not told twice.
     await mutation.applyCompletedTransaction(await db.transaction.findUniqueOrThrow({ where: { id: charge.id } }));
     assert.equal(
       events.filter((event) => event.type === 'payment.withheld' && event.metadata['paymentId'] === charge.paymentId).length,
@@ -610,7 +613,7 @@ run('a refund ends the autopay, on PostgreSQL', () => {
     assert.equal(standing.cancelledBy, null);
   });
 
-  it('the panel’s refund, in full or in part, answers before a provider that hangs: the autopay is marked first, and the card follows the provider (R5 F3)', async () => {
+  it('the panel’s refund, in full or in part, answers before a provider that hangs: the autopay is marked first, and the card follows the provider', async () => {
     for (const amount of [null, '100.00'] as const) {
       const userId = await createUser();
       const planId = await createPlan();
@@ -673,7 +676,7 @@ run('a refund ends the autopay, on PostgreSQL', () => {
     }
   });
 
-  it('a refund’s cancel the operator finishes in Platega’s dashboard keeps the refund’s mark: a charge taken before it is withheld (R5 F1)', async () => {
+  it('a refund’s cancel the operator finishes in Platega’s dashboard keeps the refund’s mark: a charge taken before it is withheld', async () => {
     const userId = await createUser();
     const planId = await createPlan();
     const subscription = await createSubscription(userId, planId);
@@ -708,7 +711,7 @@ run('a refund ends the autopay, on PostgreSQL', () => {
     assert.equal(after.expiresAt?.getTime(), refundedState.expiresAt?.getTime());
   });
 
-  it('a dispute that comes while Platega’s API is down is kept FAILED, not dropped, and its retry reverses the charge (R5 F6)', async () => {
+  it('a dispute that comes while Platega’s API is down is kept FAILED, not dropped, and its retry reverses the charge', async () => {
     const userId = await createUser();
     const planId = await createPlan();
     const subscription = await createSubscription(userId, planId);
@@ -851,7 +854,7 @@ run('a refund ends the autopay, on PostgreSQL', () => {
     assert.equal(card.isActive, true, 'the card itself stays saved');
     assert.match(String(cardFor(sale.paymentId)?.metadata['note']), /Автосписание через ЮKassa выключено\./);
     // Told by the refund's card alone: not as the customer's own switch, which
-    // rules, outbound webhooks and the email bridge act on (R6 m5).
+    // rules, outbound webhooks and the email bridge act on.
     assert.deepEqual(
       events.filter(
         (event) => event.type === 'payment.method_autopay_updated' && event.metadata['userId'] === refunded.userId,
@@ -915,8 +918,252 @@ run('a refund ends the autopay, on PostgreSQL', () => {
     assert.equal(card.autopayEnabled, false);
     assert.equal(card.isActive, true);
     // Stamped with the switch, so another door of the same refund that finds
-    // nothing left to switch still says it is off (R6 m3).
+    // nothing left to switch still says it is off.
     const stamped = (await db.transaction.findUniqueOrThrow({ where: { id: refunded.id } })).gatewayData;
     assert.equal(typeof (stamped as Record<string, unknown>)['refundSavedCardAutopayOffAt'], 'string');
+  });
+
+  /** An admin to act as, and to find the audit rows of. */
+  async function operator(): Promise<{ readonly id: string }> {
+    const admin = await db.adminUser.create({
+      data: { login: `${autopayPrefix}-admin-${next()}`, loginNormalized: `${autopayPrefix}-admin-${counter}`, passwordHash: 'not-a-hash' },
+    });
+    created.admins.push(admin.id);
+    return admin;
+  }
+
+  it('«Отметить возврат» on a Platega payment: answered before a provider that hangs, then the whole reversal, the autopay ended and the card', async () => {
+    const userId = await createUser();
+    const planId = await createPlan();
+    const subscription = await createSubscription(userId, planId);
+    const bought = await paid({ userId, subscriptionId: subscription.id, planId, gatewayType: PaymentGatewayType.PLATEGA });
+    const row = await autopay({ userId, subscriptionId: subscription.id, planId, firstTransactionId: bought.id });
+    const card = await db.savedPaymentMethod.create({
+      data: {
+        userId,
+        gatewayType: PaymentGatewayType.YOOKASSA,
+        providerMethodId: `${autopayPrefix}-pm-${next()}`,
+        methodType: 'bank_card',
+        cardLast4: '4242',
+      },
+    });
+    const admin = await operator();
+    let release: () => void = () => undefined;
+    provider.cancelAnswered = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let timer: NodeJS.Timeout | undefined;
+
+    try {
+      const answered = await Promise.race([
+        refunds
+          .recordProviderRefund({
+            transactionId: bought.id,
+            currentAdmin: { id: admin.id } as never,
+            requestMetadata: { requestId: null, remoteAddress: null, userAgent: null },
+          })
+          .then((result) => (result.recorded ? 'answered' : 'not recorded')),
+        new Promise<string>((resolve) => {
+          timer = setTimeout(() => resolve('waited for the provider'), 5000);
+        }),
+      ]);
+      clearTimeout(timer);
+
+      assert.equal(answered, 'answered');
+      const reversed = await db.transaction.findUniqueOrThrow({ where: { id: bought.id } });
+      assert.equal(reversed.status, 'CANCELED');
+      const gatewayData = reversed.gatewayData as Record<string, unknown>;
+      assert.equal(typeof gatewayData['refundReversedAt'], 'string');
+      assert.equal(gatewayData['manualRefundRecordedBy'], admin.id);
+      const counted = await db.$queryRaw<Array<{ readonly n: number }>>(
+        Prisma.sql`SELECT count(*)::int AS "n" FROM "transactions" t WHERE ${moneyReceivedSql()} AND t."id" = ${bought.id}`,
+      );
+      assert.equal(counted[0]?.n, 0, 'analytics still counts the refunded payment as money received');
+      // A NEW purchase nothing else paid for: its subscription is taken back.
+      assert.equal((await db.subscription.findUniqueOrThrow({ where: { id: subscription.id } })).status, 'EXPIRED');
+      const marked = await db.providerSubscription.findUniqueOrThrow({ where: { id: row.id } });
+      assert.equal(marked.status, ProviderSubscriptionStatus.ACTIVE, 'the provider has not answered yet');
+      assert.equal(marked.cancelledBy, REFUND_CANCELLED_BY, 'the autopay was not marked before the answer');
+      assert.equal((await db.savedPaymentMethod.findUniqueOrThrow({ where: { id: card.id } })).autopayEnabled, false);
+      assert.equal(cardFor(bought.paymentId), undefined, 'the card went out before the provider said what it did');
+      const audit = await db.adminAuditLog.findFirst({
+        where: { adminUserId: admin.id, action: 'payments.transaction.provider_refund_recorded' },
+      });
+      assert.ok(audit !== null, 'no audit row for the record');
+    } finally {
+      release();
+      provider.cancelAnswered = null;
+      await reconciliation.settleAfterResponse();
+    }
+
+    const ended = await db.providerSubscription.findUniqueOrThrow({ where: { id: row.id } });
+    assert.equal(ended.status, ProviderSubscriptionStatus.CANCELLED);
+    assert.equal(ended.cancelledBy, REFUND_CANCELLED_BY);
+    const told = cardFor(bought.paymentId);
+    assert.equal(told?.type, 'payment.refunded');
+    assert.equal(told?.metadata['note'], 'Автосписание отменено: Platega. Автосписание через ЮKassa выключено.');
+    assert.equal(told?.metadata['subscriptionRevoked'], true);
+  });
+
+  /** The operator's autopay actions on the user's card, told to `told`. */
+  function operatorAutopay(told: Array<{ readonly type: string; readonly metadata: Record<string, unknown> }>) {
+    return new AdminAutopayService(db, providerSubscriptions, savedMethods, {
+      warn: (type: string, _category: string, _message: string, metadata: Record<string, unknown>) => {
+        told.push({ type, metadata });
+      },
+      info: () => undefined,
+    } as never);
+  }
+
+  it('the operator’s «Отменить автосписание» of a Platega autopay: marked before the answer, cancelled after it, then the card — no refund', async () => {
+    const userId = await createUser();
+    const planId = await createPlan();
+    const subscription = await createSubscription(userId, planId);
+    const bought = await paid({ userId, subscriptionId: subscription.id, planId, gatewayType: PaymentGatewayType.PLATEGA });
+    const row = await autopay({ userId, subscriptionId: subscription.id, planId, firstTransactionId: bought.id });
+    const admin = await operator();
+    const told: Array<{ readonly type: string; readonly metadata: Record<string, unknown> }> = [];
+    const service = operatorAutopay(told);
+    let release: () => void = () => undefined;
+    provider.cancelAnswered = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let timer: NodeJS.Timeout | undefined;
+
+    try {
+      const answered = await Promise.race([
+        service
+          .cancelProviderSubscription({
+            userId,
+            providerSubscriptionRowId: row.id,
+            currentAdmin: { id: admin.id } as never,
+            requestMetadata: { requestId: null, remoteAddress: null, userAgent: null },
+          })
+          .then((result) => result.state),
+        new Promise<string>((resolve) => {
+          timer = setTimeout(() => resolve('waited for the provider'), 5000);
+        }),
+      ]);
+      clearTimeout(timer);
+
+      assert.equal(answered, 'CANCELLING');
+      const marked = await db.providerSubscription.findUniqueOrThrow({ where: { id: row.id } });
+      assert.equal(marked.status, ProviderSubscriptionStatus.ACTIVE);
+      assert.equal(marked.cancelledBy, OPERATOR_CANCELLED_BY, 'not marked before the answer: a cut request loses the cancel');
+      assert.equal(told.length, 0, 'the card went out before the provider said what it did');
+      const audit = await db.adminAuditLog.findFirst({
+        where: { adminUserId: admin.id, action: 'payments.autopay.provider_subscription_cancelled' },
+      });
+      assert.ok(audit !== null, 'no audit row for the cancel');
+    } finally {
+      release();
+      provider.cancelAnswered = null;
+      await service.settleAfterResponse();
+    }
+
+    const ended = await db.providerSubscription.findUniqueOrThrow({ where: { id: row.id } });
+    assert.equal(ended.status, ProviderSubscriptionStatus.CANCELLED);
+    assert.equal(ended.cancelledBy, OPERATOR_CANCELLED_BY);
+    assert.ok(cancelCalls.some((url) => url.endsWith(`/subscription/${row.providerSubscriptionId}/cancel`)));
+    assert.deepEqual(told.map((event) => event.type), ['payment.autopay_stopped_by_operator']);
+    assert.match(String(told[0]?.metadata['note']), /^Автосписание отменено у Platega: новых списаний не будет\./);
+    // No refund: the payment and the subscription it paid for stand.
+    assert.equal((await db.transaction.findUniqueOrThrow({ where: { id: bought.id } })).status, 'COMPLETED');
+    assert.equal((await db.subscription.findUniqueOrThrow({ where: { id: subscription.id } })).status, 'ACTIVE');
+    assert.deepEqual(await providerSubscriptions.listForUser(userId), [], 'the customer’s «Способы оплаты» still lists it');
+  });
+
+  it('an operator’s cancel Platega does not take is finished by the sweep, as the operator’s', async () => {
+    const userId = await createUser();
+    const planId = await createPlan();
+    const subscription = await createSubscription(userId, planId);
+    const bought = await paid({ userId, subscriptionId: subscription.id, planId, gatewayType: PaymentGatewayType.PLATEGA });
+    const row = await autopay({ userId, subscriptionId: subscription.id, planId, firstTransactionId: bought.id });
+    const admin = await operator();
+    const told: Array<{ readonly type: string; readonly metadata: Record<string, unknown> }> = [];
+    const service = operatorAutopay(told);
+    provider.refuseCancel.add(row.providerSubscriptionId);
+
+    try {
+      await service.cancelProviderSubscription({
+        userId,
+        providerSubscriptionRowId: row.id,
+        currentAdmin: { id: admin.id } as never,
+        requestMetadata: { requestId: null, remoteAddress: null, userAgent: null },
+      });
+      await service.settleAfterResponse();
+    } finally {
+      provider.refuseCancel.delete(row.providerSubscriptionId);
+    }
+    const pending = await db.providerSubscription.findUniqueOrThrow({ where: { id: row.id } });
+    assert.equal(pending.status, ProviderSubscriptionStatus.ACTIVE);
+    assert.equal(pending.cancelledBy, OPERATOR_CANCELLED_BY);
+    assert.match(String(told[0]?.metadata['note']), /Отменить автосписание у Platega сразу не удалось: панель повторяет отмену каждые 10 минут/);
+
+    await providerSubscriptions.cancelStranded();
+
+    const ended = await db.providerSubscription.findUniqueOrThrow({ where: { id: row.id } });
+    assert.equal(ended.status, ProviderSubscriptionStatus.CANCELLED);
+    assert.equal(ended.cancelledBy, OPERATOR_CANCELLED_BY);
+  });
+
+  it('«Выключить автосписание ЮKassa»: every method off in the request, the one a charge holds after the answer', async () => {
+    const userId = await createUser();
+    const admin = await operator();
+    const cardMethod = await db.savedPaymentMethod.create({
+      data: { userId, gatewayType: PaymentGatewayType.YOOKASSA, providerMethodId: `${autopayPrefix}-pm-${next()}`, methodType: 'bank_card', cardLast4: '4242' },
+    });
+    const sbpMethod = await db.savedPaymentMethod.create({
+      data: { userId, gatewayType: PaymentGatewayType.YOOKASSA, providerMethodId: `${autopayPrefix}-pm-${next()}`, methodType: 'sbp' },
+    });
+    const told: Array<{ readonly type: string; readonly metadata: Record<string, unknown> }> = [];
+    const service = operatorAutopay(told);
+    // A charge of the SBP method being submitted: it holds that method's lock.
+    let letGo: () => void = () => undefined;
+    const released = new Promise<void>((resolve) => {
+      letGo = resolve;
+    });
+    let locked: () => void = () => undefined;
+    const holding = new Promise<void>((resolve) => {
+      locked = resolve;
+    });
+    const charge = db.$transaction(
+      async (tx) => {
+        await tx.$queryRaw`SELECT "id" FROM "saved_payment_methods" WHERE "id" = ${sbpMethod.id} FOR UPDATE`;
+        locked();
+        await released;
+      },
+      { timeout: 30_000 },
+    );
+    await holding;
+
+    try {
+      const result = await service.disableYookassaAutopay({
+        userId,
+        currentAdmin: { id: admin.id } as never,
+        requestMetadata: { requestId: null, remoteAddress: null, userAgent: null },
+      });
+      assert.deepEqual(result, { switched: 1, pending: 1 });
+      assert.equal((await db.savedPaymentMethod.findUniqueOrThrow({ where: { id: cardMethod.id } })).autopayEnabled, false);
+      assert.equal((await db.savedPaymentMethod.findUniqueOrThrow({ where: { id: sbpMethod.id } })).autopayEnabled, true);
+      assert.equal(told.length, 0, 'the card went out before the busy method was switched');
+    } finally {
+      letGo();
+      await charge;
+    }
+    await service.settleAfterResponse();
+
+    const sbp = await db.savedPaymentMethod.findUniqueOrThrow({ where: { id: sbpMethod.id } });
+    assert.equal(sbp.autopayEnabled, false);
+    assert.equal(sbp.isActive, true, 'the method itself stays saved');
+    assert.deepEqual(told.map((event) => event.type), ['payment.autopay_stopped_by_operator']);
+    assert.match(String(told[0]?.metadata['note']), /^Автосписание через ЮKassa выключено: •••• 4242, СБП\./);
+    const audit = await db.adminAuditLog.findFirst({ where: { adminUserId: admin.id, action: 'payments.autopay.yookassa_disabled' } });
+    assert.ok(audit !== null, 'no audit row for the switch');
+    assert.deepEqual(
+      events.filter((event) => event.type === 'payment.method_autopay_updated' && event.metadata['userId'] === userId),
+      [],
+      'the customer’s own event: whatever is bound to it would tell the customer they did it',
+    );
   });
 });

@@ -13,6 +13,7 @@ import { RefundTransactionDto } from '../dto/refund-transaction.dto';
 import { AdminPaymentTransactionInterface } from '../interfaces/admin-payment-transaction.interface';
 import {
   PaymentRefundService,
+  ProviderRefundRecordResultInterface,
   RefundEligibilityInterface,
   RefundResultInterface,
   WithheldRefundRecordResultInterface,
@@ -83,6 +84,10 @@ export class AdminPaymentTransactionsController {
    * the provider, and runs the reversal a provider's refund notification runs.
    * Withheld payments only, any gateway; nothing is sent to the provider.
    * The same `payments:refund` as the refund above: it books money as returned.
+   *
+   * Kept beside `provider-refund`, which does the same for a withheld payment:
+   * the withheld section of the payment's details posts here, and so does a
+   * panel tab opened before an update.
    */
   @Post(':transactionId/withheld-refund')
   @RequirePermission('payments', 'refund')
@@ -92,6 +97,30 @@ export class AdminPaymentTransactionsController {
     @Req() request: Request,
   ): Promise<WithheldRefundRecordResultInterface> {
     return this.paymentRefundService.recordWithheldRefund({
+      transactionId,
+      currentAdmin,
+      requestMetadata: extractRequestMetadata(request),
+    });
+  }
+
+  /**
+   * «Отметить возврат» for any payment the panel does not refund itself
+   * (every gateway but ЮKassa): the operator returned the money at the
+   * provider, and the panel runs the reversal a provider's refund notice runs —
+   * commission, cashback, the subscription, the autopay (no «Мой налог»
+   * receipt: the panel files those for ЮKassa payments only). Nothing
+   * is sent to the provider, and the answer does not wait on one. A withheld
+   * payment is handled as `withheld-refund` handles it. `payments:refund`: it
+   * books money as returned.
+   */
+  @Post(':transactionId/provider-refund')
+  @RequirePermission('payments', 'refund')
+  public async recordProviderRefund(
+    @Param('transactionId') transactionId: string,
+    @CurrentAdmin() currentAdmin: CurrentAdminInterface,
+    @Req() request: Request,
+  ): Promise<ProviderRefundRecordResultInterface> {
+    return this.paymentRefundService.recordProviderRefund({
       transactionId,
       currentAdmin,
       requestMetadata: extractRequestMetadata(request),

@@ -78,7 +78,12 @@ interface Scenario {
   readonly accessMode?: AccessMode;
   readonly gateway?: Record<string, unknown> | null;
   readonly price?: () => Promise<typeof PRICED>;
-  readonly withActiveForCharge?: () => Promise<never>;
+  readonly withActiveForCharge?: (
+    input: unknown,
+    submit: (method: { readonly id: string; readonly providerMethodId: string }, signal: AbortSignal) => Promise<unknown>,
+  ) => Promise<unknown>;
+  /** What the provider is asked; by default no provider call is expected. */
+  readonly createCheckout?: (input: Record<string, unknown>) => Promise<never>;
 }
 
 interface TransactionRow {
@@ -179,8 +184,9 @@ function harness(scenario: Scenario) {
       assertRenewalPolicy: async () => undefined,
     } as never,
     {
-      createCheckout: async () => {
+      createCheckout: async (input: Record<string, unknown>) => {
         providerCalls += 1;
+        if (scenario.createCheckout !== undefined) return scenario.createCheckout(input);
         throw new Error('no provider call is expected in these cases');
       },
     } as never,
@@ -297,5 +303,26 @@ describe('autopay over the real renewal checkout: a refusal before any payment e
       ['a1', 'a2'],
       'the next attempt was not made',
     );
+  });
+
+  it("hands the saved method's charge the deadline of the method's lock", async () => {
+    // The charge is submitted under the method's lock, which lasts a bounded
+    // time: the POST must end by the deadline the lock hands over, or the lock
+    // lapses with the POST still running (`withActiveForCharge`).
+    const deadline = new AbortController().signal;
+    const asked: Array<Record<string, unknown>> = [];
+    const h = harness({
+      withActiveForCharge: async (_input, submit) => submit({ id: 'method-1', providerMethodId: 'pm-1' }, deadline),
+      createCheckout: async (input) => {
+        asked.push(input);
+        throw new Error('the provider did not answer');
+      },
+    });
+
+    await h.autopay.markExpiredSubscriptions();
+
+    assert.equal(asked.length, 1);
+    assert.equal(asked[0]?.['paymentMethodId'], 'pm-1');
+    assert.equal(asked[0]?.['signal'], deadline, 'the renewal charge would outlive the lock that guards it');
   });
 });

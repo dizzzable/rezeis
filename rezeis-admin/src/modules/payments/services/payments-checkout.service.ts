@@ -309,6 +309,8 @@ export class PaymentsCheckoutService {
     });
     const createProviderCheckout = async (
       chargedMethod: { readonly id: string; readonly providerMethodId: string } | null,
+      // A saved method's charge: the deadline its lock holds for (`withActiveForCharge`).
+      signal?: AbortSignal,
     ) =>
       this.paymentProviderExecutionService.createCheckout({
         gateway,
@@ -321,6 +323,7 @@ export class PaymentsCheckoutService {
         savedPaymentMethodId: chargedMethod?.id ?? null,
         savePaymentMethod: input.savePaymentMethod,
         savePaymentMethodConsent: input.savePaymentMethodConsent,
+        ...(signal === undefined ? {} : { signal }),
       });
     let providerCheckout: Awaited<ReturnType<PaymentProviderExecutionService['createCheckout']>>;
     try {

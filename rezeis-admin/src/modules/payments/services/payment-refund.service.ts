@@ -14,7 +14,7 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { buildAdminAuditLogData } from '../../../common/utils/admin-audit-log.util';
 import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
 import { RequestMetadataInterface } from '../../auth/interfaces/request-metadata.interface';
-import { PaymentReconciliationService } from './payment-reconciliation.service';
+import { importedPaymentSource, PaymentReconciliationService } from './payment-reconciliation.service';
 import { readGatewaySettings } from '../utils/payment-gateway-settings.util';
 import { redactPaymentDiagnosticMessage } from '../utils/payment-provider-error.util';
 import {
@@ -59,7 +59,7 @@ export interface RefundResultInterface {
   readonly providerStatus: string | null;
 }
 
-/** What «Отметить возврат» did for a withheld payment. */
+/** What «Отметить возврат» did — for a withheld payment, or for any other made at its provider. */
 export interface WithheldRefundRecordResultInterface {
   readonly transactionId: string;
   /**
@@ -71,13 +71,37 @@ export interface WithheldRefundRecordResultInterface {
   readonly refundedAt: string | null;
 }
 
+/** What «Отметить возврат» did for any payment; the same answer. */
+export type ProviderRefundRecordResultInterface = WithheldRefundRecordResultInterface;
+
 /**
- * How long one «Отметить возврат» holds a withheld payment before another may
- * run the reversal. The claim is what keeps two clicks, or two operators, from
+ * How long one «Отметить возврат» holds a payment before another may run the
+ * reversal. The claim is what keeps two clicks, or two operators, from
  * running it twice; the reversal takes well under a second, and a claim older
  * than this belongs to a run that died, which a later click finishes.
  */
 export const WITHHELD_REFUND_CLAIM_MS = 60_000;
+
+/**
+ * Why a refund made at the provider cannot be recorded for this payment
+ * («Отметить возврат» on any payment), or null when it can. The panel refunds
+ * ЮKassa itself, with «Вернуть»; a partner-balance payment has no provider to
+ * refund it at; a payment imported from another bot was settled there; and
+ * only a payment that went through and was delivered has anything to undo.
+ * A withheld payment is decided by its own rule, not this one.
+ */
+export function providerRefundRecordRefusal(
+  transaction: Pick<Transaction, 'gatewayType' | 'status' | 'fulfilledAt' | 'amount' | 'planSnapshot'>,
+): string | null {
+  if (transaction.gatewayType === PaymentGatewayType.YOOKASSA) return 'PAYMENT_REFUND_RECORD_USE_REFUND';
+  if (transaction.gatewayType === PaymentGatewayType.PARTNER_BALANCE) return 'PAYMENT_REFUND_RECORD_NO_PROVIDER';
+  if (importedPaymentSource(transaction) !== null) return 'PAYMENT_REFUND_RECORD_IMPORTED';
+  if (transaction.status !== TransactionStatus.COMPLETED) return 'PAYMENT_REFUND_NOT_COMPLETED';
+  if (transaction.fulfilledAt === null) return 'PAYMENT_REFUND_NOT_FULFILLED';
+  const amount = Number(transaction.amount.toString());
+  if (!Number.isFinite(amount) || amount <= 0) return 'PAYMENT_REFUND_RECORD_NOTHING_PAID';
+  return null;
+}
 
 function asGatewayRecord(gatewayData: unknown): Record<string, unknown> {
   return typeof gatewayData === 'object' && gatewayData !== null && !Array.isArray(gatewayData)
@@ -397,10 +421,77 @@ export class PaymentRefundService {
     readonly currentAdmin: CurrentAdminInterface;
     readonly requestMetadata: RequestMetadataInterface;
   }): Promise<WithheldRefundRecordResultInterface> {
+    return this.recordRefundMadeAtProvider(input, { onlyWithheld: true });
+  }
+
+  /**
+   * «Отметить возврат» on ANY payment: the operator returned its money at the
+   * provider — in Platega's or RollyPay's own dashboard, or by hand for any
+   * gateway — and says so here. Those refunds never reach the panel (Platega
+   * reports only a chargeback, RollyPay only `payment.paid`), so the autopay
+   * went on and the commission and the cashback stayed.
+   *
+   * A WHOLE refund, with exactly what a provider's own refund notice does to
+   * the payment, because it runs the same reversal
+   * (`PaymentReconciliationService.reverseFulfilledPayment`): the payment
+   * becomes CANCELED, the partner's commission, the referral reward and the
+   * cashback are taken back, analytics stops counting it, a NEW purchase's
+   * subscription is revoked (a renewal's or a plan change's is left for the
+   * operator, as the notice leaves it), the autopay ends
+   * (`refundEndsAutopay`), and the operator's card «↩️ Платёж возвращён» says
+   * with its «📝 Заметка» what became of the autopay. Nothing is sent to the
+   * provider, and the answer does not wait for one: the provider cancels and
+   * the card come after it (`deferAutopay`).
+   *
+   * No «Мой налог» receipt is cancelled, because there is none: the panel
+   * files them for ЮKassa payments only, this door refuses a ЮKassa payment
+   * that was not withheld, and a withheld one was never filed. The reversal's
+   * cancellation job stops at such a payment (`MoyNalogProcessor`).
+   *
+   * Only for a payment the panel does not refund itself and that has something
+   * to undo ({@link providerRefundRecordRefusal}); refused with 409 otherwise.
+   *
+   * A withheld payment takes the branch {@link recordWithheldRefund} takes —
+   * one door behind both routes, so the operator never meets a dead end, and a
+   * withheld payment's record stays what it was: its own audit action, its own
+   * refusals, `payment.withheld_refunded`, and no subscription or saved card
+   * touched.
+   */
+  public async recordProviderRefund(input: {
+    readonly transactionId: string;
+    readonly currentAdmin: CurrentAdminInterface;
+    readonly requestMetadata: RequestMetadataInterface;
+  }): Promise<ProviderRefundRecordResultInterface> {
+    return this.recordRefundMadeAtProvider(input, { onlyWithheld: false });
+  }
+
+  /**
+   * «Отметить возврат», both doors: see {@link recordWithheldRefund} and
+   * {@link recordProviderRefund}. The branch is whether the payment is
+   * withheld; `onlyWithheld` is the withheld door refusing every other one.
+   */
+  private async recordRefundMadeAtProvider(
+    input: {
+      readonly transactionId: string;
+      readonly currentAdmin: CurrentAdminInterface;
+      readonly requestMetadata: RequestMetadataInterface;
+    },
+    door: { readonly onlyWithheld: boolean },
+  ): Promise<WithheldRefundRecordResultInterface> {
     const transaction = await this.loadTransaction(input.transactionId);
-    if (!isWithheldConversion(transaction.gatewayData)) {
-      throw new ConflictException('PAYMENT_NOT_WITHHELD');
+    const withheld = isWithheldConversion(transaction.gatewayData);
+    if (!withheld) {
+      if (door.onlyWithheld) {
+        throw new ConflictException('PAYMENT_NOT_WITHHELD');
+      }
+      // A payment reversed already answers «recorded before» below, whatever
+      // its status says now: its reversal made it CANCELED.
+      if (typeof asGatewayRecord(transaction.gatewayData)['refundReversedAt'] !== 'string') {
+        const refusal = providerRefundRecordRefusal(transaction);
+        if (refusal !== null) throw new ConflictException(refusal);
+      }
     }
+    const inProgress = withheld ? 'PAYMENT_WITHHELD_REFUND_IN_PROGRESS' : 'PAYMENT_REFUND_RECORD_IN_PROGRESS';
 
     const claim = await this.prismaService.$transaction(async (tx) => {
       const live = asGatewayRecord(await lockTransactionRefundLedger(tx, transaction.id));
@@ -430,14 +521,18 @@ export class PaymentRefundService {
       return { transactionId: transaction.id, recorded: false, refundedAt: claim.reversedAt };
     }
     if (claim.kind === 'IN_PROGRESS') {
-      throw new ConflictException('PAYMENT_WITHHELD_REFUND_IN_PROGRESS');
+      throw new ConflictException(inProgress);
     }
 
     // The operator's statement, attributed, before the reversal it sets off:
-    // it is what they asserted, whatever becomes of the run.
+    // it is what they asserted, whatever becomes of the run. Its own action
+    // for any other payment, so «Лента операционной активности» on the
+    // dashboard says which it was.
     await this.prismaService.adminAuditLog.create({
       data: buildAdminAuditLogData({
-        action: 'payments.transaction.withheld_refund_recorded',
+        action: withheld
+          ? 'payments.transaction.withheld_refund_recorded'
+          : 'payments.transaction.provider_refund_recorded',
         actorId: input.currentAdmin.id,
         requestMetadata: input.requestMetadata,
         metadata: {
@@ -448,6 +543,7 @@ export class PaymentRefundService {
           gatewayType: transaction.gatewayType,
           amount: transaction.amount.toString(),
           currency: transaction.currency,
+          ...(withheld ? {} : { purchaseType: transaction.purchaseType }),
         },
       }),
     });
@@ -459,12 +555,14 @@ export class PaymentRefundService {
       // An operator's record is not a word from the provider: whatever the
       // provider said last stays on the row.
       recordProviderStatus: false,
-      // Nor does the answer wait on the provider: its own sign-up is cancelled
+      // Nor does the answer wait on the provider: the autopay is cancelled
       // after it, and the card comes then.
       deferAutopay: true,
     });
     this.logger.warn(
-      `Refund of withheld payment ${transaction.id} recorded by admin ${input.currentAdmin.id}`,
+      withheld
+        ? `Refund of withheld payment ${transaction.id} recorded by admin ${input.currentAdmin.id}`
+        : `Refund made at the provider for payment ${transaction.id} recorded by admin ${input.currentAdmin.id}`,
     );
 
     const reversed = await this.loadTransaction(transaction.id);

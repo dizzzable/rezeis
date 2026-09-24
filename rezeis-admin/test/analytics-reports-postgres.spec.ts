@@ -530,6 +530,7 @@ run('business analytics on PostgreSQL', () => {
         ['renewal', 900, 1],
         ['change', 40, 1],
         ['addon', 50, 1],
+        ['withheld', 0, 0],
       ],
     );
     assert.deepEqual(
@@ -551,7 +552,7 @@ run('business analytics on PostgreSQL', () => {
     );
     assert.equal(report.series.reduce((sum, point) => sum + point.total, 0), report.total.value);
     const lastBar = report.series[report.series.length - 2];
-    assert.deepEqual(lastBar?.byKind, { new: 10, renewal: 0, change: 0, addon: 0 });
+    assert.deepEqual(lastBar?.byKind, { new: 10, renewal: 0, change: 0, addon: 0, withheld: 0 });
   });
 
   it('converts a trial only by a payment made after it, and counts the days from the grant', async () => {
@@ -864,6 +865,7 @@ run('business analytics on PostgreSQL', () => {
       ['renewal', 0, 0],
       ['change', 350, 2],
       ['addon', 0, 0],
+      ['withheld', 0, 0],
     ]);
   });
 
@@ -910,7 +912,80 @@ run('business analytics on PostgreSQL', () => {
       ['renewal', 0, 0],
       ['change', 0, 0],
       ['addon', 0, 0],
+      ['withheld', 0, 0],
     ]);
+  });
+
+  it('files money withheld for refund on a row of its own — «Не применён (к возврату)» — until its refund takes it out', async () => {
+    const observed = await onCleanSlate(async (tx, service) => {
+      await customer(tx, 'held', { createdAt: daysAgo(40) });
+      const trial = await tx.subscription.create({
+        data: { userId: 'held', planSnapshot: PRO, createdAt: daysAgo(40), startedAt: daysAgo(5), expiresAt: daysAhead(25) },
+      });
+      await trialClaim(tx, 'held', trial.id, daysAgo(40));
+      const converter = await pay(tx, {
+        userId: 'held',
+        subscriptionId: trial.id,
+        purchaseType: 'UPGRADE',
+        amount: '300',
+        createdAt: daysAgo(5),
+        fulfilledAt: daysAgo(5),
+        planSnapshot: PRO,
+      });
+      // A second conversion of the same trial, paid in this window: received, applied to nothing.
+      const conversion = await pay(tx, {
+        userId: 'held',
+        subscriptionId: trial.id,
+        purchaseType: 'UPGRADE',
+        amount: '250',
+        createdAt: daysAgo(3),
+        fulfilledAt: daysAgo(3),
+        planSnapshot: PRO,
+        gatewayData: { conversionWithheldAt: daysAgo(3).toISOString(), trialConvertedByPaymentId: converter.paymentId },
+      });
+      // An autopay charge the provider took after a refund ended the autopay: a RENEW, withheld the same way.
+      await pay(tx, {
+        userId: 'held',
+        purchaseType: 'RENEW',
+        amount: '120',
+        createdAt: daysAgo(2),
+        fulfilledAt: daysAgo(2),
+        gatewayData: { conversionWithheldAt: daysAgo(2).toISOString(), withheldReason: 'AUTOPAY_AFTER_REFUND' },
+      });
+      const kinds = async () =>
+        (await service.getRevenueReport(30)).byKind.map((kind) => [kind.kind, kind.figure.value, kind.payments]);
+      const held = await kinds();
+      const heldTotal = (await service.getRevenueReport(30)).total.value;
+      // «Отметить возврат» on the conversion: the reversal makes it CANCELED and stamps it.
+      await tx.transaction.update({
+        where: { id: conversion.id },
+        data: {
+          status: 'CANCELED',
+          gatewayData: {
+            conversionWithheldAt: daysAgo(3).toISOString(),
+            trialConvertedByPaymentId: converter.paymentId,
+            refundReversedAt: new Date().toISOString(),
+          },
+        },
+      });
+      return { held, heldTotal, refunded: await kinds(), refundedTotal: (await service.getRevenueReport(30)).total.value };
+    });
+    assert.deepEqual(observed.held, [
+      ['new', 300, 1],
+      ['renewal', 0, 0],
+      ['change', 0, 0],
+      ['addon', 0, 0],
+      ['withheld', 370, 2],
+    ]);
+    assert.equal(observed.heldTotal, 670, 'the rows no longer add up to the total');
+    assert.deepEqual(observed.refunded, [
+      ['new', 300, 1],
+      ['renewal', 0, 0],
+      ['change', 0, 0],
+      ['addon', 0, 0],
+      ['withheld', 120, 1],
+    ]);
+    assert.equal(observed.refundedTotal, 420, 'a refunded withheld payment stayed in the money');
   });
 
   it('leaves a spend of a partner’s balance out of revenue, payers and payment systems, and states it apart', async () => {
@@ -1338,6 +1413,7 @@ run('business analytics on PostgreSQL', () => {
       ['renewal', 0, 0],
       ['change', 300, 1],
       ['addon', 0, 0],
+      ['withheld', 0, 0],
     ]);
     // Counted once each: the paid trial on the day it was bought, the free one on the day it was first paid for.
     assert.deepEqual(observed.newSubscriptions, { current: 2, previous: 0 });

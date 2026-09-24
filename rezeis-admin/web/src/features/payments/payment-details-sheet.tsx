@@ -40,6 +40,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { useHasPermission } from '@/features/rbac'
 import { PermissionRequiredNotice } from './permission-required-notice'
 import { paymentsRoutePermissions, useRouteAccess } from './payments-route-permissions'
+import { ProviderRefundSection } from './provider-refund'
 import { WebhookReplayControl } from './webhook-replay-control'
 import { WithheldBadge, WithheldConversionSection } from './withheld-conversion'
 import { clientPaymentsHref, subscriptionPaymentsHref } from './payments-filters'
@@ -209,6 +210,9 @@ function PaymentDetailsBody({ transaction }: { readonly transaction: Transaction
           </Fact>
         </dl>
       </section>
+
+      {/* «Отметить возврат» for a refund made at the provider; renders its own separator, or nothing. */}
+      <ProviderRefundSection transaction={transaction} />
 
       <Separator />
 

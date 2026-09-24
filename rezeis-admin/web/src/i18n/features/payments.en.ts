@@ -379,4 +379,47 @@ export const en = {
         'The provider and webhook-health reports are served by the analytics module, not the payments one, and your role cannot read it. This is a refusal, not a report that failed to load — retrying will not help.',
     },
   },
+  // Merged into the core `paymentsPage` when the Payments page loads (deep,
+  // `addResourceBundle`): kept out of the core dictionary, which every page
+  // loads before its first paint.
+  paymentsPage: {
+    // «Отметить возврат» for a payment of a gateway the panel does not refund
+    // itself. The same words are in `userDetailPanel.providerRefund` (the user
+    // card's bundle): one dialog on two pages, and a test holds them equal.
+    providerRefund: {
+      title: 'Refund made at the provider',
+      hint: 'The panel returns money by itself only through YooKassa. If you refunded this payment in the {{gateway}} dashboard or another way, record it here: the panel undoes what this payment gave, as if the provider had reported the refund.',
+      action: 'Record refund',
+      confirmTitle: 'Record the refund?',
+      confirmIntro:
+        'First return {{amount}} to the customer at the provider ({{gateway}}). The panel sends the provider nothing: it only records that the money is back, and undoes what this payment gave:',
+      consequenceNew: 'the subscription this payment created is switched off, if nothing else paid for it;',
+      consequenceOther: 'the subscription does not change: adjust a renewal or a plan change by hand if needed; an add-on this payment bought ends at once;',
+      consequenceAutopay:
+        'the customer’s autopay ends: at Platega and RollyPay for the subscription this payment paid for, through YooKassa on every saved payment method;',
+      consequenceMoney:
+        'the partner commission, the referral reward and the cashback of this payment are taken back. The panel files «Мой налог» receipts for YooKassa payments only, so it has none for this one: if you declared this income in «Мой налог» yourself, cancel that receipt there.',
+      confirmAfter:
+        'The payment becomes CANCELED and no longer counts as revenue. The Telegram card «↩️ Платёж возвращён» follows.',
+      confirm: 'Yes, the money is returned',
+      submitting: 'Recording…',
+      recorded: 'Refund recorded',
+      alreadyRecorded: 'This payment’s refund was already recorded',
+      recordedAt: 'Refund recorded {{time}}',
+      failed: 'Could not record the refund',
+      noPermission: 'Recording a refund needs the payments:refund permission.',
+      errors: {
+        PAYMENT_REFUND_RECORD_USE_REFUND:
+          'The panel refunds a YooKassa payment itself: Users → the customer → Operations tab → “Refund”.',
+        PAYMENT_REFUND_RECORD_NO_PROVIDER:
+          'A partner-balance payment never went through a provider — there is nobody to have refunded it.',
+        PAYMENT_REFUND_RECORD_IMPORTED: 'The payment was imported from another bot and settled there — its refund cannot be recorded.',
+        PAYMENT_REFUND_NOT_COMPLETED: 'The payment is not completed — there is nothing to record.',
+        PAYMENT_REFUND_NOT_FULFILLED: 'This payment’s purchase was never delivered — there is nothing to undo.',
+        PAYMENT_REFUND_RECORD_NOTHING_PAID: 'The payment was for nothing — there is nothing to refund.',
+        PAYMENT_REFUND_RECORD_IN_PROGRESS: 'This payment’s refund is already being recorded. Refresh the page in a minute.',
+        PAYMENT_WITHHELD_REFUND_IN_PROGRESS: 'This payment’s refund is already being recorded. Refresh the page in a minute.',
+      },
+    },
+  },
 } as const

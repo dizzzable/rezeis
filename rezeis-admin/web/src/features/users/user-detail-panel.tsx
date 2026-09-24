@@ -109,6 +109,8 @@ import { PointsLedgerSheet } from './points-ledger-sheet'
 import { CopyableId, copyTextToClipboard } from '@/components/ui/copyable-id'
 import { clientPaymentsHref, paymentHref } from '@/features/payments/payments-filters'
 import { WithheldBadge } from '@/features/payments/withheld-conversion'
+import { ProviderRefundAction } from '@/features/payments/provider-refund'
+import { UserAutopaySection } from './user-autopay-section'
 
 /** The reason codes the backend accepts for a manual points adjustment; the subscriber sees the label. */
 const POINTS_ADJUSTMENT_REASONS = ['COMPENSATION', 'PROMOTION', 'CORRECTION', 'VIOLATION', 'OTHER'] as const
@@ -121,6 +123,7 @@ import {
   readSubscriptionDeleteRefusal,
   type SubscriptionDeleteRefusal,
 } from './subscription-delete-refusals'
+import { readPlanAssignmentRefusal } from './plan-assignment-refusals'
 import { panelTrafficLimitToGb } from './panel-traffic-limit'
 import {
   useCreateReferralInviteMutation,
@@ -2038,6 +2041,16 @@ function SubscriptionsTab({ user, telegramId, queryKey }: { user: UserDetail; te
     onError: () => toast.error(t('userDetailPanel.toasts.syncFailed')),
   })
 
+  // What «Назначить план» says when it fails — one card's select or the dialog
+  // for several: a refusal the server names by its code in the operator's
+  // language (its own sentence is English), otherwise the server's words, and
+  // with none of those «Не удалось назначить план». The one card used to fall
+  // back to «Подписка обновлена»: a failure announced as a success.
+  const assignPlanFailure = (err: unknown): string =>
+    readPlanAssignmentRefusal(err) === 'queuedRenewal'
+      ? t('userDetailPanel.subscriptions.assignBlockedByQueuedRenewal')
+      : getErrorMessage(err, t('userDetailPanel.subscriptions.assignFailed'))
+
   const assignPlanMutation = useMutation({
     mutationFn: ({ id, planId }: { id: string; planId: string }) =>
       api.patch(`/admin/users/subscriptions/${id}`, { planId }),
@@ -2045,7 +2058,7 @@ function SubscriptionsTab({ user, telegramId, queryKey }: { user: UserDetail; te
       queryClient.invalidateQueries({ queryKey })
       toast.success(t('userDetailPanel.subscriptions.planAssigned'))
     },
-    onError: (err) => toast.error(getErrorMessage(err, t('userDetailPanel.toasts.subUpdated'))),
+    onError: (err) => toast.error(assignPlanFailure(err)),
   })
 
   // Bulk assign: apply the chosen plan to each selected subscription via the
@@ -2063,7 +2076,7 @@ function SubscriptionsTab({ user, telegramId, queryKey }: { user: UserDetail; te
       setAssignPlanId('')
       setSelectedSubIds([])
     },
-    onError: (err) => toast.error(getErrorMessage(err, t('userDetailPanel.subscriptions.assignFailed'))),
+    onError: (err) => toast.error(assignPlanFailure(err)),
   })
 
   const { data: plans } = usePlans()
@@ -2223,6 +2236,10 @@ function SubscriptionsTab({ user, telegramId, queryKey }: { user: UserDetail; te
           ))}
         </div>
       )}
+
+      {/* ── How the subscriptions renew without the customer, and the
+          operator's «Отменить автосписание» (no refund) ───────────── */}
+      <UserAutopaySection userId={user.id} />
 
       {/* ── Plan Access toggles ─────────────────────────────────── */}
       <PlanAccessSection
@@ -4744,11 +4761,28 @@ function OperationCard({
               </Badge>
             )}
           </div>
-          <RefundPaymentAction
-            transactionId={operation.id}
-            amount={operation.payload.amount}
-            currency={operation.payload.currency}
-          />
+          <div className="flex flex-wrap items-center gap-1">
+            <RefundPaymentAction
+              transactionId={operation.id}
+              amount={operation.payload.amount}
+              currency={operation.payload.currency}
+            />
+            {/* A refund made at the provider, for every gateway but ЮKassa:
+                renders only for a payment it can record. */}
+            <ProviderRefundAction
+              texts="userDetailPanel.providerRefund"
+              payment={{
+                id: operation.id,
+                paymentId: operation.payload.paymentId,
+                status: operation.payload.status,
+                gatewayType: operation.payload.gatewayType,
+                purchaseType: operation.payload.purchaseType,
+                amount: operation.payload.amount,
+                currency: operation.payload.currency,
+                conversionWithheld: operation.payload.conversionWithheld,
+              }}
+            />
+          </div>
         </div>
       </div>
     )
@@ -5579,6 +5613,12 @@ const DELETE_BLOCKER_KEYS = [
   'referralPointsExchanges',
   'partnerTransactions',
   'partnerWithdrawals',
+  // The add-on model's records of money on the account's subscriptions.
+  'addOnPurchases',
+  'paidTerms',
+  'resetPeriods',
+  'deviceReductions',
+  'openIncidents',
 ] as const
 
 type DeleteBlockers = Partial<Record<(typeof DELETE_BLOCKER_KEYS)[number], number>>

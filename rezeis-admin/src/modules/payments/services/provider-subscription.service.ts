@@ -31,6 +31,7 @@ import {
 } from '../constants/payment-reconciliation.constant';
 import { PaymentWebhookEnvelopeInterface } from '../interfaces/payment-webhook-envelope.interface';
 import { readGatewaySettings } from '../utils/payment-gateway-settings.util';
+import { DISPUTE_EVENT_KEY_MARKER } from '../utils/payment-webhook-auto-retry.util';
 import {
   type AutopayRefundOutcome,
   type AutopayRow,
@@ -106,6 +107,21 @@ type StrandedCandidate = ProviderSubscription & { readonly user: { readonly isBl
  * the sweep retries until the provider takes it.
  */
 export type ProviderSubscriptionCancelledBy = 'CUSTOMER' | 'OPERATOR' | 'SYSTEM' | typeof REFUND_CANCELLED_BY;
+
+/**
+ * `cancelledBy` for a cancel an operator asked for from the user's card in the
+ * panel («Отменить автосписание»). Written on the live row BEFORE the provider
+ * is asked, like a refund's mark, so the sweep finishes a cancel the provider
+ * did not take (`STRANDED_BY_OPERATOR`). Unlike a refund's, a charge taken
+ * before the cancel lands is the customer's money for the period and renews.
+ */
+export const OPERATOR_CANCELLED_BY = 'OPERATOR';
+
+/** A live autopay as the user's card in the panel shows it. */
+export interface OperatorProviderSubscriptionInterface extends CustomerProviderSubscriptionInterface {
+  /** A cancel asked for and still waiting for the provider: from the panel, or by a refund. */
+  readonly cancelRequestedBy: typeof OPERATOR_CANCELLED_BY | typeof REFUND_CANCELLED_BY | null;
+}
 
 /** A Platega callback that disputes a subscription charge (`isRefundProviderStatus`). */
 export interface ProviderSubscriptionChargeback {
@@ -489,6 +505,82 @@ export class ProviderSubscriptionService {
   }
 
   /**
+   * The customer's live autopays, for the user's card in the panel: what
+   * «Способы оплаты» shows the customer, and whether a cancel was asked for
+   * and still waits for the provider — the operator's, or a refund's.
+   */
+  public async listForOperator(userId: string): Promise<readonly OperatorProviderSubscriptionInterface[]> {
+    const live = await this.listForUser(userId);
+    if (live.length === 0) return [];
+    const marks = await this.prismaService.providerSubscription.findMany({
+      where: { id: { in: live.map((row) => row.id) } },
+      select: { id: true, cancelledBy: true },
+    });
+    const byId = new Map(marks.map((row) => [row.id, row.cancelledBy]));
+    return live.map((row) => {
+      const mark = byId.get(row.id) ?? null;
+      return {
+        ...row,
+        cancelRequestedBy: mark === REFUND_CANCELLED_BY || mark === OPERATOR_CANCELLED_BY ? mark : null,
+      };
+    });
+  }
+
+  /**
+   * «Отменить автосписание» on the user's card in the panel, the part before
+   * the operator's answer: the row is marked (`OPERATOR_CANCELLED_BY`) and the
+   * provider is not asked yet. From here the sweep cancels it whatever becomes
+   * of the rest (`STRANDED_BY_OPERATOR`). Never over a refund's mark, which says
+   * more: a charge taken on that row is withheld.
+   *
+   * `ENDED` — not live any more; `REFUND_ENDING` — a refund's cancel of it is
+   * already under way.
+   */
+  public async markForOperatorCancel(
+    id: string,
+  ): Promise<
+    | { readonly state: 'MARKED'; readonly row: ProviderSubscription }
+    | { readonly state: 'NOT_FOUND' | 'ENDED' | 'REFUND_ENDING' }
+  > {
+    const row = await this.prismaService.providerSubscription.findUnique({ where: { id } });
+    if (row === null) return { state: 'NOT_FOUND' };
+    if (!(LIVE_STATUSES as readonly ProviderSubscriptionStatus[]).includes(row.status)) return { state: 'ENDED' };
+    // The write decides, not the read above: a refund can mark the row between
+    // the two, and its mark is never written over.
+    const marked = await this.prismaService.providerSubscription.updateMany({
+      where: {
+        id,
+        status: { in: [...LIVE_STATUSES] },
+        OR: [{ cancelledBy: null }, { cancelledBy: { not: REFUND_CANCELLED_BY } }],
+      },
+      data: { cancelledBy: OPERATOR_CANCELLED_BY },
+    });
+    if (marked.count === 0) {
+      // Marked by a refund (before the read or since), or not live any more.
+      const now = await this.prismaService.providerSubscription.findUnique({ where: { id }, select: { cancelledBy: true } });
+      return { state: now?.cancelledBy === REFUND_CANCELLED_BY ? 'REFUND_ENDING' : 'ENDED' };
+    }
+    return { state: 'MARKED', row: { ...row, cancelledBy: OPERATOR_CANCELLED_BY } };
+  }
+
+  /**
+   * The rest of «Отменить автосписание», after the operator's answer: the
+   * provider is asked to cancel the row {@link markForOperatorCancel} marked.
+   * Never throws: a provider that refuses or cannot be reached is reported,
+   * and the sweep keeps trying the marked row every 10 minutes.
+   */
+  public async cancelForOperator(id: string): Promise<AutopayRefundOutcome> {
+    try {
+      return await this.cancelLive({ ids: [id] }, OPERATOR_CANCELLED_BY);
+    } catch (error: unknown) {
+      this.logger.error(
+        `Could not cancel provider subscription ${id} for an operator: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return { cancelled: [], failed: [{ gatewayType: UNKNOWN_AUTOPAY_GATEWAY, providerSubscriptionId: '' }] };
+    }
+  }
+
+  /**
    * Stops every live charge for these subscriptions or this user, so a plan
    * change, a deletion or a ban never leaves the provider charging for access
    * the panel no longer gives. Each cancel is tried separately, and a failure
@@ -706,7 +798,9 @@ export class ProviderSubscriptionService {
       // The dispute names no payment of ours yet — which one it is, is what
       // its handling finds out — so the event is filed under the subscription.
       paymentId: providerSubscriptionId,
-      providerEventId: `subscription:${providerSubscriptionId}:dispute-callback:${disputedChargeId(providerSubscriptionId, chargeback) ?? payloadHash}`,
+      // The marker is what gives a dispute its longer retry ladder
+      // (`DISPUTE_RETRY_LADDER`): Platega being down fails its handling.
+      providerEventId: `subscription:${providerSubscriptionId}${DISPUTE_EVENT_KEY_MARKER}${disputedChargeId(providerSubscriptionId, chargeback) ?? payloadHash}`,
       eventStatus: chargeback.providerStatus,
       receivedAt: new Date().toISOString(),
       payloadHash,
@@ -719,8 +813,9 @@ export class ProviderSubscriptionService {
    * A chargeback (or a refund) the provider reports on a subscription charge.
    * Platega posts it like a charge callback — `Id`, `SubscriptionId`, a status —
    * so it used to reach only `sync`, which counts charges and never reverses
-   * one: the commission, the cashback and the tax receipt stood, and the
-   * autopay went on charging.
+   * one: the commission and the cashback stood, and the autopay went on
+   * charging. (There was no «Мой налог» receipt to stand: the panel files those
+   * for ЮKassa payments only.)
    *
    * The charges the provider reports are applied first, then the disputed one
    * is found and goes through the refund reversal every other refund takes —
@@ -732,7 +827,8 @@ export class ProviderSubscriptionService {
    * several times gives no way to tell which charge is disputed — every
    * charge is the same sum, and Platega's callback names none of ours — so
    * nothing is guessed: the autopay ends and the operator is told
-   * (`payment.chargeback_unmatched`) what was not reversed.
+   * (`payment.chargeback_unmatched`) what was not reversed, and how to reverse
+   * it: «Отметить возврат» on the charge they find ({@link unmatchedChargebackNote}).
    */
   public async handleChargeback(
     gatewayType: PaymentGatewayType,
@@ -807,11 +903,7 @@ export class ProviderSubscriptionService {
         chargeCount: row.appliedChargeCount,
         ...(row.subscriptionId === null ? {} : { subscriptionId: row.subscriptionId }),
         needsManualReview: true,
-        note:
-          `Провайдер сообщил об оспаривании одного из ${row.appliedChargeCount} списаний по автоплатежу, ` +
-          'но не сказал, какого: оно не отменено в панели (комиссия, кешбэк и чек «Мой налог» остались). ' +
-          'Найдите списание в личном кабинете провайдера по его ID. ' +
-          (describeAutopayOutcome({ ...outcome, ...savedCard }) ?? 'Живых автосписаний у подписки не было.'),
+        note: unmatchedChargebackNote(gatewayType, row.appliedChargeCount, { ...outcome, ...savedCard }),
         ...savedCard,
       },
     );
@@ -1004,6 +1096,7 @@ export class ProviderSubscriptionService {
       const subscription = row.subscriptionId === null ? undefined : byId.get(row.subscriptionId);
       const reason = strandedReason({
         refundRequested: row.cancelledBy === REFUND_CANCELLED_BY,
+        operatorRequested: row.cancelledBy === OPERATOR_CANCELLED_BY,
         userDeleted: row.userId === null,
         userBlocked: row.user?.isBlocked === true,
         subscription:
@@ -1020,7 +1113,14 @@ export class ProviderSubscriptionService {
       });
       if (reason === null) continue;
       try {
-        await this.cancel(row, reason === STRANDED_BY_REFUND ? REFUND_CANCELLED_BY : 'SYSTEM');
+        await this.cancel(
+          row,
+          reason === STRANDED_BY_REFUND
+            ? REFUND_CANCELLED_BY
+            : reason === STRANDED_BY_OPERATOR
+              ? OPERATOR_CANCELLED_BY
+              : 'SYSTEM',
+        );
         cancelled += 1;
         this.logger.log(`Cancelled provider subscription ${row.id} at ${row.gatewayType}: ${reason}`);
       } catch (error: unknown) {
@@ -1537,8 +1637,51 @@ export function disputedChargeId(
     : null;
 }
 
+/**
+ * The «📝 Заметка» of `payment.chargeback_unmatched`: what the panel could not
+ * reverse, and how the operator reverses it — find the disputed charge at the
+ * provider by the ids on the card, then «Отметить возврат» on that payment in
+ * the panel, which takes back its commission and cashback as a provider's
+ * refund notice would, and sends the provider nothing. The place is named in
+ * the words the panel shows: `adminNav.items.users`,
+ * `userDetailPanel.tabs.operations`, `providerRefund.action` and
+ * `providerRefund.confirm`.
+ *
+ * NO «МОЙ НАЛОГ» RECEIPT IS CLAIMED. The panel files receipts for
+ * ЮKassa payments only (`enqueueMoyNalogIncomeBestEffort`), and these cards
+ * are for Platega and RollyPay: it filed none for the disputed charge, and
+ * saying it would cancel one left an operator who had declared the income by
+ * hand thinking it was done. The note says where that receipt is cancelled.
+ */
+export function unmatchedChargebackNote(
+  gatewayType: PaymentGatewayType,
+  chargeCount: number,
+  autopay: AutopayRefundOutcome,
+): string {
+  const provider =
+    gatewayType === PaymentGatewayType.PLATEGA
+      ? 'Platega'
+      : gatewayType === PaymentGatewayType.ROLLYPAY
+        ? 'RollyPay'
+        : String(gatewayType);
+  return (
+    `Провайдер сообщил об оспаривании одного из ${chargeCount} списаний по автоплатежу, но не сказал, какого: ` +
+    'оно пока не отменено в панели (комиссия и кешбэк остались). ' +
+    `Найдите оспоренное списание в личном кабинете ${provider} по ID из карточки и посмотрите его дату и сумму. ` +
+    'Затем в панели откройте «Пользователи» → этот клиент → вкладка «Операции», найдите платёж с той же датой ' +
+    'и суммой и нажмите у него «Отметить возврат» → «Да, деньги возвращены»: панель отменит его комиссию и кешбэк, ' +
+    'а провайдеру ничего не отправит. ' +
+    `Чеки «Мой налог» по платежам ${provider} панель не отправляет: если вы сами добавили этот доход в «Мой налог», ` +
+    'аннулируйте чек там. ' +
+    (describeAutopayOutcome(autopay) ?? 'Живых автосписаний у подписки не было.')
+  );
+}
+
 /** {@link strandedReason} for a row a refund asked to cancel, whose cancel has not landed yet. */
 export const STRANDED_BY_REFUND = 'refunded: the autopay ends with the refund';
+
+/** {@link strandedReason} for a row an operator asked to cancel from the panel, whose cancel has not landed yet. */
+export const STRANDED_BY_OPERATOR = 'cancelled by an operator in the panel';
 
 /**
  * Why a provider subscription must stop charging, or null while it may go on.
@@ -1551,6 +1694,11 @@ export function strandedReason(input: {
    * could not be reached: every pass tries again until it lands.
    */
   readonly refundRequested?: boolean;
+  /**
+   * An operator asked for this cancel from the user's card
+   * (`OPERATOR_CANCELLED_BY`) and it has not landed: every pass tries again.
+   */
+  readonly operatorRequested?: boolean;
   readonly userDeleted: boolean;
   readonly userBlocked: boolean;
   readonly subscription:
@@ -1573,6 +1721,7 @@ export function strandedReason(input: {
   readonly planId: string;
 }): string | null {
   if (input.refundRequested === true) return STRANDED_BY_REFUND;
+  if (input.operatorRequested === true) return STRANDED_BY_OPERATOR;
   if (input.userDeleted) return 'account deleted';
   if (input.userBlocked) return 'account blocked';
   if (input.subscription === 'NOT_YET') return null;

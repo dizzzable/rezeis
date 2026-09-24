@@ -148,7 +148,9 @@ function earlierSql(): Prisma.Sql {
  *     cannot buy NEW (`SubscriptionQuoteService`), the trial row is UPGRADEd in
  *     place (`PaymentSubscriptionMutationService`) — and it is a new paying
  *     subscription, not a plan change;
- *   - `change`: an UPGRADE of a subscription that had already brought money in.
+ *   - `change`: an UPGRADE of a subscription that had already brought money in;
+ *   - `withheld`: a payment withheld for refund, whatever it was drafted as
+ *     (below).
  *
  * "Already brought money in" is read off every earlier payment that can be
  * this subscription's: linked to it, or through a combined renewal's items —
@@ -158,22 +160,24 @@ function earlierSql(): Prisma.Sql {
  * the panel could say for what. An UPGRADE with no subscription recorded, or
  * one itself imported, keeps the donor's word for it: a change.
  *
- * A trial's conversion withheld for refund (`gateway_data.conversionWithheldAt`,
- * `payments/utils/trial-conversion.util.ts`) converted nothing: another
- * payment did. So it is never a subscription's earlier money — its draft can
- * be days older than the payment that converted the trial, which it would turn
- * into a "change" — and never a new subscription itself. Until its refund
- * takes it out of money received it is filed as a change, so every breakdown
- * still adds up to the total.
+ * A payment withheld for refund (`gateway_data.conversionWithheldAt`,
+ * `payments/utils/trial-conversion.util.ts`) — a trial's conversion another
+ * payment had made first, or an autopay charge taken after a refund ended the
+ * autopay — bought nothing. It is `withheld`, its own kind, until its refund
+ * takes it out of money received: «Не применён (к возврату)» in «Откуда
+ * деньги», so every breakdown still adds up to the total and none of it reads
+ * as a sale. It is never a subscription's earlier money either: its draft can
+ * be days older than the payment that did convert the trial, which it would
+ * turn into a "change".
  */
 export function purchaseKindSql(): Prisma.Sql {
   return Prisma.sql`(CASE
+    WHEN t."gateway_data"->>'conversionWithheldAt' IS NOT NULL THEN 'withheld'
     WHEN t."purchase_type" = 'ADDITIONAL' AND t."plan_snapshot"->>'snapshotSource' = 'ADDON_PURCHASE' THEN 'addon'
     WHEN t."purchase_type" = 'RENEW' THEN 'renewal'
     WHEN t."purchase_type" = 'UPGRADE' THEN (CASE
       WHEN t."subscription_id" IS NOT NULL
        AND t."plan_snapshot"->>'importedFrom' IS NULL
-       AND t."gateway_data"->>'conversionWithheldAt' IS NULL
        AND NOT EXISTS (
          SELECT 1
            FROM "transactions" e

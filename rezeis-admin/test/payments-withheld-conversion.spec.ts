@@ -36,7 +36,7 @@ import { executeGatewayDataWrites } from './helpers/gateway-data-write-double';
 /**
  * A trial's conversion paid after ANOTHER payment converted the trial is
  * withheld: received, settled, applied to nothing, and the operator told once
- * to refund it at the provider (R2-support-money M1).
+ * to refund it at the provider.
  *
  * It used to throw out of fulfilment. The notification then failed three times
  * and kept the dashboard CRITICAL for good; the YooKassa poll only logged an
@@ -90,6 +90,8 @@ function world(
      * meanwhile — another door switching first.
      */
     readonly savedCard?: ReadonlyArray<SavedCardAnswer>;
+    /** What ends a refunded add-on (`AddOnRefundService`); none unless a test gives one. */
+    readonly addOnRefunds?: unknown;
   } = {},
 ) {
   const gatewayType = options.gatewayType ?? PaymentGatewayType.PLATEGA;
@@ -166,6 +168,14 @@ function world(
   const events: RaisedEvent[] = [];
   const inbox = { processed: [] as string[], failed: [] as string[], failedAlerts: [] as string[] };
   const hooks = { partner: 0, referral: 0, cashback: 0, moyNalog: 0, adConversion: 0, savedMethod: 0 };
+  /** The payments each step of a refund's reversal was asked to undo. */
+  const reversals = {
+    partner: [] as string[],
+    referral: [] as string[],
+    cashback: [] as string[],
+    moyNalog: [] as string[],
+    adConversion: [] as string[],
+  };
   const plan = {
     id: PLAN_ID,
     name: 'Plan P',
@@ -270,6 +280,15 @@ function world(
         Object.assign(row, data);
         return { ...row };
       },
+      // A refunded NEW purchase's revocation asks whether anything else paid
+      // for its subscription (`revokeRefundedSubscriptionBestEffort`).
+      count: async ({ where }: { where: Record<string, unknown> }) =>
+        rows.filter(
+          (row) =>
+            row.subscriptionId === where.subscriptionId &&
+            row.status === where.status &&
+            row.id !== (where.id as { not?: string } | undefined)?.not,
+        ).length,
     },
     transactionItem: { findMany: async () => [] },
     plan: { findUnique: async () => plan },
@@ -346,14 +365,19 @@ function world(
       processPartnerEarning: async () => {
         hooks.partner += 1;
       },
-      reverseEarningsForTransaction: async () => 0,
+      reverseEarningsForTransaction: async (id: string) => {
+        reversals.partner.push(id);
+        return 0;
+      },
     } as never,
     {
       qualifyReferralAfterPurchase: async () => {
         hooks.referral += 1;
         return null;
       },
-      reverseQualificationForTransaction: async () => undefined,
+      reverseQualificationForTransaction: async (id: string) => {
+        reversals.referral.push(id);
+      },
     } as never,
     { enqueue: async () => undefined } as never,
     systemEvents as never,
@@ -361,13 +385,17 @@ function world(
       enqueueRegisterIncome: async () => {
         hooks.moyNalog += 1;
       },
-      enqueueCancelIncome: async () => undefined,
+      enqueueCancelIncome: async (id: string) => {
+        reversals.moyNalog.push(id);
+      },
     } as never,
     {
       recordFirstPurchase: async () => {
         hooks.adConversion += 1;
       },
-      revertConversion: async () => undefined,
+      revertConversion: async (id: string) => {
+        reversals.adConversion.push(id);
+      },
     } as never,
     {
       upsertFromYookassaPayment: async () => {
@@ -390,7 +418,9 @@ function world(
         hooks.cashback += 1;
         return null;
       },
-      reverseForTransactionBestEffort: async () => undefined,
+      reverseForTransactionBestEffort: async (id: string) => {
+        reversals.cashback.push(id);
+      },
     } as never,
     { create: async () => 'notification-1' } as never,
     {
@@ -404,6 +434,7 @@ function world(
         return [];
       },
     } as never,
+    options.addOnRefunds as never,
   );
   const expiry = new PaymentPendingExpiryService(
     prisma as never,
@@ -456,6 +487,7 @@ function world(
     events,
     inbox,
     hookCalls,
+    reversals,
   };
 }
 
@@ -570,9 +602,9 @@ describe('a conversion paid after another payment converted the trial', () => {
 });
 
 /**
- * «Отметить возврат» (R3-support-money N4): the operator returned a withheld
- * payment's money at the provider — most gateways never report a refund — and
- * records it here, which runs the reversal a refund notification runs.
+ * «Отметить возврат»: the operator returned a withheld payment's money at the
+ * provider — most gateways never report a refund — and records it here, which
+ * runs the reversal a refund notification runs.
  */
 describe('recording the refund of a withheld payment', () => {
   const OPERATOR = { id: 'admin-1' } as CurrentAdminInterface;
@@ -682,8 +714,8 @@ describe('recording the refund of a withheld payment', () => {
 });
 
 /**
- * A withheld payment's refund, told by the PROVIDER — the other door
- * (R3-support-money wave 4b). No sale was ever announced for the payment, so
+ * A withheld payment's refund, told by the PROVIDER — the other door. No sale
+ * was ever announced for the payment, so
  * its refund is the operator's alone: `payment.withheld_refunded`, which
  * `OPERATOR_ONLY_EVENT_TYPES` keeps from rules, outbound webhooks and refund
  * emails. As `payment.refunded` it told all of them of a refund of a sale none
@@ -781,7 +813,7 @@ describe("a withheld payment's refund reported by the provider", () => {
 });
 
 /**
- * The reversal runs ONCE, whichever door comes second (R4 F1, laterList 2).
+ * The reversal runs ONCE, whichever door comes second.
  *
  * `refundReversedAt` is written at the END of the reversal, so while one door's
  * run was still going, another found it unset and ran the whole reversal as
@@ -864,8 +896,8 @@ describe('the refund reversal, from two doors at once', () => {
   });
 
   it('an ordinary payment: the panel’s refund and its own notice reverse it once, ending with the newest word', async () => {
-    // R4 laterList 2: the panel's ЮKassa refund and its `refund.succeeded` both
-    // found the total full and both reversed.
+    // Both the panel's ЮKassa refund and its `refund.succeeded` used to find
+    // the total full, and both reversed.
     const w = world();
     await w.reconciliation.reconcileWebhookEvent('event-1');
     const held = holdFirstRun(w);
@@ -903,7 +935,7 @@ describe('the refund reversal, from two doors at once', () => {
 });
 
 /**
- * «все возвраты … удаляют автосписания» (wave 6): every refund ends the
+ * «все возвраты … удаляют автосписания»: every refund ends the
  * autopay of what the payment paid for, through every door, and its card says
  * how that went. The provider side is `refund-ends-autopay.spec.ts`; here the
  * doors, against the real reconciliation and refund services.
@@ -1004,7 +1036,7 @@ describe('every refund ends the autopay, and its card says so', () => {
     assert.equal(refundCard(w)?.metadata.autopayCancelled, undefined);
   });
 
-  it('an operator’s refund is answered before the provider is: the autopay is marked first, and the card follows the provider (R5 F3)', async () => {
+  it('an operator’s refund is answered before the provider is: the autopay is marked first, and the card follows the provider', async () => {
     // A request is cut at 30 s, and Platega or RollyPay may take 45 s a call:
     // the operator was told «Не удалось оформить возврат» with the money back.
     const w = world({ autopay: PLATEGA_CANCELLED, cancelHangs: true });
@@ -1144,7 +1176,7 @@ describe('a refund switches off the saved-card autopay (the owner, 23.09.2026)',
     assert.match(String(card?.metadata.note), /«Способах оплаты»/);
   });
 
-  it('never says both: a switch in the request, then one that fails after the answer, is a failure (R6 m3)', async () => {
+  it('never says both: a switch in the request, then one that fails after the answer, is a failure', async () => {
     mock.method(Logger.prototype, 'error', () => undefined);
     const w = world({ savedCard: [{ switched: 1, busy: 1 }, new Error('the database is not answering')] });
     await w.reconciliation.reconcileWebhookEvent('event-1');
@@ -1159,7 +1191,7 @@ describe('a refund switches off the saved-card autopay (the owner, 23.09.2026)',
     assert.doesNotMatch(String(card?.metadata.note), /выключено/, 'the card said both');
   });
 
-  it('the other door switching first still reaches the card: the stamp is read after the switch (R6 m3)', async () => {
+  it('the other door switching first still reaches the card: the stamp is read after the switch', async () => {
     // The panel's partial refund and ЮKassa's notice of it wait on the same
     // card; the panel's switch gets it first. The notice read the payment
     // before that, finds nothing left to switch — and its card says it is off.
@@ -1190,12 +1222,12 @@ describe('a refund switches off the saved-card autopay (the owner, 23.09.2026)',
 });
 
 /**
- * The ЮKassa autopay charges a refund's switch cannot stop (R6 m1). The
- * switch stops the next renewal; a charge already under way renews all the
- * same, and nothing withholds it (the orchestrator's decision): the card
- * names it, so the operator can refund it too.
+ * The ЮKassa autopay charges a refund's switch cannot stop. The switch stops
+ * the next renewal; a charge already under way renews all the same, and
+ * nothing withholds it (decided on 24.09.2026): the card names it, so the
+ * operator can refund it too.
  */
-describe('the ЮKassa charges around a refund are on its card (R6 m1)', () => {
+describe('the ЮKassa charges around a refund are on its card', () => {
   const refundCard = (w: ReturnType<typeof world>) =>
     w.events.find((event) => ['payment.refunded', 'payment.withheld_refunded', 'payment.refund_partial'].includes(event.type));
   const autopayCharge = (status: TransactionStatus): Row => ({
@@ -1255,12 +1287,12 @@ describe('the ЮKassa charges around a refund are on its card (R6 m1)', () => {
 });
 
 /**
- * A stop never loses a refund's card (R6 m4). What is under way gets a few
+ * A stop never loses a refund's card. What is under way gets a few
  * seconds — well inside the 10 s Docker gives before it kills the container —
  * then each card still owed goes out at once, saying the provider's cancel
  * had not finished and that the panel retries it; nothing is told twice.
  */
-describe('a stop and the refund cards under way (R6 m4)', () => {
+describe('a stop and the refund cards under way', () => {
   const refundCards = (w: ReturnType<typeof world>) =>
     w.events.filter((event) => ['payment.refunded', 'payment.withheld_refunded', 'payment.refund_partial'].includes(event.type));
 
@@ -1369,6 +1401,295 @@ describe('a withheld payment paid again after its refund', () => {
     const again = w.events.filter((event) => event.metadata.paidAfterRefund === true);
     assert.deepEqual(again.map((event) => event.type), ['payment.amount_mismatch']);
     assert.equal(again[0]?.metadata.conversionWithheld, undefined);
+  });
+});
+
+/**
+ * «Отметить возврат» on ANY payment the panel does not refund itself: a refund
+ * made in Platega's or RollyPay's own dashboard never reached the panel, so
+ * the autopay went on and the commission and the cashback stayed (the panel
+ * files «Мой налог» receipts for ЮKassa payments only). The record runs the
+ * reversal the provider's own notice of a refund runs, and sends the provider
+ * nothing. `tx-first` is the world's ordinary payment: a COMPLETED, delivered
+ * Platega UPGRADE.
+ */
+describe('«Отметить возврат» for any payment the panel does not refund itself', () => {
+  const OPERATOR = { id: 'admin-1' } as CurrentAdminInterface;
+  const REQUEST = { requestId: 'request-1', remoteAddress: '203.0.113.5', userAgent: 'spec' };
+  const PLATEGA_CANCELLED: AutopayRefundOutcome = {
+    cancelled: [{ gatewayType: 'PLATEGA', providerSubscriptionId: 'platega-1' }],
+    failed: [],
+  };
+  const record = async (w: ReturnType<typeof world>, transactionId = 'tx-first') => {
+    const result = await w.refunds.recordProviderRefund({ transactionId, currentAdmin: OPERATOR, requestMetadata: REQUEST });
+    await w.reconciliation.settleAfterResponse();
+    return result;
+  };
+  const cardOf = (w: ReturnType<typeof world>, paymentId = 'payment-first') =>
+    w.events.filter(
+      (event) =>
+        ['payment.refunded', 'payment.refund_partial', 'payment.withheld_refunded'].includes(event.type) &&
+        event.metadata.paymentId === paymentId,
+    );
+
+  it('reverses it as the provider’s refund notice would, ends the autopay, and says who recorded it', async () => {
+    const w = world({ autopay: PLATEGA_CANCELLED, savedCard: [{ switched: 1, busy: 0 }] });
+
+    const result = await record(w);
+
+    assert.equal(result.recorded, true);
+    assert.equal(w.first.status, TransactionStatus.CANCELED, 'the payment still counts as money received');
+    const gatewayData = w.first.gatewayData as Record<string, unknown>;
+    assert.equal(typeof gatewayData.refundReversedAt, 'string');
+    assert.equal(result.refundedAt, gatewayData.refundReversedAt);
+    assert.equal(gatewayData.manualRefundRecordedBy, 'admin-1');
+    assert.equal('providerStatus' in gatewayData, false, 'an operator’s record was written down as the provider’s word');
+    for (const [step, asked] of Object.entries(w.reversals)) {
+      assert.deepEqual(asked, ['tx-first'], `${step} was not reversed`);
+    }
+    // The subscription as the notice leaves it: a plan change is not undone
+    // by guesswork, it is handed to the operator.
+    assert.equal(gatewayData.refundNeedsManualReview, true);
+    assert.deepEqual(w.subscriptionWrites, []);
+    assert.deepEqual(w.autopayMarked, ['tx-first'], 'the autopay was not marked before the answer');
+    assert.deepEqual(w.autopayEnded, ['tx-first']);
+    assert.deepEqual(
+      w.savedCardAsks.map((ask) => ask.transactionId),
+      ['tx-first'],
+      'the ЮKassa autopay was not switched off',
+    );
+
+    const cards = cardOf(w);
+    assert.deepEqual(cards.map((card) => card.type), ['payment.refunded']);
+    assert.equal(cards[0]?.metadata.note, 'Автосписание отменено: Platega. Автосписание через ЮKassa выключено.');
+    assert.equal(cards[0]?.metadata.needsManualReview, true);
+    assert.equal(cards[0]?.metadata.subscriptionRevoked, false);
+    assert.equal(w.audits.length, 1);
+    assert.equal(w.audits[0]?.action, 'payments.transaction.provider_refund_recorded');
+    assert.deepEqual(w.audits[0]?.adminUser, { connect: { id: 'admin-1' } });
+    const audit = w.audits[0]?.metadata as Record<string, unknown>;
+    assert.equal(audit.transactionId, 'tx-first');
+    assert.equal(audit.gatewayType, PaymentGatewayType.PLATEGA);
+    assert.equal(audit.purchaseType, PurchaseType.UPGRADE);
+  });
+
+  it('does to the payment exactly what the provider’s notice of the refund does', async () => {
+    for (const purchaseType of [PurchaseType.NEW, PurchaseType.UPGRADE]) {
+      const recorded = world({ autopay: PLATEGA_CANCELLED, savedCard: [{ switched: 1, busy: 0 }] });
+      const noticed = world({ autopay: PLATEGA_CANCELLED, savedCard: [{ switched: 1, busy: 0 }] });
+      recorded.first.purchaseType = purchaseType;
+      noticed.first.purchaseType = purchaseType;
+
+      await record(recorded);
+      await noticed.notify('refund-notice', {
+        eventStatus: 'REFUNDED',
+        rawPayload: { status: 'REFUNDED' },
+        paymentId: 'payment-first',
+      });
+
+      const facts = (w: ReturnType<typeof world>) => {
+        const gatewayData = { ...(w.first.gatewayData as Record<string, unknown>) };
+        // Who said so, and in which words: the operator's record, or the provider's.
+        delete gatewayData.manualRefundRecordedAt;
+        delete gatewayData.manualRefundRecordedBy;
+        delete gatewayData.providerStatus;
+        const [card] = cardOf(w);
+        return {
+          status: w.first.status,
+          gatewayDataKeys: Object.keys(gatewayData).sort(),
+          reversed: w.reversals,
+          subscriptionWrites: w.subscriptionWrites.length,
+          syncJobs: w.syncJobs.length,
+          autopayEnded: w.autopayEnded,
+          savedCard: w.savedCardAsks.map((ask) => ask.transactionId),
+          card: { type: card?.type, note: card?.metadata.note, revoked: card?.metadata.subscriptionRevoked },
+        };
+      };
+      assert.deepEqual(facts(recorded), facts(noticed), `${purchaseType}: the record and the notice differ`);
+    }
+  });
+
+  it('answers before a provider that hangs: the autopay is marked first, and the card follows the provider', async () => {
+    const w = world({ autopay: PLATEGA_CANCELLED, cancelHangs: true });
+    let timer: NodeJS.Timeout | undefined;
+
+    const answered = await Promise.race([
+      w.refunds
+        .recordProviderRefund({ transactionId: 'tx-first', currentAdmin: OPERATOR, requestMetadata: REQUEST })
+        .then((result) => (result.recorded ? 'answered' : 'not recorded')),
+      new Promise<string>((resolve) => {
+        timer = setTimeout(() => resolve('waited for the provider'), 1000);
+      }),
+    ]);
+    clearTimeout(timer);
+
+    try {
+      assert.equal(answered, 'answered');
+      assert.deepEqual(w.autopayMarked, ['tx-first']);
+      assert.equal(w.first.status, TransactionStatus.CANCELED);
+      assert.deepEqual(cardOf(w), [], 'the card went out before the provider said what it did');
+    } finally {
+      w.releaseCancel();
+      await w.reconciliation.settleAfterResponse();
+    }
+    assert.equal(cardOf(w)[0]?.metadata.note, 'Автосписание отменено: Platega.');
+  });
+
+  it('refuses a payment the panel refunds itself, and every one with nothing to undo — changing nothing', async () => {
+    const cases: ReadonlyArray<readonly [string, Record<string, unknown>]> = [
+      ['PAYMENT_REFUND_RECORD_USE_REFUND', { gatewayType: PaymentGatewayType.YOOKASSA }],
+      ['PAYMENT_REFUND_RECORD_NO_PROVIDER', { gatewayType: PaymentGatewayType.PARTNER_BALANCE }],
+      ['PAYMENT_REFUND_RECORD_IMPORTED', { planSnapshot: { id: PLAN_ID, importedFrom: 'bedolaga' } }],
+      ['PAYMENT_REFUND_NOT_COMPLETED', { status: TransactionStatus.PENDING }],
+      ['PAYMENT_REFUND_NOT_FULFILLED', { fulfilledAt: null }],
+      ['PAYMENT_REFUND_RECORD_NOTHING_PAID', { amount: new Prisma.Decimal('0') }],
+    ];
+    for (const [code, change] of cases) {
+      const w = world({ autopay: PLATEGA_CANCELLED });
+      Object.assign(w.first, change);
+      const before = JSON.stringify(w.first);
+
+      await assert.rejects(
+        record(w),
+        (error: unknown) => error instanceof ConflictException && error.message === code,
+        `${code} was not refused`,
+      );
+
+      assert.equal(JSON.stringify(w.first), before, `${code}: the payment changed`);
+      assert.equal(w.audits.length, 0, `${code}: an audit row for a refusal`);
+      assert.deepEqual(cardOf(w), [], `${code}: a card for a refusal`);
+      assert.deepEqual(w.autopayMarked, [], `${code}: the autopay was touched`);
+      assert.deepEqual(w.reversals.partner, [], `${code}: the commission was reversed`);
+    }
+  });
+
+  it('is idempotent, and does nothing for a payment the provider already reported refunded', async () => {
+    const w = world({ autopay: PLATEGA_CANCELLED });
+    const first = await record(w);
+    const settled = JSON.stringify(w.first);
+
+    const again = await record(w);
+
+    assert.deepEqual(again, { transactionId: 'tx-first', recorded: false, refundedAt: first.refundedAt });
+    assert.equal(JSON.stringify(w.first), settled);
+    assert.equal(w.audits.length, 1);
+    assert.equal(cardOf(w).length, 1);
+
+    const noticed = world({ autopay: PLATEGA_CANCELLED });
+    await noticed.notify('chargeback-first', { eventStatus: 'CHARGEBACKED', rawPayload: { status: 'CHARGEBACKED' }, paymentId: 'payment-first' });
+    const after = await record(noticed);
+    assert.equal(after.recorded, false);
+    assert.equal(noticed.audits.length, 0);
+    assert.equal(cardOf(noticed).length, 1);
+  });
+
+  it('turns a second click away while the first one runs, and finishes a run that died', async () => {
+    const w = world({ autopay: PLATEGA_CANCELLED });
+    const gatewayData = w.first.gatewayData as Record<string, unknown>;
+    gatewayData.manualRefundRecordedAt = new Date(Date.now() - 1000).toISOString();
+
+    await assert.rejects(
+      record(w),
+      (error: unknown) => error instanceof ConflictException && error.message === 'PAYMENT_REFUND_RECORD_IN_PROGRESS',
+    );
+    assert.equal(w.first.status, TransactionStatus.COMPLETED);
+    assert.equal(w.audits.length, 0);
+
+    gatewayData.manualRefundRecordedAt = new Date(Date.now() - WITHHELD_REFUND_CLAIM_MS - 1000).toISOString();
+    assert.equal((await record(w)).recorded, true);
+    assert.equal(w.first.status, TransactionStatus.CANCELED);
+  });
+
+  it('takes a withheld payment the way the withheld door takes it', async () => {
+    const w = world({ autopay: PLATEGA_CANCELLED });
+    await w.reconciliation.reconcileWebhookEvent('event-1');
+
+    const result = await record(w, 'tx-second');
+
+    assert.equal(result.recorded, true);
+    assert.equal(w.second.status, TransactionStatus.CANCELED);
+    assert.equal(w.audits[0]?.action, 'payments.transaction.withheld_refund_recorded');
+    assert.deepEqual(cardOf(w, 'payment-second').map((card) => card.type), ['payment.withheld_refunded']);
+    assert.deepEqual(w.savedCardAsks, [], 'a withheld payment’s refund switched off the ЮKassa autopay');
+    assert.deepEqual(w.subscriptionWrites, []);
+  });
+});
+
+describe('an add-on’s refund ends the add-on, and its card says what ended', () => {
+  const OPERATOR = { id: 'admin-1' } as CurrentAdminInterface;
+  const REQUEST = { requestId: 'request-1', remoteAddress: '203.0.113.5', userAgent: 'spec' };
+
+  /** The world's first payment made an add-on purchase, and an `AddOnRefundService` that answers `outcome`. */
+  function addOnWorld(outcome: { readonly note: string; readonly ended?: boolean; readonly reduceDevicesOf?: string | null }, deviceLine: string | null = null) {
+    const asked: Array<{ readonly transactionId: string; readonly kind: string }> = [];
+    const reduced: string[] = [];
+    const w = world({
+      addOnRefunds: {
+        endForRefund: async (transaction: { readonly id: string }, kind: string) => {
+          asked.push({ transactionId: transaction.id, kind });
+          return {
+            ended: outcome.ended ?? true,
+            note: outcome.note,
+            audit: {},
+            syncJobIds: [],
+            reduceDevicesOf: outcome.reduceDevicesOf ?? null,
+            addOnType: 'EXTRA_DEVICES',
+            addOnValue: 2,
+          };
+        },
+        reduceDevices: async (subscriptionId: string) => {
+          reduced.push(subscriptionId);
+          return deviceLine;
+        },
+      },
+    });
+    w.first.purchaseType = PurchaseType.ADDITIONAL;
+    w.first.planSnapshot = {
+      snapshotSource: 'ADDON_PURCHASE',
+      addOnId: 'addon-1',
+      addOnType: 'EXTRA_DEVICES',
+      addOnValue: 2,
+      targetSubscriptionId: 'trial-sub',
+    };
+    return { w, asked, reduced };
+  }
+  const cardOf = (w: ReturnType<typeof world>) =>
+    w.events.find((event) => event.type === 'payment.refunded' && event.metadata.paymentId === 'payment-first');
+
+  it('«Отметить возврат»: the card leads with the add-on that ended and its devices, and asks for no review', async () => {
+    const { w, asked, reduced } = addOnWorld(
+      { note: 'Докупка «+2 устройства» отключена.', reduceDevicesOf: 'trial-sub' },
+      'Лишние устройства удалены: 1.',
+    );
+
+    await w.refunds.recordProviderRefund({ transactionId: 'tx-first', currentAdmin: OPERATOR, requestMetadata: REQUEST });
+    await w.reconciliation.settleAfterResponse();
+
+    assert.deepEqual(asked, [{ transactionId: 'tx-first', kind: 'REFUND' }]);
+    assert.deepEqual(reduced, ['trial-sub'], 'the extra devices are never taken off');
+    const card = cardOf(w);
+    assert.equal(card?.metadata.note, 'Докупка «+2 устройства» отключена. Лишние устройства удалены: 1.');
+    assert.equal(card?.metadata.needsManualReview, false);
+    assert.equal(card?.metadata.addOnType, 'EXTRA_DEVICES');
+    assert.equal(card?.metadata.addOnEnded, true);
+    assert.deepEqual(w.subscriptionWrites, [], 'an add-on purchase took the subscription with it');
+  });
+
+  it('a chargeback is recorded as one, and an add-on the panel could not end asks for review', async () => {
+    const { w, asked, reduced } = addOnWorld({ ended: false, note: 'Докупку «+2 устройства» панель не отключила.' });
+
+    await w.notify('event-chargeback', {
+      eventStatus: 'CHARGEBACKED',
+      rawPayload: { status: 'CHARGEBACKED' },
+      paymentId: 'payment-first',
+    });
+    await w.reconciliation.settleAfterResponse();
+
+    assert.deepEqual(asked.map((entry) => entry.kind), ['CHARGEBACK']);
+    assert.deepEqual(reduced, [], 'devices reduced for an add-on that asked for none');
+    const card = cardOf(w);
+    assert.equal(card?.metadata.needsManualReview, true);
+    assert.equal(card?.metadata.note, 'Докупку «+2 устройства» панель не отключила.');
   });
 });
 

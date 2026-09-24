@@ -31,8 +31,10 @@ import {
 } from '../../referrals/services/referral-qualification.service';
 import {
   PAYMENT_WEBHOOK_STATUS_FAILED,
+  PAYMENT_WEBHOOK_STATUS_PROCESSED,
   PaymentWebhookInboxService,
 } from './payment-webhook-inbox.service';
+import { autoRetryExhausted, isDisputeEventKey } from '../utils/payment-webhook-auto-retry.util';
 import {
   NotifiedMoneyInterface,
   resolveNotifiedMoney,
@@ -67,6 +69,8 @@ import { SavedPaymentMethodService } from './saved-payment-method.service';
 import { YookassaPaymentVerificationService } from './yookassa-payment-verification.service';
 import { ProviderSubscriptionService, readProviderSubscriptionDispute } from './provider-subscription.service';
 import { releasePaidTrialClaim } from '../../subscriptions/services/trial-claim-ledger.util';
+import { findDaysConvertedFromPayment } from '../../subscriptions/services/paid-remainder-conversion.util';
+import { type AddOnRefundOutcome, AddOnRefundService, readRefundedAddOnMarker } from './addon-refund.service';
 @Injectable()
 export class PaymentReconciliationService implements OnModuleDestroy {
   private readonly logger = new Logger(PaymentReconciliationService.name);
@@ -99,6 +103,12 @@ export class PaymentReconciliationService implements OnModuleDestroy {
      */
     @Optional()
     private readonly providerSubscriptions?: ProviderSubscriptionService,
+    /**
+     * Ends the add-on a refunded payment paid for (`AddOnRefundService`). Last
+     * and optional for the same reason as the one above.
+     */
+    @Optional()
+    private readonly addOnRefunds?: AddOnRefundService,
   ) {}
 
   public async reconcileWebhookEvent(eventId: string): Promise<void> {
@@ -108,8 +118,16 @@ export class PaymentReconciliationService implements OnModuleDestroy {
     if (event === null) {
       throw new NotFoundException('Payment webhook event not found');
     }
+    // An automatic retry of a run that failed and was told: the operator got a
+    // card at that first failure (`tellFailedRun`). This run's failure is told
+    // again only if it is the last one, and its success closes the story with
+    // one card. An event that never ran — its enqueue failed — was never told,
+    // and a replay is marked ENQUEUED first: its operator is watching.
+    const runs = (event.reconciliationAttempts ?? 0) + 1;
+    const retryOfToldFailure = event.status === PAYMENT_WEBHOOK_STATUS_FAILED && runs > 1;
     await this.paymentWebhookInboxService.incrementReconciliationAttempts(event.id);
     await this.paymentWebhookInboxService.markProcessing(event.id);
+    let failed = false;
     try {
       // A Platega dispute of a subscription charge (`recordDispute`) names no
       // payment of ours: the subscription's charges tell which one it is. Run
@@ -387,14 +405,15 @@ export class PaymentReconciliationService implements OnModuleDestroy {
           // lose a real payment). Throwing is what the surrounding machinery is
           // already built for: reconciliation runs in a BullMQ worker AFTER
           // ingress answered the provider 200, so this costs no provider retry
-          // storm; the catch below marks the event FAILED and fires
-          // `notifyWebhookFailed`; and `PaymentAutoRetryService` re-enqueues any
-          // FAILED event while `reconciliationAttempts < 3`, each attempt
-          // re-asking the provider. That is TWO auto-retries after this run, at
-          // +5 min and +15 min plus up to the five-minute cron granularity — not
-          // three: the counter is incremented at the top of EVERY run, so a
-          // FAILED event never carries 0 and the ladder's "immediate" arm is
-          // unreachable. A blip self-heals unattended inside that window.
+          // storm; the catch below marks the event FAILED and tells the
+          // operator once (`tellFailedRun`); and `PaymentAutoRetryService` runs
+          // it again on `ORDINARY_RETRY_LADDER`, each run re-asking the
+          // provider. That is TWO auto-retries after this run, at +5 min and
+          // +15 min plus up to the five-minute cron granularity — not three: the
+          // counter is incremented at the top of EVERY run, so a FAILED event
+          // that ran never carries 0 and the ladder's "at once" step is only for
+          // an event whose enqueue failed. A blip self-heals unattended inside
+          // that window.
           //
           // What does not self-heal is an outage outliving those two retries,
           // and the second recovery path is not the safety net it reads as:
@@ -587,14 +606,71 @@ export class PaymentReconciliationService implements OnModuleDestroy {
 
       await this.paymentWebhookInboxService.markProcessed(event.id);
     } catch (error: unknown) {
+      failed = true;
       const failedEvent = await this.paymentWebhookInboxService.markFailed(
         event.id,
         normalizePaymentProviderError(error, PAYMENT_WEBHOOK_STATUS_FAILED),
       );
-      await this.paymentOpsAlertService.notifyWebhookFailed({
-        event: failedEvent,
-      });
+      await this.tellFailedRun(event, failedEvent, runs, retryOfToldFailure);
       throw error;
+    } finally {
+      // Every way out of the block above that did not throw marked the event
+      // processed.
+      if (!failed && retryOfToldFailure) {
+        await this.tellRecovered(event, runs);
+      }
+    }
+  }
+
+  /**
+   * One card per failing event, not one per run: during an
+   * outage every automatic retry failed again and sent a card, and a dispute
+   * retried over days would send dozens. Told at its first failure, with what
+   * follows (`WebhookRetryOutlook`); then only when its last automatic run
+   * fails too. Never throws: the run's own error is what its caller gets.
+   */
+  private async tellFailedRun(
+    event: PaymentWebhookEvent,
+    failedEvent: PaymentWebhookEvent,
+    runs: number,
+    retryOfToldFailure: boolean,
+  ): Promise<void> {
+    const exhausted = autoRetryExhausted(event, runs);
+    try {
+      if (!retryOfToldFailure) {
+        await this.paymentOpsAlertService.notifyWebhookFailed({
+          event: failedEvent,
+          retry: { automatic: !exhausted, dispute: isDisputeEventKey(event.providerEventId) },
+        });
+      } else if (exhausted) {
+        await this.paymentOpsAlertService.notifyWebhookGivenUp({ event: failedEvent, runs });
+      } else {
+        this.logger.warn(
+          `Payment webhook event ${event.id} failed again on its automatic run ${runs}; the operator was told at its first failure`,
+        );
+      }
+    } catch (alertError: unknown) {
+      this.logger.error(
+        `Could not tell the operator that payment webhook event ${event.id} failed: ${
+          alertError instanceof Error ? alertError.message : String(alertError)
+        }`,
+      );
+    }
+  }
+
+  /** The card that closes a told failure: a later automatic run went through. Never throws. */
+  private async tellRecovered(event: PaymentWebhookEvent, runs: number): Promise<void> {
+    try {
+      await this.paymentOpsAlertService.notifyWebhookRecovered({
+        event: { ...event, status: PAYMENT_WEBHOOK_STATUS_PROCESSED, lastError: null },
+        runs,
+      });
+    } catch (alertError: unknown) {
+      this.logger.error(
+        `Could not tell the operator that payment webhook event ${event.id} went through: ${
+          alertError instanceof Error ? alertError.message : String(alertError)
+        }`,
+      );
     }
   }
 
@@ -1276,13 +1352,22 @@ export class PaymentReconciliationService implements OnModuleDestroy {
       );
     }
 
+    // An add-on the payment bought ends at once (the owner's decision of
+    // 24.09.2026, `AddOnRefundService`): an add-on purchase is undone by that
+    // alone, and a renewal's add-on lines end with it too.
+    const addOn = await this.endRefundedAddOnBestEffort(transaction, providerStatus);
+    const addOnPurchase = readRefundedAddOnMarker(transaction.planSnapshot) !== null;
+
     // Revoke the access this payment paid for. Only a NEW purchase can be
     // reversed mechanically — the subscription exists *because* of this
     // transaction, so expiring it restores the pre-payment state exactly.
     // RENEW/UPGRADE mutate a subscription that predates the payment (added days,
     // switched plan), and un-mixing that from later activity is guesswork, so
     // those are surfaced for manual handling instead of being half-undone.
-    const revocation = await this.revokeRefundedSubscriptionBestEffort(transaction);
+    const revocation =
+      addOn !== null && addOnPurchase
+        ? { revoked: false, needsManualReview: !addOn.ended, audit: addOn.audit }
+        : mergeAddOnRevocation(await this.revokeRefundedSubscriptionBestEffort(transaction), addOn);
 
     // Mark CANCELED + stamp the reversal so it is auditable and never repeats.
     //
@@ -1314,8 +1399,30 @@ export class PaymentReconciliationService implements OnModuleDestroy {
     // refund of a sale none of them had seen. The same for every door here:
     // «Отметить возврат», the panel's refund, a provider's notification.
     const withheld = isWithheldConversion(transaction.gatewayData);
+    // The card's «📝 Заметка», before what became of the autopay: what ended
+    // of the add-on, what becomes of its extra devices, then the days an
+    // upgrade converted this payment's money into, which stay with the
+    // subscription for the operator to take off by hand.
+    //
+    // The devices' line is what WILL happen (`devicesLine`, by stage 6) until
+    // the refund's own run of the reduction, after the answer, says what did.
+    // A card that goes out first — the panel stopping — still says what the
+    // queue will do, which is true: the add-on is in it.
+    const addOnLines = addOn === null ? [] : [addOn.note];
+    let devicesLine: string | null = addOn?.devicesLine ?? null;
+    const convertedDays = await this.describeConvertedDaysBestEffort(transaction);
+    const reduceAddOnDevices = async (): Promise<void> => {
+      if (addOn?.reduceDevicesOf == null || this.addOnRefunds === undefined) return;
+      devicesLine = await this.addOnRefunds.reduceDevices(addOn.reduceDevicesOf);
+    };
     const announce = (autopay: AutopayRefundOutcome): void => {
       const autopayNote = describeAutopayOutcome(autopay);
+      const note = [
+        ...addOnLines,
+        ...(devicesLine === null ? [] : [devicesLine]),
+        ...convertedDays.lines,
+        ...(autopayNote === null ? [] : [autopayNote]),
+      ].join(' ');
       this.systemEvents.warn(
         withheld ? EVENT_TYPES.PAYMENT_WITHHELD_REFUNDED : EVENT_TYPES.PAYMENT_REFUNDED,
         'PAYMENT',
@@ -1334,7 +1441,11 @@ export class PaymentReconciliationService implements OnModuleDestroy {
           subscriptionRevoked: revocation.revoked,
           needsManualReview: revocation.needsManualReview,
           ...(withheld ? { conversionWithheld: true } : {}),
-          ...(autopayNote === null ? {} : autopayMetadata(autopay, autopayNote)),
+          ...(addOn === null
+            ? {}
+            : { addOnType: addOn.addOnType, addOnValue: addOn.addOnValue, addOnEnded: addOn.ended }),
+          ...(convertedDays.days.length === 0 ? {} : { convertedDays: convertedDays.days }),
+          ...(autopayNote === null ? (note.length > 0 ? { note } : {}) : autopayMetadata(autopay, note)),
         },
       );
     };
@@ -1345,26 +1456,111 @@ export class PaymentReconciliationService implements OnModuleDestroy {
     // anyway renews nothing; and the user's ЮKassa autopay is switched off.
     // Never throws: the money is already back.
     if (!refundEndsAutopay({ full: true })) {
+      await reduceAddOnDevices();
       announce(NO_AUTOPAY);
       return;
     }
     // One card, sent once: when the autopay's end is known, or when the panel
     // stops before it is (`onModuleDestroy`). Marked first, whichever door:
     // from here the sweep ends the autopay even if nothing else does, which is
-    // what a card sent before the end can promise.
+    // what a card sent before the end can promise. A refunded device add-on's
+    // extra devices are taken off in the same work, before the card.
     const card = new PendingRefundCard(transaction.paymentId, announce);
     await this.markAutopayForRefund(transaction);
     if (options.deferAutopay === true) {
       const early = await this.switchOffSavedCardAutopayForRefund(transaction, { waitForCharges: false });
       card.progress.savedCard = early;
-      void this.trackRefundWork(`the autopay of refunded transaction ${transaction.id}`, transaction.paymentId, card, () =>
-        this.finishAutopayForRefund(transaction, early, card.progress),
-      );
+      void this.trackRefundWork(`the autopay of refunded transaction ${transaction.id}`, transaction.paymentId, card, async () => {
+        const autopay = await this.finishAutopayForRefund(transaction, early, card.progress);
+        await reduceAddOnDevices();
+        return autopay;
+      });
       return;
     }
-    await this.trackRefundWork(`the autopay of refunded transaction ${transaction.id}`, transaction.paymentId, card, () =>
-      this.finishAutopayForRefund(transaction, null, card.progress),
-    );
+    await this.trackRefundWork(`the autopay of refunded transaction ${transaction.id}`, transaction.paymentId, card, async () => {
+      const autopay = await this.finishAutopayForRefund(transaction, null, card.progress);
+      await reduceAddOnDevices();
+      return autopay;
+    });
+  }
+
+  /**
+   * Ends the add-on a refunded payment bought ({@link AddOnRefundService}),
+   * or `null` when it bought none. A chargeback is recorded as one. Never
+   * throws: the service does not, and a missing one ends nothing.
+   */
+  private async endRefundedAddOnBestEffort(
+    transaction: Transaction,
+    providerStatus: string | null,
+  ): Promise<AddOnRefundOutcome | null> {
+    if (this.addOnRefunds === undefined) return null;
+    const kind = /chargeback/i.test(providerStatus ?? '') ? 'CHARGEBACK' : 'REFUND';
+    return this.addOnRefunds.endForRefund(transaction, kind);
+  }
+
+  /**
+   * The days an applied upgrade converted this payment's money into
+   * (`findDaysConvertedFromPayment`): they stay with the subscription — a
+   * refund takes no days back, as for a renewal or a plan change — and the
+   * card names each, and where an operator takes them off. Never throws.
+   */
+  private async describeConvertedDaysBestEffort(transaction: Transaction): Promise<{
+    readonly lines: readonly string[];
+    readonly days: ReadonlyArray<{ readonly upgradePaymentId: string; readonly days: number }>;
+  }> {
+    try {
+      await this.waitOutUpgradesInFlight(transaction);
+      const attributions = await findDaysConvertedFromPayment(this.prismaService, transaction.id);
+      return {
+        lines: attributions.map(
+          (entry) =>
+            `Остаток этого платежа при улучшении перевёлся в +${entry.days} дн. (платёж ${entry.upgradePaymentId}) — ` +
+            `эти дни остались у подписки; уберите их вручную: ${SUBSCRIPTION_EXPIRY_EDIT_PATH}.`,
+        ),
+        days: attributions.map((entry) => ({ upgradePaymentId: entry.upgradePaymentId, days: entry.days })),
+      };
+    } catch (error: unknown) {
+      this.logger.warn(
+        `Could not read the upgrade days converted from refunded transaction ${transaction.id}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return { lines: [], days: [] };
+    }
+  }
+
+  /**
+   * AN UPGRADE STILL IN FLIGHT. An upgrade reads the payments it
+   * converts into days under its subscription's row lock and commits after;
+   * one that read this payment before it was marked refunded would convert its
+   * money after the card was written, and the card would not name those days.
+   * So each subscription the payment paid for is locked here first — which
+   * waits out an upgrade holding it — and then let go; an upgrade that starts
+   * after that finds the payment marked (`REFUND_MARK_KEYS` in
+   * `paid-remainder-conversion.util.ts`) and converts nothing of it.
+   *
+   * THE LOCK ORDER STAYS SAFE because nothing else is held: each lock is taken
+   * alone, in its own short transaction, and released before the next one, so
+   * this can wait on a writer but never be waited on while it waits — it
+   * cannot close a deadlock cycle. The reversal's own writes committed before.
+   */
+  private async waitOutUpgradesInFlight(transaction: Transaction): Promise<void> {
+    const items = await this.prismaService.transactionItem.findMany({
+      where: { transactionId: transaction.id },
+      select: { subscriptionId: true },
+    });
+    const subscriptionIds = [
+      ...new Set(
+        [transaction.subscriptionId, ...items.map((item) => item.subscriptionId)].filter(
+          (id): id is string => typeof id === 'string' && id.length > 0,
+        ),
+      ),
+    ].sort();
+    for (const subscriptionId of subscriptionIds) {
+      await this.prismaService.$transaction([
+        this.prismaService.$queryRaw(Prisma.sql`SELECT "id" FROM "subscriptions" WHERE "id" = ${subscriptionId} FOR UPDATE`),
+      ]);
+    }
   }
 
   /**
@@ -1463,7 +1659,8 @@ export class PaymentReconciliationService implements OnModuleDestroy {
    *   (`lockHeldAt`, from the switch that found it held): it went through
    *   while the refund waited for it. Created at most
    *   {@link CHARGE_IN_FLIGHT_WINDOW_MS} before: the charge is written before
-   *   it takes the lock, and a charge holds it for 30 s at most.
+   *   it takes the lock, and a charge holds it for 65 s at most, never less
+   *   than its POST (`SavedPaymentMethodService.withActiveForCharge`).
    *
    * Never for a withheld payment's refund, which leaves the autopay on.
    * Never throws: a lookup that fails only leaves the line out.
@@ -2640,6 +2837,31 @@ function parseInstant(value: unknown): Date | null {
 }
 
 /**
+ * Where an operator moves a subscription's end date, in the words the panel
+ * shows (`user-detail-panel.tsx`, the subscription card): the date picker
+ * «Истекает:» under «Быстрые действия», saved with «Сохранить».
+ */
+const SUBSCRIPTION_EXPIRY_EDIT_PATH =
+  '«Пользователи» → клиент → вкладка «Подписки» → «Быстрые действия» → «Истекает» → «Сохранить»';
+
+/**
+ * A refunded payment's revocation with what its add-on lines came to: a
+ * renewal that also bought add-ons still leaves its days to the operator, and
+ * an add-on it could not end asks for one too.
+ */
+function mergeAddOnRevocation(
+  revocation: { revoked: boolean; needsManualReview: boolean; audit: Record<string, unknown> },
+  addOn: AddOnRefundOutcome | null,
+): { revoked: boolean; needsManualReview: boolean; audit: Record<string, unknown> } {
+  if (addOn === null) return revocation;
+  return {
+    revoked: revocation.revoked,
+    needsManualReview: revocation.needsManualReview || !addOn.ended,
+    audit: { ...revocation.audit, ...addOn.audit },
+  };
+}
+
+/**
  * What the refund card carries about the autopay: how many were cancelled and
  * how many could not be (for machines), and the line the operator reads as
  * «📝 Заметка».
@@ -2750,8 +2972,8 @@ export const AFTER_RESPONSE_SHUTDOWN_WAIT_MS = 5_000;
 
 /**
  * How long before a refund found a saved method held by a charge that charge
- * can have been written: before it takes the lock, which it holds 30 s at most
- * (`CHARGE_LOCK_TIMEOUT_MS`). See `yookassaChargesAroundRefund`.
+ * can have been written: before it takes the lock, which it holds 65 s at most
+ * (`chargeLockHoldMs(CHARGE_LOCK_TIMING)`). See `yookassaChargesAroundRefund`.
  */
 const CHARGE_IN_FLIGHT_WINDOW_MS = 2 * 60 * 1000;
 

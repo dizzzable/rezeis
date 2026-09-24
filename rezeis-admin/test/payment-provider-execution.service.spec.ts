@@ -123,6 +123,31 @@ describe('PaymentProviderExecutionService checkout execution', () => {
     assert.equal(result.gatewayData['checkoutUrl'], 'https://checkout.example/yookassa');
   });
 
+  it('ends a saved method’s charge at its lock’s deadline: the POST carries the signal it is given', async () => {
+    // The client's own timeout is idle-only; the lock around this charge
+    // (`SavedPaymentMethodService.withActiveForCharge`) lasts a bounded time.
+    const calls: Array<{ readonly options: { readonly signal?: unknown } }> = [];
+    const service = createService({
+      post: (_url: string, _body: unknown, options: { readonly signal?: unknown }) => {
+        calls.push({ options });
+        return of({ data: { id: 'provider-payment-2', status: 'succeeded', payment_method: { id: 'pm-1', saved: true } } });
+      },
+    });
+    const deadline = new AbortController().signal;
+
+    await service.createCheckout({
+      gateway: createGateway({ type: PaymentGatewayType.YOOKASSA, settings: { shopId: 'shop-1', apiKey: 'secret-1' } }),
+      transaction: createTransaction({ paymentId: 'payment-2', gatewayType: PaymentGatewayType.YOOKASSA, amount: '12.50', currency: Currency.RUB }),
+      description: 'Renewal charged to a saved card',
+      paymentMethodId: 'pm-1',
+      savedPaymentMethodId: 'method-1',
+      signal: deadline,
+    });
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]?.options.signal, deadline, 'the POST would outlive the lock that guards the charge');
+  });
+
   it('does not request save_payment_method without consent when client opts in', async () => {
     const calls: unknown[] = [];
     const service = createService({

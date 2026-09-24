@@ -69,12 +69,14 @@ export function isWithheldConversion(gatewayData: unknown): boolean {
 }
 
 /**
- * Stamped on a withheld conversion's `gatewayData`, with
- * {@link MANUAL_REFUND_RECORDED_BY_KEY}, when an operator records in the panel
- * that its money was returned at the provider («Отметить возврат»). Most
+ * Stamped on a payment's `gatewayData`, with {@link MANUAL_REFUND_RECORDED_BY_KEY},
+ * when an operator records in the panel that its money was returned at the
+ * provider («Отметить возврат») — a withheld conversion's, or since
+ * 24.09.2026 any payment of a gateway the panel does not refund itself. Most
  * gateways never report a refund, so without it such a payment stayed a
- * received, unapplied sale for good. The reversal it triggers is the one a
- * provider's refund notification runs; this only says who asked, and when.
+ * received sale for good. The reversal it triggers is the one a provider's
+ * refund notification runs; this only says who asked, and when, and holds a
+ * second click off while the first one runs.
  */
 export const MANUAL_REFUND_RECORDED_AT_KEY = 'manualRefundRecordedAt';
 

@@ -5,6 +5,7 @@ import { AutomationTriggerKind } from '@prisma/client';
 
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { shouldRunSchedules } from '../../common/runtime/process-role.util';
+import { OPERATOR_ONLY_EVENT_TYPES } from '../../common/services/system-events.service';
 import {
   RealtimeEventInterface,
 } from '../realtime/interfaces/realtime-event.interface';
@@ -87,6 +88,13 @@ export class AutomationEventBridgeService implements OnModuleInit {
   }
 
   private async dispatchRealtime(event: RealtimeEventInterface): Promise<void> {
+    // An operator-only type reaches this broadcast because the admin panel
+    // shows it live (`SystemEventsService.emit`), not for a rule to act on: a
+    // withheld payment is money no rule may treat as a sale, and the event
+    // catalogue never offers one as a trigger. A wildcard rule (`payment.*`)
+    // would still match it here.
+    if (OPERATOR_ONLY_EVENT_TYPES.has(event.type)) return;
+
     // ── The stop that keeps a rule from feeding itself ──────────────────────
     //
     // Every emitted event comes back through here, and three actions emit. One

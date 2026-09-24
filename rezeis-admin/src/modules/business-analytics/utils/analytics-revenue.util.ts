@@ -26,7 +26,12 @@ import { type AnalyticsWindowInterface, bothWindowsSql, bucketIndexSql, describe
 type SqlNumeric = Prisma.Decimal | string | number | bigint | null;
 const num = (value: SqlNumeric | undefined): number => (value === null || value === undefined ? 0 : Number(value));
 
-export const PURCHASE_KINDS: readonly PurchaseKind[] = ['new', 'renewal', 'change', 'addon'];
+/**
+ * `withheld` last: money received and applied to nothing, to be refunded
+ * («Не применён (к возврату)»). The panel shows its row only while there is
+ * some; the report always carries it, so the rows add up to the total.
+ */
+export const PURCHASE_KINDS: readonly PurchaseKind[] = ['new', 'renewal', 'change', 'addon', 'withheld'];
 
 export interface RevenueSliceRow {
   readonly bucket: number;

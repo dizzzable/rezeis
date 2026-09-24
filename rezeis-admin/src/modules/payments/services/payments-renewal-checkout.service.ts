@@ -405,6 +405,8 @@ export class PaymentsRenewalCheckoutService {
     try {
       const createProviderCheckout = async (
         chargedMethod: { readonly id: string; readonly providerMethodId: string } | null,
+        // A saved method's charge: the deadline its lock holds for (`withActiveForCharge`).
+        signal?: AbortSignal,
       ) => {
         providerSubmissionStarted = true;
         return this.paymentProviderExecutionService.createCheckout({
@@ -418,6 +420,7 @@ export class PaymentsRenewalCheckoutService {
           savedPaymentMethodId: chargedMethod?.id ?? null,
           savePaymentMethod: input.savePaymentMethod,
           savePaymentMethodConsent: input.savePaymentMethodConsent,
+          ...(signal === undefined ? {} : { signal }),
         });
       };
       providerCheckout =

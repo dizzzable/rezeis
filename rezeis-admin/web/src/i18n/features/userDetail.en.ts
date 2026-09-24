@@ -184,6 +184,9 @@ export const en = {
       assignPlanSelectAll: 'Select all',
       assign: 'Assign',
       assignFailed: 'Failed to assign plan',
+      // 409 `PLAN_ASSIGNMENT_BLOCKED_BY_QUEUED_RENEWAL` (`plan-assignment-refusals.ts`).
+      assignBlockedByQueuedRenewal:
+        'The plan was not assigned: the next period of this subscription is already paid for, with add-ons bought for it. Assigning a plan now would cancel that paid period. Assign the plan once it has started.',
       planAssigned: 'Plan assigned',
       planPlaceholder: 'Select a plan',
       planAccessTitle: 'Plan access',
@@ -551,12 +554,95 @@ export const en = {
       failed: 'Could not issue the refund',
       reasons: {
         default: 'This payment cannot be refunded',
-        PAYMENT_REFUND_UNSUPPORTED_GATEWAY: 'Refunds are not supported for this payment gateway',
+        PAYMENT_REFUND_UNSUPPORTED_GATEWAY:
+          'The panel returns money by itself only through YooKassa. If you refunded this payment at the provider, close this window and press “Record refund” beside it.',
         PAYMENT_REFUND_NOT_COMPLETED: 'The payment is not completed — there is nothing to refund',
         PAYMENT_REFUND_NOT_FULFILLED: 'The payment has not been delivered to the customer yet',
         PAYMENT_REFUND_MISSING_PROVIDER_ID: 'The payment has no provider-side identifier',
         PAYMENT_REFUND_ALREADY_REFUNDED: 'The payment has already been fully refunded',
       },
+    },
+    // «Отметить возврат» for a payment of a gateway the panel does not refund
+    // itself. The same words are in `paymentsPage.providerRefund` (the
+    // Payments bundle): one dialog on two pages, and a test holds them equal.
+    providerRefund: {
+      title: 'Refund made at the provider',
+      hint: 'The panel returns money by itself only through YooKassa. If you refunded this payment in the {{gateway}} dashboard or another way, record it here: the panel undoes what this payment gave, as if the provider had reported the refund.',
+      action: 'Record refund',
+      confirmTitle: 'Record the refund?',
+      confirmIntro:
+        'First return {{amount}} to the customer at the provider ({{gateway}}). The panel sends the provider nothing: it only records that the money is back, and undoes what this payment gave:',
+      consequenceNew: 'the subscription this payment created is switched off, if nothing else paid for it;',
+      consequenceOther: 'the subscription does not change: adjust a renewal or a plan change by hand if needed; an add-on this payment bought ends at once;',
+      consequenceAutopay:
+        'the customer’s autopay ends: at Platega and RollyPay for the subscription this payment paid for, through YooKassa on every saved payment method;',
+      consequenceMoney:
+        'the partner commission, the referral reward and the cashback of this payment are taken back. The panel files «Мой налог» receipts for YooKassa payments only, so it has none for this one: if you declared this income in «Мой налог» yourself, cancel that receipt there.',
+      confirmAfter:
+        'The payment becomes CANCELED and no longer counts as revenue. The Telegram card «↩️ Платёж возвращён» follows.',
+      confirm: 'Yes, the money is returned',
+      submitting: 'Recording…',
+      recorded: 'Refund recorded',
+      alreadyRecorded: 'This payment’s refund was already recorded',
+      recordedAt: 'Refund recorded {{time}}',
+      failed: 'Could not record the refund',
+      noPermission: 'Recording a refund needs the payments:refund permission.',
+      errors: {
+        PAYMENT_REFUND_RECORD_USE_REFUND:
+          'The panel refunds a YooKassa payment itself: Users → the customer → Operations tab → “Refund”.',
+        PAYMENT_REFUND_RECORD_NO_PROVIDER:
+          'A partner-balance payment never went through a provider — there is nobody to have refunded it.',
+        PAYMENT_REFUND_RECORD_IMPORTED: 'The payment was imported from another bot and settled there — its refund cannot be recorded.',
+        PAYMENT_REFUND_NOT_COMPLETED: 'The payment is not completed — there is nothing to record.',
+        PAYMENT_REFUND_NOT_FULFILLED: 'This payment’s purchase was never delivered — there is nothing to undo.',
+        PAYMENT_REFUND_RECORD_NOTHING_PAID: 'The payment was for nothing — there is nothing to refund.',
+        PAYMENT_REFUND_RECORD_IN_PROGRESS: 'This payment’s refund is already being recorded. Refresh the page in a minute.',
+        PAYMENT_WITHHELD_REFUND_IN_PROGRESS: 'This payment’s refund is already being recorded. Refresh the page in a minute.',
+      },
+    },
+    // «Автосписание» on the «Подписки» tab: how the customer's subscriptions
+    // renew without them, and the operator's «Отменить автосписание» — no refund.
+    autopay: {
+      title: 'Autopay',
+      description:
+        'How the customer’s subscriptions renew without them. Turning it off here returns no money — it only stops the next charges.',
+      loadFailed: 'Could not load the customer’s autopays',
+      none: 'No autopay: no Platega or RollyPay subscription and no saved YooKassa payment method.',
+      noPermission: 'Turning autopay off needs the payments:edit permission.',
+      planUnnamed: 'subscription',
+      providerTitle: '{{provider}} · {{plan}}',
+      providerCharge: '{{amount}}, next charge {{date}}',
+      providerAmount: '{{amount}} per period',
+      pastDue: 'The last charge failed',
+      cancelling: 'Cancelling',
+      cancellingByRefund: 'Cancelling by a refund',
+      cancel: 'Cancel autopay',
+      cancelTitle: 'Cancel the autopay?',
+      cancelDescription:
+        '{{provider}} stops charging {{amount}} for “{{plan}}”. No money is returned, and the paid term of the subscription does not change. The panel sends the cancel to the provider right after you confirm; if it does not answer, the panel retries every 10 minutes.',
+      cancelCustomer:
+        'The panel tells the customer nothing. In the cabinet, under «Способы оплаты», this autopay is gone; the customer can set it up again only with a new payment through {{provider}} marked «для автоматического списания».',
+      cancelConfirm: 'Yes, cancel',
+      cancelFailed: 'Could not cancel the autopay',
+      cancelResult: {
+        CANCELLING: 'The cancel went to the provider. The Telegram card will say how it ended.',
+        ENDED: 'This autopay has already ended',
+        REFUND_ENDING: 'A refund is already cancelling this autopay',
+      },
+      yookassaTitle: 'YooKassa — saved payment methods',
+      yookassaOn: 'Autopay on: {{methods}}',
+      yookassaOff: 'Autopay is off on every method. The customer can turn it on in «Способы оплаты».',
+      yookassaDisable: 'Turn off YooKassa autopay',
+      yookassaTitleConfirm: 'Turn off YooKassa autopay?',
+      yookassaDescription:
+        'The panel stops renewing the customer’s subscriptions from these YooKassa payment methods: {{methods}}. No money is returned, and the methods stay saved. A method being charged right now is switched off right after that charge.',
+      yookassaCustomer:
+        'The panel tells the customer nothing. In the cabinet, under «Способы оплаты», these methods show the «Автосписание» switch off, and the customer can turn it back on.',
+      yookassaConfirm: 'Yes, turn off',
+      yookassaDisabled: 'YooKassa autopay is off',
+      yookassaDisabledPending: 'Autopay is off; the method busy with a charge is switched off right after it',
+      yookassaAlreadyOff: 'YooKassa autopay was already off',
+      yookassaFailed: 'Could not turn off YooKassa autopay',
     },
     operations: {
       title: 'Operations history',
@@ -680,6 +766,11 @@ export const en = {
         referralPointsExchanges: 'Points exchanges: {{count}}',
         partnerTransactions: 'Partner ledger entries: {{count}}',
         partnerWithdrawals: 'Partner withdrawals: {{count}}',
+        addOnPurchases: 'Add-on purchases: {{count}}',
+        paidTerms: 'Paid subscription periods: {{count}}',
+        resetPeriods: 'Traffic reset periods: {{count}}',
+        deviceReductions: 'Device reduction plans: {{count}}',
+        openIncidents: 'Open incidents: {{count}}',
       },
       deleteFullExplain:
         'A full delete removes the account entirely: the Telegram id and e-mail are freed, devices, IPs and anti-fraud marks go, and the trial claim disappears — the free trial can be taken again. Payments, promocodes, rewards and the partner ledger stay in the reports but move to an anonymous holder: no name, no Telegram id, no e-mail. Revenue reported for past months does not change.',

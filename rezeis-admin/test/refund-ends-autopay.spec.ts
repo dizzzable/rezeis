@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { afterEach, describe, it, mock } from 'node:test';
 
 import { Logger } from '@nestjs/common';
@@ -20,6 +22,7 @@ import {
   readProviderSubscriptionDispute,
   STRANDED_BY_REFUND,
   strandedReason,
+  unmatchedChargebackNote,
 } from '../src/modules/payments/services/provider-subscription.service';
 import {
   autopayEndedByRefund,
@@ -32,7 +35,7 @@ import {
 
 /**
  * «все возвраты, которые захочет пользователь, удаляют автосписания» — the
- * owner's rule: a refund ends the autopay (wave 6).
+ * owner's rule: a refund ends the autopay.
  *
  * A full refund of a NEW, ADDITIONAL or RENEW payment, or of an autopay charge,
  * used to leave the provider subscription live: the provider charged again
@@ -298,7 +301,7 @@ describe('the refund policy', () => {
     assert.match(String(failed), /повторяет отмену каждые 10 минут/);
     assert.match(String(failed), /отмените подписку в личном кабинете провайдера/);
     // Rows the panel could not even read were not marked: nothing for the
-    // sweep to retry, so the card does not promise it (R5 nit).
+    // sweep to retry, so the card does not promise it.
     const unread = describeAutopayOutcome({
       cancelled: [],
       failed: [{ gatewayType: UNKNOWN_AUTOPAY_GATEWAY, providerSubscriptionId: '' }],
@@ -308,7 +311,7 @@ describe('the refund policy', () => {
     assert.doesNotMatch(String(unread), /повторяет отмену/);
   });
 
-  it('says one thing of the ЮKassa autopay: that it is off, or — winning over it — that switching it off failed (R6 m3)', () => {
+  it('says one thing of the ЮKassa autopay: that it is off, or — winning over it — that switching it off failed', () => {
     assert.equal(describeAutopayOutcome({ ...NO_AUTOPAY, savedCardAutopayOff: true }), 'Автосписание через ЮKassa выключено.');
     const both = describeAutopayOutcome({ ...NO_AUTOPAY, savedCardAutopayOff: true, savedCardAutopayFailed: true });
     assert.match(String(both), /^Автосписание через ЮKassa выключить не удалось: следующее продление может списать деньги\./);
@@ -316,7 +319,7 @@ describe('the refund policy', () => {
     assert.doesNotMatch(String(both), /выключено/, 'the card said both');
   });
 
-  it('names the ЮKassa charges the switch could not stop, and a card sent before the provider finished (R6 m1, m4)', () => {
+  it('names the ЮKassa charges the switch could not stop, and a card sent before the provider finished', () => {
     const during = describeAutopayOutcome({ ...NO_AUTOPAY, yookassaChargesDuringRefund: ['pay-7'] });
     assert.equal(
       during,
@@ -588,11 +591,39 @@ describe('a Platega chargeback on a subscription charge', () => {
     assert.equal(w.events[0]?.metadata['chargeCount'], 3);
     assert.match(String(w.events[0]?.metadata['note']), /одного из 3 списаний/);
     assert.match(String(w.events[0]?.metadata['note']), /Автосписание отменено: Platega\./);
+    // What to do about what stayed: the card used to end at
+    // "find it at the provider", with no way to reverse it in the panel.
+    assert.match(String(w.events[0]?.metadata['note']), /в личном кабинете Platega по ID из карточки/);
+    assert.match(
+      String(w.events[0]?.metadata['note']),
+      /«Пользователи» → этот клиент → вкладка «Операции», найдите платёж с той же датой и суммой и нажмите у него «Отметить возврат» → «Да, деньги возвращены»: панель отменит его комиссию и кешбэк, а провайдеру ничего не отправит\./,
+    );
+    // No «Мой налог» receipt of the panel's to cancel: it files them for
+    // ЮKassa payments only. One declared by hand is cancelled there.
+    assert.doesNotMatch(String(w.events[0]?.metadata['note']), /(отменит|остались)[^.]*«Мой налог»/);
+    assert.match(
+      String(w.events[0]?.metadata['note']),
+      /Чеки «Мой налог» по платежам Platega панель не отправляет: если вы сами добавили этот доход в «Мой налог», аннулируйте чек там\./,
+    );
+  });
+
+  it('names the place of «Отметить возврат» in the words the panel shows', () => {
+    const note = unmatchedChargebackNote(PaymentGatewayType.PLATEGA, 2, { cancelled: [], failed: [] });
+    const quoted = [...note.matchAll(/«([^«»]+)»/g)].map((match) => match[1] as string);
+    const core = readFileSync(resolve(__dirname, '..', 'web/src/i18n/ru.ts'), 'utf8');
+    const card = readFileSync(resolve(__dirname, '..', 'web/src/i18n/features/userDetail.ru.ts'), 'utf8');
+    for (const label of ['Пользователи', 'Операции', 'Отметить возврат', 'Да, деньги возвращены']) {
+      assert.ok(quoted.includes(label), `the note does not name «${label}»`);
+      assert.ok(core.includes(`'${label}'`) || card.includes(`'${label}'`), `the panel shows no «${label}»`);
+    }
+    assert.match(card, /tabs: \{[\s\S]*?operations: 'Операции'/);
+    assert.match(card, /providerRefund: \{[\s\S]*?action: 'Отметить возврат'[\s\S]*?confirm: 'Да, деньги возвращены'/);
+    assert.match(note, /Живых автосписаний у подписки не было\.$/);
   });
 });
 
-describe('the chargeback handling, in wave 6b (R5)', () => {
-  it('applies the charges the provider took before asking which one is disputed (H1)', async () => {
+describe('the chargeback handling', () => {
+  it('applies the charges the provider took before asking which one is disputed', async () => {
     // Charged twice by now, the second charge not seen yet: counted before the
     // match, the dispute cannot be pinned on the first payment by a count of one.
     mock.method(Logger.prototype, 'error', () => undefined);
@@ -647,7 +678,7 @@ describe('the chargeback handling, in wave 6b (R5)', () => {
     assert.deepEqual(w.events.map((event) => event.type), ['payment.chargeback_unmatched']);
   });
 
-  it('tells the operator once, however often the same dispute is handled (F5)', async () => {
+  it('tells the operator once, however often the same dispute is handled', async () => {
     mock.method(Logger.prototype, 'error', () => undefined);
     mock.method(Logger.prototype, 'log', () => undefined);
     const autopay = row('told', { appliedChargeCount: 3 });
@@ -720,7 +751,7 @@ describe('the chargeback handling, in wave 6b (R5)', () => {
     assert.match(String(w.events[0]?.metadata['note']), /Автосписание через ЮKassa выключить не удалось/);
   });
 
-  it('keys a dispute that names the subscription itself by its payload: two such are two events and two cards, a true repeat one (R6 m2)', async () => {
+  it('keys a dispute that names the subscription itself by its payload: two such are two events and two cards, a true repeat one', async () => {
     mock.method(Logger.prototype, 'error', () => undefined);
     const autopay = row('self', { appliedChargeCount: 3 });
     const w = world({ rows: [autopay], chargesSuccess: 3 });
@@ -755,7 +786,7 @@ describe('the chargeback handling, in wave 6b (R5)', () => {
   });
 });
 
-describe('a Platega dispute is kept in the payment inbox until it is handled (R5 F6)', () => {
+describe('a Platega dispute is kept in the payment inbox until it is handled', () => {
   const dispute = { providerPaymentId: 'pl-tx-9', providerStatus: 'CHARGEBACKED' };
   const body = { Id: 'pl-tx-9', SubscriptionId: 'platega-1', Amount: 299, Status: 'CHARGEBACKED' };
 
@@ -855,7 +886,7 @@ describe('a Platega dispute is kept in the payment inbox until it is handled (R5
   });
 });
 
-describe('a refund\'s mark outlives whoever finishes the cancel (R5 F1)', () => {
+describe('a refund\'s mark outlives whoever finishes the cancel', () => {
   it('the provider reporting the cancel the operator made in its dashboard: the mark stays, and a charge taken before it is withheld', async () => {
     mock.method(Logger.prototype, 'error', () => undefined);
     mock.method(Logger.prototype, 'log', () => undefined);
@@ -911,7 +942,7 @@ describe('a refund\'s mark outlives whoever finishes the cancel (R5 F1)', () => 
   });
 });
 
-describe('one refund asks the provider once per autopay (R5 F2, F3, H3)', () => {
+describe('one refund asks the provider once per autopay', () => {
   it('a sign-up bound to the subscription it paid for is asked once, and a failure is counted once', async () => {
     mock.method(Logger.prototype, 'error', () => undefined);
     const own = row('own', { firstTransactionId: 'tx-refunded' });

@@ -60,9 +60,10 @@ import {
 } from './analytics-chart-support'
 import { formatBucket, formatCount, formatMoney, formatPercent, gatewayName, partnerBalanceText } from './analytics-format'
 import { ACCENT, CURRENCY_ORDER, currencyColor, OTHER_COLOR, PURCHASE_KIND_COLORS } from './analytics-palette'
+import { revenueKindsOf, SALE_KINDS } from './analytics-revenue-kinds'
 
 const LISTS_ROW = 'grid gap-4 @min-[56rem]:grid-cols-2 @min-[88rem]:grid-cols-3'
-const KINDS: readonly PurchaseKind[] = ['new', 'renewal', 'change', 'addon']
+const KINDS = SALE_KINDS
 /** Named currencies a stack may show; the rest fold into «Другие». */
 const MAX_NAMED_CURRENCIES = 4
 const OTHER_KEY = '__other__'
@@ -387,6 +388,7 @@ function KindsCard({ report, played, className }: { readonly report: RevenueRepo
   const chartRef = useRef<HTMLDivElement>(null)
   const entrance = useChartEntrance('revenue.kinds', played, chartRef)
   const { money, period } = report
+  const kinds = revenueKindsOf(report)
   const rows: KindRow[] = useMemo(
     () =>
       period.buckets.map((bucket, index) => ({
@@ -397,6 +399,7 @@ function KindsCard({ report, played, className }: { readonly report: RevenueRepo
         renewal: report.series[index]?.byKind.renewal ?? 0,
         change: report.series[index]?.byKind.change ?? 0,
         addon: report.series[index]?.byKind.addon ?? 0,
+        withheld: report.series[index]?.byKind.withheld ?? 0,
       })),
     [period, report.series, locale],
   )
@@ -425,7 +428,7 @@ function KindsCard({ report, played, className }: { readonly report: RevenueRepo
               { key: 'share', label: t('analyticsPage.common.share'), numeric: true },
               { key: 'payments', label: t('analyticsPage.common.payments'), numeric: true },
             ]}
-            rows={KINDS.map((kind) => {
+            rows={kinds.map((kind) => {
               const entry = totals.get(kind)
               const value = entry?.figure.value ?? 0
               return {
@@ -444,8 +447,14 @@ function KindsCard({ report, played, className }: { readonly report: RevenueRepo
         <EmptyState className="h-64">{t('analyticsPage.revenue.empty')}</EmptyState>
       ) : (
         <div className="space-y-3">
-          <ul className="grid grid-cols-2 gap-x-4 gap-y-2 @min-[40rem]:grid-cols-4" data-kind-legend="">
-            {KINDS.map((kind) => {
+          <ul
+            className={cn(
+              'grid grid-cols-2 gap-x-4 gap-y-2',
+              kinds.length > KINDS.length ? '@min-[40rem]:grid-cols-5' : '@min-[40rem]:grid-cols-4',
+            )}
+            data-kind-legend=""
+          >
+            {kinds.map((kind) => {
               const value = totals.get(kind)?.figure.value ?? 0
               return (
                 <li key={kind} className="min-w-0" data-kind={kind}>
@@ -477,7 +486,7 @@ function KindsCard({ report, played, className }: { readonly report: RevenueRepo
                       return (
                         <TooltipCard
                           heading={row.heading}
-                          rows={[...KINDS].reverse().map((kind) => ({
+                          rows={[...kinds].reverse().map((kind) => ({
                             key: kind,
                             name: label(kind),
                             value: formatMoney(row[kind], money.currency),
@@ -488,14 +497,14 @@ function KindsCard({ report, played, className }: { readonly report: RevenueRepo
                       )
                     }}
                   />
-                  {KINDS.map((kind) => (
+                  {kinds.map((kind) => (
                     <Bar
                       key={kind}
                       dataKey={kind}
                       name={label(kind)}
                       stackId="kind"
                       fill={PURCHASE_KIND_COLORS[kind]}
-                      shape={(props: SegmentShapeProps) => <StackSegment {...props} order={KINDS} segment={kind} />}
+                      shape={(props: SegmentShapeProps) => <StackSegment {...props} order={kinds} segment={kind} />}
                       maxBarSize={BAR_MAX}
                       isAnimationActive={entrance.animate}
                       animationDuration={SWEEP_MS}

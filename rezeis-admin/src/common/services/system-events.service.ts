@@ -35,6 +35,7 @@ import { firstValueFrom } from 'rxjs';
 import { appConfig } from '../config/app.config';
 import { webhookConfig } from '../config/webhook.config';
 import { readAdminBotToken, readEnvBotToken } from '../utils/admin-bot-token.util';
+import { literalCardText } from '../utils/operator-card-text.util';
 import { buildWebhookSignature } from '../http/webhook-signature.util';
 import { PrismaService } from '../prisma/prisma.service';
 import { RealtimeGateway } from '../../modules/realtime/realtime.gateway';
@@ -266,12 +267,26 @@ export const EVENT_TYPES = {
    * charge is the same sum — so the panel could not tell which charge to
    * reverse (`ProviderSubscriptionService.handleChargeback`). Nothing was
    * guessed: the autopay was ended, and the operator is to find the charge at
-   * the provider. Operator-only (`OPERATOR_ONLY_EVENT_TYPES`), and delivered to
-   * whoever ticked the refund cards (`DELIVERED_WITH`). Metadata: `{ userId,
-   * gatewayType, providerSubscriptionId, providerPaymentId, providerStatus,
-   * amount, currency, chargeCount, subscriptionId?, note }`.
+   * the provider and press «Отметить возврат» on it in the panel, which
+   * reverses its commission and cashback (the note says where; the panel
+   * files «Мой налог» receipts for ЮKassa payments only, so it has none to
+   * cancel for this charge). Operator-only (`OPERATOR_ONLY_EVENT_TYPES`), and
+   * delivered to whoever ticked the refund cards (`DELIVERED_WITH`). Metadata:
+   * `{ userId, gatewayType, providerSubscriptionId, providerPaymentId,
+   * providerStatus, amount, currency, chargeCount, subscriptionId?, note }`.
    */
   PAYMENT_CHARGEBACK_UNMATCHED: 'payment.chargeback_unmatched',
+  /**
+   * An operator ended a customer's autopay from the user's card, without a
+   * refund: a Platega or RollyPay subscription cancelled at the provider, or
+   * the ЮKassa autopay switched off on every saved method
+   * (`AdminAutopayService`). Operator-only (`OPERATOR_ONLY_EVENT_TYPES`): the
+   * customer's own switch is `payment.method_autopay_updated`, and whatever is
+   * bound to that would tell the customer they did it. Delivered to whoever
+   * ticked that one (`DELIVERED_WITH`). Metadata: `{ userId, gatewayType,
+   * providerSubscriptionId?, subscriptionId?, amount?, currency?, note }`.
+   */
+  PAYMENT_AUTOPAY_STOPPED_BY_OPERATOR: 'payment.autopay_stopped_by_operator',
   PAYMENT_EXPIRED: 'payment.expired',
   PAYMENT_WEBHOOK_RECEIVED: 'payment.webhook_received',
   PAYMENT_FULFILLMENT_RECOVERED: 'payment.fulfillment_recovered',
@@ -538,11 +553,14 @@ export const REGISTERED_EVENT_TYPES: ReadonlySet<string> = new Set<string>(
  * Types the panel tells its OPERATOR about and nobody else.
  *
  * Such an event is written to the audit log («Журнал аудита» → «Системные
- * события») and sent as the operator's Telegram card, and that is all: it is
- * not pushed to the realtime stream (automation rules ride on it), not handed
- * to the out-of-band hooks (outbound webhooks, the email bridge, quests) and
- * not posted to the environment's webhook URLs. The automation event
- * catalogue does not offer it as a trigger either.
+ * события»), sent as the operator's Telegram card, and pushed to the admin
+ * panel's own realtime stream — an open «Платежи» page refreshes on it as on
+ * any payment. That is all: the two consumers that ride on the same broadcast
+ * skip it (the automation bridge, `AutomationEventBridgeService`, and the
+ * payer's projection, `UserRealtimeService`), it is not handed to the
+ * out-of-band hooks (outbound webhooks, the email bridge, quests) and not
+ * posted to the environment's webhook URLs. The automation event catalogue
+ * does not offer it as a trigger either.
  *
  * For money a human has to settle that must not read as anything else to a
  * machine: a withheld payment announced as `payment.completed` went to the
@@ -559,6 +577,9 @@ export const OPERATOR_ONLY_EVENT_TYPES: ReadonlySet<string> = new Set<string>([
   // A chargeback the panel could not pin on one payment: the operator finds
   // the charge by hand, and no integration may read it as a refund of anything.
   EVENT_TYPES.PAYMENT_CHARGEBACK_UNMATCHED,
+  // An operator's own action. A rule or letter bound to an autopay change
+  // would tell the customer they turned it off.
+  EVENT_TYPES.PAYMENT_AUTOPAY_STOPPED_BY_OPERATOR,
 ]);
 
 // ── Service ─────────────────────────────────────────────────────────────────
@@ -684,9 +705,12 @@ export class SystemEventsService {
     });
 
     // 5. Push over WebSocket to connected admin clients (sync — no I/O).
-    //    Not for an operator-only type: automation rules are dispatched from
-    //    this broadcast (`AutomationEventBridgeService`).
-    if (!operatorOnly) this.deliverRealtime(enrichedEvent);
+    //    An operator-only type too: it is the operator's own panel, and an
+    //    open «Платежи» page shows a withheld payment as it shows any other.
+    //    The automation rules and the payer's projection ride on this same
+    //    broadcast, and both skip an operator-only type themselves
+    //    (`AutomationEventBridgeService`, `UserRealtimeService`).
+    this.deliverRealtime(enrichedEvent);
 
     // 6. Out-of-band hooks (Phase 6 webhook dispatcher, future plugins).
     //    Each hook runs in its own microtask so a slow/buggy receiver
@@ -1689,6 +1713,26 @@ export class SystemEventsService {
         planLines.push(`📱 Лимит устройств: ${escapeHtml(meta['deviceLimit'])}`);
       if (meta['durationDays'])
         planLines.push(`⏳ Длительность: ${humanizeDuration(meta['durationDays'])}`);
+      // «Подписка улучшена»: the days the old plan's paid remainder added on
+      // top of the term bought, which is why «Действует до» is later than the
+      // duration alone says. Only when there were some.
+      if (typeof meta['paidRemainderDays'] === 'number' && meta['paidRemainderDays'] > 0)
+        planLines.push(`📥 Остаток прежнего тарифа: +${meta['paidRemainderDays']} дн.`);
+      // «Подписка продлена» by a renewal priced for the plan an upgrade left:
+      // what it was priced for, and the days its money bought on this plan.
+      // None at all renewed nothing (status and expiry unchanged), and the
+      // payment card says so and what to do.
+      if (
+        typeof meta['renewalPricedForPlan'] === 'string' &&
+        typeof meta['renewalPricedDays'] === 'number' &&
+        typeof meta['renewalConvertedDays'] === 'number'
+      )
+        planLines.push(
+          `📥 Оплачено по цене «${escapeHtml(meta['renewalPricedForPlan'])}» за ${meta['renewalPricedDays']} дн. — ` +
+            (meta['renewalConvertedDays'] > 0
+              ? `на этом тарифе это +${meta['renewalConvertedDays']} дн.`
+              : 'на этом тарифе это 0 дн.: срок не продлён, деньги нужно вернуть.'),
+        );
       if (meta['isTrial'] !== undefined)
         planLines.push(`🎁 Триал: ${meta['isTrial'] ? 'да' : 'нет'}`);
       const expireRaw = meta['expireAt'] ?? meta['expiresAt'];
@@ -1898,14 +1942,16 @@ export class SystemEventsService {
             `   🪪 Telegram ID: <code>${escapeHtml(meta['referredTelegramId'])}</code>`,
           );
         refLines.push(`   👾 Reiwa ID: <code>${escapeHtml(meta['referredUserId'])}</code>`);
+        // Names, usernames and logins are the subscribers' own words: shown as
+        // typed, never read as the operator's emoji tokens (`literalCardText`).
         if (meta['referredName']) {
-          const h = meta['referredUsername'] ? ` (@${escapeHtml(meta['referredUsername'])})` : '';
-          refLines.push(`   👤 Имя: ${escapeHtml(meta['referredName'])}${h}`);
+          const h = meta['referredUsername'] ? ` (@${literalCardText(meta['referredUsername'])})` : '';
+          refLines.push(`   👤 Имя: ${literalCardText(meta['referredName'])}${h}`);
         } else if (meta['referredUsername']) {
-          refLines.push(`   👤 Username: @${escapeHtml(meta['referredUsername'])}`);
+          refLines.push(`   👤 Username: @${literalCardText(meta['referredUsername'])}`);
         }
         if (meta['referredLogin'])
-          refLines.push(`   🔑 Login: <code>${escapeHtml(meta['referredLogin'])}</code>`);
+          refLines.push(`   🔑 Login: <code>${literalCardText(meta['referredLogin'])}</code>`);
       }
       if (meta['referrerId']) {
         refLines.push(`👥 Пригласил:`);
@@ -1915,13 +1961,13 @@ export class SystemEventsService {
           );
         refLines.push(`   👾 Reiwa ID: <code>${escapeHtml(meta['referrerId'])}</code>`);
         if (meta['referrerName']) {
-          const h = meta['referrerUsername'] ? ` (@${escapeHtml(meta['referrerUsername'])})` : '';
-          refLines.push(`   👤 Имя: ${escapeHtml(meta['referrerName'])}${h}`);
+          const h = meta['referrerUsername'] ? ` (@${literalCardText(meta['referrerUsername'])})` : '';
+          refLines.push(`   👤 Имя: ${literalCardText(meta['referrerName'])}${h}`);
         } else if (meta['referrerUsername']) {
-          refLines.push(`   👤 Username: @${escapeHtml(meta['referrerUsername'])}`);
+          refLines.push(`   👤 Username: @${literalCardText(meta['referrerUsername'])}`);
         }
         if (meta['referrerLogin'])
-          refLines.push(`   🔑 Login: <code>${escapeHtml(meta['referrerLogin'])}</code>`);
+          refLines.push(`   🔑 Login: <code>${literalCardText(meta['referrerLogin'])}</code>`);
       }
       if (meta['rewardType']) {
         const rv = meta['rewardValue'] !== undefined ? `: ${escapeHtml(meta['rewardValue'])}` : '';
@@ -2040,7 +2086,8 @@ export class SystemEventsService {
     if (meta['templateName']) extraLines.push(`🫧 Шаблон: ${escapeHtml(meta['templateName'])}`);
     if (meta['ticketId'])
       extraLines.push(`🚓 Тикет: <code>${escapeHtml(String(meta['ticketId']).slice(0, 12))}</code>`);
-    if (meta['subject']) extraLines.push(`📨 Тема: ${escapeHtml(meta['subject'])}`);
+    // The subject a customer or a guest typed: as typed (`literalCardText`).
+    if (meta['subject']) extraLines.push(`📨 Тема: ${literalCardText(meta['subject'])}`);
     // WHOSE authority moved. The role pair below has been rendered since the
     // block was written and had no producer to feed it; the account it
     // belongs to still had no line at all, so a card would have read «Роль:
@@ -3221,11 +3268,12 @@ function formatFraudBlock(meta: Record<string, unknown>): string[] {
   out.push('👤 <b>Нарушитель:</b>');
   const who: string[] = [];
   if (meta['fraudHasRezeisAccount'] === true) {
-    if (meta['fraudUserName']) who.push(`👤 Имя: ${escapeHtml(meta['fraudUserName'])}`);
-    if (meta['fraudUsername']) who.push(`👤 Username: @${escapeHtml(meta['fraudUsername'])}`);
+    // The offender's own name, username and address: as typed (`literalCardText`).
+    if (meta['fraudUserName']) who.push(`👤 Имя: ${literalCardText(meta['fraudUserName'])}`);
+    if (meta['fraudUsername']) who.push(`👤 Username: @${literalCardText(meta['fraudUsername'])}`);
     if (meta['fraudTelegramId'])
       who.push(`🪪 Telegram ID: <code>${escapeHtml(meta['fraudTelegramId'])}</code>`);
-    if (meta['fraudUserEmail']) who.push(`📧 Email: ${escapeHtml(meta['fraudUserEmail'])}`);
+    if (meta['fraudUserEmail']) who.push(`📧 Email: ${literalCardText(meta['fraudUserEmail'])}`);
     if (meta['fraudUserRole']) who.push(`🥢 Роль: ${escapeHtml(meta['fraudUserRole'])}`);
     if (typeof meta['fraudSubscriptions'] === 'number')
       who.push(`📦 Подписок: ${meta['fraudSubscriptions']}`);
@@ -3344,7 +3392,11 @@ function formatImportBlock(type: string, meta: Record<string, unknown>): string[
       facts.push(`🏷 Тариф: <code>${escapeHtml(meta['planId'])}</code>`);
     const counted: ReadonlyArray<readonly [string, string]> = [
       ['updated', '✅ Тариф назначен подпискам'],
-      ['skippedAlreadyAssigned', '⏭ Уже на этом тарифе'],
+      // A plan of ANY kind: a bought subscription, or one an operator or an
+      // earlier run assigned — not necessarily the plan chosen now.
+      ['skippedAlreadyAssigned', '⏭ Тариф уже назначен'],
+      ['skippedPurchasedHere', '⏭ Куплены или продлены в панели'],
+      ['skippedNotImported', '⏭ Не из импорта'],
       ['skippedDeleted', '⏭ Пропущено удалённых'],
       ['skippedNoSubscription', '⏭ Без подписки'],
       ['syncJobsCreated', '🔄 Задач синхронизации'],
@@ -3565,8 +3617,12 @@ const SYSTEM_ERROR_HEADERS = {
   // `BackupProcessor` — a restore threw.
   restore_failed: { emoji: '🧯', title: 'Восстановление базы не удалось' },
   // `PaymentSubscriptionMutationService` — raised at WARNING, still an incident
-  // card: an upgrade kept a paid scheduled term, and with it the old baseline.
-  upgrade_baseline_kept: { emoji: '⏭', title: 'Тариф сменён, но следующий период остался прежним' },
+  // card: an upgrade ends the subscription before a paid, queued period that
+  // carries add-ons begins, so those add-ons cannot be delivered.
+  upgrade_addons_after_end: {
+    emoji: '⏭',
+    title: 'Тариф улучшен, а оплаченный следующий период начнётся после конца подписки',
+  },
 } as const;
 
 /**
@@ -3697,6 +3753,8 @@ export const EVENT_PRESENTATION: Record<string, EventPresentation> = {
   'payment.method_saved': { emoji: '💳', title: 'Сохранён способ оплаты' },
   'payment.method_unbound': { emoji: '🚫', title: 'Отвязан способ оплаты' },
   'payment.method_autopay_updated': { emoji: '🔁', title: 'Изменено автосписание' },
+  // The operator's own switch, from the user's card; the note says what the provider did.
+  'payment.autopay_stopped_by_operator': { emoji: '⏹', title: 'Автосписание отключено в панели' },
   // Not an error and not a completion: the charge is parked until the customer
   // passes 3DS. Titled as a wait, so it does not read like `payment.failed`.
   'payment.autopay_confirmation_required': {

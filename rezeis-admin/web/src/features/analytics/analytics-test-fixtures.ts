@@ -147,7 +147,7 @@ export function emptyOverviewReport(windowDays = 30): AdvancedAnalyticsReport {
   }
 }
 
-const NO_KINDS = { new: 0, renewal: 0, change: 0, addon: 0 } as const
+const NO_KINDS = { new: 0, renewal: 0, change: 0, addon: 0, withheld: 0 } as const
 
 export function revenueReport(money: MoneyView = ROUBLES): RevenueReport {
   const multi = money.converted
@@ -175,7 +175,7 @@ export function revenueReport(money: MoneyView = ROUBLES): RevenueReport {
               { currency: 'RUB', amount: 3500, value: 3500 },
               ...(multi ? [{ currency: 'USDT', amount: 10, value: 800 }] : []),
             ],
-            byKind: { new: multi ? 2300 : 1500, renewal: 2000, change: 0, addon: 0 },
+            byKind: { new: multi ? 2300 : 1500, renewal: 2000, change: 0, addon: 0, withheld: 0 },
           }
         : { total: 0, byCurrency: [], byKind: NO_KINDS },
     ),
@@ -184,6 +184,8 @@ export function revenueReport(money: MoneyView = ROUBLES): RevenueReport {
       { kind: 'renewal', figure: { value: 4000, byCurrency: [{ currency: 'RUB', amount: 4000 }] }, payments: 11 },
       { kind: 'change', figure: { value: 600, byCurrency: [{ currency: 'RUB', amount: 600 }] }, payments: 1 },
       { kind: 'addon', figure: { value: 400, byCurrency: [{ currency: 'RUB', amount: 400 }] }, payments: 1 },
+      // Money withheld for refund: none here, as a server with the row sends it.
+      { kind: 'withheld', figure: { value: 0, byCurrency: [] }, payments: 0 },
     ],
     byPlan: [
       { key: 'plan:p1', kind: 'plan', planId: 'p1', name: 'Pro', figure: { value: 6000, byCurrency: [{ currency: 'RUB', amount: 6000 }] }, payments: 12 },

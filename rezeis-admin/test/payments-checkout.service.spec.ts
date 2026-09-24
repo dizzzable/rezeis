@@ -869,6 +869,45 @@ describe('PaymentsCheckoutService', () => {
     assert.equal(state.enqueueCalls, 0)
   })
 
+  /**
+   * A saved method's charge is submitted under that method's lock, which lasts
+   * a bounded time; the lock hands its deadline over, and the provider's POST
+   * has to end by it (`SavedPaymentMethodService.withActiveForCharge`).
+   */
+  it("hands a saved method's charge the deadline of the method's lock", async () => {
+    const deadline = new AbortController().signal
+    const { service, state } = createService({
+      providerCheckout: {
+        gatewayId: 'provider-saved-1',
+        checkoutUrl: null,
+        providerMode: 'IMMEDIATE',
+        providerStatus: 'pending',
+        gatewayData: { provider: 'YOOKASSA' },
+      },
+      savedPaymentMethodService: {
+        withActiveForCharge: async (
+          _input: unknown,
+          submit: (method: { readonly id: string; readonly providerMethodId: string }, signal: AbortSignal) => Promise<unknown>,
+        ) => submit({ id: 'method-1', providerMethodId: 'pm-1' }, deadline),
+        notifyAutopayConfirmationRequired: () => undefined,
+      },
+    })
+
+    await service.checkout({
+      userId: 'user-1',
+      purchaseType: PurchaseType.NEW,
+      planId: 'plan-1',
+      durationDays: 30,
+      gatewayType: PaymentGatewayType.YOOKASSA,
+      channel: PurchaseChannel.WEB,
+      savedPaymentMethodId: 'method-1',
+    })
+
+    assert.equal(state.providerCreateInputs.length, 1)
+    assert.equal(state.providerCreateInputs[0]?.['paymentMethodId'], 'pm-1')
+    assert.equal(state.providerCreateInputs[0]?.['signal'], deadline, 'the POST would outlive the lock that guards it')
+  })
+
   it('persists a canceled provider result without provisioning', async () => {
     const { service, state } = createService({ providerCheckout: { gatewayId: 'provider-canceled-1', checkoutUrl: null, providerMode: 'IMMEDIATE', providerStatus: 'CANCELLED', gatewayData: { provider: 'YOOKASSA', cancellation_details: { reason: 'permission_revoked' } } } })
     const checkout = await service.checkout({ userId: 'user-1', purchaseType: PurchaseType.NEW, planId: 'plan-1', durationDays: 30, gatewayType: PaymentGatewayType.YOOKASSA, channel: PurchaseChannel.WEB })
@@ -881,6 +920,8 @@ function createService(input: {
   enqueueError?: Error
   /** ProviderSubscriptionService stand-in; the default records nothing and refuses nothing. */
   readonly providerSubscriptionService?: Record<string, unknown>
+  /** SavedPaymentMethodService stand-in, for a saved method's charge. */
+  readonly savedPaymentMethodService?: Record<string, unknown>
   readonly gatewayType?: PaymentGatewayType
   readonly gatewayCurrency?: Currency
   readonly gatewaySettings?: Record<string, unknown>
@@ -1118,9 +1159,9 @@ function createService(input: {
       // test), no-op evaluator otherwise.
       (input.accessMode === undefined ? { evaluate: () => null } : new AccessModeGuard()) as never,
       // SavedPaymentMethodService — only used when savedPaymentMethodId is set.
-      {
+      (input.savedPaymentMethodService ?? {
         resolveActiveForCharge: async () => null,
-      } as never,
+      }) as never,
       // PaymentReconciliationService — referral / partner / МойНалог / ad-conversion
       // hooks. Only the paths that capture real money must call it.
       {
