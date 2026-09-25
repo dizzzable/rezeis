@@ -353,11 +353,21 @@ function harness(scenario: Scenario): Harness {
       }
       return callback({
         $executeRaw: async () => 1,
-        $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE }],
+        $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE, remnawaveId: subscription.remnawaveId }],
         subscription: {
-          update: async (input: { where: unknown; data: Record<string, unknown> }) => {
+          // The link write: a compare-and-swap on the link the CREATE read,
+          // evaluated against the row as it is now.
+          updateMany: async (input: {
+            where: { id: string; OR: ReadonlyArray<{ remnawaveId: unknown }> };
+            data: Record<string, unknown>;
+          }) => {
+            const holds =
+              input.where.id === subscription.id &&
+              input.where.OR.some((arm) => arm.remnawaveId === subscription.remnawaveId);
+            if (!holds) return { count: 0 };
             linkWrites.push(input);
             apply(subscription, input.data);
+            return { count: 1 };
           },
         },
         subscriptionTerm: { updateMany: async () => ({ count: 0 }) },

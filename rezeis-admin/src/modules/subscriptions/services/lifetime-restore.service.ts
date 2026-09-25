@@ -16,6 +16,7 @@ import { EffectiveProjectionService } from '../../add-on-entitlements/services/e
 import { SubscriptionTermHooksService } from '../../add-on-entitlements/services/subscription-term-hooks.service';
 import type { AlignTailResult } from '../../add-on-entitlements/services/subscription-term.service';
 import type { RequestMetadataInterface } from '../../auth/interfaces/request-metadata.interface';
+import { refundedSoFarSql } from '../../business-analytics/utils/analytics-money-received.util';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { isRetryableTransactionConflict } from '../../referrals/services/referral-qualification.service';
 
@@ -107,9 +108,9 @@ const BOUNDARY_COMPLETION_REASONS: readonly string[] = [
 export type LifetimeEvidence =
   /** The row's own plan snapshot records "no end" (-1 days). */
   | { readonly kind: 'snapshot' }
-  /** A completed payment for it was for -1 days. */
+  /** A completed payment for it, not refunded in full, was for -1 days. */
   | { readonly kind: 'payment'; readonly paymentId: string }
-  /** A completed combined renewal's line for it was -1 days. */
+  /** A completed combined renewal's line for it was -1 days, and the renewal was not refunded in full. */
   | { readonly kind: 'paymentLine'; readonly paymentId: string }
   /** Its plan sells no duration other than -1. */
   | { readonly kind: 'plan'; readonly planId: string };
@@ -247,14 +248,46 @@ interface RestoreWrite {
 }
 
 /**
+ * THE PAYMENT WAS REFUNDED OR CHARGED BACK IN FULL — as the reversal
+ * (`PaymentReconciliationService.reverseFulfilledPayment`, every door: the
+ * provider's notice, the panel's «Вернуть», «Отметить возврат») leaves it,
+ * WHATEVER ITS STATUS SAYS NOW:
+ *  - its own stamp, `refundReversedAt`;
+ *  - its refund ledger reaching what was paid — `refundedAmountTotal` at least
+ *    the `amount` of a payment of more than nothing, `refundedInFullAt`'s rule
+ *    (`payment-reconciliation.service.ts`). An older build's «Мой налог» write
+ *    erased the stamp on most full refunds; the ledger, written before it,
+ *    survived;
+ *  - CANCELED after fulfilment applied it — a checkout abandoned before it was
+ *    paid is CANCELED too, but was never applied;
+ *  - REFUNDED, the status an older build gave a refund.
+ * WHATEVER ITS STATUS: before 962aecf7 (19.09.2026) a success notification
+ * replayed or retried after a full refund revived the payment to COMPLETED and
+ * ran its hooks again, stamp and ledger kept (review R3b-01). The money went
+ * back all the same, so such a payment proves nothing was PAID: the paid arms
+ * of {@link lifetimeEvidenceSql} leave it out, and {@link refundedWithoutEndSql}
+ * counts it as the refund it was.
+ * A PARTIAL refund leaves the payment COMPLETED and the purchase standing
+ * (`handleRefundReversal`), so it is not one.
+ */
+const REFUNDED_IN_FULL = Prisma.sql`(
+  t."gateway_data" ->> 'refundReversedAt' IS NOT NULL
+  OR (t."amount" > 0 AND ${refundedSoFarSql('t')} >= t."amount")
+  OR (t."status" = 'CANCELED' AND t."fulfilled_at" IS NOT NULL)
+  OR t."status" = 'REFUNDED'
+)`;
+
+/**
  * EVERY PIECE OF EVIDENCE THAT A SUBSCRIPTION WAS SOLD WITHOUT AN END — one row
  * per piece: its `kind`, the payment or plan it names (`ref`) and, for a
  * payment, when it was made (`paidAt`). W4's census (R1-01), validated on
  * seeded rows; any one piece is enough:
  *  - the row's own plan snapshot records the duration -1;
  *  - a COMPLETED payment for it records -1 (a PENDING, REFUNDED or FAILED one
- *    proves nothing was sold);
- *  - a COMPLETED combined renewal's line for it has -1 days;
+ *    proves nothing was sold, and neither does one refunded in full, COMPLETED
+ *    or not — {@link REFUNDED_IN_FULL});
+ *  - a COMPLETED combined renewal's line for it has -1 days, the renewal not
+ *    refunded in full;
  *  - the plan its snapshot names sells no duration other than -1.
  * `onlySubscriptionId` narrows every branch to one row: the restore's re-check
  * under the lock reads exactly what the census read, for that row.
@@ -271,6 +304,7 @@ function lifetimeEvidenceSql(onlySubscriptionId: string | null): Prisma.Sql {
     SELECT t."subscription_id", 'payment', t."payment_id", t."created_at"
       FROM "transactions" t
      WHERE t."status" = 'COMPLETED'
+       AND NOT ${REFUNDED_IN_FULL}
        AND t."subscription_id" IS NOT NULL
        AND t."plan_snapshot" ->> 'selectedDurationDays' = '-1'
        ${only(Prisma.sql`t."subscription_id"`)}
@@ -279,6 +313,7 @@ function lifetimeEvidenceSql(onlySubscriptionId: string | null): Prisma.Sql {
       FROM "transaction_items" i
       JOIN "transactions" t ON t."id" = i."transaction_id"
      WHERE t."status" = 'COMPLETED'
+       AND NOT ${REFUNDED_IN_FULL}
        AND i."duration_days" = -1
        ${only(Prisma.sql`i."subscription_id"`)}
     UNION ALL
@@ -292,26 +327,8 @@ function lifetimeEvidenceSql(onlySubscriptionId: string | null): Prisma.Sql {
   `;
 }
 
-/** The evidence that a "no end" purchase was PAID for, and stands. */
+/** The evidence that a "no end" purchase was PAID for, and stands (never a payment refunded in full). */
 const PAID_EVIDENCE_KINDS: readonly LifetimeEvidence['kind'][] = ['payment', 'paymentLine'];
-
-/**
- * THE PAYMENT WAS REFUNDED OR CHARGED BACK IN FULL — as the reversal
- * (`PaymentReconciliationService.reverseFulfilledPayment`, every door: the
- * provider's notice, the panel's «Вернуть», «Отметить возврат») leaves it:
- *  - its own stamp, `refundReversedAt`;
- *  - CANCELED after fulfilment applied it — a checkout abandoned before it was
- *    paid is CANCELED too, but was never applied; this also covers the full
- *    refunds whose stamp an older build's «Мой налог» write erased;
- *  - REFUNDED, the status an older build gave a refund.
- * A PARTIAL refund leaves the payment COMPLETED and the purchase standing
- * (`handleRefundReversal`), so it is not one.
- */
-const REFUNDED_IN_FULL = Prisma.sql`(
-  t."gateway_data" ->> 'refundReversedAt' IS NOT NULL
-  OR (t."status" = 'CANCELED' AND t."fulfilled_at" IS NOT NULL)
-  OR t."status" = 'REFUNDED'
-)`;
 
 /**
  * EVERY SUBSCRIPTION WHOSE "NO END" PURCHASE WAS REFUNDED — keyed on that

@@ -28,6 +28,11 @@ import {
 } from '../../remnawave/interfaces/remnawave-strict-outcome.interface';
 import { panelExpiryToLocal } from '../../remnawave/services/panel-expiry';
 import { panelTrafficLimitToGb } from '../../remnawave/utils/panel-traffic-limit.util';
+import {
+  readRemnawaveProfileFacts,
+  type RemnawaveProfileFactsClient,
+  stampRemnawaveProfileFacts,
+} from '../../remnawave/utils/remnawave-profile-facts.util';
 
 /** Fresh subscription fields projected from a live Remnawave panel profile. */
 export interface PanelSubscriptionState {
@@ -95,6 +100,56 @@ export function panelSubscriptionState(panel: RemnawavePanelUser): PanelSubscrip
     externalSquad: panel.externalSquadUuid ?? null,
     configUrl: panel.subscriptionUrl || null,
   };
+}
+
+/**
+ * THE PROFILE'S TWO FACTS, FROM THE USER THE OVERLAY ALREADY READ — its
+ * `createdAt` (the rolling reset's anchor) and `lastTrafficResetAt` (what
+ * confirms a reset), which stage 4 needs and only Remnawave knows
+ * (`remnawave-profile-facts.util.ts`). The Remnawave importer has stamped them
+ * since stage 4; the four backup importers overlaid the same full user and
+ * dropped both, so an imported row learnt them only at its next push, webhook
+ * or ↻ (S4-sync's leftover). Taken only from a profile the overlay resolved to
+ * THIS row — never from a foreign panel's answer, which the overlay never
+ * reads — and by the one writer's rules: never null over a value, the reset
+ * only forward.
+ *
+ * This one: the facts as the columns of a subscription an import CREATES;
+ * nothing when no profile was read.
+ */
+export function overlaidProfileFactsColumns(panel: RemnawavePanelUser | null): {
+  readonly remnawaveProfileCreatedAt?: Date;
+  readonly remnawaveLastTrafficResetAt?: Date;
+} {
+  if (panel === null) return {};
+  const facts = readRemnawaveProfileFacts(panel);
+  return {
+    ...(facts.createdAt === null ? {} : { remnawaveProfileCreatedAt: facts.createdAt }),
+    ...(facts.lastTrafficResetAt === null ? {} : { remnawaveLastTrafficResetAt: facts.lastTrafficResetAt }),
+  };
+}
+
+/**
+ * The facts onto a row an import updated from `panel`. Best-effort, like the
+ * Remnawave importer's: a failure costs the stamp, not the import — the next
+ * push, webhook or ↻ stamps the row anyway.
+ */
+export async function stampOverlaidProfileFacts(
+  client: RemnawaveProfileFactsClient,
+  subscriptionId: string,
+  panel: RemnawavePanelUser | null,
+  onFailure: (message: string) => void,
+): Promise<void> {
+  if (panel === null) return;
+  try {
+    await stampRemnawaveProfileFacts(client, [subscriptionId], readRemnawaveProfileFacts(panel));
+  } catch (error: unknown) {
+    onFailure(
+      `Remnawave profile facts not stamped for subscription ${subscriptionId}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
 }
 
 /** Resolved bulk view of the panel for an import run. */

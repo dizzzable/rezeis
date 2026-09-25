@@ -65,6 +65,9 @@ describe('«Трафик исчерпан» in the template editor', () => {
     const note = await screen.findByRole('note')
     expect(note).toHaveTextContent('«📦 Докупить трафик» → «Дополнения» (/addons)')
     expect(note).toHaveTextContent('«Продление подписки» (/renew)')
+    // Only when there is something to buy (N1 gap 4), and what happens otherwise.
+    expect(note).toHaveTextContent('если ей есть что там купить: докупку трафика или «Сброс трафика»')
+    expect(note).toHaveTextContent('таких кнопок бот не показывает, а само уведомление приходит')
   })
 
   it('in English too', async () => {

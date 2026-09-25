@@ -103,6 +103,8 @@ export const ADD_ON_SWITCH_DEFAULTS: Readonly<Record<AddOnSwitchName, boolean>> 
  * switch; the stages they name are resolved one variable at a time, so a line
  * that sets only `ADDON_ENTITLEMENT_SHADOW` decides stage 1 and leaves stage 2
  * to the switch — which the panel then shows as «Задано в .env» all the same.
+ * A switch decided per rule ({@link ADD_ON_SWITCHES_DECIDED_PER_RULE}) is shown
+ * so only for the rules its lines name.
  */
 export const ADD_ON_SWITCH_VARIABLES: Readonly<Record<AddOnSwitchName, readonly AddOnRolloutFlagName[]>> = {
   durableAccounting: ['ADDON_ENTITLEMENT_SHADOW', 'ADDON_ENTITLEMENT_DIRECT_PURCHASE'],
@@ -114,6 +116,29 @@ export const ADD_ON_SWITCH_VARIABLES: Readonly<Record<AddOnSwitchName, readonly 
     'ADDON_RESET_EXPIRY_MONTH_ROLLING',
   ],
 };
+
+/**
+ * THE SWITCHES WHOSE VARIABLES ARE RULES, NOT STAGES: «Докупка трафика до
+ * сброса» carries one variable per reset rule, and each rule stands on its own
+ * (N1, 25.09.2026). A `.env` line for some rules leaves the others to the
+ * switch, so the switch stays the operator's for them: it shows the value they
+ * run with, it can be changed, and the page names the rules `.env` decides
+ * («Задано в .env для: ежедневного сброса»). It is locked only when `.env`
+ * decides every rule. The other switches' variables are stages that only make
+ * sense together, so any one line of theirs locks the switch whole.
+ */
+export const ADD_ON_SWITCHES_DECIDED_PER_RULE: ReadonlySet<AddOnSwitchName> = new Set<AddOnSwitchName>([
+  'trafficResetExpiry',
+]);
+
+/**
+ * `.env` takes the switch out of the panel's hands: any of its lines for a
+ * switch of stages, every one of its lines for a switch of rules.
+ */
+function lockedByEnv(name: AddOnSwitchName, linesSet: number): boolean {
+  if (linesSet === 0) return false;
+  return !ADD_ON_SWITCHES_DECIDED_PER_RULE.has(name) || linesSet === ADD_ON_SWITCH_VARIABLES[name].length;
+}
 
 /** Every variable this module reads, switch by switch. */
 export const ADD_ON_ROLLOUT_FLAG_NAMES: readonly AddOnRolloutFlagName[] = ADD_ON_SWITCH_NAMES.flatMap(
@@ -257,16 +282,23 @@ export function readAddOnRolloutFlags(reader: AddOnRolloutFlagReader | undefined
 /** One switch as the page shows it. */
 export interface AddOnSwitchState {
   readonly name: AddOnSwitchName;
-  /** ON for every stage it carries: what the code runs with right now. */
+  /**
+   * What the code runs with right now: ON for every stage it carries. For a
+   * switch of rules that `.env` decides only in part, the value the OTHER rules
+   * run with — the switch's own — while `env` names the rules `.env` decides.
+   */
   readonly enabled: boolean;
   readonly defaultEnabled: boolean;
   /** The operator's own value, or `null` while the switch was never set. */
   readonly stored: boolean | null;
-  /**
-   * The explicit `.env` values that decide it instead of the panel. While any
-   * exists the switch cannot be changed from the panel.
-   */
+  /** The explicit `.env` values that decide it, or some of its rules, instead of the panel. */
   readonly env: ReadonlyArray<{ readonly variable: AddOnRolloutFlagName; readonly enabled: boolean }>;
+  /**
+   * `.env` decides all of it: the switch cannot be changed from the panel. Any
+   * line locks a switch of stages; a switch of rules only when every rule has
+   * its line ({@link ADD_ON_SWITCHES_DECIDED_PER_RULE}).
+   */
+  readonly locked: boolean;
 }
 
 export function describeAddOnSwitches(
@@ -280,12 +312,19 @@ export function describeAddOnSwitches(
       const value = readEnvOverride(env[variable], variable);
       if (value !== null) overrides.push({ variable, enabled: value });
     }
+    const locked = lockedByEnv(name, overrides.length);
+    // A switch of rules `.env` decides in part runs the other rules with its
+    // own value: that is what the page shows it at, and what a change moves.
+    const partly = ADD_ON_SWITCHES_DECIDED_PER_RULE.has(name) && overrides.length > 0 && !locked;
     return {
       name,
-      enabled: variables.every((variable) => resolveVariable(variable, stored, env)),
+      enabled: partly
+        ? (stored[name] ?? ADD_ON_SWITCH_DEFAULTS[name])
+        : variables.every((variable) => resolveVariable(variable, stored, env)),
       defaultEnabled: ADD_ON_SWITCH_DEFAULTS[name],
       stored: stored[name] ?? null,
       env: overrides,
+      locked,
     };
   });
 }
@@ -314,7 +353,9 @@ export type AddOnSwitchUpdatePlan =
  *
  *  - A switch `.env` decides is refused whole, naming its variables: storing a
  *    value the panel cannot apply would only surprise whoever later removes
- *    the line.
+ *    the line. A switch of rules `.env` decides only in part is not: the value
+ *    is stored and applies to the rules no line names
+ *    ({@link ADD_ON_SWITCHES_DECIDED_PER_RULE}).
  *  - Turning a switch OFF needs `confirmOff`: the page asks first, in a dialog
  *    that says what switching off does NOT undo, and a client that skipped it
  *    is refused here rather than trusted.
@@ -336,7 +377,7 @@ export function planAddOnSwitchUpdate(input: {
     const variables = ADD_ON_SWITCH_VARIABLES[name].filter(
       (variable) => readEnvOverride(env[variable], variable) !== null,
     );
-    if (variables.length > 0) return { kind: 'SET_IN_ENV', switchName: name, variables };
+    if (lockedByEnv(name, variables.length)) return { kind: 'SET_IN_ENV', switchName: name, variables };
     const current = input.stored[name] ?? ADD_ON_SWITCH_DEFAULTS[name];
     if (current && !requested && !input.confirmOff) return { kind: 'OFF_NOT_CONFIRMED', switchName: name };
     if (current !== requested) changed.push(name);

@@ -146,6 +146,8 @@ async function payment(
     /** When fulfilment applied it; unset for a payment never applied. */
     readonly fulfilledAt?: Date;
     readonly gatewayData?: Record<string, unknown>;
+    /** What was paid; 999 unless said otherwise. */
+    readonly amount?: string;
   },
 ): Promise<{ readonly id: string; readonly paymentId: string }> {
   return prisma.transaction.create({
@@ -156,7 +158,7 @@ async function payment(
       purchaseType: input.purchaseType ?? (input.days === undefined ? 'ADDITIONAL' : input.days === -1 ? 'NEW' : 'RENEW'),
       gatewayType: 'YOOKASSA',
       currency: 'RUB',
-      amount: new Prisma.Decimal('999'),
+      amount: new Prisma.Decimal(input.amount ?? '999'),
       planSnapshot: input.days === undefined ? {} : { id: datedPlan, selectedDurationDays: input.days },
       ...(input.createdAt === undefined ? {} : { createdAt: input.createdAt }),
       ...(input.fulfilledAt === undefined ? {} : { fulfilledAt: input.fulfilledAt }),
@@ -664,7 +666,71 @@ run('«Вернуть бессрочность»: the census and the restore (Po
       },
     });
 
-    const refunded = [refundedNew, chargedBack, legacyRefunded, stampErased, lineRefunded];
+    // REVIVED BY AN OLDER BUILD (review R3b-01). Before 962aecf7 (19.09.2026) a
+    // success notification replayed or retried after a full refund turned the
+    // transaction back to COMPLETED and re-ran its hooks, and it kept its
+    // `refundReversedAt` stamp (`moy-nalog.processor.ts` says so). The money
+    // went back all the same: COMPLETED here is not "paid".
+    const revivedStamped = await subscription(expired);
+    await created(revivedStamped, boughtAt);
+    await payment(revivedStamped, {
+      subscriptionId: revivedStamped.subscriptionId,
+      days: -1,
+      status: TransactionStatus.COMPLETED,
+      createdAt: boughtAt,
+      fulfilledAt: boughtAt,
+      gatewayData: {
+        providerStatus: 'succeeded',
+        refundReversedAt: refundedAt.toISOString(),
+        subscriptionRevoked: true,
+        refundRevokedSubscriptionId: revivedStamped.subscriptionId,
+        refundRevokedFromExpiresAt: null,
+        refundRevokedFromStatus: 'ACTIVE',
+        refundRevokedAt: refundedAt.toISOString(),
+      },
+    });
+    // …revived with the stamp an older «Мой налог» write had erased: only the
+    // refund ledger says it, and it reaches exactly what was paid.
+    const revivedLedger = await subscription(expired);
+    await payment(revivedLedger, {
+      subscriptionId: revivedLedger.subscriptionId,
+      days: -1,
+      status: TransactionStatus.COMPLETED,
+      createdAt: boughtAt,
+      fulfilledAt: boughtAt,
+      gatewayData: { providerStatus: 'succeeded', refundedAmountTotal: '999.00' },
+    });
+    // …and a combined renewal revived the same way, whose line for this row was "no end".
+    const revivedLine = await subscription({ ...expired, snapshot: lifetimeSnapshot });
+    const revivedCombined = await payment(revivedLine, {
+      subscriptionId: null,
+      days: 30,
+      status: TransactionStatus.COMPLETED,
+      createdAt: boughtAt,
+      fulfilledAt: boughtAt,
+      gatewayData: { providerStatus: 'succeeded', refundReversedAt: refundedAt.toISOString() },
+    });
+    await prisma.transactionItem.create({
+      data: {
+        transactionId: revivedCombined.id,
+        subscriptionId: revivedLine.subscriptionId,
+        planId: lifetimePlan,
+        durationDays: -1,
+        amount: new Prisma.Decimal('999'),
+        currency: 'RUB',
+      },
+    });
+
+    const refunded = [
+      refundedNew,
+      chargedBack,
+      legacyRefunded,
+      stampErased,
+      lineRefunded,
+      revivedStamped,
+      revivedLedger,
+      revivedLine,
+    ];
     const census = await service.census();
     for (const owner of refunded) {
       assert.equal(
@@ -728,8 +794,27 @@ run('«Вернуть бессрочность»: the census and the restore (Po
       fulfilledAt: boughtAt,
       gatewayData: { partialRefundAt: at(-5).toISOString(), refundNeedsManualReview: true, refundedAmountTotal: '100.00' },
     });
+    // …however much of it went back, while a kopeck of it stayed (review R3b-01).
+    const nearlyWhole = await subscription(expired);
+    const nearlyRefunded = await payment(nearlyWhole, {
+      subscriptionId: nearlyWhole.subscriptionId,
+      days: -1,
+      createdAt: boughtAt,
+      fulfilledAt: boughtAt,
+      gatewayData: { partialRefundAt: at(-5).toISOString(), refundNeedsManualReview: true, refundedAmountTotal: '998.99' },
+    });
+    // A "no end" purchase a 100 % promo code paid in full: nothing was paid, so
+    // nothing refunded reaches it — it is not refunded in full.
+    const promo = await subscription(expired);
+    const promoPaid = await payment(promo, {
+      subscriptionId: promo.subscriptionId,
+      days: -1,
+      createdAt: boughtAt,
+      fulfilledAt: boughtAt,
+      amount: '0',
+    });
 
-    const kept = [granted, otherRefunded, boughtAgain, abandoned, partial];
+    const kept = [granted, otherRefunded, boughtAgain, abandoned, partial, nearlyWhole, promo];
     const census = await service.census();
     const byId = new Map(census.rows.map((row) => [row.subscriptionId, row]));
     for (const owner of kept) assert.ok(byId.has(owner.subscriptionId), `listed: ${owner.subscriptionId}`);
@@ -742,6 +827,14 @@ run('«Вернуть бессрочность»: the census and the restore (Po
     assert.deepEqual(byId.get(partial.subscriptionId)!.evidence, [
       { kind: 'snapshot' },
       { kind: 'payment', paymentId: partlyRefunded.paymentId },
+    ]);
+    assert.deepEqual(byId.get(nearlyWhole.subscriptionId)!.evidence, [
+      { kind: 'snapshot' },
+      { kind: 'payment', paymentId: nearlyRefunded.paymentId },
+    ]);
+    assert.deepEqual(byId.get(promo.subscriptionId)!.evidence, [
+      { kind: 'snapshot' },
+      { kind: 'payment', paymentId: promoPaid.paymentId },
     ]);
 
     const results = await restore(kept.map((owner) => owner.subscriptionId));

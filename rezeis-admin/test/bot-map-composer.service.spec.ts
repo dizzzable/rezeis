@@ -335,7 +335,11 @@ describe('BotMapComposerService.compose', () => {
     assert.equal(lifetime?.target, 'mini-app:/addons');
     assert.equal(lifetime?.valid, true);
     assert.deepStrictEqual(lifetime?.destination, { kind: 'webApp', route: '/addons' });
-    assert.match(lifetime?.sourceLabel ?? '', /^📦 Докупить трафик — у бессрочной подписки, вместо «🔄 Продлить подписку»$/);
+    // Only when there is something to buy (N1 gap 4): the label says so.
+    assert.match(
+      lifetime?.sourceLabel ?? '',
+      /^📦 Докупить трафик — у бессрочной подписки, если ей есть что докупить, вместо «🔄 Продлить подписку»$/,
+    );
     assert.ok(out.nodes.some((n) => n.id === 'mini-app:/addons'), 'the add-on page is on the map');
     // Only this template: an expiry notice's renewal button stays the only arrow.
     assert.equal(out.edges.filter((e) => e.id.startsWith('notif-lifetime')).length, 1);
@@ -347,6 +351,10 @@ describe('BotMapComposerService.compose', () => {
         ['default', 'mini-app:/renew'],
         ['lifetime-default', 'mini-app:/addons'],
       ],
+    );
+    assert.equal(
+      bare.edges.find((e) => e.id.startsWith('notif-lifetime-default'))?.sourceLabel,
+      'у бессрочной подписки, если ей есть что докупить',
     );
   });
 

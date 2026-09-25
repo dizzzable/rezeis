@@ -32,9 +32,11 @@ import { panelProfileClaims } from './remnawave-importer.service';
 import {
   buildPanelLookup,
   isLivePanelStatus,
+  overlaidProfileFactsColumns,
   panelSubscriptionState,
   reconcileMissingPanelStatus,
   resolvePanelProfile,
+  stampOverlaidProfileFacts,
   type PanelAbsenceProbe,
   type PanelLookup,
 } from '../utils/remnawave-overlay.util';
@@ -696,6 +698,9 @@ export class RemnashopImporterService {
             data,
           });
         }
+        // The profile's `createdAt` and `lastTrafficResetAt`, from the user the
+        // overlay read — whatever the read-back rule took of the rest.
+        await stampOverlaidProfileFacts(this.prismaService, existing.id, panel, (message) => this.logger.warn(message));
         if (verdict !== null) {
           await finishTermModelReadback(this.prismaService, verdict, {
             subscriptionId: existing.id,
@@ -723,6 +728,9 @@ export class RemnashopImporterService {
           startedAt: this.parseOptionalDate(sub.created_at) ?? new Date(),
           planSnapshot: this.buildSubscriptionPlanSnapshot(sub, importRecordId),
           ...panelOwned,
+          // A new row has no earlier fact to keep (none on a foreign panel,
+          // whose answer the overlay never reads).
+          ...overlaidProfileFactsColumns(panel),
       };
       const newSub = sub.is_trial
         ? await this.prismaService.$transaction(async (tx) => {

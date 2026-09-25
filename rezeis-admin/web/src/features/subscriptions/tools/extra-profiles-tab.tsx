@@ -37,6 +37,7 @@ import {
   type ExtraProfile,
   type ExtraProfileCustomer,
   type ExtraProfilesReport,
+  type ExtraProfileUnknownOwner,
   type SubscriptionWithoutLink,
 } from './panel-link-check-api'
 import { subscriptionToolsQueryKeys } from './query-keys'
@@ -119,7 +120,7 @@ export function ExtraProfilesTab(): JSX.Element | null {
             <PanelLinkCheckStatusLine check={report.check} />
             <ComparisonSummary report={report} />
 
-            {report.customers.length === 0 ? (
+            {report.customers.length === 0 && report.unknownOwners.length === 0 ? (
               <p className="text-sm text-muted-foreground">
                 {report.comparedAt === null
                   ? t('subscriptionTools.extraProfiles.emptyNeverCompared')
@@ -135,6 +136,7 @@ export function ExtraProfilesTab(): JSX.Element | null {
                 {report.customers.map((customer) => (
                   <CustomerBlock key={customer.userId} customer={customer} />
                 ))}
+                {report.unknownOwners.length > 0 ? <UnknownOwners report={report} /> : null}
               </div>
             )}
           </>
@@ -172,8 +174,59 @@ function ComparisonSummary({ report }: { readonly report: ExtraProfilesReport })
   )
 }
 
-/** One customer: who they are, their extra profiles, and their unlinked subscriptions. */
-function CustomerBlock({ customer }: { readonly customer: ExtraProfileCustomer }): JSX.Element {
+/**
+ * The owners the panel does not have (review R3b-03), APART from the customers
+ * and after them: a customer deleted here whose profile outlived the deletion,
+ * or another panel's customer on the same Remnawave. Nothing to link, so no
+ * «Привязать профиль» and no subscriptions to list — only the profiles, and,
+ * when the audit has it, the day the customer was deleted here.
+ */
+function UnknownOwners({ report }: { readonly report: ExtraProfilesReport }): JSX.Element {
+  const { t } = useTranslation()
+  const shown = report.unknownOwners.length
+  const total = report.unknownOwnersTotal ?? shown
+  return (
+    <div className="space-y-2">
+      <div className="max-w-3xl space-y-1">
+        <p className="text-sm font-semibold">{t('subscriptionTools.extraProfiles.unknownOwners.title')}</p>
+        <p className="text-xs text-muted-foreground">{t('subscriptionTools.extraProfiles.unknownOwners.intro')}</p>
+        {total > shown ? (
+          <p className="text-xs text-muted-foreground">
+            {t('subscriptionTools.extraProfiles.unknownOwners.shown', { shown, total })}
+          </p>
+        ) : null}
+      </div>
+      {report.unknownOwners.map((owner) => (
+        <CustomerBlock key={owner.userId} customer={asMissingCustomer(owner)} apart={{ deletedAt: owner.deletedAt }} />
+      ))}
+    </div>
+  )
+}
+
+/** An owner the panel does not have, in the shape a customer block draws. */
+function asMissingCustomer(owner: ExtraProfileUnknownOwner): ExtraProfileCustomer {
+  return {
+    userId: owner.userId,
+    userExists: false,
+    userName: null,
+    userTelegramId: null,
+    profiles: owner.profiles,
+    subscriptionsWithoutLink: [],
+  }
+}
+
+/**
+ * One customer: who they are, their extra profiles, and their unlinked
+ * subscriptions. `apart` marks an owner the panel does not have at all (see
+ * {@link UnknownOwners}).
+ */
+function CustomerBlock({
+  customer,
+  apart,
+}: {
+  readonly customer: ExtraProfileCustomer
+  readonly apart?: { readonly deletedAt: string | null }
+}): JSX.Element {
   const { t } = useTranslation()
   const targets: LinkTarget[] = customer.subscriptionsWithoutLink.map((subscription) => ({
     subscriptionId: subscription.subscriptionId,
@@ -192,6 +245,11 @@ function CustomerBlock({ customer }: { readonly customer: ExtraProfileCustomer }
           <p className="text-sm font-medium text-destructive">
             {t('subscriptionTools.extraProfiles.customerMissing')}
           </p>
+          {apart !== undefined && apart.deletedAt !== null ? (
+            <p className="text-xs text-muted-foreground">
+              {t('subscriptionTools.extraProfiles.unknownOwners.deletedAt', { when: formatDateTime(apart.deletedAt) })}
+            </p>
+          ) : null}
           <p className="font-mono text-xs text-muted-foreground">{customer.userId}</p>
         </div>
       )}
@@ -261,33 +319,35 @@ function CustomerBlock({ customer }: { readonly customer: ExtraProfileCustomer }
         </Table>
       </div>
 
-      <div className="space-y-1 text-xs">
-        <p className="font-medium">{t('subscriptionTools.extraProfiles.withoutLinkTitle')}</p>
-        {customer.subscriptionsWithoutLink.length === 0 ? (
-          <p className="text-muted-foreground">{t('subscriptionTools.extraProfiles.withoutLinkNone')}</p>
-        ) : (
-          <ul className="list-disc space-y-0.5 pl-5 text-muted-foreground">
-            {customer.subscriptionsWithoutLink.map((subscription) => (
-              <li key={subscription.subscriptionId}>
-                {t('subscriptionTools.extraProfiles.withoutLinkItem', {
-                  plan: subscription.planName ?? t('subscriptionTools.common.planMissing'),
-                  status: String(
-                    t(`subscriptionsPage.statuses.${subscription.status}`, {
-                      defaultValue: subscription.status,
-                    }),
-                  ),
-                  created: formatDate(subscription.createdAt),
-                  holds:
-                    subscription.storedRemnawaveId === null
-                      ? t('subscriptionTools.unlinked.holdsEmpty')
-                      : subscription.storedRemnawaveId,
-                  id: subscription.subscriptionId,
-                })}
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
+      {apart !== undefined ? null : (
+        <div className="space-y-1 text-xs">
+          <p className="font-medium">{t('subscriptionTools.extraProfiles.withoutLinkTitle')}</p>
+          {customer.subscriptionsWithoutLink.length === 0 ? (
+            <p className="text-muted-foreground">{t('subscriptionTools.extraProfiles.withoutLinkNone')}</p>
+          ) : (
+            <ul className="list-disc space-y-0.5 pl-5 text-muted-foreground">
+              {customer.subscriptionsWithoutLink.map((subscription) => (
+                <li key={subscription.subscriptionId}>
+                  {t('subscriptionTools.extraProfiles.withoutLinkItem', {
+                    plan: subscription.planName ?? t('subscriptionTools.common.planMissing'),
+                    status: String(
+                      t(`subscriptionsPage.statuses.${subscription.status}`, {
+                        defaultValue: subscription.status,
+                      }),
+                    ),
+                    created: formatDate(subscription.createdAt),
+                    holds:
+                      subscription.storedRemnawaveId === null
+                        ? t('subscriptionTools.unlinked.holdsEmpty')
+                        : subscription.storedRemnawaveId,
+                    id: subscription.subscriptionId,
+                  })}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
     </section>
   )
 }

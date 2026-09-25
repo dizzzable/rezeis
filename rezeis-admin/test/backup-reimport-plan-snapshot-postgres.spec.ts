@@ -631,5 +631,74 @@ run('A backup re-import keeps the snapshot of a subscription it already has (Pos
       const columns = await columnsOf(row);
       assert.equal(columns.deviceLimit, DONOR.devices, 'the donor fallback still writes the donor’s devices');
     });
+
+    // S4-sync's leftover (FX3b): the overlay reads the full Remnawave user, and
+    // its two facts stage 4 needs — `createdAt`, the rolling reset's anchor,
+    // and `lastTrafficResetAt`, what confirms a reset — now land on the row, by
+    // the one writer's rules (never null over a value, the reset only forward).
+    it(`RS5 ${backup}: a re-import stamps the profile's createdAt and last traffic reset onto the row it overlaid`, async () => {
+      const row = await linkedRow(backup, () => ({}));
+      await prisma.subscription.update({
+        where: { id: row.subscriptionId },
+        data: { remnawaveLastTrafficResetAt: PROFILE_FACTS.olderReset },
+      });
+      await reimport(backup, row, panelServing([profileWithFacts(row)]));
+      assert.deepEqual(await factsOf(row.subscriptionId), {
+        remnawaveProfileCreatedAt: PROFILE_FACTS.createdAt,
+        remnawaveLastTrafficResetAt: PROFILE_FACTS.lastReset,
+      });
+
+      // The panel unreadable: nothing is read, nothing is stamped over what the row holds.
+      await reimport(backup, row, PANEL_DOWN);
+      assert.deepEqual(await factsOf(row.subscriptionId), {
+        remnawaveProfileCreatedAt: PROFILE_FACTS.createdAt,
+        remnawaveLastTrafficResetAt: PROFILE_FACTS.lastReset,
+      });
+    });
+
+    it(`RS6 ${backup}: a first import writes the profile's two facts with the row it creates`, async () => {
+      const row = await donorWithoutRow(backup);
+      await reimport(backup, row, panelServing([profileWithFacts(row)]));
+      const created = await prisma.subscription.findFirstOrThrow({
+        where: { userId: row.userId, remnawaveId: row.identity },
+        select: { id: true },
+      });
+      assert.deepEqual(await factsOf(created.id), {
+        remnawaveProfileCreatedAt: PROFILE_FACTS.createdAt,
+        remnawaveLastTrafficResetAt: PROFILE_FACTS.lastReset,
+      });
+    });
   }
 });
+
+/** The two facts of a profile, distinct from anything a fixture sets on its own. */
+const PROFILE_FACTS = {
+  createdAt: new Date('2025-11-17T06:41:00.000Z'),
+  lastReset: new Date('2026-09-17T00:05:03.000Z'),
+  olderReset: new Date('2026-08-17T00:05:02.000Z'),
+} as const;
+
+/** {@link profileOf}, carrying {@link PROFILE_FACTS}. */
+function profileWithFacts(row: Row): RemnawavePanelUser {
+  return {
+    ...profileOf(row),
+    createdAt: PROFILE_FACTS.createdAt.toISOString(),
+    lastTrafficResetAt: PROFILE_FACTS.lastReset.toISOString(),
+  };
+}
+
+async function factsOf(subscriptionId: string) {
+  return prisma.subscription.findUniqueOrThrow({
+    where: { id: subscriptionId },
+    select: { remnawaveProfileCreatedAt: true, remnawaveLastTrafficResetAt: true },
+  });
+}
+
+/** A donor account the backup brings in whole: the customer is here, the subscription is not yet. */
+async function donorWithoutRow(backup: Backup): Promise<Row> {
+  const telegramId = BigInt(TELEGRAM_BASE + fx.next());
+  const userId = await newUser(fx, { telegramId });
+  const panelId = PANEL_BASE + fx.next();
+  const identity = backup === 'Bedolaga' ? String(panelId) : uuidIdentity(panelId);
+  return { userId, subscriptionId: '', panelId, identity, telegramId, donorId: fx.next() };
+}

@@ -190,9 +190,9 @@ describe('add-on switches — an explicit .env value wins', () => {
 describe('add-on switches — what the page shows', () => {
   it('each switch in page order, with what it runs as, its default, the stored choice and no lock', () => {
     assert.deepEqual(describeAddOnSwitches({ deviceCleanupAuto: false }, NO_ENV), [
-      { name: 'durableAccounting', enabled: true, defaultEnabled: true, stored: null, env: [] },
-      { name: 'deviceCleanupAuto', enabled: false, defaultEnabled: true, stored: false, env: [] },
-      { name: 'trafficResetExpiry', enabled: true, defaultEnabled: true, stored: null, env: [] },
+      { name: 'durableAccounting', enabled: true, defaultEnabled: true, stored: null, env: [], locked: false },
+      { name: 'deviceCleanupAuto', enabled: false, defaultEnabled: true, stored: false, env: [], locked: false },
+      { name: 'trafficResetExpiry', enabled: true, defaultEnabled: true, stored: null, env: [], locked: false },
     ]);
   });
 
@@ -211,15 +211,55 @@ describe('add-on switches — what the page shows', () => {
       assert.equal(durable!.enabled, false, 'a switch is ON only while every stage it carries is');
       assert.equal(durable!.stored, true);
       assert.deepEqual(durable!.env, [{ variable: 'ADDON_ENTITLEMENT_DIRECT_PURCHASE', enabled: false }]);
+      assert.equal(durable!.locked, true, 'one line of a switch of stages locks it whole');
       // A value the panel does not recognise locks nothing.
       assert.deepEqual(cleanup!.env, []);
       assert.equal(cleanup!.enabled, true);
-      // One strategy ON by .env, the rest with the switch (OFF): shown OFF, locked.
+      assert.equal(cleanup!.locked, false);
+      // One rule ON by .env, the others with the switch (stored OFF): the switch
+      // shows its own OFF and stays the operator's (N1 gap 3).
       assert.equal(reset!.enabled, false);
       assert.deepEqual(reset!.env, [{ variable: 'ADDON_RESET_EXPIRY_WEEK', enabled: true }]);
+      assert.equal(reset!.locked, false);
     } finally {
       mock.restoreAll();
     }
+  });
+
+  it('N1 gap 3: .env turning ONE reset rule off leaves the switch at the value the other rules run with — not off as a whole', () => {
+    const env = { ADDON_RESET_EXPIRY_DAY: 'false' };
+    const reset = describeAddOnSwitches({}, env)[2]!;
+
+    assert.deepEqual(reset, {
+      name: 'trafficResetExpiry',
+      enabled: true,
+      defaultEnabled: true,
+      stored: null,
+      env: [{ variable: 'ADDON_RESET_EXPIRY_DAY', enabled: false }],
+      locked: false,
+    });
+    // …which is exactly how the stages run.
+    assert.deepEqual(resolveAddOnRolloutFlags({}, env).resetExpiry, {
+      DAY: false,
+      WEEK: true,
+      MONTH: true,
+      MONTH_ROLLING: true,
+    });
+  });
+
+  it('N1 gap 3: a switch of rules with EVERY rule in .env is locked and shows how they run', () => {
+    const reset = describeAddOnSwitches(
+      { trafficResetExpiry: true },
+      {
+        ADDON_RESET_EXPIRY_DAY: 'false',
+        ADDON_RESET_EXPIRY_WEEK: 'true',
+        ADDON_RESET_EXPIRY_MONTH: 'true',
+        ADDON_RESET_EXPIRY_MONTH_ROLLING: 'true',
+      },
+    )[2]!;
+
+    assert.equal(reset.locked, true);
+    assert.equal(reset.enabled, false, 'ON only while every rule is');
   });
 });
 
@@ -231,13 +271,33 @@ describe('add-on switches — a change from the page', () => {
         // The first change alone would be allowed; the request is refused whole.
         changes: { deviceCleanupAuto: false, trafficResetExpiry: true },
         confirmOff: true,
-        env: { ADDON_RESET_EXPIRY_DAY: 'false', ADDON_RESET_EXPIRY_MONTH_ROLLING: '0' },
+        env: {
+          ADDON_RESET_EXPIRY_DAY: 'false',
+          ADDON_RESET_EXPIRY_WEEK: 'off',
+          ADDON_RESET_EXPIRY_MONTH: 'no',
+          ADDON_RESET_EXPIRY_MONTH_ROLLING: '0',
+        },
       }),
       {
         kind: 'SET_IN_ENV',
         switchName: 'trafficResetExpiry',
-        variables: ['ADDON_RESET_EXPIRY_DAY', 'ADDON_RESET_EXPIRY_MONTH_ROLLING'],
+        variables: [
+          'ADDON_RESET_EXPIRY_DAY',
+          'ADDON_RESET_EXPIRY_WEEK',
+          'ADDON_RESET_EXPIRY_MONTH',
+          'ADDON_RESET_EXPIRY_MONTH_ROLLING',
+        ],
       },
+    );
+    // A switch of stages is refused on ONE line.
+    assert.deepEqual(
+      planAddOnSwitchUpdate({
+        stored: {},
+        changes: { durableAccounting: false },
+        confirmOff: true,
+        env: { ADDON_ENTITLEMENT_SHADOW: 'false' },
+      }),
+      { kind: 'SET_IN_ENV', switchName: 'durableAccounting', variables: ['ADDON_ENTITLEMENT_SHADOW'] },
     );
     // Even to the value .env already gives it: storing a value the panel
     // cannot apply would only surprise whoever later removes the line.
@@ -250,6 +310,26 @@ describe('add-on switches — a change from the page', () => {
       }),
       { kind: 'SET_IN_ENV', switchName: 'deviceCleanupAuto', variables: ['ADDON_DEVICE_CLEANUP_AUTO'] },
     );
+  });
+
+  it('N1 gap 3: stores a change to a switch of rules .env decides only in part — it applies to the rules no line names', () => {
+    const env = { ADDON_RESET_EXPIRY_DAY: 'false', ADDON_RESET_EXPIRY_MONTH_ROLLING: '0' };
+    // Turning it OFF is still a switch-off: asked first.
+    assert.deepEqual(
+      planAddOnSwitchUpdate({ stored: {}, changes: { trafficResetExpiry: false }, confirmOff: false, env }),
+      { kind: 'OFF_NOT_CONFIRMED', switchName: 'trafficResetExpiry' },
+    );
+    const plan = planAddOnSwitchUpdate({ stored: {}, changes: { trafficResetExpiry: false }, confirmOff: true, env });
+    assert.deepEqual(plan, { kind: 'WRITE', next: { trafficResetExpiry: false }, changed: ['trafficResetExpiry'] });
+    // …and it moves exactly the rules `.env` leaves to the switch.
+    const onlyWeek = { ADDON_RESET_EXPIRY_WEEK: 'true' };
+    const stored = plan.kind === 'WRITE' ? plan.next : {};
+    assert.deepEqual(resolveAddOnRolloutFlags(stored, onlyWeek).resetExpiry, {
+      DAY: false,
+      WEEK: true,
+      MONTH: false,
+      MONTH_ROLLING: false,
+    });
   });
 
   it('asks for confirmation to turn a switch OFF — from its default ON and from a stored ON', () => {

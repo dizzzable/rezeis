@@ -97,6 +97,17 @@ export interface ExtraProfileCustomer {
   readonly subscriptionsWithoutLink: readonly SubscriptionWithoutLink[];
 }
 
+/**
+ * Extra profiles whose `reiwa_id` names nobody this install has: a customer
+ * deleted here, or another install's (`ComparedUnknownOwner`). Nothing to link.
+ */
+export interface ExtraProfileUnknownOwner {
+  readonly userId: string;
+  /** When the audit says an operator deleted that user here; `null` proves nothing. */
+  readonly deletedAt: string | null;
+  readonly profiles: readonly ExtraProfile[];
+}
+
 export interface ExtraProfilesResponse {
   readonly check: PanelLinkCheckStatus;
   readonly comparedAt: string | null;
@@ -106,4 +117,8 @@ export interface ExtraProfilesResponse {
   readonly autoLinked: number;
   readonly customers: readonly ExtraProfileCustomer[];
   readonly truncated: boolean;
+  /** Apart from the customers, at most `PANEL_PROFILE_COMPARISON_MAX_UNKNOWN_OWNERS`. */
+  readonly unknownOwners: readonly ExtraProfileUnknownOwner[];
+  /** All such owners the comparison found; more than `unknownOwners.length` when the cap cut them. */
+  readonly unknownOwnersTotal: number;
 }

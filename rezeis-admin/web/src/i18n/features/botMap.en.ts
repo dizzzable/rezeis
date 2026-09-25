@@ -164,7 +164,7 @@ export const en = {
       defaultTargetHint:
         'With no buttons, the system still deep-links into the most relevant cabinet section — see the diagram.',
       lifetimeTopUpHint:
-        'A subscription that never expires has nothing to renew, so the bot turns this notification’s buttons that open «Subscription renewal» (/renew) into «📦 Buy more traffic» → «Add-ons» (/addons) for that subscription. The push and the cabinet bell lead there too. The diagram draws it as its own arrow.',
+        'A subscription that never expires has nothing to renew, so the bot turns this notification’s buttons that open «Subscription renewal» (/renew) into «📦 Buy more traffic» → «Add-ons» (/addons) for that subscription — if it has something to buy there: extra traffic or «Traffic reset». With nothing to buy (say, a lifetime subscription on a plan without traffic resets and no «Traffic reset» in the catalogue) the bot leaves those buttons out, and the notification still goes. The push leads there too, or to the home page when there is nothing to buy; the cabinet bell then just shows the notification. The diagram draws it as its own arrow.',
       save: 'Save template',
     },
     terminal: {

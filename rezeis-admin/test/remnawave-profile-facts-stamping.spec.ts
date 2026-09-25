@@ -310,8 +310,9 @@ describe('profile sync — the CREATE answer is stamped', () => {
         $transaction: async (callback: (tx: unknown) => Promise<unknown>) =>
           callback({
             $executeRaw: recorder.$executeRaw,
-            $queryRaw: async () => [{ status: SubscriptionStatus.LIMITED }],
-            subscription: { update: async () => undefined },
+            $queryRaw: async () => [{ status: SubscriptionStatus.LIMITED, remnawaveId: null }],
+            // The link write, fenced on the link the CREATE read (none).
+            subscription: { updateMany: async () => ({ count: 1 }) },
             subscriptionTerm: {
               updateMany: async (input: unknown) => {
                 termAnchors.push(input);

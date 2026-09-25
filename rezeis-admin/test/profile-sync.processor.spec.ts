@@ -551,9 +551,13 @@ describe('ProfileSyncProcessor', () => {
         $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
           // The advisory lock the exclusivity guard takes before the row lock.
           $executeRaw: async () => 1,
-          $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE }],
+          $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE, remnawaveId: null }],
           subscription: {
-            update: async (input: unknown) => { subscriptionUpdates.push(input); },
+            // The link write: a compare-and-swap on the link the CREATE read.
+            updateMany: async (input: unknown) => {
+              subscriptionUpdates.push(input);
+              return { count: 1 };
+            },
           },
           subscriptionTerm: {
             updateMany: async (input: unknown) => {
@@ -611,7 +615,9 @@ describe('ProfileSyncProcessor', () => {
       data: { remnawavePendingUsername: 'rz_subscription_1', remnawavePendingOwnerId: 'user-1' },
     }]);
     assert.deepStrictEqual(subscriptionUpdates, [{
-      where: { id: 'subscription-1' },
+      // Only while the row still holds the link the CREATE read (none), or
+      // already this very profile (review R3b-05).
+      where: { id: 'subscription-1', OR: [{ remnawaveId: null }, { remnawaveId: '4471' }] },
       data: {
         // The panel's own numeric id, in decimal — the spelling every user
         // route answers to and the one `remnawaveId` now stores.
@@ -659,7 +665,7 @@ describe('ProfileSyncProcessor', () => {
           // The advisory lock the exclusivity guard takes before the row lock.
           $executeRaw: async () => 1,
           $queryRaw: async () => [{ id: 'subscription-deleted', status: SubscriptionStatus.DELETED, remnawaveId: null }],
-          subscription: { update: async () => undefined },
+          subscription: { updateMany: async () => ({ count: 1 }) },
           profileSyncJob: {
             findMany: async () => [],
             create: async () => { deleteJobs += 1; return { id: 'delete-job-late-create' }; },
@@ -730,11 +736,18 @@ describe('ProfileSyncProcessor', () => {
         $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
           // The advisory lock the exclusivity guard takes before the row lock.
           $executeRaw: async () => 1,
-          $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE }],
+          $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE, remnawaveId: row['remnawaveId'] }],
           subscription: {
-            update: async (input: { data: Record<string, unknown> }) => {
+            // The fenced link write, evaluated against the row: it lands only
+            // while the row holds one of the links the fence names.
+            updateMany: async (input: {
+              where: { OR: ReadonlyArray<{ remnawaveId: unknown }> };
+              data: Record<string, unknown>;
+            }) => {
               subscriptionUpdates.push(input);
+              if (!input.where.OR.some((arm) => arm.remnawaveId === row['remnawaveId'])) return { count: 0 };
               Object.assign(row, input.data);
+              return { count: 1 };
             },
           },
           // The adopted panel row carries a `createdAt`, so the MONTH_ROLLING
@@ -778,7 +791,7 @@ describe('ProfileSyncProcessor', () => {
 
     assert.equal(createCalled, false);
     assert.deepStrictEqual(subscriptionUpdates, [{
-      where: { id: 'subscription-1' },
+      where: { id: 'subscription-1', OR: [{ remnawaveId: null }, { remnawaveId: '902' }] },
       data: {
         remnawaveId: '902',
         // Reusing a profile records its identity just as fully as creating one:
@@ -1326,8 +1339,8 @@ describe('ProfileSyncProcessor', () => {
         $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
           // The advisory lock the exclusivity guard takes before the row lock.
           $executeRaw: async () => 1,
-          $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE }],
-          subscription: { update: async () => { throw schemaDrift; } },
+          $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE, remnawaveId: null }],
+          subscription: { updateMany: async () => { throw schemaDrift; } },
           profileSyncJob: { findMany: async () => [], create: async () => ({ id: 'unused-delete-job' }) },
         }),
       } as never,
@@ -1707,8 +1720,13 @@ describe('ProfileSyncProcessor', () => {
         $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
           // The advisory lock the exclusivity guard takes before the row lock.
           $executeRaw: async () => 1,
-          $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE }],
-          subscription: { update: async (input: unknown) => { subscriptionUpdates.push(input); } },
+          $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE, remnawaveId: null }],
+          subscription: {
+            updateMany: async (input: unknown) => {
+              subscriptionUpdates.push(input);
+              return { count: 1 };
+            },
+          },
           subscriptionTerm: { updateMany: async () => ({ count: 0 }) },
           profileSyncJob: { findMany: async () => [], create: async () => ({ id: 'unused-delete' }) },
         }),
@@ -1762,9 +1780,9 @@ describe('ProfileSyncProcessor', () => {
       data: { remnawavePendingUsername: 'rz_subscription_imported', remnawavePendingOwnerId: 'user-1' },
     });
     // ...and the fresh profile was linked back, under the identity this panel
-    // actually answers to.
+    // actually answers to — while the row still held no link.
     assert.deepStrictEqual(subscriptionUpdates[2], {
-      where: { id: 'subscription-imported' },
+      where: { id: 'subscription-imported', OR: [{ remnawaveId: null }, { remnawaveId: '5150' }] },
       data: {
         remnawaveId: '5150',
         remnawavePanelId: 5150,
@@ -1918,8 +1936,13 @@ describe('ProfileSyncProcessor', () => {
         $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
           // The advisory lock the exclusivity guard takes before the row lock.
           $executeRaw: async () => 1,
-          $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE }],
-          subscription: { update: async (input: unknown) => { subscriptionUpdates.push(input); } },
+          $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE, remnawaveId: null }],
+          subscription: {
+            updateMany: async (input: unknown) => {
+              subscriptionUpdates.push(input);
+              return { count: 1 };
+            },
+          },
           subscriptionTerm: { updateMany: async () => ({ count: 0 }) },
           profileSyncJob: { findMany: async () => [], create: async () => ({ id: 'unused-delete' }) },
         }),
@@ -1955,7 +1978,7 @@ describe('ProfileSyncProcessor', () => {
     });
     // ...and the fresh profile linked back to the previously-unlinked subscription.
     assert.deepStrictEqual(subscriptionUpdates[1], {
-      where: { id: 'subscription-unlinked' },
+      where: { id: 'subscription-unlinked', OR: [{ remnawaveId: null }, { remnawaveId: '7788' }] },
       data: {
         remnawaveId: '7788',
         remnawavePanelId: 7788,
@@ -2193,11 +2216,13 @@ describe('ProfileSyncProcessor', () => {
         $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
           // The advisory lock the exclusivity guard takes before the row lock.
           $executeRaw: async () => 1,
-          $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE }],
+          $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE, remnawaveId: null }],
           subscription: {
-            update: async (input: { data: Record<string, unknown> }) => {
+            // The fenced link write; nothing else links this row meanwhile.
+            updateMany: async (input: { data: Record<string, unknown> }) => {
               linkWrites.push(input);
               Object.assign(linked, input.data);
+              return { count: 1 };
             },
           },
           subscriptionTerm: { updateMany: async () => ({ count: 0 }) },
@@ -2568,7 +2593,7 @@ describe('ProfileSyncProcessor', () => {
     assert.equal(failureWrites.length, 0);
     assert.deepEqual(linkWrites, [
       {
-        where: { id: 'subscription-1' },
+        where: { id: 'subscription-1', OR: [{ remnawaveId: null }, { remnawaveId: '1201' }] },
         data: {
           remnawaveId: '1201',
           remnawavePanelId: 1201,
@@ -2630,7 +2655,7 @@ describe('ProfileSyncProcessor', () => {
     assert.equal((created?.data as Record<string, unknown> | undefined)?.['username'], 'rz_login_7f3a2b_sub');
     assert.deepEqual(linkWrites, [
       {
-        where: { id: 'subscription-1' },
+        where: { id: 'subscription-1', OR: [{ remnawaveId: null }, { remnawaveId: '1203' }] },
         data: {
           remnawaveId: '1203',
           remnawavePanelId: 1203,
@@ -2918,8 +2943,8 @@ describe('ProfileSyncProcessor', () => {
         $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
           // The advisory lock the exclusivity guard takes before the row lock.
           $executeRaw: async () => 1,
-          $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE }],
-          subscription: { update: async () => undefined },
+          $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE, remnawaveId: null }],
+          subscription: { update: async () => undefined, updateMany: async () => ({ count: 1 }) },
           subscriptionTerm: { updateMany: async () => ({ count: 0 }) },
           profileSyncJob: { findMany: async () => [], create: async () => ({ id: 'unused' }) },
         }),
@@ -3266,9 +3291,21 @@ describe('ProfileSyncProcessor — live state must survive the safeguards', () =
     readonly otherRows?: readonly StoredRow[];
     readonly lockedStatus?: SubscriptionStatus;
     readonly conflictOnProbe?: string;
+    /**
+     * A link another writer lands on the row while this CREATE talks to the
+     * panel — an operator's «Привязать профиль», the walk or the comparison
+     * (review R3b-05): during the POST on the create path, during the name
+     * lookup on the adopt path. From then on the row holds it.
+     */
+    readonly linkedMeanwhile?: { readonly remnawaveId: string; readonly panelId: number };
   }) {
     const deleteJobPayloads: unknown[] = [];
     const linkWrites: unknown[] = [];
+    const linkAttempts: Array<{ readonly where: Record<string, unknown> }> = [];
+    const enqueued: string[] = [];
+    const patches: Array<Record<string, unknown>> = [];
+    const stampValues: unknown[][] = [];
+    const anchorWrites: unknown[] = [];
     let creates = 0;
     const row: StoredRow = {
       id: 'subscription-1',
@@ -3278,6 +3315,15 @@ describe('ProfileSyncProcessor — live state must survive the safeguards', () =
       remnawavePanelId: null,
       remnawavePanelUsername: null,
       ...options.subscription,
+    };
+    // The link columns as the database holds them now.
+    let held: Pick<StoredRow, 'remnawaveId' | 'remnawavePanelId'> = {
+      remnawaveId: row.remnawaveId,
+      remnawavePanelId: row.remnawavePanelId,
+    };
+    const land = (): void => {
+      if (options.linkedMeanwhile === undefined) return;
+      held = { remnawaveId: options.linkedMeanwhile.remnawaveId, remnawavePanelId: options.linkedMeanwhile.panelId };
     };
     const processor = new ProfileSyncProcessor(
       {
@@ -3292,6 +3338,7 @@ describe('ProfileSyncProcessor — live state must survive the safeguards', () =
             payload: {},
             subscription: {
               ...row,
+              ...held,
               trafficLimit: 10,
               deviceLimit: 3,
               internalSquads: [],
@@ -3315,8 +3362,12 @@ describe('ProfileSyncProcessor — live state must survive the safeguards', () =
           updateMany: async () => ({ count: 1 }),
         },
         $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
-          // The advisory lock the exclusivity guard takes before the row lock.
-          $executeRaw: async () => 1,
+          // The advisory lock the exclusivity guard takes before the row lock,
+          // and the facts stamp (recorded: whose `createdAt` reached the row).
+          $executeRaw: async (query: { readonly values?: readonly unknown[] }) => {
+            stampValues.push([...(query?.values ?? [])]);
+            return 1;
+          },
           $queryRaw: async (query: { readonly strings?: readonly string[] }) => {
             // Discriminated by WHAT THE STATEMENT ASKS FOR, not by how many ran
             // before it. The previous version counted calls — "1 = advisory
@@ -3328,7 +3379,7 @@ describe('ProfileSyncProcessor — live state must survive the safeguards', () =
             // cannot be knocked out of step by reordering.
             const text = (query?.strings ?? []).join('');
             if (text.includes('FOR UPDATE')) {
-              return [{ status: options.lockedStatus ?? row.status }];
+              return [{ status: options.lockedStatus ?? row.status, remnawaveId: held.remnawaveId }];
             }
             // The exclusivity probe. No rows = nobody else holds this identity.
             return options.conflictOnProbe === undefined
@@ -3336,11 +3387,24 @@ describe('ProfileSyncProcessor — live state must survive the safeguards', () =
               : [{ conflictId: options.conflictOnProbe }];
           },
           subscription: {
-            update: async (input: unknown) => {
+            // The link write, fenced: evaluated against the row as it is NOW.
+            updateMany: async (input: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
+              linkAttempts.push(input);
+              if (!matchesWhere({ ...row, ...held }, input.where)) return { count: 0 };
               linkWrites.push(input);
+              held = {
+                remnawaveId: input.data['remnawaveId'] as string,
+                remnawavePanelId: (input.data['remnawavePanelId'] as number | undefined) ?? held.remnawavePanelId,
+              };
+              return { count: 1 };
             },
           },
-          subscriptionTerm: { updateMany: async () => ({ count: 0 }) },
+          subscriptionTerm: {
+            updateMany: async (input: unknown) => {
+              anchorWrites.push(input);
+              return { count: 0 };
+            },
+          },
           profileSyncJob: {
             findMany: async () => [],
             create: async (input: unknown) => {
@@ -3351,18 +3415,27 @@ describe('ProfileSyncProcessor — live state must survive the safeguards', () =
         }),
       } as never,
       {
-        getUserByUsername: async () =>
-          options.existingPanelUser === null
-            ? {
-                kind: 'rejected',
-                status: 404,
-                code: 'A063',
-                detail: 'User with specified params not found',
-                retryAfterMs: null,
-              }
-            : { kind: 'ok', data: { response: options.existingPanelUser } },
+        getUserByUsername: async () => {
+          if (options.existingPanelUser === null) {
+            return {
+              kind: 'rejected',
+              status: 404,
+              code: 'A063',
+              detail: 'User with specified params not found',
+              retryAfterMs: null,
+            };
+          }
+          land();
+          return { kind: 'ok', data: { response: options.existingPanelUser } };
+        },
+        // The PATCH the row's state goes out with, to whatever profile it links.
+        updateUser: async (body: Record<string, unknown>) => {
+          patches.push(body);
+          return { kind: 'ok', data: { response: { id: body['id'], username: 'rz_linked_meanwhile' } } };
+        },
         createUser: async () => {
           creates += 1;
+          land();
           return {
             kind: 'ok',
             data: {
@@ -3384,12 +3457,22 @@ describe('ProfileSyncProcessor — live state must survive the safeguards', () =
         getContactInfo: async () => ({ email: null, telegramId: null }),
       } as never,
       { error: () => undefined, info: () => undefined, warn: () => undefined } as never,
-      { enqueue: async () => undefined } as never,
+      {
+        enqueue: async (jobId: string) => {
+          enqueued.push(jobId);
+        },
+      } as never,
     );
     return {
       run: () => processor.process({ data: { syncJobId: 'sync-job-create' } } as never),
       deleteJobPayloads,
       linkWrites,
+      linkAttempts,
+      enqueued,
+      patches,
+      stampValues,
+      anchorWrites,
+      held: () => held,
       panelCreates: () => creates,
     };
   }
@@ -3498,6 +3581,99 @@ describe('ProfileSyncProcessor — live state must survive the safeguards', () =
 
     await assert.rejects(created.run(), /subscription-winner was linked to it first/);
     assert.deepEqual(created.linkWrites, [], 'the loser must not overwrite the winner');
+  });
+
+  // ── Review R3b-05: the link write is a compare-and-swap ──────────────────
+  //
+  // The CREATE read the row unlinked before its panel round-trip. Meanwhile an
+  // operator's «Привязать профиль», the walk or the comparison can link it —
+  // each under ITS profile's advisory lock, not this one. The write used to be
+  // unconditional and replaced that link with the profile the CREATE made.
+
+  /** The createdAt of the profile the harness's POST mints (id 9001). */
+  const MINTED_CREATED_AT = new Date('2026-01-15T12:30:00.000Z').getTime();
+
+  it('R3b-05: a link written during the POST wins — nothing overwrites it, the profile the CREATE made is deleted, the row is pushed to the profile it links', async () => {
+    const created = createProcessor({
+      subscription: {},
+      existingPanelUser: null,
+      linkedMeanwhile: { remnawaveId: '5150', panelId: 5150 },
+    });
+
+    await created.run();
+
+    assert.equal(created.panelCreates(), 1);
+    assert.deepEqual(
+      created.linkAttempts.map((attempt) => attempt.where),
+      [{ id: 'subscription-1', OR: [{ remnawaveId: null }, { remnawaveId: '9001' }] }],
+      'the write is fenced on the link the CREATE read, or this very profile',
+    );
+    assert.deepEqual(created.linkWrites, [], 'the newer link is not overwritten');
+    assert.deepEqual(created.held(), { remnawaveId: '5150', remnawavePanelId: 5150 });
+    // Nobody holds the profile this job made, and nobody ever saw its link.
+    assert.deepEqual(created.deleteJobPayloads, [
+      {
+        source: 'CREATE_SUPERSEDED_BY_NEWER_LINK',
+        targetRemnawaveId: '9001',
+        targetRemnawavePanelId: 9001,
+        targetRemnawavePanelUsername: 'rz_john_sub',
+      },
+    ]);
+    assert.deepEqual(created.enqueued, ['compensating-delete-job']);
+    // Whoever linked 5150 pushed nothing: the row's state goes out to it.
+    assert.deepEqual(created.patches.map((patch) => patch['id']), [5150]);
+    // And the made profile's facts never reached the row: its `createdAt` is
+    // no anchor of the profile the row links.
+    assert.equal(
+      created.stampValues.some((values) =>
+        values.some((value) => value instanceof Date && value.getTime() === MINTED_CREATED_AT),
+      ),
+      false,
+      'no facts of the profile that lost are stamped',
+    );
+    assert.deepEqual(created.anchorWrites, [], 'nor its createdAt as a rolling anchor');
+  });
+
+  it('R3b-05: a profile the CREATE was about to ADOPT is left alone when a newer link wins — no DELETE, no overwrite', async () => {
+    const created = createProcessor({
+      subscription: {},
+      existingPanelUser: {
+        id: 4471,
+        username: 'rz_john_sub',
+        description: 'name: John\nreiwa_id: user-1',
+        subscriptionUrl: 'https://sub.example/found',
+        createdAt: null,
+      },
+      linkedMeanwhile: { remnawaveId: '5150', panelId: 5150 },
+    });
+
+    await created.run();
+
+    assert.equal(created.panelCreates(), 0);
+    assert.equal(created.linkAttempts.length, 1);
+    assert.deepEqual(created.linkWrites, []);
+    assert.deepEqual(created.held(), { remnawaveId: '5150', remnawavePanelId: 5150 });
+    // It existed before this job, and the customer's devices may use it.
+    assert.deepEqual(created.deleteJobPayloads, [], 'a profile found, not made, is never deleted');
+    assert.deepEqual(created.enqueued, []);
+    assert.deepEqual(created.patches.map((patch) => patch['id']), [5150]);
+  });
+
+  it('R3b-05 control: a check that linked THIS very profile first is no newer link — the CREATE links it and deletes nothing', async () => {
+    // The comparison found the profile the POST had just made and linked it
+    // to this row: the same profile, so the write still lands.
+    const created = createProcessor({
+      subscription: {},
+      existingPanelUser: null,
+      linkedMeanwhile: { remnawaveId: '9001', panelId: 9001 },
+    });
+
+    await created.run();
+
+    assert.equal(created.linkWrites.length, 1);
+    assert.deepEqual(created.held(), { remnawaveId: '9001', remnawavePanelId: 9001 });
+    assert.deepEqual(created.deleteJobPayloads, []);
+    assert.deepEqual(created.enqueued, []);
   });
 
   /** A DELETE job carrying the identity recorded at enqueue time. */
@@ -4130,8 +4306,8 @@ describe('provisioning a trial', () => {
         subscription: { update: async () => undefined, updateMany: async () => ({ count: 1 }) },
         $transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({
           $executeRaw: async () => 1,
-          $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE }],
-          subscription: { update: async () => undefined },
+          $queryRaw: async () => [{ status: SubscriptionStatus.ACTIVE, remnawaveId: null }],
+          subscription: { updateMany: async () => ({ count: 1 }) },
           subscriptionTerm: { updateMany: async () => ({ count: 0 }) },
           profileSyncJob: {
             findMany: async () => [],

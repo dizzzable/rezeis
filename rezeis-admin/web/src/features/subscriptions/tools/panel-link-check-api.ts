@@ -118,6 +118,7 @@ export const AUTO_LINK_OUTCOMES = [
   'syncInFlight',
   'changedDuringCheck',
   'panelUnavailable',
+  'ownerNotInPanel',
 ] as const
 
 export type AutoLinkOutcome = (typeof AUTO_LINK_OUTCOMES)[number]
@@ -166,6 +167,18 @@ export interface ExtraProfileCustomer {
   readonly subscriptionsWithoutLink: readonly SubscriptionWithoutLink[]
 }
 
+/**
+ * Extra profiles whose `reiwa_id` names nobody this panel has: a customer
+ * deleted here (the deletion removes the profile from Remnawave only when it
+ * can), or another panel's customer on the same Remnawave. Nothing to link.
+ */
+export interface ExtraProfileUnknownOwner {
+  readonly userId: string
+  /** When the audit says an operator deleted that customer here; null proves nothing. */
+  readonly deletedAt: string | null
+  readonly profiles: readonly ExtraProfile[]
+}
+
 export interface ExtraProfilesReport {
   readonly check: PanelLinkCheckStatus
   /** When the comparison last read Remnawave; null = never. */
@@ -176,6 +189,10 @@ export interface ExtraProfilesReport {
   readonly autoLinked: number | null
   readonly customers: readonly ExtraProfileCustomer[]
   readonly truncated: boolean
+  /** Apart from the customers, under a cap of their own; empty from a server that predates them. */
+  readonly unknownOwners: readonly ExtraProfileUnknownOwner[]
+  /** How many such owners there were; null = not sent. */
+  readonly unknownOwnersTotal: number | null
 }
 
 // ── Readers ──────────────────────────────────────────────────────────────────
@@ -298,6 +315,19 @@ function readCustomer(value: unknown): ExtraProfileCustomer | null {
   }
 }
 
+function readUnknownOwner(value: unknown): ExtraProfileUnknownOwner | null {
+  if (!isRecord(value)) return null
+  const userId = readString(value.userId)
+  if (userId === null) return null
+  return {
+    userId,
+    deletedAt: readString(value.deletedAt),
+    profiles: expectArray<unknown>(value.profiles)
+      .map(readExtraProfile)
+      .filter((profile): profile is ExtraProfile => profile !== null),
+  }
+}
+
 export async function fetchExtraProfiles(): Promise<ExtraProfilesReport> {
   const { data } = await api.get<unknown>(EXTRA_PROFILES_PATH)
   const body = isRecord(data) ? data : {}
@@ -312,6 +342,11 @@ export async function fetchExtraProfiles(): Promise<ExtraProfilesReport> {
       .map(readCustomer)
       .filter((customer): customer is ExtraProfileCustomer => customer !== null),
     truncated: body.truncated === true,
+    // Absent from a server built before them: none, not a failed load.
+    unknownOwners: (body.unknownOwners === undefined ? [] : expectArray<unknown>(body.unknownOwners))
+      .map(readUnknownOwner)
+      .filter((owner): owner is ExtraProfileUnknownOwner => owner !== null),
+    unknownOwnersTotal: readNumber(body.unknownOwnersTotal),
   }
 }
 

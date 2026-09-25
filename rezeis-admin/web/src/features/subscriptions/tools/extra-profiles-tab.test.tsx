@@ -399,6 +399,10 @@ describe('«Лишние профили в Remnawave»', () => {
       sentence: 'Не пробовали: последнее чтение Remnawave не удалось.',
     },
     {
+      overrides: { autoLink: 'ownerNotInPanel' },
+      sentence: 'Не привязывается: клиента с таким reiwa_id в панели нет.',
+    },
+    {
       overrides: { autoLink: 'somethingNewServerSide' },
       sentence: 'Исход, неизвестный этой сборке: somethingNewServerSide',
     },
@@ -432,6 +436,55 @@ describe('«Лишние профили в Remnawave»', () => {
     renderWithProviders(<ExtraProfilesTab />)
 
     expect(await screen.findByText('Лишних профилей нет.')).toBeInTheDocument()
+  })
+
+  // Review R3b-03: the owners the panel does not have — a customer deleted here
+  // whose profile outlived the deletion, or another panel's — listed apart.
+  const DELETED_HERE = {
+    userId: 'user-deleted',
+    deletedAt: '2026-09-20T08:00:00.000Z',
+    profiles: [profile({ profileId: '6001', username: 'rz_deleted', subscriptionMarker: null, autoLink: 'ownerNotInPanel' })],
+  }
+  const FOREIGN = {
+    userId: 'user-foreign',
+    deletedAt: null,
+    profiles: [profile({ profileId: '6002', username: 'rz_foreign', subscriptionMarker: null, autoLink: 'ownerNotInPanel' })],
+  }
+
+  it('lists the owners the panel does not have APART, after its customers: the day one was deleted here, and nothing to link', async () => {
+    mockReport(reportBody({ customers: [ALICE], unknownOwners: [DELETED_HERE, FOREIGN], unknownOwnersTotal: 5 }))
+
+    renderWithProviders(<ExtraProfilesTab />)
+
+    const deleted = await blockOf('rz_deleted')
+    const title = screen.getByText('Клиенты, которых нет в панели')
+    const alice = await blockOf('rz_alice_1')
+    // After the customers, under a heading of their own.
+    expect(alice.compareDocumentPosition(title) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(title.compareDocumentPosition(deleted) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(screen.getByText('Показано: 2 из 5 — сначала клиенты, удалённые здесь.')).toBeInTheDocument()
+
+    expect(deleted).toHaveTextContent('клиент не найден в панели')
+    expect(deleted).toHaveTextContent(`клиент удалён в панели ${formatDateTime('2026-09-20T08:00:00.000Z')}`)
+    expect(deleted).toHaveTextContent('user-deleted')
+    expect(deleted).not.toHaveTextContent('Подписки клиента без привязки')
+    expect(within(deleted).queryByRole('button')).not.toBeInTheDocument()
+    const cells = await profileCells('rz_deleted')
+    expect(cells[5]?.textContent).toBe('Не привязывается: клиента с таким reiwa_id в панели нет.')
+
+    const foreign = await blockOf('rz_foreign')
+    expect(foreign).toHaveTextContent('клиент не найден в панели')
+    expect(foreign).not.toHaveTextContent('клиент удалён в панели')
+  })
+
+  it('does not say "no extra profiles" while owners the panel does not have are listed, and names no count when none was cut', async () => {
+    mockReport(reportBody({ customers: [], unknownOwners: [FOREIGN], unknownOwnersTotal: 1, readOutcome: 'complete' }))
+
+    renderWithProviders(<ExtraProfilesTab />)
+
+    await blockOf('rz_foreign')
+    expect(screen.queryByText('Лишних профилей нет.')).not.toBeInTheDocument()
+    expect(screen.queryByText(/^Показано:/)).not.toBeInTheDocument()
   })
 
   it('does not call a comparison that never ran "no extra profiles"', async () => {

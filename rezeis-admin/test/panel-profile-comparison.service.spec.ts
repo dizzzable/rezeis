@@ -5,6 +5,7 @@ import { SubscriptionStatus, SyncJobStatus } from '@prisma/client';
 
 import {
   PANEL_PROFILE_COMPARISON_MAX_CUSTOMERS,
+  PANEL_PROFILE_COMPARISON_MAX_UNKNOWN_OWNERS,
   PanelProfileComparisonService,
 } from '../src/modules/profile-sync/panel-profile-comparison.service';
 import {
@@ -52,10 +53,17 @@ interface Harness {
   beforeProbe: (() => void) | null;
 }
 
-function harness(input: { users?: string[]; subscriptions?: Row[]; jobs?: Row[] }): Harness {
+function harness(input: {
+  users?: string[];
+  subscriptions?: Row[];
+  jobs?: Row[];
+  /** The audit log: `action` and `metadata.userId`, as the deletions write them. */
+  audit?: Array<{ action: string; userId: string; at: Date }>;
+}): Harness {
   const users = (input.users ?? ['user-1']).map((id) => ({ id }));
   const subscriptions = input.subscriptions ?? [];
   const jobs = input.jobs ?? [];
+  const audit = input.audit ?? [];
   const writes: Array<{ where: Row; data: Row }> = [];
   const locks: string[] = [];
   const state: Harness = {
@@ -78,6 +86,17 @@ function harness(input: { users?: string[]; subscriptions?: Row[]; jobs?: Row[] 
   (state as { client: unknown }).client = {
     user: {
       findMany: async (args: { where: Record<string, unknown> }) => users.filter((row) => matches(row, args.where)),
+    },
+    // The deletions read: the newest audit row of the action asked, per user asked.
+    $queryRaw: async (query: { values?: unknown[] }) => {
+      const [action, userIds] = (query.values ?? []) as [string, string[]];
+      const newest = new Map<string, Date>();
+      for (const entry of audit) {
+        if (entry.action !== action || !userIds.includes(entry.userId)) continue;
+        const known = newest.get(entry.userId);
+        if (known === undefined || entry.at > known) newest.set(entry.userId, entry.at);
+      }
+      return [...newest.entries()].map(([userId, deletedAt]) => ({ userId, deletedAt }));
     },
     subscription,
     profileSyncJob: {
@@ -347,8 +366,9 @@ describe('PanelProfileComparisonService — never a guess', () => {
     assert.deepEqual(prisma.writes, []);
   });
 
-  it('an owner who is not a user of this install is left out altogether: not listed, not linked', async () => {
-    // Another install's customer on a shared Remnawave (review R2b-04): the
+  it('an owner who is not a user of this install is listed APART, never as a customer and never linked', async () => {
+    // A customer deleted here whose profile the deletion could not remove, or
+    // another install's on a shared Remnawave (reviews R2b-04, R3b-03): the
     // line names a user that exists nowhere here.
     const prisma = harness({ users: [], subscriptions: [] });
 
@@ -356,6 +376,48 @@ describe('PanelProfileComparisonService — never a guess', () => {
 
     assert.deepEqual(result.customers, []);
     assert.equal(result.truncated, false);
+    assert.deepEqual(result.unknownOwners, [
+      {
+        userId: 'user-gone',
+        deletedAt: null,
+        profiles: [
+          {
+            profileId: '4711',
+            username: 'rz_user_4711',
+            status: 'ACTIVE',
+            createdAt: '2026-09-01T10:00:00.000Z',
+            usedTrafficBytes: 1024,
+            subscriptionMarker: null,
+            linkedBySubscriptionId: null,
+            autoLink: 'ownerNotInPanel',
+            autoLinkedSubscriptionId: null,
+            autoLinkedAt: null,
+          },
+        ],
+      },
+    ]);
+    assert.equal(result.unknownOwnersTotal, 1);
+    assert.deepEqual(prisma.writes, []);
+  });
+
+  it('a missing owner\'s profile a live row links, or a DELETED row names, is said so like a customer\'s', async () => {
+    const prisma = harness({
+      users: ['user-9'],
+      subscriptions: [
+        subscription('sub-z', { userId: 'user-9', remnawaveId: '4711', remnawavePanelId: 4711 }),
+        subscription('sub-old', { userId: 'user-9', status: SubscriptionStatus.DELETED, remnawaveId: '4712', remnawavePanelId: 4712 }),
+      ],
+    });
+
+    const result = await compareOk(prisma, [profile(4711, 'reiwa_id: user-gone'), profile(4712, 'reiwa_id: user-gone')]);
+
+    assert.deepEqual(
+      result.unknownOwners[0]?.profiles.map((entry) => [entry.profileId, entry.autoLink, entry.linkedBySubscriptionId]),
+      [
+        ['4711', 'takenByOtherRow', 'sub-z'],
+        ['4712', 'namedByDeletedSubscription', 'sub-old'],
+      ],
+    );
     assert.deepEqual(prisma.writes, []);
   });
 
@@ -418,8 +480,9 @@ describe('PanelProfileComparisonService — never a guess', () => {
  * filled the list: this install's own customers were never compared or linked.
  */
 describe('PanelProfileComparisonService — a Remnawave shared with another install', () => {
-  it("drops the other install's customers BEFORE the cap: this install's customer is compared and linked", async () => {
+  it("keeps the other install's customers OUT of the customers' cap: this install's customer is compared and linked", async () => {
     assert.equal(PANEL_PROFILE_COMPARISON_MAX_CUSTOMERS, 500, 'the fixture below is sized to the cap');
+    assert.equal(PANEL_PROFILE_COMPARISON_MAX_UNKNOWN_OWNERS, 50);
     // 500 foreign owners, every one of them sorting before 'user-1'.
     const foreign = Array.from({ length: 500 }, (_unused, index) =>
       profile(9000 + index, `reiwa_id: aaa-other-install-${String(index).padStart(3, '0')}`),
@@ -438,10 +501,58 @@ describe('PanelProfileComparisonService — a Remnawave shared with another inst
     assert.deepEqual(
       result.customers.map((customer) => customer.userId),
       ['user-1', 'user-2'],
-      "none of the other install's customers is listed",
+      "none of the other install's customers is listed as a customer",
     );
     assert.equal(result.customers[1]?.profiles[0]?.autoLink, 'noSubscriptionWithoutLink');
     assert.equal(result.truncated, false, "the other install's customers do not count towards the cap");
+    // …they are listed apart, under a cap of their own, and all are counted.
+    assert.equal(result.unknownOwners.length, 50);
+    assert.equal(result.unknownOwners[0]?.userId, 'aaa-other-install-000');
+    assert.equal(result.unknownOwnersTotal, 500);
+    assert.deepEqual(prisma.writes.filter((write) => write.where['id'] !== 'sub-a'), [], 'nothing of theirs is written');
+  });
+
+  it('a customer DELETED here leads that list, dated — the audit row proves the deletion; the other install cannot push it out', async () => {
+    // Deleting a customer removes their profile from Remnawave only
+    // best-effort (`UserDeletionService`): a failed or skipped DELETE leaves it
+    // live, naming a user this install no longer has (review R3b-03).
+    const foreign = Array.from({ length: 60 }, (_unused, index) =>
+      profile(9000 + index, `reiwa_id: aaa-other-install-${String(index).padStart(3, '0')}`),
+    );
+    const prisma = harness({
+      users: ['user-1'],
+      subscriptions: [],
+      audit: [
+        { action: 'user.deleted', userId: 'zzz-deleted-early', at: new Date('2026-09-01T08:00:00.000Z') },
+        { action: 'user.deleted', userId: 'zzz-deleted-late', at: new Date('2026-09-20T08:00:00.000Z') },
+        // Another action about the same user proves nothing.
+        { action: 'user.blocked', userId: 'zzz-blocked-only', at: new Date('2026-09-21T08:00:00.000Z') },
+      ],
+    });
+
+    const result = await compareOk(prisma, [
+      ...foreign,
+      profile(7001, 'reiwa_id: zzz-deleted-early'),
+      profile(7002, 'reiwa_id: zzz-deleted-late'),
+      profile(7003, 'reiwa_id: zzz-blocked-only'),
+    ]);
+
+    assert.deepEqual(
+      result.unknownOwners.slice(0, 3).map((owner) => [owner.userId, owner.deletedAt]),
+      [
+        ['zzz-deleted-late', '2026-09-20T08:00:00.000Z'],
+        ['zzz-deleted-early', '2026-09-01T08:00:00.000Z'],
+        ['aaa-other-install-000', null],
+      ],
+      'deleted here first, newest first; then the rest by id',
+    );
+    assert.equal(result.unknownOwners.length, 50);
+    assert.equal(result.unknownOwnersTotal, 63);
+    assert.equal(
+      result.unknownOwners.some((owner) => owner.userId === 'zzz-blocked-only'),
+      false,
+      'with no deletion on record it sorts by id, after the foreign owners, past the cap',
+    );
   });
 
   it("the cap still cuts this install's own customers, and says so", async () => {

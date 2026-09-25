@@ -28,9 +28,11 @@ import { panelProfileClaims } from './remnawave-importer.service';
 import { StealthnetReferralSyncService } from './stealthnet-referral-sync.service';
 import {
   buildPanelLookup,
+  overlaidProfileFactsColumns,
   panelSubscriptionState,
   reconcileMissingPanelStatus,
   resolvePanelProfile,
+  stampOverlaidProfileFacts,
   type PanelAbsenceProbe,
   type PanelLookup,
 } from '../utils/remnawave-overlay.util';
@@ -725,6 +727,9 @@ export class StealthnetImporterService {
         where: { id: existing.id },
         data: verdict === null ? dataShared : withoutWithheldReadbackFields(dataShared, verdict),
       });
+      // The profile's `createdAt` and `lastTrafficResetAt`, from the user the
+      // overlay read — whatever the read-back rule took of the rest.
+      await stampOverlaidProfileFacts(this.prismaService, existing.id, panel, (message) => this.logger.warn(message));
       if (verdict !== null) {
         await finishTermModelReadback(this.prismaService, verdict, {
           subscriptionId: existing.id,
@@ -752,6 +757,9 @@ export class StealthnetImporterService {
         // provisions a fresh profile instead of updating one that is not there.
         remnawaveId: foreignPanel ? null : sub.remnawave_uuid,
         startedAt: sub.created_at ? new Date(sub.created_at) : new Date(),
+        // A new row has no earlier fact to keep (none on a foreign panel,
+        // whose answer the overlay never reads).
+        ...overlaidProfileFactsColumns(panel),
       },
     });
 

@@ -31,6 +31,17 @@ export const en = {
     setInEnvAfterDefault:
       'If you delete the line from .env, after the restart the panel’s value applies — by default “{{value}}”.',
     setInEnvKeepOff: 'To keep it off, do not delete the line.',
+    // “Traffic add-ons until the reset” when .env sets only some of the reset rules.
+    setInEnvRules: 'Set in .env for: {{rules}}',
+    setInEnvRulesRest: 'The other reset rules follow this switch, and it can be changed here.',
+    setInEnvRulesAfter: 'If you delete a line from .env, after the restart its rule follows this switch.',
+    setInEnvRulesKeepOff: 'To keep that rule off, do not delete the line.',
+    envRules: {
+      DAY: 'the daily reset',
+      WEEK: 'the weekly reset',
+      MONTH: 'the monthly reset (on the 1st)',
+      MONTH_ROLLING: 'the monthly reset by creation date',
+    },
     valueOn: 'on',
     valueOff: 'off',
     noPermission: 'Only a role with Add-ons → Edit can change these switches.',
@@ -42,7 +53,7 @@ export const en = {
       durableAccounting: {
         label: 'New add-on accounting',
         description:
-          'An add-on bought in the cabinet gets an end date — the end of the subscription — instead of raising the limit for good. Subscriptions move into the new accounting in the background.',
+          'An add-on bought in the cabinet gets an end date instead of raising the limit for good: extra devices last until the subscription ends, and so does extra traffic — on a plan that resets traffic, until the nearest reset while “Traffic add-ons until the reset” is on. Subscriptions move into the new accounting in the background.',
       },
       deviceCleanupAuto: {
         label: 'Remove extra devices automatically',
@@ -52,7 +63,7 @@ export const en = {
       trafficResetExpiry: {
         label: 'Traffic add-ons until the reset',
         description:
-          'On a plan with a traffic reset, a traffic add-on lasts until Remnawave’s nearest traffic reset and is removed 30 minutes after it; if the subscription ends first, until the subscription ends. On a plan without a reset, until the subscription ends.',
+          'On a plan with a traffic reset, a traffic add-on lasts until Remnawave’s nearest traffic reset and is removed 30 minutes after it; if the subscription ends first, until the subscription ends. On a plan without a reset, until the subscription ends. Works only together with “New add-on accounting”: while that is off, a traffic add-on raises the limit for good, as before.',
         caution:
           'Reset times follow the “Remnawave time zone” below: it must match the TZ line of the Remnawave server, or add-ons are removed at the wrong hour.',
       },
@@ -79,6 +90,7 @@ export const en = {
         does: 'New traffic add-ons are sold until the subscription ends instead of until the reset.',
         keep1: 'Add-ons already sold “until the reset” end at their reset.',
       },
+      envRulesKept: 'Switching off does not change the reset rules set in .env: {{rules}}.',
     },
     // «Remnawave time zone» — the field under the switches and the daily
     // reset check's warning beside it.

@@ -32,13 +32,50 @@ export type AddOnSwitchName = 'durableAccounting' | 'deviceCleanupAuto' | 'traff
 /** One switch as `GET /admin/add-on-settings` describes it. */
 export interface AddOnSwitchState {
   readonly name: AddOnSwitchName
-  /** ON for every stage it carries: what the panel runs with right now. */
+  /**
+   * What the panel runs with right now: ON for every stage it carries. For a
+   * switch `.env` decides only for SOME of its reset rules, the value the other
+   * rules run with — the switch's own.
+   */
   readonly enabled: boolean
   readonly defaultEnabled: boolean
   /** The operator's own value, or `null` while never set. */
   readonly stored: boolean | null
-  /** Explicit `.env` values deciding it instead; any one of them locks the switch. */
+  /** Explicit `.env` values deciding it, or some of its rules, instead of the panel. */
   readonly env: ReadonlyArray<{ readonly variable: string; readonly enabled: boolean }>
+  /**
+   * `.env` decides all of it, so it cannot be changed here. Absent from a panel
+   * that predates the field, where any `.env` line locked the switch.
+   */
+  readonly locked?: boolean
+}
+
+/** The reset rule each variable of «Докупка трафика до сброса» decides. */
+const RESET_RULE_OF_VARIABLE: Readonly<Record<string, ScheduledStrategy>> = {
+  ADDON_RESET_EXPIRY_DAY: 'DAY',
+  ADDON_RESET_EXPIRY_WEEK: 'WEEK',
+  ADDON_RESET_EXPIRY_MONTH: 'MONTH',
+  ADDON_RESET_EXPIRY_MONTH_ROLLING: 'MONTH_ROLLING',
+}
+
+/** `.env` takes the whole switch out of the page's hands (see {@link AddOnSwitchState.locked}). */
+function isLocked(state: AddOnSwitchState): boolean {
+  return state.locked ?? state.env.length > 0
+}
+
+/**
+ * The rules `.env` decides, each with its value and its line —
+ * «ежедневного сброса — выключено (ADDON_RESET_EXPIRY_DAY=false)».
+ */
+function describeEnvRules(state: AddOnSwitchState, t: TFunction): string {
+  return state.env
+    .map((entry) => {
+      const rule = RESET_RULE_OF_VARIABLE[entry.variable]
+      const name = rule === undefined ? entry.variable : t(`addOnSwitches.envRules.${rule}`)
+      const value = t(entry.enabled ? 'addOnSwitches.valueOn' : 'addOnSwitches.valueOff')
+      return `${name} — ${value} (${entry.variable}=${entry.enabled ? 'true' : 'false'})`
+    })
+    .join('; ')
 }
 
 /** «Часовой пояс Remnawave» as the server describes it. */
@@ -151,6 +188,17 @@ function describeAfterEnvLine(state: AddOnSwitchState, t: TFunction): string {
   return !state.enabled && panelValue ? `${after} ${t('addOnSwitches.setInEnvKeepOff')}` : after
 }
 
+/**
+ * The same, for a switch `.env` decides only for some rules: a deleted line
+ * hands its rule to the switch — and a rule a line keeps OFF under a switch
+ * that is ON would come back on.
+ */
+function describeAfterEnvRuleLines(state: AddOnSwitchState, t: TFunction): string {
+  const after = t('addOnSwitches.setInEnvRulesAfter')
+  const keptOff = state.enabled && state.env.some((entry) => !entry.enabled)
+  return keptOff ? `${after} ${t('addOnSwitches.setInEnvRulesKeepOff')}` : after
+}
+
 function errorCode(error: unknown): string | null {
   const code = (error as { response?: { data?: { code?: unknown } } } | null)?.response?.data?.code
   return typeof code === 'string' ? code : null
@@ -210,6 +258,14 @@ export function AddOnSwitchesCard() {
 
   const view = query.data ?? null
   const confirmingLabel = confirming === null ? '' : t(`addOnSwitches.switches.${confirming}.label`)
+  // Switching off a switch `.env` decides only in part leaves the rules `.env`
+  // decides as they are: the dialog says which, so it does not over-promise.
+  const confirmingState =
+    confirming === null || view === null ? null : (view.switches.find((state) => state.name === confirming) ?? null)
+  const confirmingEnvRules =
+    confirmingState !== null && !isLocked(confirmingState) && confirmingState.env.length > 0
+      ? describeEnvRules(confirmingState, t)
+      : null
 
   return (
     <Card>
@@ -235,7 +291,9 @@ export function AddOnSwitchesCard() {
         ) : (
           <div className="divide-y rounded-lg border">
             {view.switches.map((state) => {
-              const locked = state.env.length > 0
+              const locked = isLocked(state)
+              // `.env` decides some of its reset rules; the switch runs the rest.
+              const partly = !locked && state.env.length > 0
               const id = `add-on-switch-${state.name}`
               const pending = mutation.isPending && mutation.variables?.name === state.name
               return (
@@ -270,6 +328,15 @@ export function AddOnSwitchesCard() {
                         </p>
                         <p className="text-muted-foreground">{t('addOnSwitches.setInEnvHint')}</p>
                         <p className="text-muted-foreground">{describeAfterEnvLine(state, t)}</p>
+                      </div>
+                    ) : partly ? (
+                      <div className="space-y-0.5 text-xs">
+                        <p className="flex items-center gap-1.5 font-medium">
+                          <Lock className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                          <span>{t('addOnSwitches.setInEnvRules', { rules: describeEnvRules(state, t) })}</span>
+                        </p>
+                        <p className="text-muted-foreground">{t('addOnSwitches.setInEnvRulesRest')}</p>
+                        <p className="text-muted-foreground">{describeAfterEnvRuleLines(state, t)}</p>
                       </div>
                     ) : null}
                   </div>
@@ -315,6 +382,9 @@ export function AddOnSwitchesCard() {
                         {KEEPS[confirming].map((key) => (
                           <li key={key}>{t(`addOnSwitches.confirmOff.${confirming}.${key}`)}</li>
                         ))}
+                        {confirmingEnvRules === null ? null : (
+                          <li>{t('addOnSwitches.confirmOff.envRulesKept', { rules: confirmingEnvRules })}</li>
+                        )}
                       </ul>
                     </div>
                   </>

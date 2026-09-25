@@ -229,6 +229,7 @@ describe('AddOnSwitchesService — a change from the page', () => {
         defaultEnabled: true,
         stored: true,
         env: [{ variable: 'ADDON_DEVICE_CLEANUP_AUTO', enabled: false }],
+        locked: true,
       });
 
       await assert.rejects(change(api, { deviceCleanupAuto: true }, false), (error: unknown) => {
@@ -281,8 +282,35 @@ describe('AddOnSwitchesService — a change from the page', () => {
         defaultEnabled: true,
         stored: false,
         env: [],
+        locked: false,
       });
       assert.equal(view.switches[2]!.enabled, true);
+    });
+  });
+
+  it('N1 gap 3: .env deciding SOME reset rules leaves the switch the operator\'s for the others — shown at its own value, changed for them', async () => {
+    const { db, prisma } = world();
+    await withEnv({ ADDON_RESET_EXPIRY_DAY: 'false' }, async () => {
+      const api = processOver(prisma);
+      const before = await api.view();
+      assert.deepEqual(before.switches[2], {
+        name: 'trafficResetExpiry',
+        // The weekly, monthly and rolling rules run with the switch's default ON.
+        enabled: true,
+        defaultEnabled: true,
+        stored: null,
+        env: [{ variable: 'ADDON_RESET_EXPIRY_DAY', enabled: false }],
+        locked: false,
+      });
+      assert.deepEqual((await api.flags()).resetExpiry, { DAY: false, WEEK: true, MONTH: true, MONTH_ROLLING: true });
+
+      const after = await change(api, { trafficResetExpiry: false }, true);
+
+      assert.deepEqual(db.writes, [{ addOnSettings: { trafficResetExpiry: false } }]);
+      assert.equal(db.audits.length, 1);
+      assert.equal(after.switches[2]!.enabled, false);
+      assert.equal(after.switches[2]!.locked, false);
+      assert.deepEqual((await api.flags()).resetExpiry, { DAY: false, WEEK: false, MONTH: false, MONTH_ROLLING: false });
     });
   });
 

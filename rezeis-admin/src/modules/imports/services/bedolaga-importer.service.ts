@@ -33,9 +33,11 @@ import { ImportSummary } from '../interfaces/import-summary.interface';
 import { panelProfileClaims } from './remnawave-importer.service';
 import {
   buildPanelLookup,
+  overlaidProfileFactsColumns,
   panelSubscriptionState,
   reconcileMissingPanelStatus,
   resolvePanelProfile,
+  stampOverlaidProfileFacts,
   type PanelAbsenceProbe,
   type PanelLookup,
 } from '../utils/remnawave-overlay.util';
@@ -708,6 +710,9 @@ export class BedolagaImporterService {
           });
         }
       });
+      // The profile's `createdAt` and `lastTrafficResetAt`, from the user the
+      // overlay read — whatever the read-back rule took of the rest.
+      await stampOverlaidProfileFacts(this.prismaService, existing.id, panel, (message) => this.logger.warn(message));
       if (verdict !== null) {
         await finishTermModelReadback(this.prismaService, verdict, {
           subscriptionId: existing.id,
@@ -734,6 +739,9 @@ export class BedolagaImporterService {
           remnawaveId: foreignPanel ? null : anchor,
           remnawavePanelId: foreignPanel ? null : panelId,
           startedAt: toDate(sub.start_date) ?? new Date(),
+          // A new row has no earlier fact to keep (null on a foreign panel,
+          // whose answer the overlay never reads).
+          ...overlaidProfileFactsColumns(panel),
         },
       });
       // A trial somebody already used is a trial they have SPENT. Eligibility

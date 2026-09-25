@@ -149,6 +149,8 @@ function comparisonOk(
       autoLinked: 0,
       customers: [],
       truncated: false,
+      unknownOwners: [],
+      unknownOwnersTotal: 0,
       links: [],
       ...overrides,
     },
@@ -599,6 +601,18 @@ describe('PanelLinkCheckService — one pass', () => {
     assert.equal('links' in kept, false);
     assert.equal(kept['autoLinked'], 1);
   });
+
+  it('keeps the owners this install does not have, and how many there were (review R3b-03)', async () => {
+    const test = rig();
+    const gone = { userId: 'user-gone', deletedAt: '2026-09-20T08:00:00.000Z', profiles: [] };
+    test.compare = async () => comparisonOk({ unknownOwners: [gone], unknownOwnersTotal: 7 });
+
+    await test.service.run('daily');
+
+    const kept = test.cache.store.get(PANEL_LINK_CHECK_KEYS.comparison) as Record<string, unknown>;
+    assert.deepEqual(kept['unknownOwners'], [gone]);
+    assert.equal(kept['unknownOwnersTotal'], 7);
+  });
 });
 
 describe('PanelLinkCheckService — why each row was not proven', () => {
@@ -1010,6 +1024,73 @@ describe('PanelLinkCheckService — the lists', () => {
 
     assert.equal(list.comparedAt, null);
     assert.deepEqual(list.customers, []);
+    assert.deepEqual(list.unknownOwners, []);
+    assert.equal(list.unknownOwnersTotal, 0);
+  });
+
+  it('lists the owners this install does not have apart, their profiles re-checked against the database (review R3b-03)', async () => {
+    const test = rig();
+    const extra = (profileId: string) => ({
+      profileId,
+      username: `rz_${profileId}`,
+      status: 'ACTIVE',
+      createdAt: null,
+      usedTrafficBytes: 5,
+      subscriptionMarker: null,
+      linkedBySubscriptionId: null,
+      autoLink: 'ownerNotInPanel',
+      autoLinkedSubscriptionId: null,
+      autoLinkedAt: null,
+    });
+    test.cache.store.set(PANEL_LINK_CHECK_KEYS.comparison, {
+      comparedAt: '2026-09-24T09:00:00.000Z',
+      readOutcome: 'complete',
+      profilesRead: 40,
+      profilesWithoutOwner: 0,
+      autoLinked: 0,
+      truncated: false,
+      customers: [],
+      unknownOwners: [{ userId: 'user-gone', deletedAt: '2026-09-20T08:00:00.000Z', profiles: [extra('5150'), extra('5151')] }],
+      unknownOwnersTotal: 3,
+    });
+    // Since the comparison, somebody's live row took 5151.
+    test.db.subscriptions = [
+      { id: 'sub-x', userId: 'user-x', status: 'ACTIVE', createdAt: new Date('2026-01-01T00:00:00Z'), remnawaveId: '5151', planSnapshot: {} },
+    ];
+
+    const list = await test.service.listExtraProfiles();
+
+    assert.deepEqual(list.customers, []);
+    assert.equal(list.unknownOwnersTotal, 3);
+    assert.equal(list.unknownOwners.length, 1);
+    const [gone] = list.unknownOwners;
+    assert.equal(gone?.userId, 'user-gone');
+    assert.equal(gone?.deletedAt, '2026-09-20T08:00:00.000Z');
+    assert.deepEqual(
+      gone?.profiles.map((entry) => [entry.profileId, entry.linkedNow, entry.linkedBySubscriptionId]),
+      [
+        ['5150', false, null],
+        ['5151', true, 'sub-x'],
+      ],
+    );
+  });
+
+  it('reads a comparison stored before the owners were kept apart as having none', async () => {
+    const test = rig();
+    test.cache.store.set(PANEL_LINK_CHECK_KEYS.comparison, {
+      comparedAt: '2026-09-24T09:00:00.000Z',
+      readOutcome: 'complete',
+      profilesRead: 40,
+      profilesWithoutOwner: 0,
+      autoLinked: 0,
+      truncated: false,
+      customers: [],
+    });
+
+    const list = await test.service.listExtraProfiles();
+
+    assert.deepEqual(list.unknownOwners, []);
+    assert.equal(list.unknownOwnersTotal, 0);
   });
 
   it('says when the check last ran, whether it runs now, and when it runs next', async () => {

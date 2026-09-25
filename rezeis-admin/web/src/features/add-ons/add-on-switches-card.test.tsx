@@ -184,6 +184,88 @@ describe('the add-on accounting switches', () => {
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
   })
 
+  // N1 gap 3: «Докупка трафика до сброса» carries one .env variable per reset
+  // rule, and a line for one rule leaves the other rules to the switch.
+  const DAY_OFF_IN_ENV: AddOnSwitchState = {
+    ...DEFAULTS[2]!,
+    enabled: true,
+    env: [{ variable: 'ADDON_RESET_EXPIRY_DAY', enabled: false }],
+    locked: false,
+  }
+
+  it('N1 gap 3: shows a switch .env sets for SOME reset rules at the value the others run with, still changeable, naming those rules', async () => {
+    serve([DEFAULTS[0]!, DEFAULTS[1]!, DAY_OFF_IN_ENV])
+    renderWithProviders(<AddOnSwitchesCard />)
+
+    const toggle = await screen.findByRole('switch', { name: 'Traffic add-ons until the reset' })
+    expect(toggle).toBeChecked()
+    expect(toggle).toBeEnabled()
+    expect(screen.getByText('Set in .env for: the daily reset — off (ADDON_RESET_EXPIRY_DAY=false)')).toBeInTheDocument()
+    expect(screen.getByText('The other reset rules follow this switch, and it can be changed here.')).toBeInTheDocument()
+    expect(
+      screen.getByText(
+        'If you delete a line from .env, after the restart its rule follows this switch. To keep that rule off, do not delete the line.',
+      ),
+    ).toBeInTheDocument()
+    // Not the whole-switch lock.
+    expect(screen.queryByText(/^Set in \.env: /)).not.toBeInTheDocument()
+    expect(screen.queryByText(/delete that line and run docker compose up -d/)).not.toBeInTheDocument()
+  })
+
+  it('N1 gap 3: switching it off asks, says the rules .env sets stay as they are, and sends the change', async () => {
+    const user = userEvent.setup()
+    const patch = serve([DEFAULTS[0]!, DEFAULTS[1]!, DAY_OFF_IN_ENV])
+    renderWithProviders(<AddOnSwitchesCard />)
+
+    await user.click(await screen.findByRole('switch', { name: 'Traffic add-ons until the reset' }))
+
+    const dialog = await screen.findByRole('alertdialog')
+    expect(
+      within(dialog).getByText(
+        'Switching off does not change the reset rules set in .env: the daily reset — off (ADDON_RESET_EXPIRY_DAY=false).',
+      ),
+    ).toBeInTheDocument()
+    await user.click(within(dialog).getByRole('button', { name: 'Switch off' }))
+
+    await waitFor(() => expect(patch).toHaveBeenCalledTimes(1))
+    expect(patch).toHaveBeenCalledWith('/admin/add-on-settings', { trafficResetExpiry: false, confirmOff: true })
+  })
+
+  it('N1 gap 3: a switch with EVERY reset rule in .env is locked, as is any switch from a panel that predates `locked`', async () => {
+    serve([
+      // An older panel: no `locked`, and one line locked the switch.
+      { ...DEFAULTS[0]!, enabled: false, env: [{ variable: 'ADDON_ENTITLEMENT_SHADOW', enabled: false }] },
+      DEFAULTS[1]!,
+      {
+        ...DEFAULTS[2]!,
+        enabled: false,
+        env: [
+          { variable: 'ADDON_RESET_EXPIRY_DAY', enabled: false },
+          { variable: 'ADDON_RESET_EXPIRY_WEEK', enabled: true },
+          { variable: 'ADDON_RESET_EXPIRY_MONTH', enabled: true },
+          { variable: 'ADDON_RESET_EXPIRY_MONTH_ROLLING', enabled: true },
+        ],
+        locked: true,
+      },
+    ])
+    renderWithProviders(<AddOnSwitchesCard />)
+
+    expect(await screen.findByRole('switch', { name: 'Traffic add-ons until the reset' })).toBeDisabled()
+    expect(screen.getByRole('switch', { name: 'New add-on accounting' })).toBeDisabled()
+    expect(screen.queryByText(/^Set in \.env for:/)).not.toBeInTheDocument()
+  })
+
+  it('N1 gap 1: «New add-on accounting» says a traffic add-on on a plan with resets ends at the nearest reset', async () => {
+    serve(DEFAULTS)
+    renderWithProviders(<AddOnSwitchesCard />)
+
+    await screen.findByRole('switch', { name: 'New add-on accounting' })
+    expect(screen.getByText(/on a plan that resets traffic, until the nearest reset while “Traffic add-ons until the reset” is on/)).toBeInTheDocument()
+    const ru = (await import('@/i18n/features/addOns.ru')).ru.addOnSwitches.switches.durableAccounting.description
+    expect(ru).toContain('на тарифе со сбросом трафика — до ближайшего сброса')
+    expect(ru).not.toContain('вместе с концом подписки')
+  })
+
   it('leaves every switch read-only without Add-ons → Edit', async () => {
     grant(['add_ons:view'])
     serve(DEFAULTS)

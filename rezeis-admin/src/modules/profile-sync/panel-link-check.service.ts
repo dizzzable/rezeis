@@ -13,6 +13,7 @@ import { isNumericPanelIdentity } from '../remnawave/services/panel-user-address
 import type {
   ExtraProfile,
   ExtraProfileCustomer,
+  ExtraProfileUnknownOwner,
   ExtraProfilesResponse,
   PanelLinkCheckStatus,
   PanelLinkCheckTrigger,
@@ -29,6 +30,8 @@ import {
   type PanelLinkRowReason,
 } from './panel-link-reconciliation.service';
 import {
+  type ComparedProfile,
+  type ComparedUnknownOwner,
   PanelProfileComparisonService,
   type PanelProfileComparison,
 } from './panel-profile-comparison.service';
@@ -502,14 +505,31 @@ export class PanelLinkCheckService implements OnApplicationBootstrap {
         autoLinked: 0,
         customers: [],
         truncated: false,
+        unknownOwners: [],
+        unknownOwnersTotal: 0,
       };
     }
+    // A comparison stored by a build before the owners this install does not
+    // have were kept apart (review R3b-03) carries neither field.
+    const storedUnknown: readonly ComparedUnknownOwner[] = Array.isArray(stored.unknownOwners)
+      ? stored.unknownOwners
+      : [];
     const userIds = stored.customers.map((customer) => customer.userId);
     const users = await this.readUsers(userIds);
     const withoutLink = await this.readSubscriptionsWithoutLink(userIds);
     const linkers = await this.readLinkersNow(
-      stored.customers.flatMap((customer) => customer.profiles.map((profile) => profile.profileId)),
+      [...stored.customers, ...storedUnknown].flatMap((owner) => owner.profiles.map((profile) => profile.profileId)),
     );
+    // Each profile as the database stands now: who links it, and whether anyone does.
+    const recheck = (profile: ComparedProfile, ownerId: string): ExtraProfile => {
+      const now = linkers.get(profile.profileId) ?? [];
+      const other = now.find((row) => row.userId !== ownerId) ?? null;
+      return {
+        ...profile,
+        linkedBySubscriptionId: other?.id ?? profile.linkedBySubscriptionId,
+        linkedNow: now.length > 0,
+      };
+    };
     const customers: ExtraProfileCustomer[] = stored.customers.map((customer) => {
       const user = users.get(customer.userId) ?? null;
       return {
@@ -517,18 +537,15 @@ export class PanelLinkCheckService implements OnApplicationBootstrap {
         userExists: user !== null,
         userName: user?.name ?? null,
         userTelegramId: user?.telegramId ?? null,
-        profiles: customer.profiles.map((profile): ExtraProfile => {
-          const now = linkers.get(profile.profileId) ?? [];
-          const other = now.find((row) => row.userId !== customer.userId) ?? null;
-          return {
-            ...profile,
-            linkedBySubscriptionId: other?.id ?? profile.linkedBySubscriptionId,
-            linkedNow: now.length > 0,
-          };
-        }),
+        profiles: customer.profiles.map((profile) => recheck(profile, customer.userId)),
         subscriptionsWithoutLink: withoutLink.get(customer.userId) ?? [],
       };
     });
+    const unknownOwners: ExtraProfileUnknownOwner[] = storedUnknown.map((owner) => ({
+      userId: owner.userId,
+      deletedAt: typeof owner.deletedAt === 'string' ? owner.deletedAt : null,
+      profiles: owner.profiles.map((profile) => recheck(profile, owner.userId)),
+    }));
     return {
       check,
       comparedAt: stored.comparedAt,
@@ -538,6 +555,9 @@ export class PanelLinkCheckService implements OnApplicationBootstrap {
       autoLinked: stored.autoLinked,
       customers,
       truncated: stored.truncated,
+      unknownOwners,
+      unknownOwnersTotal:
+        typeof stored.unknownOwnersTotal === 'number' ? stored.unknownOwnersTotal : unknownOwners.length,
     };
   }
 
@@ -943,5 +963,7 @@ function storedComparison(comparison: PanelProfileComparison): StoredComparison 
     autoLinked: comparison.autoLinked,
     customers: comparison.customers,
     truncated: comparison.truncated,
+    unknownOwners: comparison.unknownOwners,
+    unknownOwnersTotal: comparison.unknownOwnersTotal,
   };
 }

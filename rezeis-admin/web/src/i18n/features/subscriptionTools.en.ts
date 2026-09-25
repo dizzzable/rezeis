@@ -195,7 +195,16 @@ export const en = {
         syncInFlight: 'Not linked: the subscription has a sync job queued or running — the check tries again later.',
         changedDuringCheck: 'Not linked: the subscription or the profile changed while the check ran.',
         panelUnavailable: 'Not attempted: the last read of Remnawave failed.',
+        ownerNotInPanel: 'Not linked: the panel has no customer with this reiwa_id.',
         unknown: 'An outcome this build does not know: {{code}}',
+      },
+      // The owners the panel does not have, listed apart from the customers.
+      unknownOwners: {
+        title: 'Customers not found in the panel',
+        intro:
+          'The reiwa_id line of these profiles names a customer this panel does not have: one deleted here (deleting a customer removes their Remnawave profile only when that succeeds), or a customer of another panel that uses the same Remnawave. There is nothing to link them to. Before deleting such a profile in Remnawave, make sure it is not another panel’s.',
+        shown: 'Shown: {{shown}} of {{total}} — customers deleted here first.',
+        deletedAt: 'customer deleted in the panel {{when}}',
       },
       withoutLinkTitle: 'This customer’s subscriptions without a link',
       withoutLinkNone: 'The customer has no subscription without a link.',

@@ -3,12 +3,13 @@ import 'reflect-metadata';
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 
-import { SubscriptionStatus } from '@prisma/client';
+import { SubscriptionStatus, SyncAction, SyncJobStatus } from '@prisma/client';
 
 import { PrismaService } from '../src/common/prisma/prisma.service';
 import { PanelLinkCheckService } from '../src/modules/profile-sync/panel-link-check.service';
 import { PanelLinkReconciliationService } from '../src/modules/profile-sync/panel-link-reconciliation.service';
 import { PanelProfileComparisonService } from '../src/modules/profile-sync/panel-profile-comparison.service';
+import { ProfileSyncProcessor } from '../src/modules/profile-sync/profile-sync.processor';
 import { strictOk } from '../src/modules/remnawave/interfaces/remnawave-strict-outcome.interface';
 import { removeDurableFixtures } from './helpers/durable-rows-cleanup';
 import { newUser, termModelFixtures, type TermModelFixtures } from './helpers/term-model-fixtures';
@@ -304,5 +305,193 @@ run('the automatic panel-link check on PostgreSQL', () => {
     assert.deepEqual(outcomes.get(two), ['severalSubscriptions']);
     assert.deepEqual(outcomes.get(marked), ['subscriptionMarkerMismatch']);
     assert.deepEqual(outcomes.get(taken), ['takenByOtherRow']);
+  });
+
+  it('R3b-03: a customer deleted here is listed apart and dated by the audit; another install\'s after; this install\'s customer is still linked', async () => {
+    const panel = new PanelDouble();
+    const one = await newUser(fx);
+    // Ids no user row has: one an operator deleted (its audit row says so),
+    // one another install's.
+    const deleted = `${fx.prefix}-deleted-customer`;
+    const stranger = `${fx.prefix}-other-install`;
+    const p1 = PANEL_BASE + fx.next();
+    const p2 = PANEL_BASE + fx.next();
+    const p3 = PANEL_BASE + fx.next();
+    panel.add(p1, { shortUuid: `UNK${p1}`, owner: one });
+    panel.add(p2, { shortUuid: `UNK${p2}`, owner: deleted });
+    panel.add(p3, { shortUuid: `UNK${p3}`, owner: stranger });
+    const s1 = await subscription(one, `${fx.prefix}-unk-one`);
+    const deletion = await prisma.adminAuditLog.create({
+      data: { action: 'user.deleted', metadata: { userId: deleted, source: 'user_detail', mode: 'full' } },
+      select: { id: true, createdAt: true },
+    });
+    // Not a deletion, and about the stranger: proves nothing.
+    const blocked = await prisma.adminAuditLog.create({
+      data: { action: 'user.blocked', metadata: { userId: stranger } },
+      select: { id: true },
+    });
+    const cache = new MemoryCache();
+    cache.store.set('panel-link-check:state', { walkCursor: `${fx.prefix}-unk-` });
+    const { check } = checkService(panel, cache);
+    const startedAt = new Date();
+
+    try {
+      assert.equal(await check.run('daily'), 'ran');
+
+      const linked = await prisma.subscription.findUniqueOrThrow({ where: { id: s1 } });
+      assert.equal(linked.remnawaveId, String(p1), 'this install\'s customer is still compared and linked');
+
+      const list = await check.listExtraProfiles();
+      assert.equal(list.customers.some((customer) => customer.userId === deleted || customer.userId === stranger), false);
+      const apart = list.unknownOwners.filter((owner) => owner.userId === deleted || owner.userId === stranger);
+      assert.deepEqual(
+        apart.map((owner) => [owner.userId, owner.deletedAt, owner.profiles.map((entry) => [entry.profileId, entry.autoLink])]),
+        [
+          [deleted, deletion.createdAt.toISOString(), [[String(p2), 'ownerNotInPanel']]],
+          [stranger, null, [[String(p3), 'ownerNotInPanel']]],
+        ],
+      );
+      assert.ok(list.unknownOwnersTotal >= 2);
+    } finally {
+      // Only the rows this test made: the fixtures, and the pass's own audit row.
+      const passAudit = await prisma.adminAuditLog.findFirst({
+        where: {
+          action: 'subscriptions.panel_link_reconciled',
+          metadata: { path: ['automatic'], equals: true },
+          createdAt: { gte: startedAt },
+        },
+        orderBy: { createdAt: 'desc' },
+        select: { id: true },
+      });
+      const ids = [deletion.id, blocked.id, ...(passAudit === null ? [] : [passAudit.id])];
+      await prisma.adminAuditLog.deleteMany({ where: { id: { in: ids } } });
+    }
+  });
+
+  // ── Review R3b-05: the CREATE's link write is a compare-and-swap ─────────
+  //
+  // The CREATE reads the row unlinked, then talks to Remnawave. A link another
+  // writer commits meanwhile — the operator's «Привязать профиль», written as
+  // that endpoint writes it — must survive the CREATE's own link write.
+
+  /** Runs one CREATE job for `subscriptionId`; `duringPost` runs while the POST is in flight. */
+  async function runCreate(input: {
+    readonly userId: string;
+    readonly subscriptionId: string;
+    readonly mintedId: number;
+    readonly duringPost: () => Promise<void>;
+  }) {
+    const patched: number[] = [];
+    const enqueued: string[] = [];
+    const answer = (id: number, createdAt: string, lastTrafficResetAt: string | null) => ({
+      kind: 'ok' as const,
+      data: {
+        response: {
+          id,
+          username: `rz_pg_${id}`,
+          status: 'ACTIVE',
+          subscriptionUrl: `https://sub.example.test/MINT${id}`,
+          description: `reiwa_id: ${input.userId}`,
+          expireAt: '2099-12-31T00:00:00.000Z',
+          createdAt,
+          lastTrafficResetAt,
+          trafficLimitBytes: 100 * 1024 ** 3,
+          hwidDeviceLimit: 3,
+        },
+      },
+    });
+    const missing = { kind: 'rejected' as const, status: 404, code: 'A063', detail: 'User not found', retryAfterMs: null };
+    const processor = new ProfileSyncProcessor(
+      prisma,
+      {
+        getUserByUsername: async () => missing,
+        resolveUser: async () => missing,
+        // The profile the POST makes says it was reset lately — a fact of ITS
+        // own that must never reach a row linking another profile.
+        createUser: async () => {
+          await input.duringPost();
+          return answer(input.mintedId, '2026-01-15T12:30:00.000Z', '2026-09-20T00:00:00.000Z');
+        },
+        updateUser: async (body: { id: number }) => {
+          patched.push(body.id);
+          return answer(body.id, '2025-05-05T05:05:00.000Z', null);
+        },
+      } as never,
+      {
+        generateProfileName: async () => ({ username: `rz_pg_${input.mintedId}`, description: `reiwa_id: ${input.userId}` }),
+        getContactInfo: async () => ({ email: null, telegramId: null }),
+      } as never,
+      { error: () => undefined, warn: () => undefined, info: () => undefined, emit: () => undefined } as never,
+      { enqueue: async (jobId: string) => void enqueued.push(jobId) } as never,
+    );
+    const job = await prisma.profileSyncJob.create({
+      data: { subscriptionId: input.subscriptionId, action: SyncAction.CREATE, status: SyncJobStatus.PENDING, payload: {} },
+      select: { id: true },
+    });
+    await processor.process({ data: { syncJobId: job.id } } as never);
+    const jobs = await prisma.profileSyncJob.findMany({
+      where: { subscriptionId: input.subscriptionId },
+      orderBy: { createdAt: 'asc' },
+    });
+    return { job: jobs.find((row) => row.id === job.id)!, others: jobs.filter((row) => row.id !== job.id), patched, enqueued };
+  }
+
+  /** What «Привязать профиль» writes (`admin-user-subscriptions.controller.ts`), under the same lock. */
+  async function operatorLinks(subscriptionId: string, panelId: number): Promise<void> {
+    await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`remnawave-profile:${panelId}`})::bigint)`;
+      const written = await tx.subscription.updateMany({
+        where: { id: subscriptionId, remnawaveId: null },
+        data: { remnawaveId: String(panelId), remnawavePanelId: panelId, remnawavePendingUsername: null, remnawavePendingOwnerId: null },
+      });
+      assert.equal(written.count, 1, 'the operator\'s link lands first');
+    });
+  }
+
+  it('R3b-05: a link the operator wrote during the POST survives; the profile the CREATE made is queued for deletion; the row is pushed to the operator\'s profile', async () => {
+    const userId = await newUser(fx);
+    const own = PANEL_BASE + fx.next();
+    const minted = PANEL_BASE + fx.next();
+    const subscriptionId = await subscription(userId, `${fx.prefix}-r3b05-lost`);
+
+    const run = await runCreate({ userId, subscriptionId, mintedId: minted, duringPost: () => operatorLinks(subscriptionId, own) });
+
+    const row = await prisma.subscription.findUniqueOrThrow({ where: { id: subscriptionId } });
+    assert.equal(row.remnawaveId, String(own), 'the operator\'s link is not overwritten');
+    assert.equal(row.remnawavePanelId, own);
+    assert.equal(
+      row.remnawaveProfileCreatedAt?.toISOString(),
+      '2025-05-05T05:05:00.000Z',
+      'the facts are those of the profile the row links, never of the one that lost',
+    );
+    assert.equal(row.remnawaveLastTrafficResetAt, null, 'the losing profile\'s reset never reaches the row');
+    assert.equal(run.job.status, SyncJobStatus.COMPLETED);
+    assert.deepEqual(run.patched, [own], 'the row\'s state goes out to the profile it links');
+    assert.equal(run.others.length, 1);
+    const [deletion] = run.others;
+    assert.equal(deletion?.action, SyncAction.DELETE);
+    assert.deepEqual(deletion?.payload, {
+      source: 'CREATE_SUPERSEDED_BY_NEWER_LINK',
+      targetRemnawaveId: String(minted),
+      targetRemnawavePanelId: minted,
+      targetRemnawavePanelUsername: `rz_pg_${minted}`,
+    });
+    assert.deepEqual(run.enqueued, [deletion?.id]);
+  });
+
+  it('R3b-05 control: nothing written meanwhile — the CREATE links the profile it made, and nothing is deleted', async () => {
+    const userId = await newUser(fx);
+    const minted = PANEL_BASE + fx.next();
+    const subscriptionId = await subscription(userId, `${fx.prefix}-r3b05-won`);
+
+    const run = await runCreate({ userId, subscriptionId, mintedId: minted, duringPost: async () => undefined });
+
+    const row = await prisma.subscription.findUniqueOrThrow({ where: { id: subscriptionId } });
+    assert.equal(row.remnawaveId, String(minted));
+    assert.equal(row.remnawaveProfileCreatedAt?.toISOString(), '2026-01-15T12:30:00.000Z');
+    assert.equal(row.remnawaveLastTrafficResetAt?.toISOString(), '2026-09-20T00:00:00.000Z');
+    assert.equal(run.job.status, SyncJobStatus.COMPLETED);
+    assert.deepEqual(run.others, []);
+    assert.deepEqual(run.patched, []);
   });
 });

@@ -1,5 +1,6 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigType } from '@nestjs/config';
+import { ModuleRef } from '@nestjs/core';
 import { Prisma } from '@prisma/client';
 
 import { appConfig } from '../../../common/config/app.config';
@@ -34,6 +35,10 @@ import { buildAddOnFacts, buildSubscriptionFacts } from '../utils/subscription-f
 import { EmailDeliveryService } from '../../email/services/email-delivery.service';
 import { isRetryableRelayOutcome } from '../../backup/backup-delivery-retry.util';
 import type { NotifyDeliveryResult } from './bot-notifier.client';
+// The class is the lookup token only (`moduleRef.get`, on first use), never a
+// constructor dependency: see the `moduleRef` parameter.
+import { AddOnEligibilityService } from '../../add-ons/services/add-on-eligibility.service';
+import { offerBringsTrafficBack, readTrafficTopUp, TRAFFIC_TOP_UP_KEY } from '../utils/traffic-top-up.util';
 
 /**
  * Categories the user notifications fall under for topic routing when
@@ -222,6 +227,14 @@ export const LADDER_BOT_DEADLINE_MS = 15_000;
 /** Deferrals of the bot step after which the ladder moves on without it. */
 export const LADDER_MAX_BOT_DEFERRALS = 3;
 
+/**
+ * How long «Трафик исчерпан» waits for the add-on offer before it is written
+ * without an answer (and so keeps its buttons). The offer reads the database
+ * and, for a monthly-by-creation-date plan whose anchor the panel has not
+ * heard yet, Remnawave once, for 3 s at most (`AddOnEligibilityService`).
+ */
+const TRAFFIC_TOP_UP_DEADLINE_MS = 5_000;
+
 interface CreateUserNotificationInput {
   readonly userId: string;
   readonly type: string;
@@ -404,6 +417,10 @@ function pushTypeForNotification(type: string): string | undefined {
 export class UserNotificationsService {
   private readonly logger = new Logger(UserNotificationsService.name);
 
+  /** The add-on offer, resolved through `moduleRef` on first use; `null` where `AddOnsModule` is not registered. */
+  private addOnOffers: Pick<AddOnEligibilityService, 'listForSubscription'> | null = null;
+  private addOnOffersResolved = false;
+
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly templatesService: NotificationTemplatesService,
@@ -432,6 +449,16 @@ export class UserNotificationsService {
      */
     @Optional()
     private readonly emailDelivery?: EmailDeliveryService,
+    /**
+     * For the add-on offer «Трафик исчерпан» asks about (N1 gap 4), looked up
+     * on first use: `AddOnsModule` reaches this module through
+     * `RemnawaveModule`, so importing it here would close a module cycle — the
+     * escape hatch `SystemEventsService` uses for the same reason.
+     * `@Optional()` at the tail for the positional specs; without it the
+     * notice decides nothing and behaves as before.
+     */
+    @Optional()
+    private readonly moduleRef?: ModuleRef,
   ) {}
 
   /**
@@ -447,7 +474,7 @@ export class UserNotificationsService {
       data: {
         userId: input.userId,
         type: input.type,
-        payload: input.payload as Prisma.InputJsonObject,
+        payload: (await this.withTrafficTopUpAnswer(input.type, input.payload)) as Prisma.InputJsonObject,
       },
       select: { id: true, userId: true, type: true, payload: true },
     });
@@ -466,6 +493,54 @@ export class UserNotificationsService {
     });
 
     return event.id;
+  }
+
+  /**
+   * «Трафик исчерпан» about a subscription with no end date carries, from the
+   * moment it is written, whether that subscription can buy anything that
+   * brings traffic back (`traffic-top-up.util.ts`, N1 gap 4): the bot button,
+   * the push and the cabinet's bell all read that one answer, so they agree,
+   * and a redelivery later reads what the customer was first told. Asked of
+   * the add-on offer itself — the list the cabinet's add-on page shows — so
+   * the button is there exactly when the page has something to buy. Any other
+   * notice, a payload that already answers, and an answer that could not be
+   * read in time are left as they are: the notice then behaves as before.
+   */
+  private async withTrafficTopUpAnswer(
+    type: string,
+    payload: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    if (!isLifetimeTrafficNotice(type, payload) || readTrafficTopUp(payload) !== null) return payload;
+    const subscriptionId = payloadSubscriptionId(payload);
+    const offers = this.resolveAddOnOffers();
+    if (subscriptionId === null || offers === null) return payload;
+    try {
+      const offer = await withLadderDeadline(offers.listForSubscription(subscriptionId), TRAFFIC_TOP_UP_DEADLINE_MS);
+      if (offer === null) {
+        this.logger.warn(`«Трафик исчерпан» for ${subscriptionId}: the add-on offer did not answer in time; the notice keeps its buttons`);
+        return payload;
+      }
+      return { ...payload, [TRAFFIC_TOP_UP_KEY]: offerBringsTrafficBack(offer) };
+    } catch (err: unknown) {
+      this.logger.warn(
+        `«Трафик исчерпан» for ${subscriptionId}: the add-on offer could not be read (${
+          err instanceof Error ? err.message : String(err)
+        }); the notice keeps its buttons`,
+      );
+      return payload;
+    }
+  }
+
+  /** The add-on offer, looked up once (see the `moduleRef` parameter). */
+  private resolveAddOnOffers(): Pick<AddOnEligibilityService, 'listForSubscription'> | null {
+    if (this.addOnOffersResolved) return this.addOnOffers;
+    this.addOnOffersResolved = true;
+    try {
+      this.addOnOffers = this.moduleRef?.get(AddOnEligibilityService, { strict: false }) ?? null;
+    } catch {
+      this.addOnOffers = null;
+    }
+    return this.addOnOffers;
   }
 
   /**
@@ -2308,9 +2383,13 @@ const RENEWAL_PAGE = '/renew';
  * The renewal button of a lifetime subscription's «Трафик исчерпан» becomes
  * «📦 Докупить трафик» on the add-on page: every Mini App button the template
  * sends to `/renew` (with its slash or without), keeping its colour and row.
- * `linkButtonsToSubscription` then names the subscription on it. Any other
- * notice, subscription or button is left as the operator saved it. «Карта
- * бота» draws the substitution beside the template's own buttons
+ * `linkButtonsToSubscription` then names the subscription on it. ONLY WHEN
+ * THERE IS SOMETHING TO BUY (N1 gap 4): when the notice says its subscription
+ * can buy nothing that brings traffic back (`trafficTopUp: false`,
+ * `traffic-top-up.util.ts`) such a button is left out — a renewal it cannot
+ * take and an empty add-on page are both wrong — and the notice goes without
+ * it. Any other notice, subscription or button is left as the operator saved
+ * it. «Карта бота» draws the substitution beside the template's own buttons
  * (`BotMapComposerService`).
  */
 function offerTrafficTopUpForLifetime(
@@ -2320,13 +2399,15 @@ function offerTrafficTopUpForLifetime(
   locale: NotificationLocale,
 ): NotifyButton[] {
   if (!isLifetimeTrafficNotice(type, payload)) return buttons;
-  return buttons.map((button) => {
+  const nothingToBuy = readTrafficTopUp(payload) === false;
+  return buttons.flatMap((button): NotifyButton[] => {
     const path = button.webAppPath;
-    if (path === undefined) return button;
+    if (path === undefined) return [button];
     const cut = path.search(/[?#]/);
     const page = cut === -1 ? path : path.slice(0, cut);
-    if ((page.startsWith('/') ? page : `/${page}`) !== RENEWAL_PAGE) return button;
-    return { ...button, text: locale === 'en' ? TRAFFIC_TOP_UP_BUTTON.en : TRAFFIC_TOP_UP_BUTTON.ru, webAppPath: ADD_ONS_PAGE };
+    if ((page.startsWith('/') ? page : `/${page}`) !== RENEWAL_PAGE) return [button];
+    if (nothingToBuy) return [];
+    return [{ ...button, text: locale === 'en' ? TRAFFIC_TOP_UP_BUTTON.en : TRAFFIC_TOP_UP_BUTTON.ru, webAppPath: ADD_ONS_PAGE }];
   });
 }
 
@@ -2337,7 +2418,8 @@ function offerTrafficTopUpForLifetime(
  *   • «Помощь с подключением»           → the dashboard's connect deep link
  *   • an add-on's end, or its approach  → the add-on page, on its subscription
  *   • expiry / traffic-limit reminders → the renewal page
- *   • the traffic limit of a subscription with no end date → the add-on page
+ *   • the traffic limit of a subscription with no end date → the add-on page,
+ *     or the dashboard when it can buy nothing that brings traffic back
  *   • referral / partner program       → the referrals cabinet
  *   • broadcasts / news                 → the notifications feed
  *   • everything else                   → the dashboard
@@ -2347,6 +2429,10 @@ function offerTrafficTopUpForLifetime(
  */
 function resolveNotificationPushUrl(type: string, payload?: unknown): string {
   if (resolveToggleKey(type) === 'connect_help') return connectHelpPushUrl(payload);
+  // «Трафик исчерпан» for a subscription that is never renewed and can buy
+  // nothing that brings traffic back (N1 gap 4): not an empty add-on page, and
+  // not the renewal it cannot take — the dashboard, like any other notice.
+  if (isLifetimeTrafficNotice(type, payload) && readTrafficTopUp(payload) === false) return '/dashboard';
   // An add-on's notice, and «Трафик исчерпан» for a subscription that is never
   // renewed (`isLifetimeTrafficNotice`): the add-on page, on its subscription.
   if (isAddOnNoticeType(type) || isLifetimeTrafficNotice(type, payload)) {

@@ -510,15 +510,21 @@ const LIMITED_NOTIFICATION_TYPE = 'limited';
 const RENEWAL_ROUTE: MiniAppRoute = '/renew';
 const ADD_ONS_ROUTE: MiniAppRoute = '/addons';
 
+/** When that substitution happens at all (N1 gap 4), as the map's edge says it. */
+const LIFETIME_TOP_UP_CONDITION = 'если ей есть что докупить';
+
 /**
  * Where «Трафик исчерпан» sends a subscription with no end date (the owner,
  * 24.09.2026). Such a subscription is never renewed, so every Mini App button
  * of the template that opens «Продление подписки» opens «Дополнения» of that
  * subscription instead, as «📦 Докупить трафик» — what the bot is sent
  * (`offerTrafficTopUpForLifetime` in `user-notifications.service.ts`, which
- * this mirrors). One edge beside each button it replaces, the case in its
- * label, so the operator sees both destinations; with no buttons, one beside
- * the default click-through, which the push and the cabinet's bell follow
+ * this mirrors). Only when that subscription can buy something that brings
+ * traffic back — a traffic add-on or «Сброс трафика» (N1 gap 4); otherwise the
+ * button is left out and the push opens the dashboard — so the label says so.
+ * One edge beside each button it replaces, the case in its label, so the
+ * operator sees both destinations; with no buttons, one beside the default
+ * click-through, which the push and the cabinet's bell follow
  * (`resolveNotificationPushUrl`). None for any other template.
  */
 function composeLifetimeTopUpEdges(
@@ -530,7 +536,15 @@ function composeLifetimeTopUpEdges(
   if (type !== LIMITED_NOTIFICATION_TYPE) return [];
   const addOns = { route: ADD_ONS_ROUTE, shown: ADD_ONS_ROUTE };
   if (stored.length === 0) {
-    return [miniAppEdge(`notif-lifetime-default:${source}`, source, 'у бессрочной подписки', addOns, routes.referencedTerminals)];
+    return [
+      miniAppEdge(
+        `notif-lifetime-default:${source}`,
+        source,
+        `у бессрочной подписки, ${LIFETIME_TOP_UP_CONDITION}`,
+        addOns,
+        routes.referencedTerminals,
+      ),
+    ];
   }
   const edges: BotMapEdge[] = [];
   stored.forEach((button, index) => {
@@ -540,7 +554,7 @@ function composeLifetimeTopUpEdges(
       miniAppEdge(
         `notif-lifetime:${source}:${index}`,
         source,
-        `📦 Докупить трафик — у бессрочной подписки, вместо «${button.labelRu}»`,
+        `📦 Докупить трафик — у бессрочной подписки, ${LIFETIME_TOP_UP_CONDITION}, вместо «${button.labelRu}»`,
         addOns,
         routes.referencedTerminals,
       ),

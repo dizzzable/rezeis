@@ -731,7 +731,7 @@ export class ProfileSyncProcessor extends WorkerHost {
       // or a fallback as often as today's `panelUsername`. The log line and the
       // operator card name the profile that was linked.
       const adoptedUsername = existingUsername ?? search.name;
-      const deleteScheduled = await this.persistProfileLink(
+      const link = await this.persistProfileLink(
         subscription.id,
         existingRemnawaveId,
         existingPanelId,
@@ -742,8 +742,12 @@ export class ProfileSyncProcessor extends WorkerHost {
         existingUsername,
         readPanelString(existing.subscriptionUrl),
         readRemnawaveProfileFacts(existing),
+        // Found, not made: a newer link leaves it exactly as it was.
+        { heldWhenRead: subscription.remnawaveId, minted: false },
       );
-      if (deleteScheduled) {
+      if (link.kind === 'superseded') return this.afterSupersededCreate(syncJob, link, existingRemnawaveId);
+      const deleteScheduled = link.deleteJobId;
+      if (deleteScheduled !== null) {
         await this.enqueueCompensatingDelete(deleteScheduled);
         this.logger.warn(
           `Subscription ${subscription.id} was deleted while CREATE ran; scheduled deletion of linked profile '${existingRemnawaveId}'`,
@@ -923,15 +927,19 @@ export class ProfileSyncProcessor extends WorkerHost {
     }
     const remnawaveId = String(createdPanelId);
 
-    const deleteScheduled = await this.persistProfileLink(
+    const link = await this.persistProfileLink(
       subscription.id,
       remnawaveId,
       createdPanelId,
       readPanelString(panelUser.username),
       readPanelString(panelUser.subscriptionUrl),
       readRemnawaveProfileFacts(panelUser),
+      // Made by this job: a newer link sends it to deletion.
+      { heldWhenRead: subscription.remnawaveId, minted: true },
     );
-    if (deleteScheduled) {
+    if (link.kind === 'superseded') return this.afterSupersededCreate(syncJob, link, remnawaveId);
+    const deleteScheduled = link.deleteJobId;
+    if (deleteScheduled !== null) {
       await this.enqueueCompensatingDelete(deleteScheduled);
       this.logger.warn(
         `Subscription ${subscription.id} was deleted while CREATE ran; scheduled deletion of new profile '${remnawaveId}'`,
@@ -1291,6 +1299,28 @@ export class ProfileSyncProcessor extends WorkerHost {
    * failed job an operator can see and a retry can fix. {@link readPanelUserId}
    * closes the same hole one layer up, where an unvalidated panel body could
    * otherwise produce the string `'undefined'` instead of an absent one.
+   *
+   * THE WRITE IS A COMPARE-AND-SWAP ON THE LINK THE CREATE READ (review
+   * R3b-05), like every other link writer's: the operator's «Привязать
+   * профиль», the panel-link walk and the per-customer comparison. The CREATE
+   * read the row before a panel round-trip, and any of those can link it
+   * meanwhile — each under ITS profile's advisory lock, which is not this one.
+   * An unconditional write replaced that link with the profile this CREATE
+   * made, and the customer's own profile stayed live and unlinked. So the link
+   * lands only while the row still holds what the CREATE read (`heldWhenRead`,
+   * always none: `handleCreate` provisions only a row without one) — or already
+   * holds this very profile, which a check that found it first wrote. Anything
+   * else is a NEWER link, and it wins: `superseded`, nothing written to the row.
+   * What that leaves behind is decided here, in the same transaction:
+   *  - a profile this CREATE MINTED (`minted`) is scheduled for deletion. Nobody
+   *    holds it — the probe below asked under its lock — and nobody ever saw
+   *    its link: its config URL was never stored. Left alone it would stay live
+   *    with the paid expiry and limits, and «Лишние профили в Remnawave» would
+   *    list it as this customer's for an operator to puzzle over;
+   *  - a profile it found and was about to ADOPT existed before this job and
+   *    may be the one the customer's devices use: never deleted, left to the
+   *    comparison, which lists it.
+   * The caller then pushes the row's state to the profile the row does link.
    */
   private async persistProfileLink(
     subscriptionId: string,
@@ -1299,7 +1329,8 @@ export class ProfileSyncProcessor extends WorkerHost {
     panelUsername: string | null,
     configUrl: string | null | undefined,
     panelFacts: RemnawaveProfileFacts,
-  ): Promise<string | null> {
+    race: { readonly heldWhenRead: string | null; readonly minted: boolean },
+  ): Promise<ProfileLinkWrite> {
     if (typeof remnawaveId !== 'string' || remnawaveId.length === 0) {
       throw new Error(
         `Refusing to link subscription ${subscriptionId} to an empty Remnawave identity ` +
@@ -1329,8 +1360,8 @@ export class ProfileSyncProcessor extends WorkerHost {
       await tx.$executeRaw(Prisma.sql`
         SELECT pg_advisory_xact_lock(hashtext(${`remnawave-profile:${remnawaveId}`})::bigint)
       `);
-      const rows = await tx.$queryRaw<Array<{ status: SubscriptionStatus }>>(Prisma.sql`
-        SELECT "status"::text AS "status"
+      const rows = await tx.$queryRaw<Array<{ status: SubscriptionStatus; remnawaveId: string | null }>>(Prisma.sql`
+        SELECT "status"::text AS "status", "remnawave_id" AS "remnawaveId"
         FROM "subscriptions"
         WHERE "id" = ${subscriptionId}
         FOR UPDATE
@@ -1369,8 +1400,13 @@ export class ProfileSyncProcessor extends WorkerHost {
         );
       }
 
-      await tx.subscription.update({
-        where: { id: subscriptionId },
+      // The compare-and-swap (see above): still the link this CREATE read, or
+      // already this very profile. The row lock is held since the read above.
+      const written = await tx.subscription.updateMany({
+        where: {
+          id: subscriptionId,
+          OR: [{ remnawaveId: race.heldWhenRead }, { remnawaveId }],
+        },
         // `?? undefined`: a panel that omitted the field must not OVERWRITE a
         // value we already hold with null. Prisma reads `undefined` as "leave
         // this column alone" and `null` as "set it to null", and the two are
@@ -1386,6 +1422,21 @@ export class ProfileSyncProcessor extends WorkerHost {
           remnawavePendingOwnerId: null,
         },
       });
+      if (written.count !== 1) {
+        // A NEWER LINK WON. Nothing is written to the row — not the link, not
+        // this profile's facts (its `createdAt` is no anchor of the profile
+        // the row links). Only a profile this job made goes, described by
+        // what the panel just said about it: the job may outlive the row.
+        const deleteJobId = race.minted
+          ? await this.createDeleteJobIfMissing(
+              tx,
+              subscriptionId,
+              { remnawaveId, panelId, panelUsername },
+              'CREATE_SUPERSEDED_BY_NEWER_LINK',
+            )
+          : null;
+        return { kind: 'superseded', heldRemnawaveId: current.remnawaveId, deleteJobId };
+      }
       await this.stampRemnawaveFacts(tx, subscriptionId, panelFacts, current.status);
       // ONLY a retired row. This branch compensates for a CREATE that finished
       // after its subscription was deleted — nothing else. It used to fire for
@@ -1409,12 +1460,38 @@ export class ProfileSyncProcessor extends WorkerHost {
           panelUsername,
         });
         if (deleteJobId !== null) {
-          return deleteJobId;
+          return { kind: 'linked', deleteJobId };
         }
       }
 
-      return null;
+      return { kind: 'linked', deleteJobId: null };
     });
+  }
+
+  /**
+   * A CREATE a newer link overtook (`persistProfileLink`). The profile it made
+   * goes — its DELETE was written with the refusal and is queued now; one it
+   * would have adopted stays as it was. Then the row's state is pushed to the
+   * profile the row DOES link: whoever linked it (an operator's «Привязать
+   * профиль», the walk, the comparison) pushed nothing, and that profile may
+   * carry another expiry or limits. The same move as a CREATE that finds its
+   * row already linked (the top of `handleCreate`); the trial announcement and
+   * the «Подписка создана» card stay unsent — this job linked nothing.
+   */
+  private async afterSupersededCreate(
+    syncJob: SyncJobRecord,
+    link: Extract<ProfileLinkWrite, { readonly kind: 'superseded' }>,
+    remnawaveId: string,
+  ): Promise<'updated'> {
+    if (link.deleteJobId !== null) await this.enqueueCompensatingDelete(link.deleteJobId);
+    this.logger.warn(
+      `Subscription ${syncJob.subscription.id} was linked to Remnawave profile ` +
+        `'${link.heldRemnawaveId ?? 'none'}' while its CREATE ran; profile '${remnawaveId}' was not linked ` +
+        (link.deleteJobId === null ? 'and is left as it was' : 'and is scheduled for deletion') +
+        ' — pushing the row to the profile it links',
+    );
+    await this.handleUpdate(syncJob);
+    return 'updated';
   }
 
   private async handleUpdate(syncJob: SyncJobRecord): Promise<void> {
@@ -1993,12 +2070,15 @@ export class ProfileSyncProcessor extends WorkerHost {
    * with its identity columns cleared, or relinked to a different profile — so a
    * re-read would find nothing or address the replacement. Same three keys
    * `subscription-deletion.service.ts` writes, read back by
-   * {@link readTargetIdentity}.
+   * {@link readTargetIdentity}. `source` says which CREATE left the profile
+   * behind: one that finished after its subscription was deleted, or one a
+   * newer link overtook (`persistProfileLink`).
    */
   private async createDeleteJobIfMissing(
     tx: Prisma.TransactionClient,
     subscriptionId: string,
     target: StoredPanelIdentity,
+    source: 'CREATE_COMPLETED_AFTER_DELETE' | 'CREATE_SUPERSEDED_BY_NEWER_LINK' = 'CREATE_COMPLETED_AFTER_DELETE',
   ): Promise<string | null> {
     const targetRemnawaveId = target.remnawaveId;
     const existingDeletes = await tx.profileSyncJob.findMany({
@@ -2020,7 +2100,7 @@ export class ProfileSyncProcessor extends WorkerHost {
         action: SyncAction.DELETE,
         status: SyncJobStatus.PENDING,
         payload: {
-          source: 'CREATE_COMPLETED_AFTER_DELETE',
+          source,
           targetRemnawaveId,
           targetRemnawavePanelId: target.panelId,
           targetRemnawavePanelUsername: target.panelUsername,
@@ -2893,6 +2973,17 @@ interface RecordedCreate {
 
 /** What `handleCreate` did: the caller brings an ADOPTED profile up to date. */
 type CreateOutcome = 'created' | 'adopted' | 'deleted';
+
+/**
+ * What `persistProfileLink` did. `linked`: the row names the profile now, and
+ * `deleteJobId` is the compensating DELETE when the row turned out DELETED.
+ * `superseded`: a newer link won the row (`heldRemnawaveId`, what it holds),
+ * nothing was written to it, and `deleteJobId` removes the profile the CREATE
+ * minted — `null` for one it would have adopted, which is left alone.
+ */
+type ProfileLinkWrite =
+  | { readonly kind: 'linked'; readonly deleteJobId: string | null }
+  | { readonly kind: 'superseded'; readonly heldRemnawaveId: string | null; readonly deleteJobId: string | null };
 
 type RecoveryClassification = 'TRANSIENT' | 'TERMINAL';
 
