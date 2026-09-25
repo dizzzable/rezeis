@@ -31,6 +31,8 @@ function mockTx(opts: {
   const state = {
     creates: [] as Array<{ termId: string; ordinal: number; startsAt: Date; plannedEndsAt: Date }>,
     savepointSql: [] as string[],
+    /** The window key every lookup asked for, so a test can see which window was meant. */
+    windowReads: [] as string[],
   };
   const tx = {
     $executeRawUnsafe: async (sql: string) => {
@@ -38,7 +40,11 @@ function mockTx(opts: {
       return 0;
     },
     subscriptionResetEpoch: {
-      findUnique: async () => (findUniqueQueue.length > 0 ? findUniqueQueue.shift()! : null),
+      findUnique: async (args: { where: { termId_plannedEndsAt: { termId: string; plannedEndsAt: Date } } }) => {
+        const key = args.where.termId_plannedEndsAt;
+        state.windowReads.push(`${key.termId}@${key.plannedEndsAt.toISOString()}`);
+        return findUniqueQueue.length > 0 ? findUniqueQueue.shift()! : null;
+      },
       findFirst: async () =>
         opts.lastOrdinal === null || opts.lastOrdinal === undefined ? null : { ordinal: opts.lastOrdinal },
       create: async (args: { data: EpochRow & { termId: string; ordinal: number } }) => {
@@ -104,19 +110,42 @@ describe('ensureLiveResetEpoch', () => {
     assert.equal(state.creates.length, 0);
   });
 
+  it('returns null for a zone the runtime does not know, instead of aborting the transaction', async () => {
+    const { tx, state } = mockTx({});
+    const result = await ensureLiveResetEpoch(tx as never, {
+      termId: 't1', strategy: 'MONTH', anchorAt: MONTH_ANCHOR, capability: 'ENABLED', now: NOW,
+      timeZone: 'Mars/Olympus_Mons',
+    });
+    assert.equal(result, null);
+    assert.equal(state.creates.length, 0);
+    assert.equal(state.savepointSql.length, 0);
+  });
+
   it('returns the existing epoch for the current window without inserting a new one', async () => {
     const existing: EpochRow = {
       id: 'epoch-existing',
-      startsAt: new Date('2026-03-01T00:00:00.000Z'),
-      plannedEndsAt: new Date('2026-04-01T00:00:00.000Z'),
+      startsAt: new Date('2026-03-01T00:20:00.000Z'),
+      plannedEndsAt: new Date('2026-04-01T00:20:00.000Z'),
     };
     const { tx, state } = mockTx({ findUniqueQueue: [existing] });
     const result = await ensureLiveResetEpoch(tx as never, {
       termId: 't1', strategy: 'MONTH', anchorAt: MONTH_ANCHOR, capability: 'ENABLED', now: NOW,
     });
     assert.deepEqual(result, existing);
+    assert.deepEqual(state.windowReads, ['t1@2026-04-01T00:20:00.000Z']);
     assert.equal(state.creates.length, 0);
     assert.equal(state.savepointSql.length, 0);
+  });
+
+  it('mints the window in Remnawave\'s zone: the 1st 00:20 in Moscow is 21:20 UTC the day before', async () => {
+    const { tx, state } = mockTx({ findUniqueQueue: [null], lastOrdinal: 0 });
+    await ensureLiveResetEpoch(tx as never, {
+      termId: 't1', strategy: 'MONTH', anchorAt: MONTH_ANCHOR, capability: 'ENABLED', now: NOW,
+      timeZone: 'Europe/Moscow',
+    });
+    assert.equal(state.creates.length, 1);
+    assert.equal(state.creates[0]!.startsAt.toISOString(), '2026-02-28T21:20:00.000Z');
+    assert.equal(state.creates[0]!.plannedEndsAt.toISOString(), '2026-03-31T21:20:00.000Z');
   });
 
   it('inserts the current-window epoch under a savepoint with ordinal = last+1 when none exists', async () => {
@@ -128,9 +157,9 @@ describe('ensureLiveResetEpoch', () => {
     assert.equal(state.creates.length, 1);
     assert.equal(state.creates[0]!.termId, 't1');
     assert.equal(state.creates[0]!.ordinal, 3);
-    // MONTH strategy → calendar-month window containing `now` (March 2026 UTC).
-    assert.equal(state.creates[0]!.startsAt.toISOString(), '2026-03-01T00:00:00.000Z');
-    assert.equal(state.creates[0]!.plannedEndsAt.toISOString(), '2026-04-01T00:00:00.000Z');
+    // MONTH strategy → between Remnawave's resets on the 1st at 00:20 (UTC).
+    assert.equal(state.creates[0]!.startsAt.toISOString(), '2026-03-01T00:20:00.000Z');
+    assert.equal(state.creates[0]!.plannedEndsAt.toISOString(), '2026-04-01T00:20:00.000Z');
     // Savepoint wraps the insert, then is released on success.
     assert.deepEqual(state.savepointSql, ['SAVEPOINT reset_epoch_mint', 'RELEASE SAVEPOINT reset_epoch_mint']);
   });
@@ -146,8 +175,8 @@ describe('ensureLiveResetEpoch', () => {
   it('rolls back to the savepoint and returns the winner when a concurrent same-window insert conflicts', async () => {
     const winner: EpochRow = {
       id: 'epoch-winner',
-      startsAt: new Date('2026-03-01T00:00:00.000Z'),
-      plannedEndsAt: new Date('2026-04-01T00:00:00.000Z'),
+      startsAt: new Date('2026-03-01T00:20:00.000Z'),
+      plannedEndsAt: new Date('2026-04-01T00:20:00.000Z'),
     };
     // Pre-read misses; the insert raises P2002; the post-rollback re-read finds
     // the committed winner (another tx got there first).

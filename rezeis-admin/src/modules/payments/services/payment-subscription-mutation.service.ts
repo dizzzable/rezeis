@@ -27,15 +27,12 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { SystemEventsService, EVENT_TYPES } from '../../../common/services/system-events.service';
 import { readJsonObject } from '../../../common/utils/read-json-object.util';
 import { planNameMetadata, planNamesMetadata } from '../../../common/utils/plan-snapshot.util';
-import {
-  type AddOnRolloutFlags,
-  readAddOnRolloutFlags,
-  resolveResetCapabilities,
-} from '../../add-on-entitlements/add-on-rollout.config';
+import { type AddOnRolloutFlags, readAddOnRolloutFlags } from '../../add-on-entitlements/add-on-rollout.config';
+import { type AddOnQuote, readAddOnQuote } from '../../add-on-entitlements/domain/add-on-quote';
 import { GIB_BYTES } from '../../add-on-entitlements/domain/cutover-baseline';
 import {
-  getResetCapability,
-  provisionalResetAnchor,
+  planResetEpoch,
+  resetExpiryAt,
   ResetStrategy,
 } from '../../add-on-entitlements/domain/reset-cycle-policy';
 import { AddOnEntitlementService } from '../../add-on-entitlements/services/add-on-entitlement.service';
@@ -45,7 +42,11 @@ import {
   resolvePlanChangeLimitCarryInTransaction,
   resolveRecordedAddOnContribution,
 } from '../../add-on-entitlements/services/configured-baseline.util';
-import { ensureLiveResetEpoch } from '../../add-on-entitlements/services/reset-epoch.util';
+import {
+  bindResetEpochWindow,
+  mintResetAnchorInTransaction,
+  redateResetAddOnsInTransaction,
+} from '../../add-on-entitlements/services/reset-epoch.util';
 import {
   EffectiveProjectionService,
   type RecomputeProjectionResult,
@@ -253,9 +254,14 @@ export class PaymentSubscriptionMutationService {
    * GATED BY STAGE 1 («Новый учёт докупок») AND BY NOTHING ELSE. Only ENTERING
    * the model reads the flag; what a renewal, an upgrade or an add-on does once
    * a subscription is in it follows the term ROW, whatever the flags say now —
-   * so turning stage 1 off stops new entrants and strands nobody. `flags` is
-   * the snapshot the caller already holds, when it holds one: an operation
-   * that reads the switches twice can straddle a flip.
+   * so turning stage 1 off stops new entrants and strands nobody.
+   *
+   * `flags` is REQUIRED: the one snapshot `applyCompletedTransaction` read
+   * before any transaction opened (review R2b-07). Read here, inside the
+   * caller's transaction, a cold settings cache needed a second pool connection
+   * while this one was held, and a burst of payments could wait on each other
+   * until the pool timed out; an operation that reads the switches twice can
+   * also straddle a flip.
    *
    * Called at creation (NEW, ADDITIONAL, a paid trial) and lazily wherever a
    * payment needs the model: the add-on ledger, the renewal term, the upgrade
@@ -264,15 +270,20 @@ export class PaymentSubscriptionMutationService {
   private async enterTermModelInTransaction(
     tx: Prisma.TransactionClient,
     subscriptionId: string,
-    flags?: AddOnRolloutFlags,
+    flags: AddOnRolloutFlags,
   ): Promise<void> {
-    if (!(flags ?? (await readAddOnRolloutFlags(this.addOnSwitches))).entitlementShadow) return;
+    if (!flags.entitlementShadow) return;
     await this.entitlementCutoverService.ensureTermInTransaction(tx, subscriptionId);
   }
 
   public async applyCompletedTransaction(
     transaction: Transaction,
   ): Promise<{ readonly syncJobs: readonly ProfileSyncJob[] }> {
+    // ONE snapshot of the stage switches for the whole fulfilment, read here,
+    // before any transaction opens, and handed down to every branch (review
+    // R2b-07): see `enterTermModelInTransaction`.
+    const flags = await readAddOnRolloutFlags(this.addOnSwitches);
+
     // Combined multi-subscription renewal: the presence of line items marks
     // this as a single payment fulfilled item-by-item. Handle it before the
     // single-subscription, plan-centric branches.
@@ -291,7 +302,7 @@ export class PaymentSubscriptionMutationService {
       if (await autopayEndedByRefund(this.prismaService, transaction)) {
         return this.withholdAutopayCharge(transaction, items);
       }
-      const combined = await this.applyCombinedRenewal(transaction, items);
+      const combined = await this.applyCombinedRenewal(transaction, items, flags);
       // A multi-subscription renewal is a plan purchase — consume the
       // one-time "next purchase" discount once it completes.
       //
@@ -320,7 +331,7 @@ export class PaymentSubscriptionMutationService {
     // with purchaseDiscount = 0 (they never benefit from it), so they must
     // NOT consume the user's one-time purchase discount.
     if (isAddOnTransaction(transaction)) {
-      const addOnResult = await this.applyAddOnTopUp(transaction);
+      const addOnResult = await this.applyAddOnTopUp(transaction, flags);
       return { syncJobs: [addOnResult.syncJob] };
     }
 
@@ -345,6 +356,7 @@ export class PaymentSubscriptionMutationService {
           transaction,
           purchasedPlan,
           selectedDurationDays,
+          flags,
         });
         break;
       case PurchaseType.RENEW: {
@@ -352,6 +364,7 @@ export class PaymentSubscriptionMutationService {
           transaction,
           purchasedPlan,
           selectedDurationDays,
+          flags,
         });
         if (renewed.kind === 'WITHHELD_LIFETIME') {
           // A subscription with no end date: settled and not applied, as a
@@ -378,6 +391,7 @@ export class PaymentSubscriptionMutationService {
           transaction,
           purchasedPlan,
           selectedDurationDays,
+          flags,
         });
         if (upgraded.kind === 'WITHHELD_LIFETIME') {
           // The same for an upgrade: it would have restarted the term at the
@@ -1032,6 +1046,11 @@ export class PaymentSubscriptionMutationService {
   private async applyCombinedRenewal(
     transaction: Transaction,
     items: readonly TransactionItem[],
+    /**
+     * The one snapshot `applyCompletedTransaction` read — for every line alike.
+     * Read here, still before the transaction, only by a direct caller.
+     */
+    passedFlags?: AddOnRolloutFlags,
   ): Promise<{
     readonly syncJobs: readonly ProfileSyncJob[];
     /** Lines kept on their subscription's current plan; see the completion below. */
@@ -1045,6 +1064,7 @@ export class PaymentSubscriptionMutationService {
     if (pending.length === 0) {
       return { syncJobs: [], latePlanMigrationRenewals: [], renewalsPricedBeforeUpgrade: [], lifetimeOnly: false };
     }
+    const flags = passedFlags ?? (await readAddOnRolloutFlags(this.addOnSwitches));
 
     const committed = await this.prismaService.$transaction(async (transactionClient) => {
       // Operator cards this fulfillment wants to raise, held until it COMMITS:
@@ -1215,6 +1235,7 @@ export class PaymentSubscriptionMutationService {
                 durationDays: item.durationDays,
                 latePlanMigrationRenewal,
                 correlationId,
+                flags,
               })
             : pricedBeforeUpgrade.currentPlan !== null && renewedDays > 0
               ? await this.scheduleRenewalTermInTransaction(transactionClient, {
@@ -1222,6 +1243,7 @@ export class PaymentSubscriptionMutationService {
                   plan: pricedBeforeUpgrade.currentPlan,
                   durationDays: renewedDays,
                   correlationId,
+                  flags,
                 })
               : null;
 
@@ -1588,16 +1610,20 @@ export class PaymentSubscriptionMutationService {
    */
   private async applyAddOnTopUp(
     transaction: Transaction,
+    /**
+     * The one snapshot of the stage switches `applyCompletedTransaction` read
+     * before any transaction opened: the ledger's entry into the model and the
+     * Remnawave zone come from it. What a «до сброса» add-on delivers does not:
+     * that is the quote on the marker (`add-on-quote.ts`). Read here, still
+     * before the transaction, only by a direct caller.
+     */
+    passedFlags?: AddOnRolloutFlags,
   ): Promise<{ readonly subscription: Subscription; readonly syncJob: ProfileSyncJob }> {
     const marker = readAddOnMarker(transaction);
     if (marker === null) {
       throw new NotFoundException('Add-on marker not found on transaction');
     }
-
-    // ONE snapshot of the stage switches for the whole fulfilment, handed down
-    // to the ledger: its reset-capability map must come from the flags whose
-    // `directPurchase` let it in (see `resolveResetCapabilities`).
-    const flags = await readAddOnRolloutFlags(this.addOnSwitches);
+    const flags = passedFlags ?? (await readAddOnRolloutFlags(this.addOnSwitches));
 
     // Set inside the transaction, acted on after it commits. A local flag
     // rather than a second return shape: this method's contract is read by the
@@ -1605,6 +1631,9 @@ export class PaymentSubscriptionMutationService {
     // subscription-limit change would make every caller handle a case that
     // does not concern them.
     let resetTarget: { readonly subscriptionId: string; readonly addOnId: string } | null = null;
+    // Also set inside, told after the commit: a reset-scoped add-on the
+    // capture could not deliver as quoted (see `AddOnQuoteNote`).
+    let quoteNote: AddOnQuoteNote | null = null;
 
     const result = await this.prismaService.$transaction(async (tx) => {
       const subscription = await tx.subscription.findUnique({
@@ -1680,21 +1709,27 @@ export class PaymentSubscriptionMutationService {
       // `sourceLineKey`; `withLedgerMarkerDefaults` gives it the v2 checkout's
       // own values (`UNTIL_SUBSCRIPTION_END`, the add-on id), so a draft in
       // flight across the deploy is ledgered too instead of becoming permanent.
-      if (
-        flags.directPurchase &&
-        (subscription.status === SubscriptionStatus.ACTIVE ||
-          subscription.status === SubscriptionStatus.LIMITED)
-      ) {
-        const ledgered = await this.applyAddOnViaLedger(
-          tx,
-          transaction,
-          withLedgerMarkerDefaults(marker),
-          subscription,
-          flags,
-        );
+      //
+      // A «до сброса» QUOTE IS NEVER THE PERMANENT INCREMENT. It was sold
+      // while stage 2 was on (nothing else can quote it), so it goes to the
+      // ledger even when the switch went off before the money came in, and
+      // when the ledger cannot deliver it the payment is recorded as not
+      // applied and the operator is told — the legacy branch below raises a
+      // column that nothing would ever take back.
+      const ledgerMarker = withLedgerMarkerDefaults(marker);
+      const resetQuoted = ledgerMarker.lifetime === AddOnLifetime.UNTIL_NEXT_RESET;
+      const live =
+        subscription.status === SubscriptionStatus.ACTIVE || subscription.status === SubscriptionStatus.LIMITED;
+      if (live && (flags.directPurchase || resetQuoted)) {
+        const ledgered = await this.applyAddOnViaLedger(tx, transaction, ledgerMarker, subscription, flags);
         if (ledgered !== null) {
-          return ledgered;
+          quoteNote = ledgered.quoteNote;
+          return { subscription: ledgered.subscription, syncJob: ledgered.syncJob };
         }
+      }
+      if (resetQuoted) {
+        quoteNote = { kind: 'NOT_APPLIED', reason: 'SUBSCRIPTION_NOT_ACTIVE' };
+        return this.recordAddOnLedgerNoOp(tx, transaction, subscription, 'RESET_QUOTE_NOT_APPLIED');
       }
 
       // ── Legacy increment path ────────────────────────────────────────────
@@ -1811,8 +1846,10 @@ export class PaymentSubscriptionMutationService {
       }
     }
 
-    this.events.info(EVENT_TYPES.PAYMENT_COMPLETED, 'PAYMENT', 'Payment completed: ADD_ON', {
-      userId: transaction.userId,
+    // `userId` is written at each emit call below, not here: pop-ups and
+    // automations resolve the customer from it, and
+    // `test/popup-capable-events.spec.ts` reads it at the call.
+    const completedMetadata = {
       paymentId: transaction.paymentId,
       purchaseType: transaction.purchaseType,
       addOnType: marker.addOnType,
@@ -1824,33 +1861,75 @@ export class PaymentSubscriptionMutationService {
       // The plan the add-on was bought ONTO. An add-on is «+50 ГБ» to nobody
       // until the card says to what.
       ...planNamesMetadata([result.subscription.planSnapshot]),
-    });
+    };
+    // Captured by the same run that recorded it, after the commit: once per
+    // payment, since a replay finds it fulfilled and never gets this far. ONE
+    // `payment.completed` either way — INFO, or WARNING with the operator's
+    // note when the quote could not be delivered as sold. Automations and
+    // pop-ups match on the type and the customer, not on the severity, so
+    // both fire them exactly once.
+    const settledNote = quoteNote as AddOnQuoteNote | null;
+    if (settledNote === null) {
+      this.events.info(EVENT_TYPES.PAYMENT_COMPLETED, 'PAYMENT', 'Payment completed: ADD_ON', {
+        userId: transaction.userId,
+        ...completedMetadata,
+      });
+    } else {
+      const card = describeAddOnQuoteNote(settledNote, {
+        name: marker.name ?? marker.addOnId,
+        gatewayType: transaction.gatewayType,
+        charged: Number(transaction.amount.toString()) > 0,
+      });
+      this.logger.warn(
+        `Add-on payment ${transaction.paymentId} for subscription ${result.subscription.id}: ${card.message} — ${card.note}`,
+      );
+      this.events.warn(EVENT_TYPES.PAYMENT_COMPLETED, 'PAYMENT', card.message, {
+        userId: transaction.userId,
+        ...completedMetadata,
+        note: card.note,
+        needsManualReview: card.needsManualReview,
+      });
+    }
 
     return result;
   }
 
   /**
-   * Flag-gated ledger fulfillment for a captured add-on. Returns `null` when
-   * the entitlement cannot be fully materialized here (no active term, no
-   * usable term window, or a reset-scoped lifetime whose expiry epoch is not
-   * yet available) so the caller falls back to the legacy increment.
+   * Ledger fulfillment for a captured add-on. Returns `null` when a «до конца
+   * подписки» entitlement cannot be fully materialized here (no active term,
+   * no usable term window) so the caller falls back to the legacy increment.
+   * A «до сброса» one is never handed back that way: it is delivered as quoted,
+   * or with the subscription's end when no reset window can be bound, or
+   * recorded as not applied — each with the `quoteNote` the caller turns into
+   * the operator's card.
    */
   private async applyAddOnViaLedger(
     tx: Prisma.TransactionClient,
     transaction: Transaction,
     marker: AddOnMarker,
     unlockedSubscription: Subscription,
-    /** The snapshot whose `directPurchase` let this call in — see the reset map below. */
+    /** The one snapshot of the switches this fulfilment read before its transaction. */
     flags: AddOnRolloutFlags,
-  ): Promise<{ readonly subscription: Subscription; readonly syncJob: ProfileSyncJob } | null> {
+  ): Promise<{
+    readonly subscription: Subscription;
+    readonly syncJob: ProfileSyncJob;
+    readonly quoteNote: AddOnQuoteNote | null;
+  } | null> {
     if (marker.lifetime === undefined || marker.sourceLineKey === undefined) return null;
+    const resetQuoted = marker.lifetime === AddOnLifetime.UNTIL_NEXT_RESET;
+    const notApplied = async (reason: AddOnNotAppliedReason, subscription: Subscription) => ({
+      ...(await this.recordAddOnLedgerNoOp(tx, transaction, subscription, 'RESET_QUOTE_NOT_APPLIED')),
+      quoteNote: { kind: 'NOT_APPLIED', reason } as const,
+    });
     // An incoherent value cannot be turned into a ledger row at all — the
     // `BigInt(marker.addOnValue)` below throws a raw `RangeError` on a
     // fractional one and mints a NEGATIVE `totalValue` on a negative one, which
     // `addTrafficLimit`/`addDeviceLimit` then reject deep inside the projection
     // recompute. Falling back to the legacy path instead keeps the outcome to
     // ONE shape: the guard there records fulfillment and touches no column.
-    if (!isCoherentAddOnValue(marker.addOnValue)) return null;
+    if (!isCoherentAddOnValue(marker.addOnValue)) {
+      return resetQuoted ? notApplied('INCOHERENT_VALUE', unlockedSubscription) : null;
+    }
 
     // ── INTO THE MODEL, AND ONTO THE SUBSCRIPTION'S REAL END ───────────────
     //
@@ -1879,7 +1958,7 @@ export class PaymentSubscriptionMutationService {
         resetAnchorAt: true,
       },
     });
-    if (term === null) return null;
+    if (term === null) return resetQuoted ? notApplied('NO_ACTIVE_TERM', subscription) : null;
 
     const isTraffic = marker.addOnType === AddOnType.EXTRA_TRAFFIC;
 
@@ -1911,56 +1990,47 @@ export class PaymentSubscriptionMutationService {
         `Add-on ${marker.addOnId} captured against an unlimited baseline for subscription ` +
           `${subscription.id} (payment ${transaction.paymentId}); fulfillment recorded as a no-op`,
       );
-      return this.recordAddOnLedgerNoOp(tx, transaction, subscription);
+      return { ...(await this.recordAddOnLedgerNoOp(tx, transaction, subscription)), quoteNote: null };
     }
 
     const now = new Date();
     let expiresAt: Date;
     let expiryEpochId: string | null = null;
+    let quoteNote: AddOnQuoteNote | null = null;
     if (marker.lifetime === AddOnLifetime.UNTIL_SUBSCRIPTION_END) {
       if (term.endsAt === null || term.endsAt.getTime() <= now.getTime()) {
         return null; // no usable term window → fall back to legacy
       }
       expiresAt = term.endsAt;
     } else {
-      // UNTIL_NEXT_RESET: bind the entitlement's expiry to the term's current
-      // reset epoch. Valid for BOTH traffic and devices — the reset epoch is
-      // the profile's monthly refresh boundary (traffic rolls back, extra
-      // devices are removed on it), so a device entitlement is expired on the
-      // same cycle as a traffic one. Applies ONLY when the strategy's reset
-      // capability is ENABLED (stage 4, «Докупка трафика до сброса»).
-      // Otherwise fall back to the legacy increment — this matches the
-      // eligibility quote, which OFFERS this lifetime under the same
-      // capability gate.
-      const strategy = term.trafficResetStrategy as ResetStrategy;
-      // Find-or-create the CURRENT reset-cycle epoch (shared helper): a purchase
-      // against an already-active term mints the epoch on demand so the offered
-      // `expiresAt` (eligibility quotes the same computation) is always honored,
-      // instead of silently degrading to the permanent legacy increment. Returns
-      // null only when there is no commercial reset window (NO_RESET, capability
-      // not ENABLED, or no anchor) → legacy fallback, matching eligibility.
+      // UNTIL_NEXT_RESET — traffic only (`withLedgerMarkerDefaults` sells a
+      // device «до конца подписки», whatever its marker says).
       //
-      // The map below is `resolveResetCapabilities(flags)` — the FLAG-PURE one —
-      // not `resolveIntakeResetCapabilities(flags)`, even though fulfilment is
-      // a selling side. The two hold the same value HERE, and only here: this
-      // method's single call site sits behind `flags.directPurchase` in
-      // `applyAddOnTopUp`, `flags` is that very snapshot handed down (never a
-      // second read of the switches, which could straddle a flip), and that
-      // flag is the one condition by which the intake map narrows the
-      // flag-pure one. Remove or widen that guard, read the flags again here,
-      // or give the intake resolver a second condition, and the offer can
-      // quote an `expiresAt` this line then refuses — see the note on
-      // `resolveResetCapabilities` for what that costs.
-      const epoch = await ensureLiveResetEpoch(tx, {
+      // THE CAPTURE BINDS TO THE QUOTE (`add-on-quote.ts`), whatever the
+      // switches, the zone or the term say now: the reset window the checkout
+      // quoted is recorded as this term's epoch, and the entitlement ends when
+      // the quote said — never after the subscription's end, which a later
+      // shortening may have brought forward (P5). Only a draft made before
+      // quotes were written has none; its window is computed now, as if stage
+      // 4 were on — it was, when that draft was made.
+      //
+      // When no window can be bound at all (a rolling term without its anchor,
+      // a zone the runtime does not know), it ends with the subscription and
+      // the operator is told; with no end either, it is not applied — never the
+      // permanent increment.
+      const binding = await this.bindResetQuoteInTransaction(tx, {
         termId: term.id,
-        strategy,
+        strategy: term.trafficResetStrategy as ResetStrategy,
         anchorAt: term.resetAnchorAt,
-        capability: getResetCapability(strategy, resolveResetCapabilities(flags)),
+        subscriptionEndsAt: subscription.expiresAt,
+        quote: marker.quote,
+        timeZone: flags.remnawaveTimeZone,
         now,
       });
-      if (epoch === null) return null; // no commercial reset window → legacy fallback
-      expiresAt = epoch.plannedEndsAt;
-      expiryEpochId = epoch.id;
+      if (binding.kind === 'NOT_APPLIED') return notApplied(binding.reason, subscription);
+      expiresAt = binding.expiresAt;
+      expiryEpochId = binding.epochId;
+      if (binding.epochId === null) quoteNote = { kind: 'BOUND_WITHOUT_RESET' };
     }
 
     const totalValue = isTraffic ? BigInt(marker.addOnValue) * GIB_BYTES : BigInt(marker.addOnValue);
@@ -2050,13 +2120,65 @@ export class PaymentSubscriptionMutationService {
       data: { subscriptionId: updatedSubscription.id, fulfilledAt: new Date() },
     });
 
-    return { subscription: updatedSubscription, syncJob };
+    return { subscription: updatedSubscription, syncJob, quoteNote };
+  }
+
+  /**
+   * Where a paid «до сброса» add-on ends — the quote's window and end, capped
+   * by the subscription's end — or why it cannot be delivered at all.
+   * See the note at its one call site in {@link applyAddOnViaLedger}.
+   */
+  private async bindResetQuoteInTransaction(
+    tx: Prisma.TransactionClient,
+    input: {
+      readonly termId: string;
+      readonly strategy: ResetStrategy;
+      readonly anchorAt: Date | null;
+      readonly subscriptionEndsAt: Date | null;
+      readonly quote: AddOnQuote | undefined;
+      readonly timeZone: string | undefined;
+      readonly now: Date;
+    },
+  ): Promise<
+    | { readonly kind: 'BOUND'; readonly expiresAt: Date; readonly epochId: string | null }
+    | { readonly kind: 'NOT_APPLIED'; readonly reason: AddOnNotAppliedReason }
+  > {
+    let window: { readonly startsAt: Date; readonly plannedEndsAt: Date } | null = null;
+    if (input.quote !== undefined && input.quote.resetAt !== null && input.quote.cycleStartsAt !== null) {
+      window = { startsAt: input.quote.cycleStartsAt, plannedEndsAt: input.quote.resetAt };
+    } else if (input.quote === undefined && input.anchorAt !== null) {
+      try {
+        const plan = planResetEpoch({
+          strategy: input.strategy,
+          capability: 'ENABLED',
+          anchorAt: input.anchorAt,
+          referenceAt: input.now,
+          timeZone: input.timeZone,
+        });
+        window = plan === null ? null : { startsAt: plan.startsAt, plannedEndsAt: plan.plannedEndsAt };
+      } catch {
+        window = null; // an anchor or a zone the policy refuses: no window
+      }
+    }
+    const epoch = window === null ? null : await bindResetEpochWindow(tx, { termId: input.termId, ...window });
+
+    let end: Date | null = input.quote?.expiresAt ?? (epoch === null ? null : resetExpiryAt(epoch.plannedEndsAt));
+    if (input.subscriptionEndsAt !== null && (end === null || input.subscriptionEndsAt.getTime() < end.getTime())) {
+      end = input.subscriptionEndsAt;
+    }
+    if (end === null) return { kind: 'NOT_APPLIED', reason: 'NO_END' };
+    // Paid after its own end — the notification came late — and an entitlement
+    // born expired would only push a raised limit to Remnawave for the sweep to
+    // take back minutes later.
+    if (end.getTime() <= input.now.getTime()) return { kind: 'NOT_APPLIED', reason: 'ENDED_BEFORE_CAPTURE' };
+    return { kind: 'BOUND', expiresAt: end, epochId: epoch === null ? null : epoch.id };
   }
 
   private async recordAddOnLedgerNoOp(
     tx: Prisma.TransactionClient,
     transaction: Transaction,
     subscription: Subscription,
+    note: 'UNLIMITED_NOOP' | 'RESET_QUOTE_NOT_APPLIED' = 'UNLIMITED_NOOP',
   ): Promise<{ readonly subscription: Subscription; readonly syncJob: ProfileSyncJob }> {
     const syncJob = await tx.profileSyncJob.create({
       data: {
@@ -2066,7 +2188,7 @@ export class PaymentSubscriptionMutationService {
         payload: {
           source: 'ADDON_PURCHASE_LEDGER',
           paymentId: transaction.paymentId,
-          note: 'UNLIMITED_NOOP',
+          note,
         } as Prisma.InputJsonObject,
       },
     });
@@ -2081,7 +2203,13 @@ export class PaymentSubscriptionMutationService {
     readonly transaction: Transaction;
     readonly purchasedPlan: Plan;
     readonly selectedDurationDays: number;
+    /**
+     * The one snapshot `applyCompletedTransaction` read before any transaction;
+     * read here, still before this one, only by a direct caller.
+     */
+    readonly flags?: AddOnRolloutFlags;
   }): Promise<{ readonly subscription: Subscription; readonly syncJob: ProfileSyncJob }> {
+    const flags = input.flags ?? (await readAddOnRolloutFlags(this.addOnSwitches));
     // A paid trial is a NEW purchase whose checkout-time plan availability was
     // TRIAL. Prefer the persisted snapshot so a later catalog edit cannot turn
     // a paid trial into a renewable regular subscription (or vice versa).
@@ -2115,7 +2243,7 @@ export class PaymentSubscriptionMutationService {
       // equals them, and an add-on bought a minute later is ledgered with an
       // end date rather than falling back to the permanent increment. A paid
       // trial is the same NEW purchase and gets one too.
-      await this.enterTermModelInTransaction(transactionClient, createdSubscription.id);
+      await this.enterTermModelInTransaction(transactionClient, createdSubscription.id, flags);
       if (isTrialPurchase) {
         // `TrialGrant.userId` is unique — upsert so a paid trial records the
         // claim without colliding with a prior (free or paid) grant. The
@@ -2227,10 +2355,13 @@ export class PaymentSubscriptionMutationService {
     readonly transaction: Transaction;
     readonly purchasedPlan: Plan;
     readonly selectedDurationDays: number;
+    /** See {@link createSubscriptionFromPayment}. */
+    readonly flags?: AddOnRolloutFlags;
   }): Promise<RenewalOutcome> {
     if (input.transaction.subscriptionId === null) {
       throw new NotFoundException('Source subscription not found');
     }
+    const flags = input.flags ?? (await readAddOnRolloutFlags(this.addOnSwitches));
     const result = await this.prismaService.$transaction(async (transactionClient): Promise<RenewalOutcome> => {
       const currentSubscription = await this.lockRenewalSubscriptionInTransaction(
         transactionClient,
@@ -2346,6 +2477,7 @@ export class PaymentSubscriptionMutationService {
               durationDays: input.selectedDurationDays,
               latePlanMigrationRenewal,
               correlationId,
+              flags,
             })
           : pricedBeforeUpgrade.currentPlan !== null && renewedDays > 0
             ? await this.scheduleRenewalTermInTransaction(transactionClient, {
@@ -2353,6 +2485,7 @@ export class PaymentSubscriptionMutationService {
                 plan: pricedBeforeUpgrade.currentPlan,
                 durationDays: renewedDays,
                 correlationId,
+                flags,
               })
             : null;
       const now = new Date();
@@ -2663,6 +2796,8 @@ export class PaymentSubscriptionMutationService {
       readonly durationDays: number;
       /** Written on the alignment's add-on events: the payment this renewal fulfils. */
       readonly correlationId?: string;
+      /** The one snapshot `applyCompletedTransaction` read before any transaction. */
+      readonly flags: AddOnRolloutFlags;
     },
   ): Promise<ScheduledRenewalTerm | null> {
     const parent = await tx.$queryRaw<Array<{ id: string; status: SubscriptionStatus }>>(Prisma.sql`
@@ -2678,7 +2813,7 @@ export class PaymentSubscriptionMutationService {
     // A subscription the background cutover has not reached yet enters the
     // model here — only once a plan to mint the renewal's term from is in hand,
     // so a renewal that cannot mint one stays where it was.
-    await this.enterTermModelInTransaction(tx, input.subscriptionId);
+    await this.enterTermModelInTransaction(tx, input.subscriptionId, input.flags);
     const activeTerm = await tx.subscriptionTerm.findFirst({
       where: { subscriptionId: input.subscriptionId, status: SubscriptionTermStatus.ACTIVE },
       orderBy: { generation: 'desc' },
@@ -2768,7 +2903,13 @@ export class PaymentSubscriptionMutationService {
       baseTrafficLimitBytes,
       baseDeviceLimit,
       trafficResetStrategy: input.plan.trafficLimitStrategy,
-      resetAnchorAt: provisionalResetAnchor(input.plan.trafficLimitStrategy, startsAt),
+      // MONTH_ROLLING counts from the Remnawave profile's `createdAt` (P2).
+      resetAnchorAt: await mintResetAnchorInTransaction(
+        tx,
+        input.subscriptionId,
+        input.plan.trafficLimitStrategy,
+        startsAt,
+      ),
     });
     return { id: created.id };
   }
@@ -2810,6 +2951,7 @@ export class PaymentSubscriptionMutationService {
       readonly latePlanMigrationRenewal: LatePlanMigrationRenewal | null;
       /** See {@link scheduleRenewalTermInTransaction}. */
       readonly correlationId?: string;
+      readonly flags: AddOnRolloutFlags;
     },
   ): Promise<ScheduledRenewalTerm | null> {
     if (input.latePlanMigrationRenewal === null) {
@@ -2818,6 +2960,7 @@ export class PaymentSubscriptionMutationService {
         plan: input.paidPlan,
         durationDays: input.durationDays,
         correlationId: input.correlationId,
+        flags: input.flags,
       });
     }
     const currentPlan = await tx.plan.findUnique({
@@ -2829,6 +2972,7 @@ export class PaymentSubscriptionMutationService {
         plan: currentPlan,
         durationDays: input.durationDays,
         correlationId: input.correlationId,
+        flags: input.flags,
       });
     }
     const activeTerm = await tx.subscriptionTerm.findFirst({
@@ -2898,7 +3042,7 @@ export class PaymentSubscriptionMutationService {
       readonly startsAt: Date;
       readonly endsAt: Date | null;
     },
-  ): Promise<{ readonly id: string } | null> {
+  ): Promise<{ readonly id: string; readonly resetAnchorAt: Date | null } | null> {
     const parent = await tx.$queryRaw<Array<{ id: string; status: SubscriptionStatus }>>(Prisma.sql`
       SELECT "id", "status"::text AS "status"
       FROM "subscriptions"
@@ -2921,6 +3065,13 @@ export class PaymentSubscriptionMutationService {
       data: { status: SubscriptionTermStatus.CANCELED, endedAt: input.startsAt },
     });
 
+    // MONTH_ROLLING counts from the Remnawave profile's `createdAt` (P2).
+    const resetAnchorAt = await mintResetAnchorInTransaction(
+      tx,
+      input.subscriptionId,
+      input.plan.trafficLimitStrategy,
+      input.startsAt,
+    );
     const created = await this.subscriptionTermService.createScheduledInTransaction(tx, {
       subscriptionId: input.subscriptionId,
       planId: input.plan.id,
@@ -2945,10 +3096,10 @@ export class PaymentSubscriptionMutationService {
         input.plan.trafficLimit === null ? null : BigInt(input.plan.trafficLimit) * GIB_BYTES,
       baseDeviceLimit: input.plan.deviceLimit <= 0 ? null : input.plan.deviceLimit,
       trafficResetStrategy: input.plan.trafficLimitStrategy,
-      resetAnchorAt: provisionalResetAnchor(input.plan.trafficLimitStrategy, input.startsAt),
+      resetAnchorAt,
     });
     await this.subscriptionTermService.activateInTransaction(tx, created.id, input.startsAt);
-    return { id: created.id };
+    return { id: created.id, resetAnchorAt };
   }
 
   /**
@@ -3036,10 +3187,13 @@ export class PaymentSubscriptionMutationService {
     readonly transaction: Transaction;
     readonly purchasedPlan: Plan;
     readonly selectedDurationDays: number;
+    /** See {@link createSubscriptionFromPayment}. */
+    readonly flags?: AddOnRolloutFlags;
   }): Promise<UpgradeOutcome> {
     if (input.transaction.subscriptionId === null) {
       throw new NotFoundException('Source subscription not found');
     }
+    const flags = input.flags ?? (await readAddOnRolloutFlags(this.addOnSwitches));
     const convertsTrial = isTrialConversionSnapshot(input.transaction.planSnapshot);
     return this.prismaService.$transaction(async (transactionClient): Promise<UpgradeOutcome> => {
       // Every upgrade reads its subscription under the row lock. A conversion
@@ -3182,7 +3336,7 @@ export class PaymentSubscriptionMutationService {
       // A subscription the background cutover has not reached yet enters the
       // term model here, while stage 1 is on — minted from its columns as they
       // stand, before anything below changes them.
-      await this.enterTermModelInTransaction(transactionClient, currentSubscription.id);
+      await this.enterTermModelInTransaction(transactionClient, currentSubscription.id, flags);
       // …and its tail catches up with the expiry it has NOW, before the upgrade
       // writes the new one. An add-on sold "until the end of the subscription"
       // whose date bonus days left behind moves to that end first — and is then
@@ -3277,6 +3431,18 @@ export class PaymentSubscriptionMutationService {
           termId: term.id,
           endsAt: expiresAt,
           correlationId: `payment:${input.transaction.paymentId}`,
+        });
+        // A plan that resets differently: the «до сброса» add-ons also end at
+        // the first reset under ITS rule, never later than promised (P6) — in
+        // the zone of the one switches snapshot this payment read.
+        await redateResetAddOnsInTransaction(transactionClient, {
+          subscriptionId: currentSubscription.id,
+          strategy: input.purchasedPlan.trafficLimitStrategy,
+          anchorAt: term.resetAnchorAt,
+          timeZone: flags.remnawaveTimeZone,
+          now,
+          correlationId: `payment:${input.transaction.paymentId}`,
+          reason: 'RESET_RULE_CHANGED',
         });
         // A free limit bonus follows the same rule: it keeps its own end, the
         // end of the period it was given in, clamped to the new end. Outside
@@ -3543,6 +3709,8 @@ interface AddOnMarker {
   readonly addOnRevision?: number;
   readonly lifetime?: AddOnLifetime;
   readonly sourceLineKey?: string;
+  /** What the checkout quoted (`add-on-quote.ts`); absent on a draft made before quotes were written. */
+  readonly quote?: AddOnQuote;
 }
 
 export function isAddOnTransaction(transaction: Transaction): boolean {
@@ -3585,6 +3753,7 @@ function readAddOnMarker(transaction: Transaction): AddOnMarker | null {
   const addOnRevision = snapshot['addOnRevision'];
   const sourceLineKey = snapshot['sourceLineKey'];
   const name = snapshot['name'];
+  const quote = readAddOnQuote(snapshot);
   return {
     addOnId,
     addOnType: addOnTypeRaw,
@@ -3594,6 +3763,7 @@ function readAddOnMarker(transaction: Transaction): AddOnMarker | null {
     addOnRevision: typeof addOnRevision === 'number' ? addOnRevision : undefined,
     lifetime,
     sourceLineKey: typeof sourceLineKey === 'string' && sourceLineKey.length > 0 ? sourceLineKey : undefined,
+    ...(quote === null ? {} : { quote }),
   };
 }
 
@@ -3605,12 +3775,78 @@ function readAddOnMarker(transaction: Transaction): AddOnMarker | null {
  * (`AddOnPurchaseService.checkout`) — so that draft becomes an entitlement that
  * ends with the subscription, not a permanent increment. A marker that carries
  * its own values keeps them.
+ *
+ * Except one: devices always end with the subscription. A device marker that
+ * says «до следующего сброса» — drafted before 25.09.2026, when the catalogue
+ * still let an operator choose it — is fulfilled «до конца подписки», and
+ * whatever reset window it quoted is dropped: a device slot taken away at the
+ * next traffic reset is not what anyone should have sold.
  */
 function withLedgerMarkerDefaults(marker: AddOnMarker): AddOnMarker {
+  const lifetime =
+    marker.addOnType === AddOnType.EXTRA_TRAFFIC
+      ? (marker.lifetime ?? AddOnLifetime.UNTIL_SUBSCRIPTION_END)
+      : AddOnLifetime.UNTIL_SUBSCRIPTION_END;
+  const { quote, ...rest } = marker;
   return {
-    ...marker,
-    lifetime: marker.lifetime ?? AddOnLifetime.UNTIL_SUBSCRIPTION_END,
+    ...rest,
+    lifetime,
     sourceLineKey: marker.sourceLineKey ?? marker.addOnId,
+    ...(quote !== undefined && quote.lifetime === lifetime ? { quote } : {}),
+  };
+}
+
+/**
+ * Why a paid reset-scoped add-on could not be delivered at all. It is never
+ * turned into the permanent increment instead: the payment is recorded as
+ * fulfilled, no limit moves, and the operator gets a card to refund it or
+ * grant it by hand.
+ */
+type AddOnNotAppliedReason =
+  | 'SUBSCRIPTION_NOT_ACTIVE'
+  | 'NO_ACTIVE_TERM'
+  | 'INCOHERENT_VALUE'
+  | 'NO_END'
+  | 'ENDED_BEFORE_CAPTURE';
+
+/** Something about a reset-scoped add-on's capture the operator must hear about. */
+type AddOnQuoteNote =
+  | { readonly kind: 'NOT_APPLIED'; readonly reason: AddOnNotAppliedReason }
+  /** Delivered, but with no reset window to end at: it ends with the subscription. */
+  | { readonly kind: 'BOUND_WITHOUT_RESET' };
+
+const ADD_ON_NOT_APPLIED_WHY: Readonly<Record<AddOnNotAppliedReason, string>> = {
+  SUBSCRIPTION_NOT_ACTIVE: 'к моменту оплаты подписка уже не активна',
+  NO_ACTIVE_TERM: 'у подписки нет действующего срока в учёте докупок',
+  INCOHERENT_VALUE: 'у докупки в каталоге неверное значение',
+  NO_END: 'у неё нет даты окончания: ни сброса трафика, ни конца подписки',
+  ENDED_BEFORE_CAPTURE: 'оплата пришла уже после окончания её срока',
+};
+
+/** The card for a note, in the words the operator reads (`📝 Заметка`). */
+function describeAddOnQuoteNote(
+  note: AddOnQuoteNote,
+  input: { readonly name: string; readonly gatewayType: string; readonly charged: boolean },
+): { readonly message: string; readonly note: string; readonly needsManualReview: boolean } {
+  if (note.kind === 'BOUND_WITHOUT_RESET') {
+    return {
+      message: 'Докупка применена без привязки к сбросу трафика',
+      note:
+        `Докупка «${input.name}» оплачена «до сброса трафика», но сброс её цикла определить не удалось ` +
+        '(нет даты создания профиля в Remnawave или неверный «Часовой пояс Remnawave»). ' +
+        'Она действует до конца подписки. Проверьте «Доп. услуги» → «Настройки».',
+      needsManualReview: false,
+    };
+  }
+  return {
+    message: 'Докупка оплачена, но не применена',
+    note:
+      `Докупка «${input.name}» оплачена «до сброса трафика», но ${ADD_ON_NOT_APPLIED_WHY[note.reason]}. ` +
+      'Лимиты подписки не менялись. ' +
+      (input.charged
+        ? `Верните деньги у платёжного провайдера (${input.gatewayType}) или выдайте докупку вручную.`
+        : 'Денег по ней не списано — возвращать нечего.'),
+    needsManualReview: input.charged,
   };
 }
 

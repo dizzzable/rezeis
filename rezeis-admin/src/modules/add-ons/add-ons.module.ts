@@ -6,6 +6,7 @@ import { AdminAddOnsController } from './controllers/admin-add-ons.controller';
 import { AdminAddOnsStatsController } from './controllers/admin-add-ons-stats.controller';
 import { InternalAddOnsController } from './controllers/internal-add-ons.controller';
 import { RemnawaveModule } from '../remnawave/remnawave.module';
+import { SettingsModule } from '../settings/settings.module';
 import { AddOnEligibilityService } from './services/add-on-eligibility.service';
 import { TrafficResetService } from './services/traffic-reset.service';
 import { AddOnsService } from './services/add-ons.service';
@@ -20,7 +21,9 @@ import { AddOnsStatsService } from './services/add-ons-stats.service';
   // optionality is there for specs, not to paper over a missing import.
   // `AddOnSwitchesModule` for the same reason: the offer reads the stage
   // switches, and without the import it would read `.env` and the defaults.
-  imports: [AuthModule, RemnawaveModule, AddOnSwitchesModule],
+  // `SettingsModule` for the operator's «Часовой пояс», which the offer sends
+  // with its dates; without it they would be shown in UTC.
+  imports: [AuthModule, RemnawaveModule, AddOnSwitchesModule, SettingsModule],
   controllers: [AdminAddOnsController, AdminAddOnsStatsController, InternalAddOnsController],
   providers: [
     AddOnsService,

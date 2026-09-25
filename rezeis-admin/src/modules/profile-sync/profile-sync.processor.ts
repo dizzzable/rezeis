@@ -35,6 +35,12 @@ import {
 } from '../remnawave/services/stale-panel-link';
 import { toPanelDeviceLimit, toPanelTrafficLimitBytes } from '../remnawave/utils/panel-limit-wire.util';
 import {
+  NO_REMNAWAVE_PROFILE_FACTS,
+  readRemnawaveProfileFacts,
+  type RemnawaveProfileFacts,
+  stampRemnawaveProfileFacts,
+} from '../remnawave/utils/remnawave-profile-facts.util';
+import {
   PROFILE_SYNC_CONCURRENCY,
   PROFILE_SYNC_MAX_ATTEMPTS,
   PROFILE_SYNC_QUEUE,
@@ -735,7 +741,7 @@ export class ProfileSyncProcessor extends WorkerHost {
         // produce a name that no longer resolves.
         existingUsername,
         readPanelString(existing.subscriptionUrl),
-        panelTimestamp(existing.createdAt),
+        readRemnawaveProfileFacts(existing),
       );
       if (deleteScheduled) {
         await this.enqueueCompensatingDelete(deleteScheduled);
@@ -923,7 +929,7 @@ export class ProfileSyncProcessor extends WorkerHost {
       createdPanelId,
       readPanelString(panelUser.username),
       readPanelString(panelUser.subscriptionUrl),
-      panelTimestamp(panelUser.createdAt),
+      readRemnawaveProfileFacts(panelUser),
     );
     if (deleteScheduled) {
       await this.enqueueCompensatingDelete(deleteScheduled);
@@ -1292,7 +1298,7 @@ export class ProfileSyncProcessor extends WorkerHost {
     panelId: number | null,
     panelUsername: string | null,
     configUrl: string | null | undefined,
-    panelCreatedAt: string | null | undefined,
+    panelFacts: RemnawaveProfileFacts,
   ): Promise<string | null> {
     if (typeof remnawaveId !== 'string' || remnawaveId.length === 0) {
       throw new Error(
@@ -1380,7 +1386,7 @@ export class ProfileSyncProcessor extends WorkerHost {
           remnawavePendingOwnerId: null,
         },
       });
-      await this.stampMonthRollingAnchor(tx, subscriptionId, panelCreatedAt, current.status);
+      await this.stampRemnawaveFacts(tx, subscriptionId, panelFacts, current.status);
       // ONLY a retired row. This branch compensates for a CREATE that finished
       // after its subscription was deleted — nothing else. It used to fire for
       // every status that is not ACTIVE, which is four of the five: EXPIRED,
@@ -1660,10 +1666,12 @@ export class ProfileSyncProcessor extends WorkerHost {
         ownerBlocked,
       });
 
+      // The last answer, the reset's when a renewal zeroed the counter: its
+      // `lastTrafficResetAt` is that reset.
       const deleteJobId = await this.ensureDeleteJobIfDeleted(
         subscription.id,
         panelIdentityOf(subscription),
-        panelTimestamp(panelUser.createdAt),
+        readRemnawaveProfileFacts(lastAnswer),
       );
       if (deleteJobId !== null) {
         await this.enqueueCompensatingDelete(deleteJobId);
@@ -1767,7 +1775,7 @@ export class ProfileSyncProcessor extends WorkerHost {
   private async ensureDeleteJobIfDeleted(
     subscriptionId: string,
     target: StoredPanelIdentity | null,
-    panelCreatedAt?: string | null,
+    panelFacts: RemnawaveProfileFacts = NO_REMNAWAVE_PROFILE_FACTS,
     client: Prisma.TransactionClient | PrismaService = this.prismaService,
   ): Promise<string | null> {
     if (target === null) {
@@ -1783,27 +1791,33 @@ export class ProfileSyncProcessor extends WorkerHost {
       if (rows[0]?.status === SubscriptionStatus.DELETED) {
         return this.createDeleteJobIfMissing(tx, subscriptionId, target);
       }
-      await this.stampMonthRollingAnchor(
-        tx,
-        subscriptionId,
-        panelCreatedAt,
-        rows[0]?.status,
-      );
+      await this.stampRemnawaveFacts(tx, subscriptionId, panelFacts, rows[0]?.status);
       return null;
     });
   }
 
-  private async stampMonthRollingAnchor(
+  /**
+   * What an answer of Remnawave's told us about the profile, onto the row it
+   * answered for: its `createdAt` and `lastTrafficResetAt` onto the
+   * subscription (`remnawave-profile-facts.util.ts` — never null over a value,
+   * the reset only forward), and its `createdAt` onto the live MONTH_ROLLING
+   * terms as their reset anchor.
+   *
+   * WHATEVER THE STATUS. This used to stamp the anchor only while the
+   * subscription was ACTIVE, and a LIMITED customer — the likely buyer of more
+   * traffic — was left with no rolling anchor, so the offer withheld the very
+   * add-on they needed. Only a row that is gone or DELETED is skipped: it is
+   * retired, and its terms with it.
+   */
+  private async stampRemnawaveFacts(
     tx: Prisma.TransactionClient,
     subscriptionId: string,
-    panelCreatedAt: string | null | undefined,
+    panelFacts: RemnawaveProfileFacts,
     subscriptionStatus: SubscriptionStatus | undefined,
   ): Promise<void> {
-    if (subscriptionStatus !== SubscriptionStatus.ACTIVE || typeof panelCreatedAt !== 'string') {
-      return;
-    }
-    const parsed = Date.parse(panelCreatedAt);
-    if (!Number.isFinite(parsed)) return;
+    if (subscriptionStatus === undefined || subscriptionStatus === SubscriptionStatus.DELETED) return;
+    await stampRemnawaveProfileFacts(tx, [subscriptionId], panelFacts);
+    if (panelFacts.createdAt === null) return;
 
     await tx.subscriptionTerm.updateMany({
       where: {
@@ -1811,7 +1825,7 @@ export class ProfileSyncProcessor extends WorkerHost {
         status: { in: [SubscriptionTermStatus.ACTIVE, SubscriptionTermStatus.SCHEDULED] },
         trafficResetStrategy: TrafficLimitStrategy.MONTH_ROLLING,
       },
-      data: { resetAnchorAt: new Date(parsed) },
+      data: { resetAnchorAt: panelFacts.createdAt },
     });
   }
 
@@ -2476,9 +2490,12 @@ export class ProfileSyncProcessor extends WorkerHost {
         `Resetting traffic for Remnawave profile '${subscription.remnawaveId}'`,
       );
     }
+    // The answer is the profile just after the reset: its `lastTrafficResetAt`
+    // is this one.
     const deleteJobId = await this.ensureDeleteJobIfDeleted(
       subscription.id,
       identity,
+      readRemnawaveProfileFacts(reset.data.response),
     );
     if (deleteJobId !== null) {
       await this.enqueueCompensatingDelete(deleteJobId);
@@ -2728,22 +2745,6 @@ function recordedCreateOf(subscription: SyncJobRecord['subscription']): Recorded
   const name = readPanelString(subscription.remnawavePendingUsername);
   if (name === null) return null;
   return { name, ownerId: readPanelString(subscription.remnawavePendingOwnerId) };
-}
-
-/**
- * A panel timestamp as the ISO string the callers downstream parse.
- *
- * The client hands the panel's own JSON over, so a date field arrives as the
- * wire string; a `Date` is still accepted, which is what the vendor parse used
- * to produce and what several test doubles hand over. Anything else answers
- * `null` rather than `String(undefined)`: `stampMonthRollingAnchor` would write
- * `Invalid Date` into a MONTH_ROLLING reset anchor, which silently moves a
- * customer's reset boundary. Only the instant is used downstream
- * (`Date.parse`), so the two spellings of one timestamp write the same anchor.
- */
-function panelTimestamp(value: unknown): string | null {
-  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.toISOString();
-  return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
 /**

@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 
-import { AddOnType, type Prisma } from '@prisma/client';
+import { AddOnLifetime, AddOnType, type Prisma } from '@prisma/client';
 
 import { _resetProcessRoleCacheForTests } from '../src/common/runtime/process-role.util';
 import {
@@ -14,6 +16,8 @@ import {
   addOnNoticeType,
   AddOnExpiryNoticeService,
   decideAddOnNotice,
+  isQuietResetCycle,
+  trafficResetEndOf,
   type AddOnNoticeRow,
 } from '../src/modules/add-on-entitlements/services/addon-expiry-notice.service';
 import {
@@ -40,7 +44,8 @@ import { admitThroughBullMq, OfflineBullMqQueue } from './helpers/bullmq-offline
  * PostgreSQL in `addon-expiry-notice-postgres.spec.ts`.
  */
 
-const NOTICE_TYPES = [
+/** The notices that name the add-on's own end (`{{endsDateTime}}`). */
+const DATED_NOTICE_TYPES = [
   'addon_ends_in_3_days',
   'addon_ended',
   'addon_devices_ends_in_3_days',
@@ -48,6 +53,11 @@ const NOTICE_TYPES = [
   'addon_devices_auto_ends_in_3_days',
   'addon_devices_auto_ended',
 ] as const;
+
+/** Traffic that ends with Remnawave's traffic reset: they name the reset (`{{resetDateTime}}`). */
+const RESET_NOTICE_TYPES = ['addon_reset_ends_in_3_days', 'addon_reset_ended'] as const;
+
+const NOTICE_TYPES = [...DATED_NOTICE_TYPES, ...RESET_NOTICE_TYPES] as const;
 
 const ENV = ['ADDON_ENTITLEMENT_DIRECT_PURCHASE', 'RUID_PROCESS_ROLE'] as const;
 const saved: Record<string, string | undefined> = {};
@@ -212,26 +222,43 @@ describe('whether a moment is due, on the row read again when it is decided', ()
     readonly activatedIn?: number | null;
     readonly status?: AddOnNoticeRow['subscription']['status'];
     readonly subscriptionEndsIn?: number | null;
-  }): AddOnNoticeRow => ({
-    id: 'e-1',
-    subscriptionId: 's-1',
-    type: AddOnType.EXTRA_TRAFFIC,
-    state: over.state ?? 'ACTIVE',
-    receiptName: 'x',
-    totalValue: 1n,
-    activatedAt: over.activatedIn === null ? null : new Date(NOW.getTime() + (over.activatedIn ?? -20 * DAY)),
-    expiresAt: new Date(NOW.getTime() + (over.endsIn ?? 2 * DAY)),
-    subscription: {
-      userId: 'u-1',
-      status: over.status ?? 'ACTIVE',
-      expiresAt:
-        over.subscriptionEndsIn === null ? null : new Date(NOW.getTime() + (over.subscriptionEndsIn ?? 20 * DAY)),
-      planSnapshot: {},
-      trafficLimit: 100,
-      deviceLimit: 3,
-      remnawavePanelUsername: null,
-    },
-  });
+    /**
+     * A reset add-on: its cycle's length, and whether the subscription's
+     * earlier end caps it (it then ends a day before the reset + margin).
+     */
+    readonly reset?: { readonly cycle: number; readonly capped?: boolean };
+  }): AddOnNoticeRow => {
+    const expiresAt = new Date(NOW.getTime() + (over.endsIn ?? 2 * DAY));
+    const plannedEndsAt =
+      over.reset === undefined
+        ? null
+        : new Date(expiresAt.getTime() - 30 * 60_000 + (over.reset.capped === true ? DAY : 0));
+    return {
+      id: 'e-1',
+      subscriptionId: 's-1',
+      type: AddOnType.EXTRA_TRAFFIC,
+      state: over.state ?? 'ACTIVE',
+      receiptName: 'x',
+      totalValue: 1n,
+      activatedAt: over.activatedIn === null ? null : new Date(NOW.getTime() + (over.activatedIn ?? -20 * DAY)),
+      expiresAt,
+      lifetime: over.reset === undefined ? AddOnLifetime.UNTIL_SUBSCRIPTION_END : AddOnLifetime.UNTIL_NEXT_RESET,
+      expiryEpoch:
+        plannedEndsAt === null || over.reset === undefined
+          ? null
+          : { startsAt: new Date(plannedEndsAt.getTime() - over.reset.cycle), plannedEndsAt },
+      subscription: {
+        userId: 'u-1',
+        status: over.status ?? 'ACTIVE',
+        expiresAt:
+          over.subscriptionEndsIn === null ? null : new Date(NOW.getTime() + (over.subscriptionEndsIn ?? 20 * DAY)),
+        planSnapshot: {},
+        trafficLimit: 100,
+        deviceLimit: 3,
+        remnawavePanelUsername: null,
+      },
+    };
+  };
 
   it('«three days out»: an ACTIVE add-on ending inside them, bought before them, on a live subscription', () => {
     assert.equal(decideAddOnNotice(row({}), 'endsSoon', NOW), 'send');
@@ -260,6 +287,67 @@ describe('whether a moment is due, on the row read again when it is decided', ()
     // Out of the three days after the end.
     assert.equal(decideAddOnNotice(row({ ...ended, endsIn: -3 * DAY - HOUR }), 'ended', NOW), 'notDue');
   });
+
+  it('a reset add-on on a daily or weekly reset is told nothing; a monthly one, and one the subscription caps, are', () => {
+    const ended = { state: 'EXPIRED' as const, endsIn: -HOUR };
+    const WEEK = 7 * DAY;
+    // Bought six days before a weekly reset — outside the three days — and a
+    // daily one that has ended: nothing either way.
+    assert.equal(decideAddOnNotice(row({ reset: { cycle: WEEK }, activatedIn: -4 * DAY }), 'endsSoon', NOW), 'notDue');
+    assert.equal(decideAddOnNotice(row({ ...ended, reset: { cycle: DAY } }), 'ended', NOW), 'notDue');
+    assert.equal(decideAddOnNotice(row({ ...ended, reset: { cycle: WEEK + HOUR } }), 'ended', NOW), 'notDue');
+    // A monthly reset: both moments, as any dated add-on.
+    assert.equal(decideAddOnNotice(row({ reset: { cycle: 28 * DAY } }), 'endsSoon', NOW), 'send');
+    assert.equal(decideAddOnNotice(row({ ...ended, reset: { cycle: 31 * DAY } }), 'ended', NOW), 'send');
+    // Capped by the subscription's earlier end: it ends with the subscription,
+    // not at the reset, so the cycle says nothing about it.
+    assert.equal(decideAddOnNotice(row({ reset: { cycle: WEEK, capped: true } }), 'endsSoon', NOW), 'send');
+  });
+});
+
+describe('the traffic reset an add-on ends with', () => {
+  const RESET = new Date('2090-04-01T00:20:00.000Z');
+  const reset = (over: Partial<Pick<AddOnNoticeRow, 'lifetime' | 'expiresAt' | 'expiryEpoch'>>) => ({
+    lifetime: AddOnLifetime.UNTIL_NEXT_RESET,
+    expiresAt: new Date(RESET.getTime() + 30 * 60_000),
+    expiryEpoch: { startsAt: new Date('2090-03-01T00:20:00.000Z'), plannedEndsAt: RESET },
+    ...over,
+  });
+
+  it('is the epoch’s reset when the add-on ends half an hour after it', () => {
+    assert.equal(trafficResetEndOf(reset({}))?.toISOString(), RESET.toISOString());
+    assert.equal(isQuietResetCycle(reset({})), false, 'a monthly cycle');
+  });
+
+  it('is none for an add-on that ends otherwise', () => {
+    // Capped by the subscription's end, a minute or a day before the reset + margin.
+    assert.equal(trafficResetEndOf(reset({ expiresAt: new Date(RESET.getTime() + 29 * 60_000) })), null);
+    assert.equal(trafficResetEndOf(reset({ expiresAt: new Date(RESET.getTime() - 24 * 3_600_000) })), null);
+    // «До конца подписки», no epoch, no end.
+    assert.equal(trafficResetEndOf(reset({ lifetime: AddOnLifetime.UNTIL_SUBSCRIPTION_END })), null);
+    assert.equal(trafficResetEndOf(reset({ expiryEpoch: null })), null);
+    assert.equal(trafficResetEndOf(reset({ expiresAt: null })), null);
+  });
+
+  it('is quiet below a week and a day, whatever the daylight-saving hour', () => {
+    const cycle = (ms: number) =>
+      isQuietResetCycle(reset({ expiryEpoch: { startsAt: new Date(RESET.getTime() - ms), plannedEndsAt: RESET } }));
+    const HOUR = 3_600_000;
+    assert.equal(cycle(23 * HOUR), true);
+    assert.equal(cycle(24 * HOUR), true);
+    assert.equal(cycle(7 * 24 * HOUR + HOUR), true);
+    assert.equal(cycle(28 * 24 * HOUR - HOUR), false);
+    // A capped weekly add-on is not a reset add-on at all.
+    assert.equal(
+      isQuietResetCycle(
+        reset({
+          expiresAt: new Date(RESET.getTime() - HOUR),
+          expiryEpoch: { startsAt: new Date(RESET.getTime() - 7 * 24 * HOUR), plannedEndsAt: RESET },
+        }),
+      ),
+      false,
+    );
+  });
 });
 
 describe('which template a notice is sent with', () => {
@@ -272,12 +360,22 @@ describe('which template a notice is sent with', () => {
     assert.equal(addOnNoticeType('ended', AddOnType.EXTRA_DEVICES, true), 'addon_devices_auto_ended');
   });
 
-  it('ships all six in the catalogue — seeded on boot, so «Карта бота» lists and edits them — in Russian and English', () => {
+  it('picks the reset’s pair for traffic that ends with the traffic reset — never for devices', () => {
+    assert.equal(addOnNoticeType('endsSoon', AddOnType.EXTRA_TRAFFIC, false, true), 'addon_reset_ends_in_3_days');
+    assert.equal(addOnNoticeType('ended', AddOnType.EXTRA_TRAFFIC, true, true), 'addon_reset_ended');
+    assert.equal(addOnNoticeType('endsSoon', AddOnType.EXTRA_TRAFFIC, false, false), 'addon_ends_in_3_days');
+    // A device add-on always lasts to the subscription's end (stage 4's rule);
+    // should one ever say otherwise, its words are still the devices'.
+    assert.equal(addOnNoticeType('ended', AddOnType.EXTRA_DEVICES, true, true), 'addon_devices_auto_ended');
+  });
+
+  it('ships all eight in the catalogue — seeded on boot, so «Карта бота» lists and edits them — in Russian and English', () => {
     for (const type of NOTICE_TYPES) {
       const template = DEFAULT_NOTIFICATION_TEMPLATES.find((entry) => entry.type === type);
       assert.ok(template !== undefined, type);
+      const when = (RESET_NOTICE_TYPES as readonly string[]).includes(type) ? '{{resetDateTime}}' : '{{endsDateTime}}';
       for (const text of [template.body, template.bodyEn ?? '']) {
-        for (const placeholder of ['{{addon}}', '{{addonValue}}', '{{plan}}', '{{endsDateTime}}']) {
+        for (const placeholder of ['{{addon}}', '{{addonValue}}', '{{plan}}', when]) {
           assert.ok(text.includes(placeholder), `${type}: ${placeholder}`);
         }
       }
@@ -312,25 +410,61 @@ describe('which template a notice is sent with', () => {
     assert.match(body('addon_devices_auto_ends_in_3_days').bodyEn ?? '', /“Subscription” → “Manage devices”/);
   });
 
+  it('says the reset — with its zone — and that the limit goes back to the plan’s, without the renewal sentence', () => {
+    const body = (type: string) => DEFAULT_NOTIFICATION_TEMPLATES.find((entry) => entry.type === type)!;
+    assert.equal(
+      body('addon_reset_ends_in_3_days').body,
+      'Опция «{{addon}}» ({{addonValue}}) к подписке «{{plan}}» действует до сброса трафика {{resetDateTime}}; ' +
+        'после сброса лимит вернётся к тарифу.',
+    );
+    assert.match(body('addon_reset_ended').body, /закончилась со сбросом трафика \{\{resetDateTime\}\}: лимит вернулся к тарифу/);
+    assert.match(body('addon_reset_ends_in_3_days').bodyEn ?? '', /until the traffic reset on \{\{resetDateTime\}\}; after the reset/);
+    for (const type of RESET_NOTICE_TYPES) {
+      // A renewal does not move a reset: the sentence about renewal is the
+      // other end's, and the take-off half an hour later is not what they name.
+      assert.doesNotMatch(body(type).body, /Продление|\{\{endsDateTime\}\}/, type);
+      assert.doesNotMatch(body(type).bodyEn ?? '', /Renewing|\{\{endsDateTime\}\}/, type);
+    }
+  });
+
   it('sits with the subscription’s notices on the map, and leads to the add-on page', () => {
     for (const type of NOTICE_TYPES) {
       assert.equal(resolveNotificationCategory(type), 'expires', type);
       assert.equal(resolveTerminalRouteFor(type), '/addons', type);
     }
   });
+
+  it('is on the operator’s notifications page too, with a label in both languages', () => {
+    // `notification-template-coverage.spec.ts` checks the page's keys against
+    // the catalogue; this is the other direction, for these eight: a template
+    // missing from the page's list is one the operator finds only on the map.
+    const page = readFileSync(join(__dirname, '..', 'web', 'src', 'features', 'notifications', 'notifications-page.tsx'), 'utf8');
+    const start = page.indexOf('const USER_NOTIFICATION_KEYS = [');
+    const keys = page.slice(start, page.indexOf('] as const', start));
+    for (const locale of ['ru', 'en']) {
+      const labels = readFileSync(join(__dirname, '..', 'web', 'src', 'i18n', 'features', `notifications.${locale}.ts`), 'utf8');
+      for (const type of NOTICE_TYPES) assert.match(labels, new RegExp(`\\b${type}: '`), `${locale}: ${type}`);
+    }
+    for (const type of NOTICE_TYPES) assert.ok(keys.includes(`'${type}'`), type);
+  });
 });
 
 describe('what the customer can switch off', () => {
-  it('two switches for six templates: «за 3 дня» and «закончилась», each mailable', () => {
+  it('two switches for eight templates: «за 3 дня» and «закончилась», each mailable', () => {
     assert.ok(SUBSCRIBER_MUTABLE_NOTIFICATION_TYPES.includes('addon_ends_in_3_days'));
     assert.ok(SUBSCRIBER_MUTABLE_NOTIFICATION_TYPES.includes('addon_ended'));
     for (const type of NOTICE_TYPES) assert.equal(isSubscriberMailableType(type), true, type);
 
     const soonOff = { addon_ends_in_3_days: false };
-    for (const type of ['addon_ends_in_3_days', 'addon_devices_ends_in_3_days', 'addon_devices_auto_ends_in_3_days']) {
+    for (const type of [
+      'addon_ends_in_3_days',
+      'addon_reset_ends_in_3_days',
+      'addon_devices_ends_in_3_days',
+      'addon_devices_auto_ends_in_3_days',
+    ]) {
       assert.equal(isSubscriberNotificationEnabled(soonOff, type), false, type);
     }
-    for (const type of ['addon_ended', 'addon_devices_ended', 'addon_devices_auto_ended']) {
+    for (const type of ['addon_ended', 'addon_reset_ended', 'addon_devices_ended', 'addon_devices_auto_ended']) {
       assert.equal(isSubscriberNotificationEnabled(soonOff, type), true, type);
       assert.equal(isSubscriberNotificationEnabled({ addon_ended: false }, type), false, type);
     }
@@ -364,6 +498,29 @@ describe('the words, in the customer’s language', () => {
 
   it('says nothing for a payload without an add-on', () => {
     assert.deepEqual(buildAddOnFacts({ type: undefined, total: undefined, endsAt: undefined }, 'ru'), {});
+  });
+
+  it('names the reset — its date, its time and its zone — in the operator’s zone', () => {
+    // Remnawave's MONTH reset at 00:20 UTC; the take-off is half an hour later.
+    const resetAt = '2090-10-01T00:20:00.000Z';
+    const endsAt = '2090-10-01T00:50:00.000Z';
+    const facts = (timezone: string | null, locale: 'ru' | 'en') =>
+      buildAddOnFacts({ type: 'EXTRA_TRAFFIC', total: 50, endsAt, resetAt, timezone }, locale);
+    const moscow = facts('Europe/Moscow', 'ru');
+    assert.equal(moscow['resetDateTime'], '1 октября в 03:20 по Москве');
+    assert.equal(moscow['resetDate'], '1 октября');
+    assert.equal(moscow['resetTime'], '03:20');
+    assert.equal(moscow['resetZone'], 'по Москве');
+    // The add-on's own end is still there, half an hour later.
+    assert.equal(moscow['endsTime'], '03:50');
+    assert.equal(facts('Europe/Moscow', 'en')['resetDateTime'], '1 October at 03:20 Moscow Time');
+    assert.equal(facts(null, 'ru')['resetDateTime'], '1 октября в 00:20 по UTC');
+    assert.equal(facts(null, 'en')['resetDateTime'], '1 October at 00:20 UTC');
+    // A zone without a written-out name: its offset, never a bare hour.
+    assert.equal(facts('Asia/Kolkata', 'ru')['resetDateTime'], '1 октября в 05:50 (UTC+5:30)');
+    assert.equal(facts('America/Sao_Paulo', 'ru')['resetZone'], '(UTC-3)');
+    // No reset in the payload: no reset words.
+    assert.equal(buildAddOnFacts({ type: 'EXTRA_TRAFFIC', total: 50, endsAt }, 'ru')['resetDateTime'], undefined);
   });
 });
 

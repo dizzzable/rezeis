@@ -223,6 +223,12 @@ interface AddOnFixture {
   /** When it was activated, from NOW; 20 days before NOW unless said. */
   readonly activatedIn?: number;
   readonly expiresAt?: 'none';
+  /**
+   * An add-on until the next traffic reset, bound to a reset epoch `cycle`
+   * long: it ends half an hour after the epoch's reset — or, `capped`, a day
+   * before the reset, with the subscription (stage 4's rule).
+   */
+  readonly reset?: { readonly cycle: number; readonly capped?: boolean };
 }
 
 /**
@@ -287,6 +293,22 @@ async function subscriptionWith(
     const id = `${subscriptionId}-addon-${index}`;
     const devices = (addOn.type ?? AddOnType.EXTRA_TRAFFIC) === AddOnType.EXTRA_DEVICES;
     const activatedAt = at(addOn.activatedIn ?? -20 * DAY_MS);
+    let expiryEpochId: string | null = null;
+    if (addOn.reset !== undefined) {
+      // The reset the add-on ends with: its end minus the half-hour margin, or
+      // a day past its end for one the subscription caps.
+      const plannedEndsAt = at(addOn.endsIn - 30 * MINUTE_MS + (addOn.reset.capped === true ? DAY_MS : 0));
+      expiryEpochId = `${id}-epoch`;
+      await prisma.subscriptionResetEpoch.create({
+        data: {
+          id: expiryEpochId,
+          termId: `${subscriptionId}-term`,
+          ordinal: index + 1,
+          startsAt: new Date(plannedEndsAt.getTime() - addOn.reset.cycle),
+          plannedEndsAt,
+        },
+      });
+    }
     await prisma.addOnEntitlement.create({
       data: {
         id,
@@ -299,7 +321,8 @@ async function subscriptionWith(
         type: addOn.type ?? AddOnType.EXTRA_TRAFFIC,
         valuePerUnit: devices ? 2 : 10,
         totalValue: devices ? 2n : 10n * GIB,
-        lifetime: AddOnLifetime.UNTIL_SUBSCRIPTION_END,
+        lifetime: addOn.reset === undefined ? AddOnLifetime.UNTIL_SUBSCRIPTION_END : AddOnLifetime.UNTIL_NEXT_RESET,
+        expiryEpochId,
         unitAmount: new Prisma.Decimal('1.00'),
         totalAmount: new Prisma.Decimal('1.00'),
         currency: 'USD',
@@ -535,6 +558,72 @@ run('the customer’s notices before and at a dated add-on’s end — PostgreSQ
 
     await sender(nothingSent()).runTick(NOW);
     assert.equal((await noticesOf(goesOn)).length, 1);
+  });
+
+  it('tells traffic that ends with the traffic reset in the reset’s words on a monthly reset, and nothing on a daily or weekly one', async () => {
+    const WEEK_MS = 7 * DAY_MS;
+    const monthly = await customer({ tag: 'reset-month' });
+    const month = await subscriptionWith(monthly, 'reset-month-sub', [{ endsIn: 2 * DAY_MS, reset: { cycle: 30 * DAY_MS } }]);
+    const monthlyEnded = await customer({ tag: 'reset-month-ended' });
+    const monthEnded = await subscriptionWith(monthlyEnded, 'reset-month-ended-sub', [
+      { endsIn: -HOUR_MS, state: AddOnEntitlementState.EXPIRED, reset: { cycle: 31 * DAY_MS } },
+    ]);
+    // Bought five days before a weekly reset — outside the three days — and a
+    // daily one that has just ended: told nothing, and nothing recorded.
+    const weekly = await customer({ tag: 'reset-week' });
+    const week = await subscriptionWith(weekly, 'reset-week-sub', [
+      { endsIn: 2 * DAY_MS, activatedIn: -5 * DAY_MS, reset: { cycle: WEEK_MS } },
+    ]);
+    const daily = await customer({ tag: 'reset-day' });
+    const day = await subscriptionWith(daily, 'reset-day-sub', [
+      { endsIn: -HOUR_MS, state: AddOnEntitlementState.EXPIRED, reset: { cycle: DAY_MS } },
+    ]);
+    // A weekly add-on the subscription's earlier end caps ends with the
+    // subscription: the ordinary words, renewal sentence and all.
+    const capped = await customer({ tag: 'reset-capped' });
+    const cap = await subscriptionWith(capped, 'reset-capped-sub', [
+      { endsIn: 2 * DAY_MS, activatedIn: -4 * DAY_MS, reset: { cycle: WEEK_MS, capped: true } },
+    ]);
+
+    // The selections — SQL — agree with the decision: the quiet ones are not
+    // even selected, so they never come back to fill a pass.
+    const soon = await selectAddOnNoticeCandidates(prisma, 'endsSoon', NOW, 10_000);
+    const ended = await selectAddOnNoticeCandidates(prisma, 'ended', NOW, 10_000);
+    assert.ok(soon.includes(month.addOnIds[0]!));
+    assert.ok(soon.includes(cap.addOnIds[0]!));
+    assert.ok(ended.includes(monthEnded.addOnIds[0]!));
+    assert.equal(soon.includes(week.addOnIds[0]!), false, 'a weekly reset add-on was selected');
+    assert.equal(ended.includes(day.addOnIds[0]!), false, 'a daily reset add-on was selected');
+
+    await sender(nothingSent()).runTick(NOW);
+
+    const [soonNotice] = await noticesOf(monthly);
+    assert.equal(soonNotice!.type, 'addon_reset_ends_in_3_days');
+    const soonPayload = soonNotice!.payload as Record<string, unknown>;
+    // The reset itself (11:30 UTC), not the take-off half an hour later.
+    assert.equal(soonPayload['addonResetAt'], '2090-03-12T11:30:00.000Z');
+    assert.equal(
+      soonPayload['text'],
+      'Опция «Доп. трафик» (+10 ГБ) к подписке «Pro» действует до сброса трафика 12 марта в 11:30 по UTC; ' +
+        'после сброса лимит вернётся к тарифу.',
+    );
+
+    const [endedNotice] = await noticesOf(monthlyEnded);
+    assert.equal(endedNotice!.type, 'addon_reset_ended');
+    assert.match(
+      String((endedNotice!.payload as Record<string, unknown>)['text']),
+      /закончилась со сбросом трафика 10 марта в 10:30 по UTC: лимит вернулся к тарифу\.\n\nЕё можно купить снова\./,
+    );
+
+    assert.deepEqual(await noticesOf(weekly), []);
+    assert.deepEqual(await recordsOf(week.addOnIds[0]!), []);
+    assert.deepEqual(await noticesOf(daily), []);
+    assert.deepEqual(await recordsOf(day.addOnIds[0]!), []);
+
+    const [cappedNotice] = await noticesOf(capped);
+    assert.equal(cappedNotice!.type, 'addon_ends_in_3_days');
+    assert.equal((cappedNotice!.payload as Record<string, unknown>)['addonResetAt'], undefined);
+    assert.match(String((cappedNotice!.payload as Record<string, unknown>)['text']), /Продление подписки опцию не продлевает/);
   });
 
   it('selects only what is due, so a row that will never be due does not come back every pass and fill it', async () => {

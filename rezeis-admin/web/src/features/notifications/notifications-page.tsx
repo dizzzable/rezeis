@@ -87,10 +87,13 @@ const USER_NOTIFICATION_KEYS = [
   'expired',
   'limited',
   'expired_1_day_ago',
-  // A dated add-on three days before its end and at it: traffic, then devices
-  // with ADDON_DEVICE_CLEANUP_AUTO off and on — the sender picks by the flag.
+  // A dated add-on three days before its end and at it: traffic, traffic that
+  // ends with the traffic reset, then devices with ADDON_DEVICE_CLEANUP_AUTO
+  // off and on — the sender picks by the add-on and the flag.
   'addon_ends_in_3_days',
   'addon_ended',
+  'addon_reset_ends_in_3_days',
+  'addon_reset_ended',
   'addon_devices_ends_in_3_days',
   'addon_devices_ended',
   'addon_devices_auto_ends_in_3_days',

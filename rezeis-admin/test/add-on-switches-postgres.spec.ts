@@ -122,13 +122,13 @@ run('add-on switches on a real database', () => {
     assert.equal(columns[0]!.is_nullable, 'NO');
     assert.match(columns[0]!.column_default ?? '', /^'\{\}'::jsonb$/);
 
-    // `{}` is "never set": the defaults, stage 4 OFF.
+    // `{}` is "never set": the defaults — every stage ON, stage 4 since 25.09.2026.
     await setStoredSwitches({});
     assert.deepEqual(await processOver(prisma).flags(), {
       entitlementShadow: true,
       directPurchase: true,
       deviceCleanupAuto: true,
-      resetExpiry: { DAY: false, WEEK: false, MONTH: false, MONTH_ROLLING: false },
+      resetExpiry: { DAY: true, WEEK: true, MONTH: true, MONTH_ROLLING: true },
     });
   });
 
@@ -166,13 +166,15 @@ run('add-on switches on a real database', () => {
         changes: { durableAccounting: false },
         confirmOff: true,
       }),
+      // A real change too: ON is the default, so the other operator switches
+      // stage 4 OFF (confirmed) rather than ON.
       processOver(prisma).update({
         currentAdmin: admin,
         requestMetadata: REQUEST_METADATA,
-        changes: { trafficResetExpiry: true },
-        confirmOff: false,
+        changes: { trafficResetExpiry: false },
+        confirmOff: true,
       }),
     ]);
-    assert.deepEqual(await storedSwitches(), { durableAccounting: false, trafficResetExpiry: true });
+    assert.deepEqual(await storedSwitches(), { durableAccounting: false, trafficResetExpiry: false });
   });
 });

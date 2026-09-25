@@ -16,6 +16,12 @@ import { displayPlanName } from '../../plans/utils/plan-deletion.util';
 import { GIB_BYTES } from '../domain/cutover-baseline';
 import { provisionalResetAnchor } from '../domain/reset-cycle-policy';
 import { boundedTermWindow, LAPSED_TERM_WINDOW_MS } from '../domain/term-window';
+import {
+  mintResetAnchorInTransaction,
+  readRemnawaveTimeZoneInTransaction,
+  readRollingResetAnchorInTransaction,
+  redateResetAddOnsInTransaction,
+} from './reset-epoch.util';
 
 export interface CreateScheduledTermInput {
   readonly subscriptionId: string;
@@ -98,6 +104,30 @@ export interface RotateForPlanChangeInput {
    */
   readonly scheduledTerms: 'REFUSE' | 'CANCEL_UNBOUND';
   readonly now?: Date;
+  /**
+   * «Часовой пояс Remnawave», for re-dating «до сброса» add-ons when the new
+   * plan resets differently; read through the transaction when absent.
+   */
+  readonly remnawaveTimeZone?: string;
+}
+
+export interface FollowResetRuleInput {
+  readonly subscriptionId: string;
+  /** The reset rule Remnawave runs for this subscription from now on. */
+  readonly strategy: TrafficLimitStrategy;
+  /** Only the terms minted from this plan follow it (a plan edit); all of them when absent. */
+  readonly planId?: string;
+  /** «Часовой пояс Remnawave»; read through the transaction when absent. */
+  readonly remnawaveTimeZone?: string;
+  readonly now?: Date;
+  readonly correlationId?: string;
+}
+
+export interface FollowResetRuleResult {
+  /** ACTIVE and SCHEDULED terms whose reset rule was rewritten. */
+  readonly termsUpdated: number;
+  /** «До сброса» add-ons moved to the first reset under the new rule. */
+  readonly redatedEntitlementIds: readonly string[];
 }
 
 export type RotateForPlanChangeResult =
@@ -392,7 +422,7 @@ export class SubscriptionTermService {
     const active = await tx.subscriptionTerm.findFirst({
       where: { subscriptionId: input.subscriptionId, status: SubscriptionTermStatus.ACTIVE },
       orderBy: { generation: 'desc' },
-      select: { id: true },
+      select: { id: true, trafficResetStrategy: true },
     });
     if (active === null) return { outcome: 'NO_ACTIVE_TERM' };
 
@@ -424,6 +454,13 @@ export class SubscriptionTermService {
         : {};
     const selectedDurationDays = stored['selectedDurationDays'];
     const plan = input.plan;
+    // MONTH_ROLLING counts from the Remnawave profile's `createdAt` (P2).
+    const resetAnchorAt = await mintResetAnchorInTransaction(
+      tx,
+      input.subscriptionId,
+      plan.trafficLimitStrategy,
+      startsAt,
+    );
     const created = await this.createScheduledInTransaction(tx, {
       subscriptionId: input.subscriptionId,
       planId: plan.id,
@@ -447,9 +484,22 @@ export class SubscriptionTermService {
       baseTrafficLimitBytes: plan.trafficLimit === null ? null : BigInt(plan.trafficLimit) * GIB_BYTES,
       baseDeviceLimit: plan.deviceLimit <= 0 ? null : plan.deviceLimit,
       trafficResetStrategy: plan.trafficLimitStrategy,
-      resetAnchorAt: provisionalResetAnchor(plan.trafficLimitStrategy, startsAt),
+      resetAnchorAt,
     });
     await this.activateInTransaction(tx, created.id, now);
+    // A plan that resets differently: the «до сброса» add-ons end at the
+    // first reset under the new rule, never later than promised (P6).
+    if (active.trafficResetStrategy !== plan.trafficLimitStrategy) {
+      await redateResetAddOnsInTransaction(tx, {
+        subscriptionId: input.subscriptionId,
+        strategy: plan.trafficLimitStrategy,
+        anchorAt: resetAnchorAt,
+        timeZone: input.remnawaveTimeZone ?? (await readRemnawaveTimeZoneInTransaction(tx)),
+        now,
+        correlationId: `plan-change:${input.subscriptionId}`,
+        reason: 'RESET_RULE_CHANGED',
+      });
+    }
     return {
       outcome: 'ROTATED',
       termId: created.id,
@@ -458,6 +508,93 @@ export class SubscriptionTermService {
       endsAt,
       canceledScheduledTermIds: scheduledTermIds,
     };
+  }
+
+  /**
+   * A SUBSCRIPTION'S RESET RULE CHANGED WITHOUT A NEW TERM — its plan was
+   * edited to reset differently, or an import rewrote the strategy (P6). Under
+   * the subscription row lock:
+   *
+   *  - its ACTIVE and SCHEDULED terms take the new rule, and the new sales, the
+   *    boundary and the notices read it from there: what the panel now pushes
+   *    to Remnawave. A term turned MONTH_ROLLING is anchored at the Remnawave
+   *    profile's `createdAt` the panel stored, or the rolling anchor one of its
+   *    terms carries (P2), and with neither gets none (fail-closed: nothing «до
+   *    сброса» is sold without it); a calendar one is anchored at its start,
+   *    which those strategies ignore;
+   *  - its live «до сброса» add-ons end at the first reset under the new rule,
+   *    never later than promised ({@link redateResetAddOnsInTransaction}).
+   *
+   * The term's BASE is untouched: a reset rule is not a limit. Pushing the new
+   * strategy to Remnawave is the caller's (the plan edit queues the push).
+   */
+  public async followResetRuleInTransaction(
+    tx: Prisma.TransactionClient,
+    input: FollowResetRuleInput,
+  ): Promise<FollowResetRuleResult> {
+    const now = input.now ?? new Date();
+    const locked = await tx.$queryRaw<Array<{ id: string; status: SubscriptionStatus }>>(Prisma.sql`
+      SELECT "id", "status"::text AS "status"
+      FROM "subscriptions"
+      WHERE "id" = ${input.subscriptionId}
+      FOR UPDATE
+    `);
+    if (locked[0] === undefined || locked[0].status === SubscriptionStatus.DELETED) {
+      return { termsUpdated: 0, redatedEntitlementIds: [] };
+    }
+
+    const terms = await tx.subscriptionTerm.findMany({
+      where: {
+        subscriptionId: input.subscriptionId,
+        status: { in: [SubscriptionTermStatus.ACTIVE, SubscriptionTermStatus.SCHEDULED] },
+        ...(input.planId === undefined ? {} : { planId: input.planId }),
+      },
+      orderBy: { generation: 'asc' },
+      select: {
+        id: true,
+        status: true,
+        startsAt: true,
+        planSnapshot: true,
+        trafficResetStrategy: true,
+      },
+    });
+    // MONTH_ROLLING counts from the Remnawave profile's `createdAt` (P2).
+    const rollingAnchor =
+      input.strategy === TrafficLimitStrategy.MONTH_ROLLING
+        ? await readRollingResetAnchorInTransaction(tx, input.subscriptionId)
+        : null;
+    let termsUpdated = 0;
+    let activeAnchor: Date | null = null;
+    for (const term of terms) {
+      const anchor = provisionalResetAnchor(input.strategy, term.startsAt, rollingAnchor);
+      if (term.status === SubscriptionTermStatus.ACTIVE) activeAnchor = anchor;
+      if (term.trafficResetStrategy === input.strategy) continue;
+      const stored =
+        typeof term.planSnapshot === 'object' && term.planSnapshot !== null && !Array.isArray(term.planSnapshot)
+          ? (term.planSnapshot as Prisma.JsonObject)
+          : {};
+      await tx.subscriptionTerm.update({
+        where: { id: term.id },
+        data: {
+          trafficResetStrategy: input.strategy,
+          resetAnchorAt: anchor,
+          planSnapshot: { ...stored, trafficLimitStrategy: input.strategy } as Prisma.InputJsonValue,
+        },
+      });
+      termsUpdated += 1;
+    }
+    if (termsUpdated === 0) return { termsUpdated, redatedEntitlementIds: [] };
+
+    const redatedEntitlementIds = await redateResetAddOnsInTransaction(tx, {
+      subscriptionId: input.subscriptionId,
+      strategy: input.strategy,
+      anchorAt: activeAnchor,
+      timeZone: input.remnawaveTimeZone ?? (await readRemnawaveTimeZoneInTransaction(tx)),
+      now,
+      correlationId: input.correlationId ?? `reset-rule:${input.subscriptionId}`,
+      reason: 'RESET_RULE_CHANGED',
+    });
+    return { termsUpdated, redatedEntitlementIds };
   }
 
   /**
@@ -607,6 +744,9 @@ export class SubscriptionTermService {
    *    end is the successor's start.
    *  - LIFETIME (`expiresAt = null`): the tail becomes open-ended, and so do the
    *    add-ons that ended with it.
+   *  - «ДО СБРОСА» add-ons (UNTIL_NEXT_RESET) are only ever brought EARLIER:
+   *    a shortening below their date clamps them to the new end, and neither
+   *    an extension nor a lifetime subscription moves them from their reset.
    *
    * An add-on is never moved to or before its own activation instant
    * (`add_on_entitlements_boundary_check`); such a clamp lands one second after
@@ -700,17 +840,11 @@ export class SubscriptionTermService {
     });
     const correlationId = options.correlationId ?? `term-align:${subscriptionId}`;
     const retimedEntitlementIds: string[] = [];
-    for (const entitlement of candidates) {
-      const next =
-        target === null
-          ? null
-          : new Date(
-              Math.max(
-                target.getTime(),
-                entitlement.scheduledActivationAt.getTime() + LAPSED_TERM_WINDOW_MS,
-              ),
-            );
-      if (sameInstant(entitlement.expiresAt, next)) continue;
+    const retime = async (
+      entitlement: (typeof candidates)[number],
+      next: Date | null,
+    ): Promise<void> => {
+      if (sameInstant(entitlement.expiresAt, next)) return;
       const claimed = await tx.addOnEntitlement.updateMany({
         where: { id: entitlement.id, state: entitlement.state, version: entitlement.version },
         data: { expiresAt: next, version: { increment: 1 } },
@@ -718,7 +852,7 @@ export class SubscriptionTermService {
       // A transition that won the row (the boundary sweep expiring it) does
       // not take the subscription lock; it owns the row now, and an add-on
       // leaving PENDING/ACTIVE has nothing left for this method to move.
-      if (claimed.count !== 1) continue;
+      if (claimed.count !== 1) return;
       await tx.addOnEntitlementEvent.create({
         data: {
           entitlementId: entitlement.id,
@@ -741,6 +875,34 @@ export class SubscriptionTermService {
         },
       });
       retimedEntitlementIds.push(entitlement.id);
+    };
+    /** The new end for an add-on, never at or before its own activation. */
+    const clampedTo = (end: Date, entitlement: (typeof candidates)[number]): Date =>
+      new Date(Math.max(end.getTime(), entitlement.scheduledActivationAt.getTime() + LAPSED_TERM_WINDOW_MS));
+
+    for (const entitlement of candidates) {
+      await retime(entitlement, target === null ? null : clampedTo(target, entitlement));
+    }
+
+    // A «до сброса» add-on ends at the earlier of its reset and the
+    // subscription's end (the owner's rule of 24.09.2026). So a subscription
+    // shortened below its date brings it back to the new end — and nothing
+    // ever moves it LATER: an extension, or a subscription made lifetime,
+    // leaves it at the reset it was sold until, which it already never passes.
+    if (target !== null) {
+      const resetScoped = await tx.addOnEntitlement.findMany({
+        where: {
+          subscriptionId,
+          lifetime: AddOnLifetime.UNTIL_NEXT_RESET,
+          state: { in: [...RETIMABLE_STATES] },
+          expiresAt: { gt: target },
+        },
+        orderBy: { id: 'asc' },
+        select: { id: true, state: true, version: true, expiresAt: true, scheduledActivationAt: true },
+      });
+      for (const entitlement of resetScoped) {
+        await retime(entitlement, clampedTo(target, entitlement));
+      }
     }
 
     return {

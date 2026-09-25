@@ -38,6 +38,7 @@ import {
 } from './term-model-readback';
 import { toPanelTrafficLimitBytes } from '../utils/panel-limit-wire.util';
 import { panelTrafficLimitToGb } from '../utils/panel-traffic-limit.util';
+import { readRemnawaveProfileFacts, stampRemnawaveProfileFacts } from '../utils/remnawave-profile-facts.util';
 
 /**
  * How long a first-connection card may hold the webhook open waiting for the
@@ -708,6 +709,17 @@ export class RemnawaveWebhookService {
           }`,
         );
       }
+      // Apart from the reconcile, and whatever it decided: the reconcile may
+      // withhold a stale event's state, but the profile's `createdAt` and a
+      // reset it reports are facts however late they come (the reset column
+      // only moves forward).
+      try {
+        await this.stampProfileFacts(payload);
+      } catch (err: unknown) {
+        this.logger.warn(
+          `Remnawave profile facts write failed for ${eventType}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
       // Best-effort like the reconcile: a failed state write must never drop
       // the webhook, and the probe and the cabinet read will learn it anyway.
       if (connect !== null) {
@@ -889,6 +901,35 @@ export class RemnawaveWebhookService {
       enriched['trafficLimitBytes'] = usage.trafficLimitBytes;
     }
     return enriched;
+  }
+
+  /**
+   * The profile's `createdAt` and `lastTrafficResetAt`, as this user event
+   * carries them (`data` is Remnawave's full user), onto every live row the
+   * event names — WHATEVER ITS STATUS (`remnawave-profile-facts.util.ts`).
+   *
+   * Every user event carries the full user, and this is the only way the panel
+   * hears of most resets: a scheduled reset sends no `user.traffic_reset` at
+   * all, only a `user.enabled` for the users it lifted from LIMITED, and any
+   * later event carries the reset it happened after. The rows are found through
+   * `panelIdentityWhere`, the same identity rule the reconcile uses, and a
+   * DELETED row is left alone. An event without either fact costs no query.
+   */
+  private async stampProfileFacts(payload: Record<string, unknown>): Promise<void> {
+    const remnawaveId = readWebhookPanelIdentity(payload);
+    if (remnawaveId === null) return;
+    const data = payload['data'] !== null && typeof payload['data'] === 'object' ? payload['data'] : payload;
+    const facts = readRemnawaveProfileFacts(data);
+    if (facts.createdAt === null && facts.lastTrafficResetAt === null) return;
+    const rows = await this.prismaService.subscription.findMany({
+      where: { ...panelIdentityWhere(remnawaveId), status: { not: SubscriptionStatus.DELETED } },
+      select: { id: true },
+    });
+    await stampRemnawaveProfileFacts(
+      this.prismaService,
+      rows.map((row) => row.id),
+      facts,
+    );
   }
 
   /**

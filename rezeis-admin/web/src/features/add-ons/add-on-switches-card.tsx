@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import type { TFunction } from 'i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, Loader2, Lock } from 'lucide-react'
 import { toast } from 'sonner'
@@ -8,6 +9,7 @@ import { api } from '@/lib/api'
 import { getErrorMessage } from '@/lib/http-errors'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
@@ -22,6 +24,7 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import { useHasPermission } from '@/features/rbac'
+import { formatUtcOffset, isAcceptableTimeZone, utcTime } from './remnawave-time-zone'
 
 /** The page's three switches, in the order the server sends and draws them. */
 export type AddOnSwitchName = 'durableAccounting' | 'deviceCleanupAuto' | 'trafficResetExpiry'
@@ -38,11 +41,68 @@ export interface AddOnSwitchState {
   readonly env: ReadonlyArray<{ readonly variable: string; readonly enabled: boolean }>
 }
 
+/** «Часовой пояс Remnawave» as the server describes it. */
+export interface RemnawaveTimeZoneState {
+  /** The zone the panel predicts Remnawave's resets in now: the stored one, or UTC. */
+  readonly value: string
+  /** The operator's own value, or `null` while never set. */
+  readonly stored: string | null
+}
+
+/** The strategies Remnawave resets on a schedule. */
+export type ScheduledStrategy = 'DAY' | 'WEEK' | 'MONTH' | 'MONTH_ROLLING'
+
+const SCHEDULED_STRATEGIES: readonly ScheduledStrategy[] = ['DAY', 'WEEK', 'MONTH', 'MONTH_ROLLING']
+
+/** One scheduled run of Remnawave's at a time the zone does not predict. */
+export interface ResetScheduleMismatch {
+  readonly strategy: ScheduledStrategy
+  readonly observedAt: string
+  readonly expectedAt: string
+  readonly impliedUtcOffsetMinutes: number
+}
+
+/** The daily check's verdict, judged when the page asked. */
+export interface ResetScheduleVerdict {
+  readonly status: 'ok' | 'mismatch' | 'no_data' | 'nothing_to_check'
+  readonly timeZone: string
+  readonly mismatches: readonly ResetScheduleMismatch[]
+}
+
 interface AddOnSwitchesView {
   readonly switches: readonly AddOnSwitchState[]
+  /** `null` from a panel that predates the zone setting: the field is not drawn. */
+  readonly remnawaveTimeZone: RemnawaveTimeZoneState | null
+  readonly resetScheduleCheck: ResetScheduleVerdict | null
 }
 
 const SWITCH_NAMES: readonly AddOnSwitchName[] = ['durableAccounting', 'deviceCleanupAuto', 'trafficResetExpiry']
+
+function readZone(data: unknown): RemnawaveTimeZoneState | null {
+  if (typeof data !== 'object' || data === null) return null
+  const value = (data as { value?: unknown }).value
+  const stored = (data as { stored?: unknown }).stored
+  if (typeof value !== 'string') return null
+  return { value, stored: typeof stored === 'string' ? stored : null }
+}
+
+function readVerdict(data: unknown): ResetScheduleVerdict | null {
+  if (typeof data !== 'object' || data === null) return null
+  const { status, timeZone, mismatches } = data as { status?: unknown; timeZone?: unknown; mismatches?: unknown }
+  if (status !== 'ok' && status !== 'mismatch' && status !== 'no_data' && status !== 'nothing_to_check') return null
+  const known = Array.isArray(mismatches)
+    ? mismatches.filter(
+        (entry): entry is ResetScheduleMismatch =>
+          typeof entry === 'object' &&
+          entry !== null &&
+          SCHEDULED_STRATEGIES.includes((entry as { strategy?: unknown }).strategy as ScheduledStrategy) &&
+          typeof (entry as { observedAt?: unknown }).observedAt === 'string' &&
+          typeof (entry as { expectedAt?: unknown }).expectedAt === 'string' &&
+          typeof (entry as { impliedUtcOffsetMinutes?: unknown }).impliedUtcOffsetMinutes === 'number',
+      )
+    : []
+  return { status, timeZone: typeof timeZone === 'string' ? timeZone : '', mismatches: known }
+}
 
 /**
  * What the confirmation says switching each one off does NOT undo, by key —
@@ -67,7 +127,28 @@ function readView(data: unknown): AddOnSwitchesView | null {
       typeof (entry as { enabled?: unknown }).enabled === 'boolean' &&
       Array.isArray((entry as { env?: unknown }).env),
   )
-  return { switches: known }
+  return {
+    switches: known,
+    remnawaveTimeZone: readZone((data as { remnawaveTimeZone?: unknown }).remnawaveTimeZone),
+    resetScheduleCheck: readVerdict((data as { resetScheduleCheck?: unknown }).resetScheduleCheck),
+  }
+}
+
+/**
+ * What a switch `.env` decides will be once that line is deleted and the panel
+ * restarted — the server's own order (`resolveVariable`): the value saved in
+ * the panel, or, when none was saved, the default. When that turns ON a
+ * switch the line now holds OFF, the operator is told how to keep it off: the
+ * move into the new accounting, for one, cannot be undone.
+ */
+function describeAfterEnvLine(state: AddOnSwitchState, t: TFunction): string {
+  const panelValue = state.stored ?? state.defaultEnabled
+  const value = t(panelValue ? 'addOnSwitches.valueOn' : 'addOnSwitches.valueOff')
+  const after =
+    state.stored === null
+      ? t('addOnSwitches.setInEnvAfterDefault', { value })
+      : t('addOnSwitches.setInEnvAfterStored', { value })
+  return !state.enabled && panelValue ? `${after} ${t('addOnSwitches.setInEnvKeepOff')}` : after
 }
 
 function errorCode(error: unknown): string | null {
@@ -188,6 +269,7 @@ export function AddOnSwitchesCard() {
                           </span>
                         </p>
                         <p className="text-muted-foreground">{t('addOnSwitches.setInEnvHint')}</p>
+                        <p className="text-muted-foreground">{describeAfterEnvLine(state, t)}</p>
                       </div>
                     ) : null}
                   </div>
@@ -205,6 +287,10 @@ export function AddOnSwitchesCard() {
             })}
           </div>
         )}
+
+        {view !== null && view.remnawaveTimeZone !== null ? (
+          <RemnawaveTimeZoneField zone={view.remnawaveTimeZone} verdict={view.resetScheduleCheck} canEdit={canEdit} />
+        ) : null}
 
         {view !== null && !canEdit ? (
           <p className="text-xs text-muted-foreground">{t('addOnSwitches.noPermission')}</p>
@@ -250,5 +336,105 @@ export function AddOnSwitchesCard() {
         </AlertDialogContent>
       </AlertDialog>
     </Card>
+  )
+}
+
+/**
+ * «Часовой пояс Remnawave»: the zone Remnawave's scheduler resets traffic in,
+ * which no API of Remnawave's states — the operator names it. Checked here as
+ * the server checks it (a name this browser knows, or empty for UTC), and the
+ * daily check's warning is drawn beside it: what Remnawave did, what this
+ * zone predicts, and the zone that would explain the difference.
+ */
+function RemnawaveTimeZoneField(props: {
+  readonly zone: RemnawaveTimeZoneState
+  readonly verdict: ResetScheduleVerdict | null
+  readonly canEdit: boolean
+}) {
+  const { t } = useTranslation()
+  const queryClient = useQueryClient()
+  // `null` while untouched: the field shows what is stored.
+  const [draft, setDraft] = useState<string | null>(null)
+  const value = draft ?? props.zone.stored ?? ''
+  const valid = isAcceptableTimeZone(value)
+  const unchanged = value.trim() === (props.zone.stored ?? '')
+
+  const mutation = useMutation({
+    mutationFn: async (next: string) =>
+      readView((await api.patch<unknown>('/admin/add-on-settings', { remnawaveTimeZone: next })).data),
+    onSuccess: (view) => {
+      if (view !== null) queryClient.setQueryData(['admin', 'add-on-settings'], view)
+      else void queryClient.invalidateQueries({ queryKey: ['admin', 'add-on-settings'] })
+      setDraft(null)
+      toast.success(t('addOnSwitches.remnawaveTimeZone.saved'))
+    },
+    onError: (error) => {
+      toast.error(getErrorMessage(error, t('addOnSwitches.saveFailed')))
+    },
+  })
+
+  const id = 'add-on-remnawave-time-zone'
+  const mismatches = props.verdict?.status === 'mismatch' ? props.verdict.mismatches : []
+
+  return (
+    <div className="space-y-2 rounded-lg border p-3">
+      <Label htmlFor={id} className="text-sm font-medium">
+        {t('addOnSwitches.remnawaveTimeZone.label')}
+      </Label>
+      <p className="text-xs text-muted-foreground">{t('addOnSwitches.remnawaveTimeZone.hint')}</p>
+      <form
+        className="flex flex-wrap items-start gap-2"
+        onSubmit={(event) => {
+          event.preventDefault()
+          if (valid && !unchanged) mutation.mutate(value.trim())
+        }}
+      >
+        <div className="min-w-0 flex-1 space-y-1">
+          <Input
+            id={id}
+            value={value}
+            placeholder={t('addOnSwitches.remnawaveTimeZone.placeholder')}
+            disabled={!props.canEdit || mutation.isPending}
+            aria-invalid={!valid}
+            autoComplete="off"
+            spellCheck={false}
+            onChange={(event) => setDraft(event.target.value)}
+          />
+          {!valid ? (
+            <p role="alert" className="text-xs text-destructive">
+              {t('addOnSwitches.remnawaveTimeZone.invalid')}
+            </p>
+          ) : props.zone.stored === null && draft === null ? (
+            <p className="text-[11px] text-muted-foreground">{t('addOnSwitches.remnawaveTimeZone.defaultValue')}</p>
+          ) : null}
+        </div>
+        <Button type="submit" size="sm" disabled={!props.canEdit || !valid || unchanged || mutation.isPending}>
+          {mutation.isPending ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" aria-hidden="true" /> : null}
+          {t('addOnSwitches.remnawaveTimeZone.save')}
+        </Button>
+      </form>
+      {mismatches.length > 0 ? (
+        <div
+          role="status"
+          className="space-y-1 rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-400"
+        >
+          <p className="flex items-center gap-1.5 font-medium">
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+            <span>{t('addOnSwitches.remnawaveTimeZone.mismatchTitle')}</span>
+          </p>
+          {mismatches.map((mismatch) => (
+            <p key={mismatch.strategy}>
+              {t('addOnSwitches.remnawaveTimeZone.mismatchLine', {
+                strategy: t(`addOnSwitches.remnawaveTimeZone.strategies.${mismatch.strategy}`),
+                observed: utcTime(mismatch.observedAt),
+                expected: utcTime(mismatch.expectedAt),
+                offset: formatUtcOffset(mismatch.impliedUtcOffsetMinutes),
+              })}
+            </p>
+          ))}
+          <p>{t('addOnSwitches.remnawaveTimeZone.mismatchHint')}</p>
+        </div>
+      ) : null}
+    </div>
   )
 }

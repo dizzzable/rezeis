@@ -180,7 +180,7 @@ async function mirrorRename(
       },
     },
   };
-  return new PlanSnapshotSyncService().syncPlanSnapshotMetadata(client as never, {
+  const { updated } = await new PlanSnapshotSyncService().syncPlanSnapshotMetadata(client as never, {
     id: plan.id,
     name: plan.name,
     tag: 'LEGACY',
@@ -191,6 +191,7 @@ async function mirrorRename(
     internalSquads: [],
     externalSquad: null,
   } as never);
+  return updated;
 }
 
 describe('BackupPlanClonerService subscription re-link', () => {

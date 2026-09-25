@@ -1,7 +1,7 @@
 import { Injectable, Optional } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 
-import { readAddOnRolloutFlags } from '../add-on-rollout.config';
+import { type AddOnRolloutFlags, readAddOnRolloutFlags } from '../add-on-rollout.config';
 import { AddOnSwitchesService } from '../switches/add-on-switches.service';
 import { EffectiveProjectionService, type RecomputeProjectionResult } from './effective-projection.service';
 import { EntitlementCutoverService, type EnsureTermResult } from './entitlement-cutover.service';
@@ -113,6 +113,14 @@ export class SubscriptionTermHooksService {
   ) {}
 
   /**
+   * The stage switches as they stand, for a caller to read BEFORE it opens the
+   * transaction it then passes them into ({@link enterNewSubscriptionInTransaction}).
+   */
+  public readFlags(): Promise<AddOnRolloutFlags> {
+    return readAddOnRolloutFlags(this.addOnSwitches);
+  }
+
+  /**
    * A subscription this transaction has just CREATED (a free trial, the
    * operator's «Выдать подписку», a promo code's subscription) gets its first
    * term — while stage 1 («Новый учёт докупок») is on, and `null`
@@ -120,12 +128,18 @@ export class SubscriptionTermHooksService {
    * SHADOW projection equals them; an add-on bought a minute later is then
    * ledgered rather than falling back to the permanent increment. Idempotent
    * (`ensureTermInTransaction`), so a path that runs twice mints one term.
+   *
+   * `flags` is the snapshot the caller read with {@link readFlags} before its
+   * transaction opened (review R2b-07): read here, inside it, a cold settings
+   * cache needs a second pool connection while this one is held. A caller that
+   * passes none still gets the read, as before.
    */
   public async enterNewSubscriptionInTransaction(
     tx: Prisma.TransactionClient,
     subscriptionId: string,
+    flags?: AddOnRolloutFlags,
   ): Promise<EnsureTermResult | null> {
-    if (!(await readAddOnRolloutFlags(this.addOnSwitches)).entitlementShadow) return null;
+    if (!(flags ?? (await readAddOnRolloutFlags(this.addOnSwitches))).entitlementShadow) return null;
     return this.entitlementCutoverService.ensureTermInTransaction(tx, subscriptionId);
   }
 

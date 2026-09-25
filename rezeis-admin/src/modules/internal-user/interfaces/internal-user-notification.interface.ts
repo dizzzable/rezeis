@@ -60,4 +60,15 @@ export interface InternalUserAddOnEntitlementInterface {
   readonly purchasedAt: string;
   readonly activatedAt: string | null;
   readonly expiresAt: string | null;
+  /**
+   * Which bound `expiresAt` is: Remnawave's traffic reset, or the
+   * subscription's end (`entitlementEndBound`); `null` for a row with no end.
+   */
+  readonly endsBound: 'reset' | 'subscription_end' | null;
+  /**
+   * For a reset-bound add-on, Remnawave's reset instant — the moment to show
+   * («до сброса трафика 01.10 в 03:20»); `expiresAt` is half an hour later,
+   * when the panel takes it off. `null` otherwise.
+   */
+  readonly resetAt: string | null;
 }

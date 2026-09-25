@@ -5,6 +5,7 @@ import { beforeEach, describe, it } from 'node:test';
 
 import { PlanAvailability, PlanType } from '@prisma/client';
 
+import { resolveAddOnRolloutFlags } from '../src/modules/add-on-entitlements/add-on-rollout.config';
 import { PaymentSubscriptionMutationService } from '../src/modules/payments/services/payment-subscription-mutation.service';
 import { PlanSquadPropagationService } from '../src/modules/plans/services/plan-squad-propagation.service';
 import { PlansAdminService } from '../src/modules/plans/services/plans-admin.service';
@@ -348,7 +349,7 @@ describe('the name a paid invoice on a hidden plan is fulfilled under', () => {
       }
     ).scheduleRenewalTermInTransaction.bind(service);
 
-    await schedule(tx, { subscriptionId: 'sub-1', plan: hidden, durationDays: 30 });
+    await schedule(tx, { subscriptionId: 'sub-1', plan: hidden, durationDays: 30, flags: resolveAddOnRolloutFlags() });
 
     assert.equal(captured.termSnapshot?.snapshotSource, 'RENEWAL_TERM', 'fixture: the renewal term was not written');
     assert.equal(captured.termSnapshot?.name, SOLD_AS, 'the renewal term carries the name the plan was renamed to');

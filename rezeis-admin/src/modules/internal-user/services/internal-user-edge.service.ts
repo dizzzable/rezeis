@@ -14,6 +14,7 @@ import {
   EVENT_TYPES,
   SystemEventsService,
 } from '../../../common/services/system-events.service';
+import { entitlementEndBound } from '../../add-on-entitlements/domain/add-on-lifetime';
 import { AccessModeGuard } from '../../settings/services/access-mode-guard.service';
 import { SettingsService } from '../../settings/services/settings.service';
 import { UserIpObservationService } from '../../device-intelligence/services/user-ip-observation.service';
@@ -610,22 +611,31 @@ export class InternalUserEdgeService {
    */
   public async listAddOnEntitlements(
     telegramId: string,
-  ): Promise<{ entitlements: readonly InternalUserAddOnEntitlementInterface[] }> {
+  ): Promise<{
+    entitlements: readonly InternalUserAddOnEntitlementInterface[];
+    /** The operator's «Часовой пояс» for these dates; `null` = UTC. The offer carries the same. */
+    displayTimeZone: string | null;
+  }> {
     const userId = await this.resolveUserId(telegramId);
     const subscriptions = await this.prismaService.subscription.findMany({
       where: { userId },
       select: { id: true },
     });
+    const displayTimeZone = await this.readDisplayTimeZone();
     if (subscriptions.length === 0) {
-      return { entitlements: [] };
+      return { entitlements: [], displayTimeZone };
     }
     const subscriptionIds = subscriptions.map((subscription) => subscription.id);
     const liveStates = ['ACTIVE', 'EXPIRING'] as const;
+    // The epoch's reset instant comes along: it is the date a reset-bound
+    // add-on is shown with, and what tells the two bounds apart.
+    const include = { expiryEpoch: { select: { plannedEndsAt: true } } } as const;
     const liveRows = await this.prismaService.addOnEntitlement.findMany({
       where: {
         subscriptionId: { in: subscriptionIds },
         state: { in: [...liveStates] },
       },
+      include,
       orderBy: { purchasedAt: 'desc' },
     });
     const terminalTake = Math.max(0, 100 - liveRows.length);
@@ -636,6 +646,7 @@ export class InternalUserEdgeService {
             subscriptionId: { in: subscriptionIds },
             state: { notIn: [...liveStates] },
           },
+          include,
           orderBy: { purchasedAt: 'desc' },
           take: terminalTake,
         });
@@ -643,23 +654,43 @@ export class InternalUserEdgeService {
       (left, right) => right.purchasedAt.getTime() - left.purchasedAt.getTime(),
     );
     return {
-      entitlements: rows.map((entitlement): InternalUserAddOnEntitlementInterface => ({
-        id: entitlement.id,
-        subscriptionId: entitlement.subscriptionId,
-        addOnId: entitlement.addOnId,
-        receiptName: entitlement.receiptName,
-        type: entitlement.type,
-        valuePerUnit: entitlement.valuePerUnit,
-        quantity: entitlement.quantity,
-        lifetime: entitlement.lifetime,
-        state: entitlement.state,
-        currency: entitlement.currency,
-        totalAmount: entitlement.totalAmount.toString(),
-        purchasedAt: entitlement.purchasedAt.toISOString(),
-        activatedAt: entitlement.activatedAt === null ? null : entitlement.activatedAt.toISOString(),
-        expiresAt: entitlement.expiresAt === null ? null : entitlement.expiresAt.toISOString(),
-      })),
+      entitlements: rows.map((entitlement): InternalUserAddOnEntitlementInterface => {
+        const epochPlannedEndsAt = entitlement.expiryEpoch?.plannedEndsAt ?? null;
+        const endsBound = entitlementEndBound({
+          lifetime: entitlement.lifetime,
+          expiresAt: entitlement.expiresAt,
+          epochPlannedEndsAt,
+        });
+        return {
+          id: entitlement.id,
+          subscriptionId: entitlement.subscriptionId,
+          addOnId: entitlement.addOnId,
+          receiptName: entitlement.receiptName,
+          type: entitlement.type,
+          valuePerUnit: entitlement.valuePerUnit,
+          quantity: entitlement.quantity,
+          lifetime: entitlement.lifetime,
+          state: entitlement.state,
+          currency: entitlement.currency,
+          totalAmount: entitlement.totalAmount.toString(),
+          purchasedAt: entitlement.purchasedAt.toISOString(),
+          activatedAt: entitlement.activatedAt === null ? null : entitlement.activatedAt.toISOString(),
+          expiresAt: entitlement.expiresAt === null ? null : entitlement.expiresAt.toISOString(),
+          endsBound,
+          resetAt: endsBound === 'reset' && epochPlannedEndsAt !== null ? epochPlannedEndsAt.toISOString() : null,
+        };
+      }),
+      displayTimeZone,
     };
+  }
+
+  /** The operator's «Часовой пояс», or `null` (UTC) — never a reason to fail the list. */
+  private async readDisplayTimeZone(): Promise<string | null> {
+    try {
+      return (await this.settingsService.getPlatformBranding()).timezone;
+    } catch {
+      return null;
+    }
   }
 
   // ── Trial ────────────────────────────────────────────────────────────────

@@ -17,11 +17,13 @@ import { i18nReady, loadFeatureBundle } from '@/i18n/i18n'
 import { usePermissionStore } from '@/features/rbac'
 import { renderWithProviders } from '@/test/test-utils'
 import { AddOnSwitchesCard, type AddOnSwitchState } from './add-on-switches-card'
+import { formatUtcOffset, isAcceptableTimeZone, utcTime } from './remnawave-time-zone'
 
 const DEFAULTS: readonly AddOnSwitchState[] = [
   { name: 'durableAccounting', enabled: true, defaultEnabled: true, stored: null, env: [] },
   { name: 'deviceCleanupAuto', enabled: true, defaultEnabled: true, stored: null, env: [] },
-  { name: 'trafficResetExpiry', enabled: false, defaultEnabled: false, stored: null, env: [] },
+  // ON by default since 25.09.2026, once the reset instants matched live Remnawave.
+  { name: 'trafficResetExpiry', enabled: true, defaultEnabled: true, stored: null, env: [] },
 ]
 
 function grant(tokens: readonly string[]): void {
@@ -73,16 +75,17 @@ describe('the add-on accounting switches', () => {
     vi.restoreAllMocks()
   })
 
-  it('draws the three switches as the server runs them, the traffic add-ons OFF by default with a caution', async () => {
+  it('draws the three switches as the server runs them, all ON by default, the traffic one with a caution', async () => {
     serve(DEFAULTS)
     renderWithProviders(<AddOnSwitchesCard />)
 
     expect(await screen.findByRole('switch', { name: 'New add-on accounting' })).toBeChecked()
     expect(screen.getByRole('switch', { name: 'Remove extra devices automatically' })).toBeChecked()
-    expect(screen.getByRole('switch', { name: 'Traffic add-ons until the reset' })).not.toBeChecked()
-    expect(screen.getByText(/Keep it off for now/)).toBeInTheDocument()
-    expect(screen.getAllByText('On by default')).toHaveLength(2)
-    expect(screen.getAllByText('Off by default')).toHaveLength(1)
+    expect(screen.getByRole('switch', { name: 'Traffic add-ons until the reset' })).toBeChecked()
+    // The caution under the traffic switch points at the zone field below it.
+    expect(screen.getByText(/Reset times follow the “Remnawave time zone” below/)).toBeInTheDocument()
+    expect(screen.getAllByText('On by default')).toHaveLength(3)
+    expect(screen.queryByText('Off by default')).not.toBeInTheDocument()
   })
 
   it('shows a switch .env decides as locked, naming the variable and its value', async () => {
@@ -100,6 +103,36 @@ describe('the add-on accounting switches', () => {
     expect(screen.getByText(/delete that line and run docker compose up -d/)).toBeInTheDocument()
     // Only that one: the others stay in the operator's hands.
     expect(screen.getByRole('switch', { name: 'New add-on accounting' })).toBeEnabled()
+  })
+
+  it('says what deleting the .env line leads to, only under a switch .env decides', async () => {
+    serve([
+      // Held OFF by .env; nothing saved in the panel, so its default — ON — takes over.
+      { ...DEFAULTS[0]!, enabled: false, env: [{ variable: 'ADDON_ENTITLEMENT_SHADOW', enabled: false }] },
+      // Held OFF by .env; OFF saved in the panel, which is what takes over.
+      { ...DEFAULTS[1]!, enabled: false, stored: false, env: [{ variable: 'ADDON_DEVICE_CLEANUP_AUTO', enabled: false }] },
+      DEFAULTS[2]!,
+    ])
+    renderWithProviders(<AddOnSwitchesCard />)
+
+    await screen.findByRole('switch', { name: 'New add-on accounting' })
+    expect(
+      screen.getByText(
+        'If you delete the line from .env, after the restart the panel’s value applies — by default “on”. To keep it off, do not delete the line.',
+      ),
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText('If you delete the line from .env, after the restart the value saved in the panel applies: “off”.'),
+    ).toBeInTheDocument()
+    // Exactly those two: the switch the operator manages from here says nothing of .env.
+    expect(screen.getAllByText(/If you delete the line from \.env/)).toHaveLength(2)
+  })
+
+  it('says nothing of .env while no switch is set there', async () => {
+    serve(DEFAULTS)
+    renderWithProviders(<AddOnSwitchesCard />)
+    await screen.findByRole('switch', { name: 'New add-on accounting' })
+    expect(screen.queryByText(/If you delete the line from \.env/)).not.toBeInTheDocument()
   })
 
   it('asks before switching OFF, says what it does not undo, and sends only once confirmed', async () => {
@@ -140,7 +173,8 @@ describe('the add-on accounting switches', () => {
 
   it('switches ON at once, with no dialog and no confirmation sent', async () => {
     const user = userEvent.setup()
-    const patch = serve(DEFAULTS)
+    // Switched off on the page earlier: ON is the default now.
+    const patch = serve([DEFAULTS[0]!, DEFAULTS[1]!, { ...DEFAULTS[2]!, enabled: false, stored: false }])
     renderWithProviders(<AddOnSwitchesCard />)
 
     await user.click(await screen.findByRole('switch', { name: 'Traffic add-ons until the reset' }))
@@ -159,5 +193,154 @@ describe('the add-on accounting switches', () => {
       expect(await screen.findByRole('switch', { name })).toBeDisabled()
     }
     expect(screen.getByText('Only a role with Add-ons → Edit can change these switches.')).toBeInTheDocument()
+  })
+})
+
+/** The page's view with «Remnawave time zone» and, optionally, the daily check's verdict. */
+function serveWithZone(options: {
+  readonly stored: string | null
+  readonly verdict?: Record<string, unknown> | null
+}) {
+  let stored = options.stored
+  const view = () => ({
+    switches: DEFAULTS,
+    remnawaveTimeZone: { value: stored ?? 'UTC', stored, defaultValue: 'UTC' },
+    resetScheduleCheck: options.verdict ?? { status: 'ok', timeZone: stored ?? 'UTC', checkedAt: '', mismatches: [] },
+  })
+  vi.spyOn(api, 'get').mockImplementation(async (path: string) => {
+    if (path === '/admin/add-on-settings') return { data: view() }
+    return { data: {} }
+  })
+  return vi.spyOn(api, 'patch').mockImplementation(async (_path: string, body?: unknown) => {
+    const zone = (body as { remnawaveTimeZone?: unknown }).remnawaveTimeZone
+    if (typeof zone === 'string') stored = zone.trim() === '' ? null : zone.trim()
+    return { data: view() }
+  })
+}
+
+describe('«Remnawave time zone»', () => {
+  beforeEach(() => {
+    grant(['add_ons:view', 'add_ons:edit'])
+  })
+
+  afterEach(() => {
+    cleanup()
+    usePermissionStore.getState().reset()
+    vi.restoreAllMocks()
+  })
+
+  it('shows the stored zone, where it comes from, and sends only the zone when saved', async () => {
+    const user = userEvent.setup()
+    const patch = serveWithZone({ stored: null })
+    renderWithProviders(<AddOnSwitchesCard />)
+
+    const field = await screen.findByLabelText('Remnawave time zone')
+    expect(field).toHaveValue('')
+    expect(screen.getByText('Not set — UTC')).toBeInTheDocument()
+    expect(screen.getByText(/the TZ line in the Remnawave server’s \.env file, or UTC when there is none/)).toBeInTheDocument()
+    const save = screen.getByRole('button', { name: 'Save' })
+    expect(save).toBeDisabled()
+
+    await user.type(field, 'Europe/Moscow')
+    await user.click(save)
+
+    await waitFor(() => expect(patch).toHaveBeenCalledTimes(1))
+    expect(patch).toHaveBeenCalledWith('/admin/add-on-settings', { remnawaveTimeZone: 'Europe/Moscow' })
+    await waitFor(() => expect(screen.getByLabelText('Remnawave time zone')).toHaveValue('Europe/Moscow'))
+  })
+
+  it('refuses a zone that does not exist before anything is sent', async () => {
+    const user = userEvent.setup()
+    const patch = serveWithZone({ stored: 'Europe/Moscow' })
+    renderWithProviders(<AddOnSwitchesCard />)
+
+    const field = await screen.findByLabelText('Remnawave time zone')
+    expect(field).toHaveValue('Europe/Moscow')
+    await user.clear(field)
+    await user.type(field, 'Europe/Mosow')
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('There is no such time zone.')
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
+    await user.type(field, '{Enter}')
+    expect(patch).not.toHaveBeenCalled()
+  })
+
+  it('puts the zone back to UTC with an empty field', async () => {
+    const user = userEvent.setup()
+    const patch = serveWithZone({ stored: 'Asia/Novosibirsk' })
+    renderWithProviders(<AddOnSwitchesCard />)
+
+    await user.clear(await screen.findByLabelText('Remnawave time zone'))
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(patch).toHaveBeenCalledWith('/admin/add-on-settings', { remnawaveTimeZone: '' }))
+  })
+
+  it('warns beside the field when Remnawave resets on another clock, naming what it observed', async () => {
+    serveWithZone({
+      stored: null,
+      verdict: {
+        status: 'mismatch',
+        timeZone: 'UTC',
+        checkedAt: '2026-09-25T10:00:00.000Z',
+        mismatches: [
+          {
+            strategy: 'DAY',
+            observedAt: '2026-09-25T03:05:00.013Z',
+            expectedAt: '2026-09-25T00:05:00.000Z',
+            impliedUtcOffsetMinutes: -180,
+          },
+        ],
+      },
+    })
+    renderWithProviders(<AddOnSwitchesCard />)
+
+    const warning = await screen.findByRole('status')
+    expect(within(warning).getByText('Remnawave’s resets do not match this zone')).toBeInTheDocument()
+    expect(
+      within(warning).getByText(
+        'The “Every day” reset ran at 03:05 UTC, while this zone expects it at 00:05 UTC. Remnawave seems to run in UTC−03:00.',
+      ),
+    ).toBeInTheDocument()
+  })
+
+  it('draws no warning while the resets agree', async () => {
+    serveWithZone({ stored: 'Europe/Moscow' })
+    renderWithProviders(<AddOnSwitchesCard />)
+    expect(await screen.findByLabelText('Remnawave time zone')).toHaveValue('Europe/Moscow')
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  })
+
+  it('is read-only without Add-ons → Edit', async () => {
+    grant(['add_ons:view'])
+    serveWithZone({ stored: 'Europe/Moscow' })
+    renderWithProviders(<AddOnSwitchesCard />)
+    expect(await screen.findByLabelText('Remnawave time zone')).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
+  })
+
+  it('draws no field for a panel that predates the zone', async () => {
+    serve(DEFAULTS)
+    renderWithProviders(<AddOnSwitchesCard />)
+    await screen.findByRole('switch', { name: 'New add-on accounting' })
+    expect(screen.queryByLabelText('Remnawave time zone')).not.toBeInTheDocument()
+  })
+})
+
+describe('the zone as the page checks and spells it', () => {
+  it('takes IANA names and an empty field, and nothing Remnawave’s TZ cannot be', () => {
+    for (const ok of ['', '  ', 'UTC', 'Europe/Moscow', 'Etc/GMT+3', 'America/Argentina/Salta']) {
+      expect(isAcceptableTimeZone(ok)).toBe(true)
+    }
+    for (const bad of ['+03:00', 'UTC+3', 'Europe/Mosow', 'Moscow', 'Europe/../Moscow', `Europe/${'a'.repeat(60)}`]) {
+      expect(isAcceptableTimeZone(bad)).toBe(false)
+    }
+  })
+
+  it('spells offsets and times in one unambiguous zone', () => {
+    expect(formatUtcOffset(180)).toBe('UTC+03:00')
+    expect(formatUtcOffset(-180)).toBe('UTC−03:00')
+    expect(formatUtcOffset(345)).toBe('UTC+05:45')
+    expect(utcTime('2026-09-24T21:05:00.009Z')).toBe('21:05 UTC')
   })
 })

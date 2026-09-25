@@ -4,6 +4,7 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import {
   AddOnEntitlementActorType,
   AddOnEntitlementState,
+  AddOnLifetime,
   AddOnType,
   Prisma,
   SubscriptionStatus,
@@ -26,6 +27,8 @@ import {
   ADD_ON_NOTICE_REDELIVER_AFTER_MS,
 } from '../addon-expiry-notice.constants';
 import { readAddOnRolloutFlags } from '../add-on-rollout.config';
+import { entitlementEndBound } from '../domain/add-on-lifetime';
+import { RESET_EXPIRY_MARGIN_MS } from '../domain/reset-cycle-policy';
 import { LAPSED_TERM_WINDOW_MS } from '../domain/term-window';
 import { AddOnSwitchesService } from '../switches/add-on-switches.service';
 
@@ -55,18 +58,64 @@ export interface AddOnNoticeTickReport {
 const GIB = 1024 ** 3;
 
 /**
+ * A reset add-on whose cycle is shorter than this — a daily or a weekly
+ * reset — is told about at neither moment. A week, with room for a
+ * daylight-saving hour; a monthly cycle is never under 28 days.
+ *
+ * Why neither, and not only «has ended»: «через 3 дня» cannot fit a daily
+ * cycle, and on a weekly one it would arrive every week for three of its seven
+ * days. «Закончилась» would come every night (or every Monday) at the reset —
+ * the moment the customer's counter starts again, so there is nothing to act
+ * on — for a customer who bought it knowing the date: the purchase screen
+ * warns before payment and «Мои опции» shows the reset. A monthly reset keeps
+ * both notices, in the reset's own words.
+ */
+export const SHORT_RESET_CYCLE_MS = 8 * 24 * 60 * 60 * 1000;
+
+/**
  * The template a notice is sent with: its moment, and — for devices — what
  * the end does to the devices already connected, which stage 6 — the switch
- * «Удалять лишние устройства автоматически» — decides (see `ADD_ON_TEMPLATES`).
+ * «Удалять лишние устройства автоматически» — decides; for traffic, whether
+ * the add-on ends with Remnawave's traffic reset (see `ADD_ON_TEMPLATES`).
  */
 export function addOnNoticeType(
   moment: AddOnNoticeMoment,
   addOnType: AddOnType,
   deviceCleanupAuto: boolean,
+  endsWithTrafficReset: boolean = false,
 ): string {
   const kind =
-    addOnType === AddOnType.EXTRA_DEVICES ? (deviceCleanupAuto ? 'addon_devices_auto' : 'addon_devices') : 'addon';
+    addOnType === AddOnType.EXTRA_DEVICES
+      ? deviceCleanupAuto
+        ? 'addon_devices_auto'
+        : 'addon_devices'
+      : endsWithTrafficReset
+        ? 'addon_reset'
+        : 'addon';
   return moment === 'endsSoon' ? `${kind}_ends_in_3_days` : `${kind}_ended`;
+}
+
+/**
+ * The traffic reset an add-on ends with — Remnawave's reset instant, its
+ * epoch's `plannedEndsAt` — or `null` when it ends otherwise: «до конца
+ * подписки», or a reset add-on the subscription's earlier end caps. The bound
+ * is `entitlementEndBound`'s, the one rule every reader of a sold add-on uses.
+ */
+export function trafficResetEndOf(
+  row: Pick<AddOnNoticeRow, 'lifetime' | 'expiresAt' | 'expiryEpoch'>,
+): Date | null {
+  const bound = entitlementEndBound({
+    lifetime: row.lifetime,
+    expiresAt: row.expiresAt,
+    epochPlannedEndsAt: row.expiryEpoch?.plannedEndsAt ?? null,
+  });
+  return bound === 'reset' && row.expiryEpoch !== null ? row.expiryEpoch.plannedEndsAt : null;
+}
+
+/** A reset add-on on a daily or weekly reset: no notice at either moment (`SHORT_RESET_CYCLE_MS`). */
+export function isQuietResetCycle(row: Pick<AddOnNoticeRow, 'lifetime' | 'expiresAt' | 'expiryEpoch'>): boolean {
+  if (trafficResetEndOf(row) === null || row.expiryEpoch === null) return false;
+  return row.expiryEpoch.plannedEndsAt.getTime() - row.expiryEpoch.startsAt.getTime() < SHORT_RESET_CYCLE_MS;
 }
 
 /** Thrown inside a claim to roll its feed row back: another runner recorded the moment first. */
@@ -113,6 +162,12 @@ interface Pass {
  *    subscription is told about by the subscription's own «Подписка
  *    закончилась», and «Купить снова» has nothing to be bought for. That
  *    decision is recorded too, so it is not taken again.
+ *  - Traffic that ends with Remnawave's traffic reset (stage 4) is told in
+ *    the reset's words — «действует до сброса трафика 1 октября в 03:20 по
+ *    Москве; после сброса лимит вернётся к тарифу» — on a monthly reset only:
+ *    a daily or weekly one gets no notice at all (`SHORT_RESET_CYCLE_MS`). A
+ *    reset add-on the subscription's earlier end caps is told in the ordinary
+ *    words: it ends with the subscription, not at a reset.
  *  - Whatever the rollout flags say. The notices follow the add-on's row, as
  *    the boundary sweep that ends it does (it reads no flag): an add-on sold
  *    while stage 2 («Новый учёт докупок») was on still ends
@@ -404,6 +459,8 @@ export class AddOnExpiryNoticeService implements BeforeApplicationShutdown {
         totalValue: true,
         activatedAt: true,
         expiresAt: true,
+        lifetime: true,
+        expiryEpoch: { select: { startsAt: true, plannedEndsAt: true } },
         subscription: {
           select: {
             userId: true,
@@ -421,7 +478,7 @@ export class AddOnExpiryNoticeService implements BeforeApplicationShutdown {
     const verdict = decideAddOnNotice(row, moment, pass.now);
     if (verdict === 'notDue') return;
 
-    const type = addOnNoticeType(moment, row.type, pass.deviceCleanupAuto);
+    const type = addOnNoticeType(moment, row.type, pass.deviceCleanupAuto, trafficResetEndOf(row) !== null);
     if (verdict === 'send' && !(await this.templateOn(type, pass))) {
       // Not recorded: switched on again while the add-on is still due, it goes.
       pass.tally.templateOff += 1;
@@ -514,9 +571,11 @@ export class AddOnExpiryNoticeService implements BeforeApplicationShutdown {
  *     alignment moves (`endMovesWithAlignmentSql`), which is due only once the
  *     drift sweep has caught its term up;
  *   • «has ended»: EXPIRING or EXPIRED — only the boundary sweep ends an add-on
- *     so — within the last three days.
+ *     so — within the last three days;
+ *   • at neither moment, a reset add-on on a daily or weekly reset
+ *     (`quietResetCycleSql`).
  * Only the `(state, expires_at)` index and the event log's unique key are read,
- * and for a row in the window its subscription's terms.
+ * and for a row in the window its subscription's terms and its reset epoch.
  */
 export async function selectAddOnNoticeCandidates(
   client: Pick<PrismaService, '$queryRaw'>,
@@ -539,6 +598,7 @@ export async function selectAddOnNoticeCandidates(
               AND (e."activated_at" IS NULL OR e."activated_at" < e."expires_at" - make_interval(secs => ${ADD_ON_NOTICE_LEAD_MS / 1000}::double precision))
               AND s."status" IN ('ACTIVE', 'LIMITED')
               AND NOT ${endMovesWithAlignmentSql()}
+              AND NOT ${quietResetCycleSql()}
               AND NOT EXISTS (
                 SELECT 1 FROM "add_on_entitlement_events" c
                 WHERE c."entitlement_id" = e."id" AND c."command_key" = ${ADD_ON_NOTICE_COMMAND_KEY.endsSoon}
@@ -553,6 +613,7 @@ export async function selectAddOnNoticeCandidates(
               AND e."type" IN ('EXTRA_TRAFFIC', 'EXTRA_DEVICES')
               AND e."expires_at" <= ${now}
               AND e."expires_at" > ${since}
+              AND NOT ${quietResetCycleSql()}
               AND NOT EXISTS (
                 SELECT 1 FROM "add_on_entitlement_events" c
                 WHERE c."entitlement_id" = e."id" AND c."command_key" = ${ADD_ON_NOTICE_COMMAND_KEY.ended}
@@ -565,6 +626,26 @@ export async function selectAddOnNoticeCandidates(
 
 /** The 1-second window `LAPSED_TERM_WINDOW_MS` as SQL seconds. */
 const LAPSED_SECONDS = LAPSED_TERM_WINDOW_MS / 1000;
+
+/**
+ * `isQuietResetCycle` for add-on `e`, in SQL: a reset add-on ending at its
+ * reset (`entitlementEndBound`: `expires_at` at or past the epoch's reset +
+ * the margin) on a cycle shorter than `SHORT_RESET_CYCLE_MS`. The selections
+ * leave such a row out — decided nowhere, it would otherwise come back every
+ * pass and could fill the batch. The same rule as the function; the
+ * PostgreSQL spec holds the two together.
+ */
+function quietResetCycleSql(): Prisma.Sql {
+  return Prisma.sql`(
+    e."lifetime" = 'UNTIL_NEXT_RESET'
+    AND EXISTS (
+      SELECT 1 FROM "subscription_reset_epochs" ep
+      WHERE ep."id" = e."expiry_epoch_id"
+        AND e."expires_at" >= ep."planned_ends_at" + make_interval(secs => ${RESET_EXPIRY_MARGIN_MS / 1000}::double precision)
+        AND ep."planned_ends_at" - ep."starts_at" < make_interval(secs => ${SHORT_RESET_CYCLE_MS / 1000}::double precision)
+    )
+  )`;
+}
 
 /**
  * Whether the next tail alignment moves the end of add-on `e` (on subscription
@@ -705,6 +786,9 @@ export interface AddOnNoticeRow {
   readonly totalValue: bigint;
   readonly activatedAt: Date | null;
   readonly expiresAt: Date | null;
+  readonly lifetime: AddOnLifetime;
+  /** The reset cycle the add-on is bound to; `null` for one bound to none. */
+  readonly expiryEpoch: { readonly startsAt: Date; readonly plannedEndsAt: Date } | null;
   readonly subscription: {
     readonly userId: string;
     readonly status: SubscriptionStatus;
@@ -722,7 +806,8 @@ export interface AddOnNoticeRow {
  * alignment or the operator may have moved the add-on or its subscription
  * since: `send`; `skip` — «has ended» with the subscription ended too, recorded
  * without a notice; `notDue` — nothing recorded, a later pass looks again (or
- * never, once it is out of the window).
+ * never, once it is out of the window, or for a reset add-on on a daily or
+ * weekly reset, which the selections leave out too).
  */
 export function decideAddOnNotice(
   row: AddOnNoticeRow,
@@ -731,6 +816,7 @@ export function decideAddOnNotice(
 ): 'send' | 'skip' | 'notDue' {
   const endsAt = row.expiresAt;
   if (endsAt === null) return 'notDue';
+  if (isQuietResetCycle(row)) return 'notDue';
   const live = row.subscription.status === SubscriptionStatus.ACTIVE || row.subscription.status === SubscriptionStatus.LIMITED;
   if (moment === 'endsSoon') {
     if (row.state !== AddOnEntitlementState.ACTIVE) return 'notDue';
@@ -748,10 +834,12 @@ export function decideAddOnNotice(
  * What the notice's words are made from, as raw facts — the renderer turns them
  * into words in the customer's language (`buildAddOnFacts`,
  * `buildSubscriptionFacts`). `subscriptionId` is what «Купить снова», the push
- * and the cabinet's feed open the add-on page on.
+ * and the cabinet's feed open the add-on page on. `addonResetAt` — only for an
+ * add-on that ends with the traffic reset — is the reset the texts name.
  */
 function noticePayload(row: AddOnNoticeRow): Record<string, unknown> {
   const plan = planNameOf(row.subscription.planSnapshot);
+  const resetAt = trafficResetEndOf(row);
   return {
     subscriptionId: row.subscriptionId,
     entitlementId: row.id,
@@ -763,6 +851,7 @@ function noticePayload(row: AddOnNoticeRow): Record<string, unknown> {
         ? Math.round((Number(row.totalValue) / GIB) * 100) / 100
         : Number(row.totalValue),
     addonEndsAt: row.expiresAt?.toISOString() ?? null,
+    ...(resetAt === null ? {} : { addonResetAt: resetAt.toISOString() }),
     plan,
     planName: plan,
     expiresAt: row.subscription.expiresAt?.toISOString() ?? null,

@@ -10,7 +10,7 @@ are **switches in the panel**: «Доп. услуги» → tab «Настрой
 |---|---|---|---|
 | «Новый учёт докупок» | 1 and 2 | **ON** | Owner's decision, 24.09.2026. |
 | «Удалять лишние устройства автоматически» | 6 | **ON** | Owner's decision, 24.09.2026. |
-| «Докупка трафика до сброса» | 4 | OFF | See stage 4: parity with Remnawave 3.x is not shown yet. The default flips once it is. |
+| «Докупка трафика до сброса» | 4 | **ON** | Since 25.09.2026, once the panel's reset instants matched live Remnawave 3.2.3, 3.3.2 and 3.4.4. See stage 4. |
 
 The defaults live in one table in the code: `ADD_ON_SWITCH_DEFAULTS` in
 `src/modules/add-on-entitlements/add-on-rollout.config.ts`. A switch nobody
@@ -42,6 +42,24 @@ per variable, so a line for one stage of «Новый учёт докупок» 
 stage and leaves the other to the switch — the switch is locked all the same.
 A value the panel does not recognise (`enabled`, a typo) decides nothing: the
 log shows one warning per value, and the switch decides.
+
+**Warning: deleting an `=false` line can switch a stage ON.** While an
+`ADDON_*` line of a switch is in `.env`, the panel refuses to change that
+switch: the page shows it locked, the API answers `ADD_ON_SWITCH_SET_IN_ENV`,
+and nothing is saved for it. Once the line is deleted and the panel restarted
+(`docker compose up -d`), the panel's own value applies: the value last saved
+on the page before the line was added or, if the switch was never saved there,
+its default — **ON** for all three switches. For «Новый учёт докупок» that
+starts the move to the new accounting, which cannot be undone. For «Докупка
+трафика до сброса» it starts selling traffic add-ons that end at the reset.
+
+- **To keep a stage off:** leave the line.
+- **To hand the switch to the panel:** first make sure the panel's own value is
+  the one you want — it is ON unless you switched it off on the page before the
+  line was added, and the page cannot change it while the line is there — then
+  delete the line and run `docker compose up -d`. If that value is ON and you
+  want the stage off, the stage runs from the restart until you switch it off
+  on the page.
 
 ### What a switch decides, and what it does not
 
@@ -273,24 +291,39 @@ default, and this runbook told every install to keep them off.
     AND ti.add_on_lines NOT IN ('null'::jsonb, '[]'::jsonb);
   ```
 
-## 4. Stage 4 («Докупка трафика до сброса»): keep it OFF until parity is shown
+## 4. Stage 4 («Докупка трафика до сброса»): ON by default since 25.09.2026
 
-Do not turn it on until parity has been shown against **every Remnawave line
-this panel serves: 3.2.x, 3.3.x and 3.4.x**. A 2.x panel is refused on every
-call, so it is owed no parity. Parity needs three things:
+**What it does.** A traffic add-on bought on a plan that resets traffic lasts
+until Remnawave's nearest traffic reset and is taken off 30 minutes after it;
+if the subscription ends first, it ends with the subscription. On a plan
+without a reset it lasts until the subscription ends. Device add-ons always
+last until the subscription ends («Обнулить трафик» zeroes the counter at once
+and has no end). Nobody chooses this per add-on any more: the add-on editor
+(«Доп. услуги» → «Создать услугу», or the pencil button on an add-on) shows the
+rule instead of a choice.
 
-1. A harness against each of those lines.
-2. Proof that the panel's own reset job fires at the same instant as our UTC
-   epoch math, including the panel's timezone and week start. The math is:
-   - `utcDayStart`;
-   - `utcWeekStart`, where the week starts on Monday;
-   - `utcMonthStart`;
-   - for MONTH_ROLLING, the anniversary of the panel profile's `createdAt`.
-3. A probe showing that a paid epoch ends exactly when the panel zeroes usage.
+**Why it is on.** The panel counts Remnawave 3.x's own reset instants: DAY at
+00:05, WEEK on Monday at 00:15, MONTH on the 1st at 00:20, on the Remnawave
+server's clock (`TZ` in its `.env`, UTC when unset), and MONTH_ROLLING at 00:10
+on the day of the month the profile was created (that day is counted in UTC by
+Remnawave's database, whatever the zone). A live check against Remnawave
+3.2.3, 3.3.2 and 3.4.4 saw every reset at the predicted instant (25.09.2026).
+A 2.x panel is refused on every call, so it is owed no parity.
 
-The switch covers every reset strategy at once. Turning it off stops new
-`UNTIL_NEXT_RESET` sales; epochs and add-ons that already exist are not
-deleted, and those add-ons still end at their reset.
+**What to set.** «Часовой пояс Remnawave», under the switches on the same tab,
+must be the Remnawave server's `TZ`. With UTC (Remnawave's default) there is
+nothing to set.
+
+**Sold before the update.** Add-ons already sold keep their dates. The update
+re-dates nothing.
+
+**Switching it off** («Доп. услуги» → «Настройки» → «Докупка трафика до
+сброса») covers every reset strategy at once. New traffic add-ons are then sold
+until the end of the subscription. Epochs and add-ons that already exist are
+not deleted, and add-ons sold «до сброса» still end at their reset. An
+`ADDON_RESET_EXPIRY_*=false` line in `.env` keeps the stage off, as it did
+before — read the warning in [section 0](#0-the-switches-their-defaults-and-where-they-are-read)
+before you delete one.
 
 ## 6. Stage 6 («Удалять лишние устройства автоматически»): automatic device reduction
 
@@ -564,8 +597,8 @@ by a line in `.env`: change or delete that line, then `docker compose up -d`.
   subscription's own.
 - **«Удалять лишние устройства автоматически» off (stage 6).** Device
   reductions wait for an operator again.
-- **«Докупка трафика до сброса» off (stage 4).** «До следующего сброса»
-  add-ons are no longer offered or sold.
+- **«Докупка трафика до сброса» off (stage 4).** New traffic add-ons are sold
+  until the end of the subscription instead of until the reset.
 
 **What switching off does NOT undo** — the dialog says the same:
 

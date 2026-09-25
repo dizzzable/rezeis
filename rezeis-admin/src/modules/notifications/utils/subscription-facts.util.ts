@@ -50,6 +50,7 @@ const WORDS = {
     of: 'из',
     devicesFree: 'доступно',
     gb: 'ГБ',
+    at: 'в',
   },
   en: {
     unlimited: 'Unlimited',
@@ -58,6 +59,7 @@ const WORDS = {
     of: 'of',
     devicesFree: 'available',
     gb: 'GB',
+    at: 'at',
   },
 } as const;
 
@@ -191,6 +193,13 @@ export interface AddOnFactsInput {
   readonly type: unknown;
   readonly total: unknown;
   readonly endsAt: unknown;
+  /**
+   * A traffic add-on that ends with Remnawave's traffic reset: the reset
+   * instant itself (the epoch's `plannedEndsAt`), not the moment the panel
+   * takes the add-on off half an hour later — the customer is told when their
+   * counter goes back to zero. Absent for every other add-on.
+   */
+  readonly resetAt?: unknown;
   /** IANA zone the operator configured. Falls back to UTC. */
   readonly timezone?: string | null;
 }
@@ -218,6 +227,11 @@ function devicesWord(count: number, locale: NotificationLocaleTag): string {
  * how much; `{{endsDate}}`, `{{endsTime}}` and `{{endsDateTime}}` when it
  * ends. A payload without an add-on gives nothing, and each fact it cannot
  * read collapses, as the others do.
+ *
+ * An add-on that ends with the traffic reset also gets the reset:
+ * `{{resetDate}}`, `{{resetTime}}`, `{{resetZone}}` — the zone named, «по
+ * Москве» (the owner, 25.09.2026: a reset time is never printed without its
+ * zone) — and `{{resetDateTime}}`, «1 октября в 03:20 по Москве».
  */
 export function buildAddOnFacts(input: AddOnFactsInput, locale: NotificationLocaleTag): Record<string, string> {
   const out: Record<string, string> = {};
@@ -237,7 +251,73 @@ export function buildAddOnFacts(input: AddOnFactsInput, locale: NotificationLoca
     out['endsTime'] = formatTime(when, zone);
     out['endsDateTime'] = `${out['endsDate']}, ${out['endsTime']}`;
   }
+  const reset = parseInstant(typeof input.resetAt === 'string' ? input.resetAt : null);
+  if (reset !== null) {
+    const zone = normaliseZone(input.timezone);
+    out['resetDate'] = formatDate(reset, locale, zone);
+    out['resetTime'] = formatTime(reset, zone);
+    out['resetZone'] = zonePhrase(zone, reset, locale);
+    out['resetDateTime'] = `${out['resetDate']} ${WORDS[locale].at} ${out['resetTime']} ${out['resetZone']}`;
+  }
   return out;
+}
+
+/**
+ * «по Москве» — a zone the way a Russian sentence names it, for the zones the
+ * operators of this product set (Russia's, and the neighbours'). A city takes
+ * the dative, which `Intl` does not give (its `shortGeneric` is «Москва»), so
+ * these are written out; any other zone is named by its offset instead, which
+ * needs no grammar.
+ */
+const ZONE_PHRASE_RU: Readonly<Record<string, string>> = {
+  'Europe/Kaliningrad': 'по Калининграду',
+  'Europe/Moscow': 'по Москве',
+  'Europe/Samara': 'по Самаре',
+  'Europe/Volgograd': 'по Волгограду',
+  'Asia/Yekaterinburg': 'по Екатеринбургу',
+  'Asia/Omsk': 'по Омску',
+  'Asia/Novosibirsk': 'по Новосибирску',
+  'Asia/Krasnoyarsk': 'по Красноярску',
+  'Asia/Irkutsk': 'по Иркутску',
+  'Asia/Yakutsk': 'по Якутску',
+  'Asia/Vladivostok': 'по Владивостоку',
+  'Asia/Magadan': 'по Магадану',
+  'Asia/Kamchatka': 'по Камчатке',
+  'Europe/Minsk': 'по Минску',
+  'Europe/Kyiv': 'по Киеву',
+  'Europe/Kiev': 'по Киеву',
+  'Asia/Almaty': 'по Алматы',
+  'Asia/Tashkent': 'по Ташкенту',
+};
+
+/**
+ * The zone a reset time is read in: «по Москве» / "Moscow Time"; «по UTC» /
+ * "UTC"; otherwise its offset at that instant, «(UTC+5)».
+ */
+function zonePhrase(zone: string, at: Date, locale: NotificationLocaleTag): string {
+  const offset = zoneOffset(zone, at);
+  if (offset === 'UTC') return locale === 'ru' ? 'по UTC' : 'UTC';
+  if (locale === 'ru') return ZONE_PHRASE_RU[zone] ?? `(${offset})`;
+  // English names a zone by itself: "Moscow Time", "Yekaterinburg Time".
+  const name = new Intl.DateTimeFormat('en-GB', { timeZone: zone, timeZoneName: 'shortGeneric' })
+    .formatToParts(at)
+    .find((part) => part.type === 'timeZoneName')?.value;
+  return name === undefined || name.startsWith('GMT') ? `(${offset})` : name;
+}
+
+/** `UTC`, `UTC+3`, `UTC+5:30`, `UTC-4` — the zone's offset at `at`. */
+function zoneOffset(zone: string, at: Date): string {
+  const name = new Intl.DateTimeFormat('en-US', { timeZone: zone, timeZoneName: 'longOffset' })
+    .formatToParts(at)
+    .find((part) => part.type === 'timeZoneName')?.value;
+  if (name === undefined || name === 'GMT') return 'UTC';
+  // `GMT+05:00` → `UTC+5`, `GMT+05:30` → `UTC+5:30`.
+  const match = /^GMT([+-])(\d{2}):(\d{2})$/u.exec(name);
+  if (match === null) return name.replace(/^GMT/u, 'UTC');
+  // A zero offset is UTC's clock, whatever the zone is called.
+  if (match[2] === '00' && match[3] === '00') return 'UTC';
+  const hours = String(Number(match[2]));
+  return `UTC${match[1]}${hours}${match[3] === '00' ? '' : `:${match[3]}`}`;
 }
 
 function parseInstant(value: string | null | undefined): Date | null {

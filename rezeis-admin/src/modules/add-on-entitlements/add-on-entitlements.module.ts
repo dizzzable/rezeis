@@ -23,6 +23,8 @@ import { EntitlementBoundarySchedulerService } from './services/entitlement-boun
 import { EntitlementCutoverService } from './services/entitlement-cutover.service';
 import { EntitlementCutoverJobService } from './services/entitlement-cutover-job.service';
 import { EntitlementMetricsService } from './services/entitlement-metrics.service';
+import { ResetBoundaryConfirmationService } from './services/reset-boundary-confirmation.service';
+import { ResetScheduleCheckService } from './services/reset-schedule-check.service';
 import { SubscriptionTermHooksService } from './services/subscription-term-hooks.service';
 import { SubscriptionTermService } from './services/subscription-term.service';
 import { AddOnSwitchesModule } from './switches/add-on-switches.module';
@@ -57,6 +59,11 @@ import { AddOnSwitchesModule } from './switches/add-on-switches.module';
     DeviceReductionExecutionService,
     EntitlementBoundaryService,
     EntitlementBoundarySchedulerService,
+    // The boundary sweep's confirmation of Remnawave's reset before it takes an
+    // add-on «до сброса» off (and the incident when none comes).
+    ResetBoundaryConfirmationService,
+    // The daily check of Remnawave's resets against «Часовой пояс Remnawave».
+    ResetScheduleCheckService,
     EntitlementMetricsService,
     AddOnEntitlementInspectionService,
     AddOnEntitlementRemediationService,

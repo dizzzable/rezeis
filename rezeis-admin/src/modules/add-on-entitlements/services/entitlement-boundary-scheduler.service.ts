@@ -10,6 +10,7 @@ import { AddOnSwitchesService } from '../switches/add-on-switches.service';
 import { DeviceReductionExecutionService } from './device-reduction-execution.service';
 import { DeviceReductionPlanService } from './device-reduction-plan.service';
 import { EntitlementBoundaryService } from './entitlement-boundary.service';
+import { ResetBoundaryConfirmationService, resetAddOnHeldSql } from './reset-boundary-confirmation.service';
 import { SubscriptionTermService, TERM_SHORTENED_ACROSS_SCHEDULED_TERM } from './subscription-term.service';
 
 /** Max subscriptions swept for due boundaries per tick. */
@@ -128,6 +129,12 @@ export class EntitlementBoundarySchedulerService {
     private readonly subscriptionTermService: SubscriptionTermService,
     /** The stage switches; `@Optional()` only for the specs that build this by hand. */
     @Optional() private readonly addOnSwitches?: AddOnSwitchesService,
+    /**
+     * Confirms Remnawave's reset before an add-on «до сброса» is taken off;
+     * `@Optional()` only for the specs that build this by hand. Without it such
+     * an add-on is simply held until the hold runs out.
+     */
+    @Optional() private readonly resetConfirmation?: ResetBoundaryConfirmationService,
   ) {}
 
   @Cron(CronExpression.EVERY_5_MINUTES, { name: 'entitlement-boundary-sweep' })
@@ -165,6 +172,19 @@ export class EntitlementBoundarySchedulerService {
     now: Date = new Date(),
   ): Promise<{ readonly subscriptions: number; readonly enqueued: number }> {
     const autoCleanup = (await readAddOnRolloutFlags(this.addOnSwitches)).deviceCleanupAuto;
+    // FIRST, the resets Remnawave has confirmed: a boundary closed here makes
+    // its add-ons due in the selection just below, in the same tick. A failed
+    // pass holds nothing longer than its hold — the selection counts the hold
+    // out on its own clock.
+    if (this.resetConfirmation !== undefined) {
+      try {
+        await this.resetConfirmation.confirmDueBoundaries(now);
+      } catch (err: unknown) {
+        this.logger.warn(
+          `Reset confirmation pass failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
     const fresh = await this.selectFreshDue(now, MAX_PER_TICK);
     const room = MAX_PER_TICK - fresh.length;
     const reentries =
@@ -277,6 +297,11 @@ export class EntitlementBoundarySchedulerService {
    * per subscription, the earliest due first. `until` is compared as the ISO
    * text it is written as (`toISOString`, always UTC), so a malformed value
    * can never fail the sweep's one query.
+   *
+   * An add-on HELD for Remnawave's reset (`resetAddOnHeldSql`) is not a fresh
+   * boundary until its reset is confirmed or its hold runs out: a boundary that
+   * never confirms would otherwise fill the window tick after tick, earliest
+   * due and never taken, and nothing behind it would expire.
    */
   private selectFreshDue(now: Date, limit: number): Promise<DueSubscription[]> {
     return this.prismaService.$queryRaw<DueSubscription[]>(Prisma.sql`
@@ -284,7 +309,9 @@ export class EntitlementBoundarySchedulerService {
       FROM (
         SELECT e."subscription_id" AS "subscriptionId", MIN(e."expires_at") AS "dueAt"
         FROM "add_on_entitlements" e
+        LEFT JOIN "subscription_reset_epochs" ep ON ep."id" = e."expiry_epoch_id"
         WHERE e."state" = 'ACTIVE' AND e."expires_at" IS NOT NULL AND e."expires_at" <= ${now}
+          AND NOT ${resetAddOnHeldSql(now)}
         GROUP BY e."subscription_id"
         UNION ALL
         SELECT t."subscription_id" AS "subscriptionId", MIN(t."starts_at") AS "dueAt"

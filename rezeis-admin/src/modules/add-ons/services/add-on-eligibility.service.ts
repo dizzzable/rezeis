@@ -15,15 +15,33 @@ import {
   readAddOnRolloutFlags,
   resolveIntakeResetCapabilities,
 } from '../../add-on-entitlements/add-on-rollout.config';
-import { resolveAddOnLifetimeGrant } from '../../add-on-entitlements/domain/add-on-lifetime';
+import {
+  type AddOnEndBound,
+  resolveAddOnLifetimeGrant,
+  resolveEffectiveAddOnLifetime,
+} from '../../add-on-entitlements/domain/add-on-lifetime';
 import { isAddOnPurchaseDated } from '../../add-on-entitlements/domain/add-on-purchase-dating';
 import { deriveCutoverBaseline } from '../../add-on-entitlements/domain/cutover-baseline';
-import { ResetCapabilityMap } from '../../add-on-entitlements/domain/reset-cycle-policy';
+import {
+  getResetCapability,
+  ResetCapabilityMap,
+  saleResetAnchor,
+} from '../../add-on-entitlements/domain/reset-cycle-policy';
 import {
   isBaselineExtendable,
   resolveConfiguredEntitlementBaseline,
 } from '../../add-on-entitlements/services/configured-baseline.util';
 import { AddOnSwitchesService } from '../../add-on-entitlements/switches/add-on-switches.service';
+import { RemnawaveProfileFactsService } from '../../remnawave/services/remnawave-profile-facts.service';
+import { SettingsService } from '../../settings/services/settings.service';
+
+/** «Сброс скоро»: the reset an add-on ends at is less than this far away (the owner's 24 h). */
+export const RESET_SOON_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/** Whether a catalogue add-on is sold for `planId` (no plans listed = every plan). */
+function appliesToPlan(addOn: { readonly applicablePlanIds: readonly string[] }, planId: string): boolean {
+  return addOn.applicablePlanIds.length === 0 || addOn.applicablePlanIds.includes(planId);
+}
 
 /**
  * Always `NOW`: an add-on bought here starts at once. `TERM_START` belonged to
@@ -56,6 +74,22 @@ export interface AddOnEligibilityInfo {
    */
   readonly dated: boolean;
   readonly explanationCode: string;
+  /**
+   * Which bound `expiresAt` is: Remnawave's traffic reset, or the
+   * subscription's end when that comes first (or the add-on lasts until it).
+   * `null` for a traffic reset, which has no end.
+   */
+  readonly endsBound: AddOnEndBound | null;
+  /**
+   * Remnawave's reset instant a reset-scoped add-on runs up to — the moment the
+   * customer is shown («до сброса трафика 01.10 в 03:20»); `expiresAt` is half
+   * an hour later, when the panel takes it off. Set whenever the add-on is
+   * sold until the next reset, even when the subscription's end cuts it
+   * short; `null` otherwise.
+   */
+  readonly nextResetAt: string | null;
+  /** The add-on ends at a reset less than 24 hours away: the cabinet warns before payment. */
+  readonly resetSoon: boolean;
 }
 
 export interface EligibleAddOn {
@@ -66,6 +100,11 @@ export interface EligibleAddOn {
   readonly type: AddOnType;
   readonly icon: string | null;
   readonly value: number;
+  /**
+   * The lifetime SOLD — `resolveEffectiveAddOnLifetime`, not the catalogue
+   * row: devices and a traffic reset always «до конца подписки», traffic «до
+   * следующего сброса» on a plan that resets once stage 4 is on.
+   */
   readonly lifetime: AddOnLifetime;
   readonly eligibility: AddOnEligibilityInfo;
   readonly prices: ReadonlyArray<{ readonly currency: string; readonly price: string }>;
@@ -89,6 +128,12 @@ export interface AddOnEligibilityResult {
   readonly availability: 'AVAILABLE' | 'EMPTY';
   readonly target: { readonly subscriptionId: string; readonly termId: string; readonly planId: string } | null;
   readonly addOns: readonly EligibleAddOn[];
+  /**
+   * The operator's «Часовой пояс» (Settings → «Платформа»), IANA, in which
+   * every date here is to be shown, zone named; `null` when none is set, and
+   * the dates are then UTC. The partner hold carries the same value.
+   */
+  readonly displayTimeZone: string | null;
 }
 
 const EMPTY_RESULT = (): AddOnEligibilityResult => ({
@@ -96,6 +141,7 @@ const EMPTY_RESULT = (): AddOnEligibilityResult => ({
   availability: 'EMPTY',
   target: null,
   addOns: [],
+  displayTimeZone: null,
 });
 
 /**
@@ -136,12 +182,15 @@ const EMPTY_RESULT = (): AddOnEligibilityResult => ({
  *    the legacy footgun where a device add-on turned an unlimited profile
  *    finite).
  *  - `UNTIL_SUBSCRIPTION_END` expires at the term end (requires a term end).
- *  - `UNTIL_NEXT_RESET` binds expiry to the plan's reset cycle and is valid for
- *    BOTH traffic and devices (the reset epoch is the profile's monthly refresh
- *    boundary — traffic rolls back and extra devices are removed on it). It is
- *    offered only when the strategy has a boundary (not NO_RESET) AND its reset
- *    capability is ENABLED (disabled until staging parity, so withheld for now).
- *    Availability is gated by the strategy/capability, NOT by the add-on type.
+ *  - `UNTIL_NEXT_RESET` binds expiry to Remnawave's next traffic reset, capped
+ *    by the subscription's end, and is for TRAFFIC only: device add-ons (and a
+ *    traffic reset) always last until the end of the subscription — a device
+ *    slot that ended at a traffic reset would be taken away at every reset.
+ *    Which lifetime is sold is decided by the panel, not the catalogue row
+ *    (`resolveEffectiveAddOnLifetime`): traffic on a plan that resets lasts
+ *    until the reset while stage 4 («Докупка трафика до сброса») is on for the
+ *    plan's strategy, and until the subscription's end on a plan that never
+ *    resets.
  *
  * Only eligible add-ons are returned; ineligible ones are withheld. This
  * endpoint is authoritative for discovery but never for money — checkout
@@ -172,6 +221,17 @@ export class AddOnEligibilityService {
     private readonly trafficResetService: TrafficResetService,
     /** The stage switches; `@Optional()` only for the specs that build this by hand. */
     @Optional() private readonly addOnSwitches?: AddOnSwitchesService,
+    /**
+     * For the operator's «Часовой пояс» the dates are shown in; `@Optional()`
+     * only for the specs that build this by hand — without it the zone is UTC.
+     */
+    @Optional() private readonly settingsService?: SettingsService,
+    /**
+     * The one read of a Remnawave profile's `createdAt` a MONTH_ROLLING sale
+     * needs when nothing has told the panel yet (P2); `@Optional()` only for
+     * the specs that build this by hand — without it such a sale is withheld.
+     */
+    @Optional() private readonly profileFacts?: RemnawaveProfileFactsService,
   ) {}
 
   public async listForSubscription(
@@ -189,6 +249,7 @@ export class AddOnEligibilityService {
         expiresAt: true,
         createdAt: true,
         planSnapshot: true,
+        remnawaveProfileCreatedAt: true,
       },
     });
     if (subscription === null) {
@@ -241,9 +302,14 @@ export class AddOnEligibilityService {
             planId: term.planId ?? '',
             baseline: {
               endsAt: term.endsAt,
+              subscriptionEndsAt: subscription.expiresAt,
               ...(await this.resolveConfiguredBaseline(subscriptionId, term, subscription)),
               trafficResetStrategy: term.trafficResetStrategy,
-              resetAnchorAt: term.resetAnchorAt,
+              resetAnchorAt: saleResetAnchor(
+                term.trafficResetStrategy,
+                term.resetAnchorAt,
+                subscription.remnawaveProfileCreatedAt ?? null,
+              ),
             },
           };
 
@@ -253,34 +319,51 @@ export class AddOnEligibilityService {
       orderBy: [{ orderIndex: 'asc' }],
     });
 
-    // ONE read of the stage switches for the whole listing: the capability map
-    // and the dating both come from it, so a switch flipped mid-listing cannot
-    // make the two disagree about one add-on.
+    // ONE read of the stage switches for the whole listing: the capability map,
+    // the Remnawave zone and the dating all come from it, so a switch flipped
+    // mid-listing cannot make them disagree about one add-on.
     const flags = await readAddOnRolloutFlags(this.addOnSwitches);
     const capabilities = this.getResetCapabilities(flags);
     const now = new Date();
     const dating = await this.readPurchaseDating(subscriptionId, term, subscription.expiresAt, now, flags);
 
+    // P2: a MONTH_ROLLING term whose anchor the panel has not heard yet. The
+    // Remnawave profile's `createdAt` is read ONCE — outside any transaction,
+    // 3 s at most, stamped for the next time — and only when it decides
+    // something: «до сброса» is sold for the strategy and traffic is on sale
+    // for the plan. Still unknown, the traffic add-on is withheld.
+    let baseline = resolved.baseline;
+    if (
+      term !== null &&
+      baseline.resetAnchorAt === null &&
+      baseline.trafficResetStrategy === TrafficLimitStrategy.MONTH_ROLLING &&
+      getResetCapability('MONTH_ROLLING', capabilities) === 'ENABLED' &&
+      this.profileFacts !== undefined &&
+      catalog.some((addOn) => addOn.type === AddOnType.EXTRA_TRAFFIC && appliesToPlan(addOn, resolved.planId))
+    ) {
+      const createdAt = await this.profileFacts.readProfileCreatedAtOnce(subscriptionId, now);
+      if (createdAt !== null) baseline = { ...baseline, resetAnchorAt: createdAt };
+    }
+
     const addOns: EligibleAddOn[] = [];
     for (const addOn of catalog) {
-      const appliesToPlan =
-        addOn.applicablePlanIds.length === 0 ||
-        addOn.applicablePlanIds.includes(resolved.planId);
-      if (!appliesToPlan) continue;
+      if (!appliesToPlan(addOn, resolved.planId)) continue;
 
       const evaluated = this.evaluate(
         addOn.type,
         addOn.lifetime,
-        resolved.baseline,
+        baseline,
         capabilities,
         now,
+        flags.remnawaveTimeZone,
       );
       if (evaluated === null) continue;
+      const { lifetime, ...offered } = evaluated;
       const eligibility: AddOnEligibilityInfo = {
-        ...evaluated,
+        ...offered,
         dated:
-          evaluated.expiresAt !== null &&
-          isAddOnPurchaseDated({ type: addOn.type, lifetime: addOn.lifetime, ...dating }),
+          offered.expiresAt !== null &&
+          isAddOnPurchaseDated({ type: addOn.type, lifetime, ...dating }),
       };
 
       addOns.push({
@@ -291,7 +374,7 @@ export class AddOnEligibilityService {
         type: addOn.type,
         icon: addOn.icon,
         value: addOn.value,
-        lifetime: addOn.lifetime,
+        lifetime,
         eligibility,
         freeAllowance:
           addOn.type === AddOnType.RESET_TRAFFIC
@@ -311,7 +394,18 @@ export class AddOnEligibilityService {
       availability: addOns.length > 0 ? 'AVAILABLE' : 'EMPTY',
       target: { subscriptionId, termId: resolved.termId, planId: resolved.planId },
       addOns,
+      displayTimeZone: await this.readDisplayTimeZone(),
     };
+  }
+
+  /** The operator's «Часовой пояс», or `null` (UTC) — never a reason to fail the listing. */
+  private async readDisplayTimeZone(): Promise<string | null> {
+    if (this.settingsService === undefined) return null;
+    try {
+      return (await this.settingsService.getPlatformBranding()).timezone;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -400,6 +494,7 @@ export class AddOnEligibilityService {
     readonly planId: string;
     readonly baseline: {
       readonly endsAt: Date | null;
+      readonly subscriptionEndsAt: Date | null;
       readonly baseTrafficLimitBytes: bigint | null;
       readonly baseDeviceLimit: number | null;
       readonly trafficResetStrategy: TrafficLimitStrategy;
@@ -426,6 +521,7 @@ export class AddOnEligibilityService {
       planId,
       baseline: {
         endsAt: baseline.endsAt,
+        subscriptionEndsAt: subscription.expiresAt,
         baseTrafficLimitBytes: baseline.baseTrafficLimitBytes,
         baseDeviceLimit: baseline.baseDeviceLimit,
         trafficResetStrategy: baseline.trafficResetStrategy,
@@ -485,6 +581,7 @@ export class AddOnEligibilityService {
     lifetime: AddOnLifetime,
     baseline: {
       readonly endsAt: Date | null;
+      readonly subscriptionEndsAt: Date | null;
       readonly baseTrafficLimitBytes: bigint | null;
       readonly baseDeviceLimit: number | null;
       readonly trafficResetStrategy: TrafficLimitStrategy;
@@ -492,7 +589,8 @@ export class AddOnEligibilityService {
     },
     capabilities: ResetCapabilityMap,
     now: Date,
-  ): Omit<AddOnEligibilityInfo, 'dated'> | null {
+    remnawaveTimeZone: string | undefined,
+  ): (Omit<AddOnEligibilityInfo, 'dated'> & { readonly lifetime: AddOnLifetime }) | null {
     // Resource-baseline eligibility: an add-on can only extend a FINITE limit.
     // The predicate is shared with the direct-purchase checkout and both
     // capture paths so the OFFER and the money paths cannot answer it
@@ -528,20 +626,46 @@ export class AddOnEligibilityService {
     // reset zeroes consumption and touches nothing else.
     if (type === AddOnType.RESET_TRAFFIC) {
       return {
+        lifetime: resolveEffectiveAddOnLifetime({
+          type,
+          catalogLifetime: lifetime,
+          trafficResetStrategy: baseline.trafficResetStrategy,
+          capabilities,
+        }),
         eligible: true,
         activation: 'NOW',
         expiresAt: null,
         explanationCode: 'RESET_TRAFFIC_IMMEDIATE',
+        endsBound: null,
+        nextResetAt: null,
+        resetSoon: false,
       };
     }
 
-    const grant = resolveAddOnLifetimeGrant({ lifetime, baseline, capabilities, now });
+    const grant = resolveAddOnLifetimeGrant({
+      type,
+      lifetime,
+      baseline,
+      capabilities,
+      now,
+      timeZone: remnawaveTimeZone,
+    });
     if (grant === null) return null;
     return {
+      lifetime: grant.lifetime,
       eligible: true,
       activation: 'NOW',
       expiresAt: grant.expiresAt.toISOString(),
       explanationCode: grant.explanationCode,
+      endsBound: grant.endsBound,
+      nextResetAt: grant.resetAt === null ? null : grant.resetAt.toISOString(),
+      // The warning is about the reset ending the add-on, so only when the
+      // reset is what ends it: an add-on the subscription's end cuts short ends
+      // by that date, which the customer is shown instead.
+      resetSoon:
+        grant.endsBound === 'reset' &&
+        grant.resetAt !== null &&
+        grant.resetAt.getTime() - now.getTime() < RESET_SOON_WINDOW_MS,
     };
   }
 

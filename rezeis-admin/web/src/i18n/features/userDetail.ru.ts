@@ -219,6 +219,10 @@ export const ru = {
       trafficLabel: 'Лимит трафика (GB)',
       trafficUnlimitedLabel: 'Безлимитный трафик',
       trafficNeedsValue: 'Укажите лимит трафика в GB или снова включите «Безлимитный трафик»',
+      // Какая часть лимита трафика — докупки со своим сроком (время — в «Часовом поясе» панели).
+      trafficAddOns: 'из них докупки: {{items}}',
+      trafficAddOnUntil: '+{{gb}} ГБ до {{when}}',
+      trafficAddOnNoEnd: '+{{gb}} ГБ без срока',
       devicesLabel: 'Лимит устройств',
       resetBtn: 'Сбросить',
       linkCopied: 'Ссылка подписки скопирована',

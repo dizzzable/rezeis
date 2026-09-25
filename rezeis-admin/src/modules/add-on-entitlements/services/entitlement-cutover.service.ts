@@ -224,7 +224,11 @@ export class EntitlementCutoverService {
     `);
     const current =
       locked.length === 1
-        ? await tx.subscription.findUnique({ where: { id: subscriptionId }, select: CANDIDATE_SELECT })
+        ? await tx.subscription.findUnique({
+            where: { id: subscriptionId },
+            // The profile's `createdAt`: MONTH_ROLLING's anchor (P2).
+            select: { ...CANDIDATE_SELECT, remnawaveProfileCreatedAt: true },
+          })
         : null;
     if (current === null || current.status === SubscriptionStatus.DELETED) {
       return {
@@ -274,7 +278,11 @@ export class EntitlementCutoverService {
       baseTrafficLimitBytes: baseline.baseTrafficLimitBytes,
       baseDeviceLimit: baseline.baseDeviceLimit,
       trafficResetStrategy: baseline.trafficResetStrategy,
-      resetAnchorAt: provisionalResetAnchor(baseline.trafficResetStrategy, baseline.startsAt),
+      resetAnchorAt: provisionalResetAnchor(
+        baseline.trafficResetStrategy,
+        baseline.startsAt,
+        current.remnawaveProfileCreatedAt ?? null,
+      ),
     });
     await this.subscriptionTermService.activateInTransaction(tx, scheduled.id, baseline.startsAt);
     const projection = await this.effectiveProjectionService.recomputeInTransaction(tx, {

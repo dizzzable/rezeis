@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, NotFoundException, ValidationPipe } from '@nestjs/common';
 
+import { AdminAddOnCreateDto, AdminAddOnUpdateDto } from '../src/modules/add-ons/dto/admin-add-on.dto';
 import { AddOnsService } from '../src/modules/add-ons/services/add-ons.service';
 
 type AddOnRecord = {
@@ -133,24 +134,82 @@ describe('AddOnsService catalog (T-006)', () => {
     assert.equal((creates[0]!.data as { lifetime: string }).lifetime, 'UNTIL_NEXT_RESET');
   });
 
-  it('allows a device add-on with UNTIL_NEXT_RESET on create (device can be one-time-until-reset; eligibility gates by plan strategy)', async () => {
-    const { service, creates } = build();
-    const result = await service.create({
-      name: 'Extra device',
-      type: 'EXTRA_DEVICES' as never,
-      lifetime: 'UNTIL_NEXT_RESET' as never,
-      value: 1,
-      prices: [{ currency: 'USD' as never, price: '1.00' }],
-    });
-    assert.equal(result.lifetime, 'UNTIL_NEXT_RESET');
-    assert.equal((creates[0]!.data as { lifetime: string }).lifetime, 'UNTIL_NEXT_RESET');
+  it('refuses «до следующего сброса» for a device add-on or a traffic reset on create, and writes nothing', async () => {
+    // P3: a device slot that ended at a traffic reset would be taken away at
+    // every reset; a traffic reset has no lifetime at all.
+    for (const type of ['EXTRA_DEVICES', 'RESET_TRAFFIC']) {
+      const { service, creates } = build();
+      await assert.rejects(
+        () =>
+          service.create({
+            name: 'Extra device',
+            type: type as never,
+            lifetime: 'UNTIL_NEXT_RESET' as never,
+            value: 1,
+            prices: [{ currency: 'USD' as never, price: '1.00' }],
+          }),
+        (e: unknown) => e instanceof BadRequestException && /Only a traffic add-on/.test(e.message),
+        type,
+      );
+      assert.equal(creates.length, 0, type);
+    }
   });
 
-  it('allows switching type to EXTRA_DEVICES while the (kept) lifetime is UNTIL_NEXT_RESET (no type-based rejection)', async () => {
+  it('refuses «до следующего сброса» sent for a stored device add-on, and writes nothing', async () => {
+    const { service, updates } = build({ existing: record({ type: 'EXTRA_DEVICES', lifetime: 'UNTIL_SUBSCRIPTION_END' }) });
+    await assert.rejects(
+      () => service.update('addon-1', { lifetime: 'UNTIL_NEXT_RESET' as never }),
+      (e: unknown) => e instanceof BadRequestException,
+    );
+    assert.equal(updates.length, 0);
+  });
+
+  it('brings a row moving away from traffic back to «до конца подписки», as a commercial change', async () => {
     const { service, updates } = build({ existing: record({ type: 'EXTRA_TRAFFIC', lifetime: 'UNTIL_NEXT_RESET' }) });
     await service.update('addon-1', { type: 'EXTRA_DEVICES' as never });
     assert.equal(updates.length, 1);
-    assert.equal((updates[0]!.data as { type: string }).type, 'EXTRA_DEVICES');
+    const data = updates[0]!.data as { type: string; lifetime: string; revision: unknown };
+    assert.equal(data.type, 'EXTRA_DEVICES');
+    assert.equal(data.lifetime, 'UNTIL_SUBSCRIPTION_END');
+    assert.deepEqual(data.revision, { increment: 1 });
+  });
+
+  it('leaves the lifetime of a device row that already ends with the subscription alone on an unrelated edit', async () => {
+    const { service, updates } = build({ existing: record({ type: 'EXTRA_DEVICES', lifetime: 'UNTIL_SUBSCRIPTION_END' }) });
+    await service.update('addon-1', { icon: '🎁' });
+    const data = updates[0]!.data as Record<string, unknown>;
+    assert.equal('lifetime' in data, false);
+    assert.equal('revision' in data, false);
+  });
+
+  it('refuses «до следующего сброса» with a non-traffic type in the same body, through the production pipe', async () => {
+    const pipe = new ValidationPipe({ whitelist: true, transform: true, forbidNonWhitelisted: true });
+    const body = {
+      name: 'Extra device',
+      type: 'EXTRA_DEVICES',
+      lifetime: 'UNTIL_NEXT_RESET',
+      value: 1,
+      prices: [{ currency: 'USD', price: '1.00' }],
+    };
+    await assert.rejects(
+      pipe.transform(body, { type: 'body', metatype: AdminAddOnCreateDto }),
+      BadRequestException,
+    );
+    await assert.rejects(
+      pipe.transform({ type: 'RESET_TRAFFIC', lifetime: 'UNTIL_NEXT_RESET' }, { type: 'body', metatype: AdminAddOnUpdateDto }),
+      BadRequestException,
+    );
+    // The control: traffic may still store it, and an update naming no type is the service's to judge.
+    const traffic = (await pipe.transform(
+      { ...body, type: 'EXTRA_TRAFFIC' },
+      { type: 'body', metatype: AdminAddOnCreateDto },
+    )) as AdminAddOnCreateDto;
+    assert.equal(traffic.lifetime, 'UNTIL_NEXT_RESET');
+    const bare = (await pipe.transform(
+      { lifetime: 'UNTIL_NEXT_RESET' },
+      { type: 'body', metatype: AdminAddOnUpdateDto },
+    )) as AdminAddOnUpdateDto;
+    assert.equal(bare.lifetime, 'UNTIL_NEXT_RESET');
   });
 
   it('rejects a non-positive value', async () => {

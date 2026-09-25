@@ -215,6 +215,10 @@ export const en = {
       trafficLabel: 'Traffic limit (GB)',
       trafficUnlimitedLabel: 'Unlimited traffic',
       trafficNeedsValue: 'Enter a traffic limit in GB, or turn "Unlimited traffic" back on',
+      // Which part of the traffic limit is add-ons with an end of their own (times in the panel's time zone).
+      trafficAddOns: 'of which add-ons: {{items}}',
+      trafficAddOnUntil: '+{{gb}} GB until {{when}}',
+      trafficAddOnNoEnd: '+{{gb}} GB with no end',
       devicesLabel: 'Device limit',
       resetBtn: 'Reset',
       linkCopied: 'Subscription link copied',

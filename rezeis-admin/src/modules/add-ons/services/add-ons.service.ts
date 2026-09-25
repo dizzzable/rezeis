@@ -10,6 +10,7 @@ import {
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { ADD_ON_RESET_LIFETIME_TRAFFIC_ONLY } from '../dto/admin-add-on.dto';
 
 export interface AddOnPriceInterface {
   readonly id: string;
@@ -97,14 +98,15 @@ export class AddOnsService {
     if (input.value <= 0) {
       throw new BadRequestException('Add-on value must be positive');
     }
-    // Default to the lifetime that is usable today: UNTIL_SUBSCRIPTION_END is
-    // always eligible for a dated subscription, whereas UNTIL_NEXT_RESET is
-    // gated behind the per-strategy reset-expiry rollout (OFF by default) and
-    // is offered per-subscription by eligibility only for plans with a reset
-    // cycle. The catalog does NOT reject by type or plan strategy — it can't
-    // reliably know the strategy (applicablePlanIds may be empty=all or mixed);
-    // eligibility withholds per-subscription when the plan is NO_RESET.
+    // The stored lifetime no longer decides a sale: the panel sells traffic
+    // «до следующего сброса» on a plan that resets once stage 4 is on, and
+    // everything else «до конца подписки» (`resolveEffectiveAddOnLifetime`).
+    // What is stored still has to be coherent, so «до следующего сброса» is
+    // refused for anything but traffic — by TYPE, which the catalogue knows;
+    // the plan's strategy it cannot (`applicablePlanIds` may be empty = all),
+    // and the offer handles that per subscription.
     const lifetime = input.lifetime ?? AddOnLifetime.UNTIL_SUBSCRIPTION_END;
+    assertLifetimeFitsType(input.type, lifetime);
     const applicablePlanIds = normalizePlanIds(input.applicablePlanIds);
     await this.assertPlansExist(applicablePlanIds);
     const cashback = resolveCashback(
@@ -188,9 +190,19 @@ export class AddOnsService {
       updateData.type = input.type;
       if (input.type !== existing.type) commercialChanged = true;
     }
-    if (input.lifetime !== undefined) {
-      updateData.lifetime = input.lifetime;
-      if (input.lifetime !== existing.lifetime) commercialChanged = true;
+    // «До следующего сброса» is for traffic only (see `create`). Asked for on
+    // another type, it is refused; a row that moves AWAY from traffic while
+    // it stores it is brought back to «до конца подписки», so a stale value
+    // cannot sit where nothing may read it — as `freeUsesPerTerm` below.
+    const nextType = input.type ?? existing.type;
+    if (input.lifetime !== undefined) assertLifetimeFitsType(nextType, input.lifetime);
+    const nextLifetime =
+      nextType === AddOnType.EXTRA_TRAFFIC
+        ? (input.lifetime ?? existing.lifetime)
+        : AddOnLifetime.UNTIL_SUBSCRIPTION_END;
+    if (input.lifetime !== undefined || nextLifetime !== existing.lifetime) {
+      updateData.lifetime = nextLifetime;
+      if (nextLifetime !== existing.lifetime) commercialChanged = true;
     }
     if (input.icon !== undefined) updateData.icon = normalizeIcon(input.icon);
     if (input.value !== undefined) {
@@ -370,6 +382,13 @@ function resolveCashback(
     return { mode, percent: null, points };
   }
   return { mode, percent: null, points: null };
+}
+
+/** «До следующего сброса» on anything but traffic: refused (`ADD_ON_RESET_LIFETIME_TRAFFIC_ONLY`). */
+function assertLifetimeFitsType(type: AddOnType, lifetime: AddOnLifetime): void {
+  if (lifetime === AddOnLifetime.UNTIL_NEXT_RESET && type !== AddOnType.EXTRA_TRAFFIC) {
+    throw new BadRequestException(ADD_ON_RESET_LIFETIME_TRAFFIC_ONLY);
+  }
 }
 
 /** Trims an icon key; empty/blank → null so it falls back to the default. */

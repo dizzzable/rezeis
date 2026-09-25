@@ -435,10 +435,14 @@ async function runPlanRename(
 ): Promise<Record<string, unknown> | null> {
   const written: Array<Record<string, unknown>> = [];
   let selectedOn: string | null = null;
-  const matched = await new PlanSnapshotSyncService().syncPlanSnapshotMetadata(
+  const { updated: matched } = await new PlanSnapshotSyncService().syncPlanSnapshotMetadata(
     {
       $queryRaw: async (query: { readonly strings?: readonly string[]; readonly values?: readonly unknown[] }) => {
         const text = (query.strings ?? []).join('?');
+        // The subscriber's row lock, taken because the rename also changes the
+        // plan's reset rule and the terms follow it (P6) — not the selection
+        // this double is about.
+        if (/FOR UPDATE/.test(text)) return [{ id: 'sub-bulk-1', status: 'ACTIVE' }];
         const key = /plan_snapshot"?\s*->>\s*'([^']+)'/.exec(text)?.[1] ?? null;
         selectedOn = key;
         assert.ok(key !== null, 'the sync must still select subscribers by a plan_snapshot JSON key');
@@ -453,6 +457,8 @@ async function runPlanRename(
           return null;
         },
       },
+      subscriptionTerm: { findMany: async () => [] },
+      settings: { findFirst: async () => null },
     } as never,
     RENAMED_PLAN as never,
   );

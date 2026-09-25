@@ -8,6 +8,7 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import {
+  AddOnLifetime,
   AddOnType,
   Currency,
   PaymentGatewayType,
@@ -33,7 +34,9 @@ import {
   resolveAddOnLifetimeGrant,
   type AddOnLifetimeBaseline,
 } from '../../add-on-entitlements/domain/add-on-lifetime';
+import { addOnQuoteMarkerFields } from '../../add-on-entitlements/domain/add-on-quote';
 import { deriveCutoverBaseline } from '../../add-on-entitlements/domain/cutover-baseline';
+import { saleResetAnchor } from '../../add-on-entitlements/domain/reset-cycle-policy';
 import {
   isBaselineExtendable,
   resolveConfiguredEntitlementBaseline,
@@ -182,6 +185,9 @@ export class AddOnPurchaseService {
         // hand-rolled stand-in for it.
         createdAt: true,
         expiresAt: true,
+        // MONTH_ROLLING's anchor for a term minted before it was known (P2),
+        // as the offer reads it (`saleResetAnchor`).
+        remnawaveProfileCreatedAt: true,
       },
     });
     if (subscription === null || subscription.userId !== userId) {
@@ -300,6 +306,7 @@ export class AddOnPurchaseService {
       // checkout sell what the offer withholds.
       lifetimeBaseline = {
         endsAt: fallback.endsAt,
+        subscriptionEndsAt: subscription.expiresAt,
         trafficResetStrategy: fallback.trafficResetStrategy,
         resetAnchorAt: null,
       };
@@ -311,8 +318,13 @@ export class AddOnPurchaseService {
       });
       lifetimeBaseline = {
         endsAt: activeTerm.endsAt,
+        subscriptionEndsAt: subscription.expiresAt,
         trafficResetStrategy: activeTerm.trafficResetStrategy,
-        resetAnchorAt: activeTerm.resetAnchorAt,
+        resetAnchorAt: saleResetAnchor(
+          activeTerm.trafficResetStrategy,
+          activeTerm.resetAnchorAt,
+          subscription.remnawaveProfileCreatedAt ?? null,
+        ),
       };
     }
     if (!isBaselineExtendable(addOn.type, baseline)) {
@@ -359,14 +371,31 @@ export class AddOnPurchaseService {
     //
     // The capability map is `resolveIntakeResetCapabilities(flags)` — the same
     // function `AddOnEligibilityService.getResetCapabilities` returns, over the
-    // same stage switches, not a second rule.
-    const lifetimeGrant = resolveAddOnLifetimeGrant({
-      lifetime: addOn.lifetime,
-      baseline: lifetimeBaseline,
-      capabilities: resolveIntakeResetCapabilities(await readAddOnRolloutFlags(this.addOnSwitches)),
-      now: new Date(),
-    });
-    if (lifetimeGrant === null) {
+    // same stage switches, not a second rule — and the zone comes from the same
+    // one read.
+    //
+    // The ANSWER is what the customer buys: which lifetime (devices always
+    // «до конца подписки», traffic «до сброса» once stage 4 is on), and until
+    // when. It goes into the marker below, and the capture binds to it.
+    //
+    // A traffic reset is not asked: it is delivered the moment it is paid and
+    // holds nothing afterwards, which is why the offer lists it without a
+    // lifetime (`AddOnEligibilityService.evaluate`). Asked anyway, it was
+    // refused here on a subscription without an end — listed, and refused at
+    // the till.
+    const flags = await readAddOnRolloutFlags(this.addOnSwitches);
+    const isReset = addOn.type === AddOnType.RESET_TRAFFIC;
+    const lifetimeGrant = isReset
+      ? null
+      : resolveAddOnLifetimeGrant({
+          type: addOn.type,
+          lifetime: addOn.lifetime,
+          baseline: lifetimeBaseline,
+          capabilities: resolveIntakeResetCapabilities(flags),
+          now: new Date(),
+          timeZone: flags.remnawaveTimeZone,
+        });
+    if (!isReset && lifetimeGrant === null) {
       throw new BadRequestException({
         code: 'ADDON_LIFETIME_UNAVAILABLE',
         message: 'This add-on cannot be delivered for its advertised period on this subscription',
@@ -446,7 +475,12 @@ export class AddOnPurchaseService {
       // marker parser ignores these fields, so this is safe on the old path.
       contractVersion: input.contractVersion ?? 1,
       addOnRevision: addOn.revision,
-      lifetime: addOn.lifetime,
+      // THE QUOTE: the lifetime sold (not the catalogue row's), its end, and
+      // for «до сброса» the reset window it ends with (`add-on-quote.ts`). The
+      // capture binds to these, whatever the switches say by then.
+      ...(lifetimeGrant === null
+        ? { lifetime: AddOnLifetime.UNTIL_SUBSCRIPTION_END }
+        : addOnQuoteMarkerFields(lifetimeGrant)),
       // One add-on line per transaction → a stable per-line dedup key backing
       // the unique (sourceTransactionId, sourceLineKey) entitlement constraint.
       sourceLineKey: addOn.id,

@@ -88,7 +88,7 @@ function planLimits(plan: typeof EDITED_PLAN) {
 async function runPlanSnapshotSync(storedSnapshot: unknown): Promise<Record<string, unknown>> {
   const written: unknown[] = [];
   const service = new PlanSnapshotSyncService();
-  const count = await service.syncPlanSnapshotMetadata(
+  const { updated } = await service.syncPlanSnapshotMetadata(
     {
       $queryRaw: async () => [{ id: 'sub-1', planSnapshot: storedSnapshot }],
       subscription: {
@@ -97,10 +97,14 @@ async function runPlanSnapshotSync(storedSnapshot: unknown): Promise<Record<stri
           return null;
         },
       },
+      // The edit also changes the reset rule (NO_RESET → MONTH), so the sync
+      // makes the subscriber's terms follow it (P6): this one has none.
+      subscriptionTerm: { findMany: async () => [] },
+      settings: { findFirst: async () => null },
     } as never,
     EDITED_PLAN as never,
   );
-  assert.equal(count, 1, 'the sync must have visited the subscriber');
+  assert.equal(updated, 1, 'the sync must have visited the subscriber');
   return written[0] as Record<string, unknown>;
 }
 

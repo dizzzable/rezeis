@@ -258,3 +258,10 @@ jobs:
           test/stripped-plan-snapshot-repair-postgres.spec.ts
           test/panel-link-check-postgres.spec.ts
           test/stale-panel-identity-census-postgres.spec.ts
+          test/add-on-reset-quote-postgres.spec.ts
+          test/add-on-reset-rule-change-postgres.spec.ts
+          test/add-on-rolling-anchor-postgres.spec.ts
+          test/remnawave-reset-facts-postgres.spec.ts
+          test/reset-boundary-confirmation-postgres.spec.ts
+          test/reset-schedule-check-postgres.spec.ts
+          test/reset-add-on-end-to-end-postgres.spec.ts

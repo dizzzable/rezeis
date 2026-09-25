@@ -82,6 +82,10 @@ import { readPanelUserStatus, takePanelAnswerStatus } from '../../profile-sync/p
 import { panelProfileClaims } from '../../imports/services/remnawave-importer.service';
 import { carryImportDomainKeys } from '../../imports/utils/import-domain-snapshot.util';
 import { requirePanelDeviceList } from '../../remnawave/utils/panel-device-read.util';
+import {
+  readRemnawaveProfileFacts,
+  stampRemnawaveProfileFacts,
+} from '../../remnawave/utils/remnawave-profile-facts.util';
 import { selectGrantableTrialPlan } from '../../subscriptions/services/grantable-trial-plan.util';
 import type {
   PlanInheritedLimitKey,
@@ -1315,6 +1319,20 @@ export class AdminUserSubscriptionsController {
       };
     }
     const panelUser = outcome.user;
+    // The profile's `createdAt` and `lastTrafficResetAt`, which only Remnawave
+    // knows, whatever the row's status and whatever the rules below decide
+    // about the rest — never null over a value, the reset only forward
+    // (`remnawave-profile-facts.util.ts`). A failure here costs the stamp, not
+    // the refresh.
+    try {
+      await stampRemnawaveProfileFacts(this.prismaService, [subscriptionId], readRemnawaveProfileFacts(panelUser));
+    } catch (error: unknown) {
+      this.logger.warn(
+        `Remnawave profile facts not stamped for subscription ${subscriptionId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
     // WHAT THIS BUTTON IS ALLOWED TO WRITE, and why it is not the importer's
     // write set — the full derivation, from what `ProfileSyncProcessor`
     // actually pushes, lives in `panel-field-ownership.ts`.

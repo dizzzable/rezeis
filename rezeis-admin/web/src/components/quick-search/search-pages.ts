@@ -68,6 +68,8 @@ export const SEARCH_KEY_TARGETS: Readonly<Record<string, string>> = {
   addOnsPage: '/add-ons',
   // The «Настройки» tab of the same page; its tabs keep no hash, so the page.
   addOnSwitches: '/add-ons',
+  // The rule that replaced the lifetime choice in the same page's add-on editor.
+  addOnLifetimeRule: '/add-ons',
   promocodesIndex: '/promocodes',
   promocodeForm: '/promocodes',
   promocodeFormExtras: '/promocodes',

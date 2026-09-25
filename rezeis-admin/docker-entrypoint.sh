@@ -102,6 +102,12 @@ is_auto_recoverable_migration() {
     20260924200000_settings_add_on_switches)
       return 0
       ;;
+    20260925090000_add_on_device_lifetime_subscription_end)
+      return 0
+      ;;
+    20260925120000_subscription_remnawave_reset_facts)
+      return 0
+      ;;
     *)
       return 1
       ;;

@@ -1,7 +1,31 @@
-import { Injectable } from '@nestjs/common';
-import { Prisma, PrismaClient } from '@prisma/client';
+import { Injectable, Optional } from '@nestjs/common';
+import {
+  Prisma,
+  PrismaClient,
+  SubscriptionStatus,
+  SyncAction,
+  SyncJobStatus,
+  TrafficLimitStrategy,
+} from '@prisma/client';
 
+import { readRemnawaveTimeZoneInTransaction } from '../../add-on-entitlements/services/reset-epoch.util';
+import { SubscriptionTermService } from '../../add-on-entitlements/services/subscription-term.service';
 import { TrafficLimitStrategyValue } from '../../plans/dto/traffic-limit-strategy.dto';
+
+/** Marks the push a plan's reset-rule edit queues for each live subscriber. */
+export const PLAN_STRATEGY_UPDATE_CAUSE = 'PLAN_STRATEGY_UPDATE';
+
+export interface PlanSnapshotSyncResult {
+  /** Subscriptions whose snapshot was rewritten. */
+  readonly updated: number;
+  /** Of those, the ones whose reset rule the edit changed. */
+  readonly strategyChanged: number;
+  /**
+   * The pushes queued for them (PENDING rows the profile-sync sweep picks up);
+   * a caller that can enqueue after its commit may nudge them sooner.
+   */
+  readonly syncJobIds: readonly string[];
+}
 
 interface SnapshotSyncPlanInput {
   readonly id: string;
@@ -18,10 +42,19 @@ interface SnapshotSyncPlanInput {
 type SubscriptionSnapshotRow = {
   readonly id: string;
   readonly planSnapshot: Prisma.JsonValue;
+  readonly status?: string;
+  readonly remnawaveId?: string | null;
 };
 
 @Injectable()
 export class PlanSnapshotSyncService {
+  /** Terms follow a changed reset rule: see `followResetRuleInTransaction`. Stateless. */
+  private readonly subscriptionTermService: SubscriptionTermService;
+
+  public constructor(@Optional() subscriptionTermService?: SubscriptionTermService) {
+    this.subscriptionTermService = subscriptionTermService ?? new SubscriptionTermService();
+  }
+
   /**
    * Mirrors the edited plan's DISPLAY fields into every subscriber's
    * `plan_snapshot`.
@@ -89,23 +122,47 @@ export class PlanSnapshotSyncService {
    * scale, the split-brain a paid upgrade once had: it moved the columns and
    * left the term stale, so the next recompute pushed the OLD baseline back.
    * Build it after the entitlement cutover picks a single owner, not before.
+   *
+   * ── A changed RESET RULE is not deferred (P6, 24.09.2026) ────────────────
+   *
+   * The strategy is no priced good: Remnawave runs whatever the panel last
+   * pushed, and until this edit reached a subscriber with its next unrelated
+   * push, Remnawave reset them by the old rule while the panel's «до сброса»
+   * add-ons ended by it too. So, for each subscriber whose stored rule the
+   * edit changes: its terms of this plan take the new rule
+   * (`SubscriptionTermService.followResetRuleInTransaction`), its live «до
+   * сброса» add-ons end at the first reset under it (never later than
+   * promised), and a push is queued for a live linked profile — a fan-out,
+   * like the squads' (`PlanSquadPropagationService`). A snapshot that names no
+   * rule of its own (an old import) changes nothing here: its rule was never
+   * the panel's to date anything by.
    */
   public async syncPlanSnapshotMetadata(
     prismaClient: Prisma.TransactionClient | PrismaClient,
     plan: SnapshotSyncPlanInput,
-  ): Promise<number> {
+    options: {
+      /** «Часовой пояс Remnawave»; read through `prismaClient` when a rule changed and none is given. */
+      readonly remnawaveTimeZone?: string;
+      readonly now?: Date;
+    } = {},
+  ): Promise<PlanSnapshotSyncResult> {
     const subscriptions = await prismaClient.$queryRaw<readonly SubscriptionSnapshotRow[]>(
       Prisma.sql`
-        SELECT "id", "plan_snapshot" AS "planSnapshot"
+        SELECT "id", "plan_snapshot" AS "planSnapshot", "status"::text AS "status", "remnawave_id" AS "remnawaveId"
         FROM "subscriptions"
         WHERE "plan_snapshot"->>'id' = ${plan.id}
       `,
     );
 
     let updatedCount = 0;
+    let strategyChanged = 0;
+    const syncJobIds: string[] = [];
+    let timeZone: string | undefined = options.remnawaveTimeZone;
+    let timeZoneRead = timeZone !== undefined;
     for (const subscription of subscriptions) {
       const planSnapshot =
         isJsonObject(subscription.planSnapshot) ? { ...subscription.planSnapshot } : {};
+      const previousStrategy = planSnapshot.trafficLimitStrategy;
       // MIRRORED — display facts. A renamed or re-tagged plan must not keep
       // showing its old label on the cabinet card, in the bot, or on an invoice.
       planSnapshot.name = plan.name;
@@ -142,8 +199,37 @@ export class PlanSnapshotSyncService {
         },
       });
       updatedCount += 1;
+
+      if (typeof previousStrategy !== 'string' || previousStrategy === plan.trafficLimitStrategy) continue;
+      strategyChanged += 1;
+      const tx = prismaClient as Prisma.TransactionClient;
+      if (!timeZoneRead) {
+        timeZone = await readRemnawaveTimeZoneInTransaction(tx);
+        timeZoneRead = true;
+      }
+      await this.subscriptionTermService.followResetRuleInTransaction(tx, {
+        subscriptionId: subscription.id,
+        strategy: plan.trafficLimitStrategy as TrafficLimitStrategy,
+        planId: plan.id,
+        remnawaveTimeZone: timeZone,
+        now: options.now,
+        correlationId: `plan-edit:${plan.id}`,
+      });
+      const live = subscription.status === SubscriptionStatus.ACTIVE || subscription.status === SubscriptionStatus.LIMITED;
+      if (!live || subscription.remnawaveId === null || subscription.remnawaveId === undefined) continue;
+      const job = await tx.profileSyncJob.create({
+        data: {
+          subscriptionId: subscription.id,
+          action: SyncAction.UPDATE,
+          status: SyncJobStatus.PENDING,
+          cause: PLAN_STRATEGY_UPDATE_CAUSE,
+          payload: { source: PLAN_STRATEGY_UPDATE_CAUSE, planId: plan.id } satisfies Prisma.InputJsonObject,
+        },
+        select: { id: true },
+      });
+      syncJobIds.push(job.id);
     }
-    return updatedCount;
+    return { updated: updatedCount, strategyChanged, syncJobIds };
   }
 }
 

@@ -225,6 +225,9 @@ export const SAFE_PRODUCT_CODES: ReadonlySet<string> = new Set<string>([
   // prevents both and names each in its own words when one reaches it anyway.
   'ADD_ON_SWITCH_SET_IN_ENV',
   'ADD_ON_SWITCH_OFF_NOT_CONFIRMED',
+  // The same page's «Часовой пояс Remnawave»: a zone name this runtime does not
+  // know (`remnawave-time-zone.ts`), refused before anything is written.
+  'ADD_ON_TIME_ZONE_INVALID',
   // The panel's own second-factor pivot, and the only entry here that is not
   // SCREAMING_SNAKE: the label is the wire value the sign-in form compares
   // against, so it is spelled the way the client reads it, not the way the

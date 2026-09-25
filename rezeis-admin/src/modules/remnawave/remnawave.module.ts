@@ -10,6 +10,7 @@ import { PanelUsersClient } from './services/panel-users.client';
 import { NodeAddressesService } from './services/node-addresses.service';
 import { RemnawaveApiService } from './services/remnawave-api.service';
 import { RemnawaveMetricsCollectorService } from './services/remnawave-metrics-collector.service';
+import { RemnawaveProfileFactsService } from './services/remnawave-profile-facts.service';
 import { RemnawaveVersionService } from './services/remnawave-version.service';
 import { StalePanelIdentityCensus } from './services/stale-panel-identity.census';
 import { SubscriberServersService } from './services/subscriber-servers.service';
@@ -27,6 +28,9 @@ import { SubscriptionNoticePayloadService } from './services/subscription-notice
     NodeAddressesService,
     RemnawaveApiService,
     RemnawaveMetricsCollectorService,
+    // The profile's `createdAt` / `lastTrafficResetAt`, read once when no
+    // answer of Remnawave's has stamped them yet (the add-on offer, the sweep).
+    RemnawaveProfileFactsService,
     RemnawaveVersionService,
     RemnawaveWebhookService,
     // The boot count of rows the stale-link net refuses (worker only).
@@ -39,6 +43,7 @@ import { SubscriptionNoticePayloadService } from './services/subscription-notice
     NodeAddressesService,
     RemnawaveApiService,
     RemnawaveMetricsCollectorService,
+    RemnawaveProfileFactsService,
     RemnawaveVersionService,
     RemnawaveWebhookService,
     StalePanelIdentityCensus,

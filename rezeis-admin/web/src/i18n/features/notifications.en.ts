@@ -24,6 +24,8 @@ export const en = {
       expired_1_day_ago: 'Subscription expired 1 day ago',
       addon_ends_in_3_days: 'Traffic add-on: 3 days before it ends',
       addon_ended: 'Traffic add-on has ended',
+      addon_reset_ends_in_3_days: 'Traffic add-on until the reset: 3 days before the reset',
+      addon_reset_ended: 'Traffic add-on until the reset has ended',
       addon_devices_ends_in_3_days: 'Device add-on: 3 days before it ends (no automatic disconnection)',
       addon_devices_ended: 'Device add-on has ended (no automatic disconnection)',
       addon_devices_auto_ends_in_3_days: 'Device add-on: 3 days before it ends (automatic disconnection)',

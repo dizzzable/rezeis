@@ -131,6 +131,7 @@ import {
 } from './subscription-delete-refusals'
 import { readPlanAssignmentRefusal } from './plan-assignment-refusals'
 import { panelTrafficLimitToGb } from './panel-traffic-limit'
+import { trafficAddOnLine } from './traffic-add-on-line'
 import {
   useCreateReferralInviteMutation,
   useIssueReferralRewardMutation,
@@ -2271,6 +2272,7 @@ function SubscriptionsTab({ user, telegramId, queryKey }: { user: UserDetail; te
             <SubscriptionCard
               key={sub.id}
               sub={sub}
+              displayTimeZone={user.displayTimeZone ?? null}
               isOpen={openSubId === sub.id}
               onToggleOpen={() => setOpenSubId(openSubId === sub.id ? null : sub.id)}
               assignablePlans={assignablePlans}
@@ -2668,6 +2670,7 @@ interface SubscriptionWriteResult {
 
 function SubscriptionCard({
   sub,
+  displayTimeZone,
   isOpen,
   onToggleOpen,
   assignablePlans,
@@ -2684,6 +2687,8 @@ function SubscriptionCard({
   isLinkingRemnawaveProfile,
 }: {
   sub: UserSubscription
+  /** The panel's «Часовой пояс», for the add-on line's times; `null` = UTC. */
+  displayTimeZone: string | null
   isOpen: boolean
   onToggleOpen: () => void
   assignablePlans: ReadonlyArray<import('@/features/plans/plans-api').Plan>
@@ -2711,9 +2716,13 @@ function SubscriptionCard({
   onLinkRemnawaveProfile: (remnawaveId: string, confirmedWithoutProof: boolean) => void
   isLinkingRemnawaveProfile: boolean
 }) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const locale = activeLocale()
   const syncActivity = subscriptionSyncActivity(sub)
+  // «из них докупки: +50 ГБ до 01.10 03:20 (по Москве)» — the part of the
+  // traffic limit that is add-ons with ends of their own, beside the limit
+  // and beside the field that edits it, so a total is never typed around it.
+  const addOnLine = trafficAddOnLine(sub.trafficAddOns, displayTimeZone, i18n.language ?? 'en', t)
 
   const statusKey = String(sub.status ?? 'UNKNOWN')
   const statusDot =
@@ -2972,6 +2981,11 @@ function SubscriptionCard({
         <InfoRow icon={<Tag className="h-3 w-3" />} label={t('userDetailPanel.subscriptions.planLabel')} value={sub.plan?.name ?? '—'} />
         <InfoRow icon={<Hash className="h-3 w-3" />} label={t('userDetailPanel.subscriptions.planType')} value={String(t(`userDetailPanel.subscriptions.planTypes.${sub.plan?.type ?? 'BOTH'}`, sub.plan?.type ?? '—'))} />
         <InfoRow icon={<Wifi className="h-3 w-3" />} label={t('userDetailPanel.subscriptions.traffic')} value={sub.trafficLimit ? `${sub.trafficLimit} GB` : '∞'} />
+        {addOnLine === null ? null : (
+          <p className="pb-0.5 text-right text-[10px] text-muted-foreground" data-testid="traffic-add-ons">
+            {addOnLine}
+          </p>
+        )}
         <InfoRow icon={<Monitor className="h-3 w-3" />} label={t('userDetailPanel.subscriptions.devices')} value={String(sub.deviceLimit || '∞')} />
         {/* ABSENT is a state, and the state is UNLIMITED.
 
@@ -3066,6 +3080,11 @@ function SubscriptionCard({
                   onChange={(e) => { setTrafficLimit(e.target.value); setDirty(true) }}
                 />
               </div>
+              {addOnLine === null ? null : (
+                <p className="text-right text-[10px] text-muted-foreground" data-testid="traffic-add-ons-editor">
+                  {addOnLine}
+                </p>
+              )}
               {/*
                 THE ONLY WAY THIS SCREEN CAN SAY "UNLIMITED".
                 The patch carries a field only when the operator moved it, so an

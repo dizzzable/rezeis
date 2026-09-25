@@ -571,13 +571,21 @@ const ADD_ON_RENEWAL_EN =
  * before it ends and when it has ended (`AddOnExpiryNoticeService`). Add-ons
  * bought before the model have no end and get neither.
  *
- * SIX TEMPLATES, because a device add-on's end means two different things: with
+ * EIGHT TEMPLATES, because a device add-on's end means two different things: with
  * `ADDON_DEVICE_CLEANUP_AUTO` on, the extra devices are disconnected by
  * themselves, newest first; with it off, they stay and new ones over the limit
- * do not connect. Each text is written out whole, where the operator reads and
- * edits it in «Карта бота», and the sender picks the one for the add-on and
- * the flag. The customer has ONE switch per moment for all three
- * (`SUBSCRIBER_SWITCH_OF_TYPE`).
+ * do not connect. And a traffic add-on that ends with Remnawave's traffic reset
+ * (stage 4, «Докупка трафика до сброса») has its own pair: it names the reset,
+ * with its zone, and says the limit goes back to the plan's — not «продление
+ * опцию не продлевает», which is about a different end. Each text is written
+ * out whole, where the operator reads and edits it in «Карта бота», and the
+ * sender picks the one for the add-on and the flag. The customer has ONE
+ * switch per moment for all four (`SUBSCRIBER_SWITCH_OF_TYPE`).
+ *
+ * A reset add-on on a daily or weekly reset gets neither of its two: a notice
+ * every night or every week says nothing the purchase screen and «Мои опции»
+ * did not, and its end is the moment the customer's counter starts again
+ * (`AddOnExpiryNoticeService`).
  *
  * The words are the cabinet's own: «Дополнительные опции» / «Мои опции» in
  * Russian, "Add-ons" in English.
@@ -585,8 +593,11 @@ const ADD_ON_RENEWAL_EN =
  * The placeholders: `{{addon}}` the add-on's name as it was sold,
  * `{{addonValue}}` «+2 устройства» / «+10 ГБ», `{{addonAmount}}` the same
  * without the plus, `{{endsDate}}` / `{{endsTime}}` / `{{endsDateTime}}` when
- * it ends, in the operator's time zone; `{{plan}}`, `{{profile}}` and the
- * subscription's own `{{expiresDate}}` as in the expiry notices.
+ * it ends, in the operator's time zone; for a reset add-on `{{resetDateTime}}`
+ * «1 октября в 03:20 по Москве» (and its parts `{{resetDate}}`, `{{resetTime}}`,
+ * `{{resetZone}}`), the reset itself rather than the moment the add-on is taken
+ * off half an hour later; `{{plan}}`, `{{profile}}` and the subscription's own
+ * `{{expiresDate}}` as in the expiry notices.
  */
 const ADD_ON_TEMPLATES: ReadonlyArray<DefaultNotificationTemplate> = [
   {
@@ -613,6 +624,32 @@ const ADD_ON_TEMPLATES: ReadonlyArray<DefaultNotificationTemplate> = [
     bodyEn:
       'The add-on “{{addon}}” ({{addonValue}}) to your “{{plan}}” subscription ended on {{endsDateTime}}: ' +
       'your traffic limit went down by {{addonAmount}}.\n\nYou can buy it again.',
+    buttons: ADD_ON_BUTTONS,
+  },
+  {
+    // Traffic that ends with Remnawave's traffic reset (a monthly one: a daily
+    // or weekly reset gets no notice at all).
+    type: 'addon_reset_ends_in_3_days',
+    title: '⏳ Дополнительный трафик заканчивается через 3 дня',
+    titleEn: '⏳ Extra traffic ends in 3 days',
+    body:
+      'Опция «{{addon}}» ({{addonValue}}) к подписке «{{plan}}» действует до сброса трафика {{resetDateTime}}; ' +
+      'после сброса лимит вернётся к тарифу.',
+    bodyEn:
+      'The add-on “{{addon}}” ({{addonValue}}) to your “{{plan}}” subscription runs until the traffic reset on ' +
+      '{{resetDateTime}}; after the reset, your traffic limit goes back to your plan’s.',
+    buttons: ADD_ON_BUTTONS,
+  },
+  {
+    type: 'addon_reset_ended',
+    title: '⌛ Дополнительный трафик закончился',
+    titleEn: '⌛ Extra traffic has ended',
+    body:
+      'Опция «{{addon}}» ({{addonValue}}) к подписке «{{plan}}» закончилась со сбросом трафика {{resetDateTime}}: ' +
+      'лимит вернулся к тарифу.\n\nЕё можно купить снова.',
+    bodyEn:
+      'The add-on “{{addon}}” ({{addonValue}}) to your “{{plan}}” subscription ended with the traffic reset on ' +
+      '{{resetDateTime}}: your traffic limit is back to your plan’s.\n\nYou can buy it again.',
     buttons: ADD_ON_BUTTONS,
   },
   {

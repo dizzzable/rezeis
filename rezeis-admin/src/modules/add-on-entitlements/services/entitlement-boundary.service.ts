@@ -15,6 +15,10 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { carryImportDomainKeys } from '../../imports/utils/import-domain-snapshot.util';
 import { storedIdentityOf } from '../../remnawave/services/panel-user-address';
 import { RemnawaveApiService } from '../../remnawave/services/remnawave-api.service';
+import {
+  readRemnawaveProfileFacts,
+  stampRemnawaveProfileFacts,
+} from '../../remnawave/utils/remnawave-profile-facts.util';
 import { readAddOnRolloutFlags, resolveResetCapabilities } from '../add-on-rollout.config';
 import { GIB_BYTES } from '../domain/cutover-baseline';
 import { resolveOperatorConfiguredLimits } from '../domain/entitlement-baseline';
@@ -23,6 +27,7 @@ import { AddOnSwitchesService } from '../switches/add-on-switches.service';
 import { AddOnEntitlementService } from './add-on-entitlement.service';
 import { DurableRetirementResult, retireDurableRowsInTransaction } from './durable-retirement.util';
 import { EffectiveProjectionService } from './effective-projection.service';
+import { isHeldForResetConfirmation } from './reset-boundary-confirmation.service';
 import { SubscriptionTermService } from './subscription-term.service';
 import { pruneEndedTermLimitBonusesInTransaction } from './term-limit-bonus.util';
 
@@ -88,9 +93,12 @@ function decodeDeferredPlanActivation(
  * (`expiresAt <= now`) — a term end (UNTIL_SUBSCRIPTION_END) or a reset epoch
  * (UNTIL_NEXT_RESET, sold only while stage 4 is on — «Докупка трафика до
  * сброса»; the date is on the row, so this service expires it without a flag
- * of its own). A manual panel reset can NEVER expire a commercial entitlement
- * — expiry is driven purely by the local `expiresAt`, not by a Remnawave
- * observation.
+ * of its own). A manual panel reset can NEVER expire a commercial entitlement:
+ * nothing but `expiresAt` makes one due. What a Remnawave observation CAN do is
+ * DELAY one — an add-on that ends at a reset waits, past its `expiresAt`, until
+ * Remnawave's reset is confirmed or its hold runs out
+ * (`ResetBoundaryConfirmationService`), so the base limit never reaches
+ * Remnawave before the counter is zeroed.
  *
  * Per due entitlement (idempotent via per-entitlement command keys):
  *  - `BEGIN_EXPIRY` (ACTIVE → EXPIRING): the desired projection drops
@@ -316,6 +324,13 @@ export class EntitlementBoundaryService {
    * anchor so activation remains available while reset-scoped commerce stays
    * fail-closed. Called only while the MONTH_ROLLING capability is on; the
    * caller has read it.
+   *
+   * The profile's `createdAt` stamped on the subscription
+   * (`remnawave_profile_created_at`, from every answer of Remnawave's) is the
+   * anchor, with no read at all; the panel is asked only when nothing stamped
+   * it yet — and what that read says is stamped too. Before the column, a read
+   * that failed at the moment of activation left the new term with no anchor,
+   * and its rolling sales withheld until the next push.
    */
   private async resolveDueMonthRollingPanelAnchor(
     subscriptionId: string,
@@ -343,11 +358,16 @@ export class EntitlementBoundaryService {
             remnawavePanelId: true,
             remnawavePanelUsername: true,
             configUrl: true,
+            remnawaveProfileCreatedAt: true,
           },
         },
       },
     });
     if (due === null) return undefined;
+    const stamped = due.subscription.remnawaveProfileCreatedAt;
+    if (stamped instanceof Date && !Number.isNaN(stamped.getTime())) {
+      return { termId: due.id, anchorAt: stamped };
+    }
     const identity = storedIdentityOf(due.subscription);
     if (identity === null || this.remnawaveApiService === undefined) {
       return { termId: due.id, anchorAt: null };
@@ -355,12 +375,16 @@ export class EntitlementBoundaryService {
 
     try {
       const panelUser = await this.remnawaveApiService.getPanelUser(identity);
-      const timestamp = panelUser?.createdAt;
-      const parsed = typeof timestamp === 'string' ? Date.parse(timestamp) : Number.NaN;
-      return {
-        termId: due.id,
-        anchorAt: Number.isFinite(parsed) ? new Date(parsed) : null,
-      };
+      const facts = readRemnawaveProfileFacts(panelUser);
+      try {
+        await stampRemnawaveProfileFacts(this.prismaService, [subscriptionId], facts);
+      } catch (error) {
+        // The stamp is for the next reader; this activation has its anchor.
+        this.logger.warn(
+          `Remnawave profile facts not stamped for subscription ${subscriptionId}: ${(error as Error).message}`,
+        );
+      }
+      return { termId: due.id, anchorAt: facts.createdAt };
     } catch (error) {
       this.logger.warn(
         `Cannot resolve MONTH_ROLLING panel anchor for term ${due.id}: ${(error as Error).message}`,
@@ -541,14 +565,28 @@ export class EntitlementBoundaryService {
       // below then drops it, as it drops an expired add-on.
       const endedBonusTerms = await pruneEndedTermLimitBonusesInTransaction(tx, subscriptionId, now);
 
-      const due = await tx.addOnEntitlement.findMany({
-        where: {
-          subscriptionId,
-          state: { in: [AddOnEntitlementState.ACTIVE, AddOnEntitlementState.EXPIRING] },
-          expiresAt: { not: null, lte: now },
-        },
-        select: { id: true, type: true, state: true },
-      });
+      // An add-on that ends AT a Remnawave reset waits for that reset to be
+      // confirmed (`ResetBoundaryConfirmationService`), at most its hold: taken
+      // off before the counter is zeroed, it cuts off a customer who used the
+      // extra traffic. The same rule the sweep's selection applies in SQL, so a
+      // subscription picked up for another boundary does not expire it early.
+      const due = (
+        await tx.addOnEntitlement.findMany({
+          where: {
+            subscriptionId,
+            state: { in: [AddOnEntitlementState.ACTIVE, AddOnEntitlementState.EXPIRING] },
+            expiresAt: { not: null, lte: now },
+          },
+          select: {
+            id: true,
+            type: true,
+            state: true,
+            lifetime: true,
+            expiresAt: true,
+            expiryEpoch: { select: { plannedEndsAt: true, closedAt: true } },
+          },
+        })
+      ).filter((entitlement) => !isHeldForResetConfirmation(entitlement, now));
       if (due.length === 0 && endedBonusTerms === 0) {
         return { began: 0, expired: 0, changed: false, desiredRevision: null, syncJobIds: [], deviceExpiryTriggered: false };
       }

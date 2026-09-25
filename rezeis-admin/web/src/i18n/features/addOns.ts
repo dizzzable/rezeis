@@ -4,7 +4,7 @@
  * Re-exports per-language modules so Vite can split each language into
  * its own chunk; only the active language ships when the feature loads.
  *
- * Contains namespaces: addOnSwitches.
+ * Contains namespaces: addOnSwitches, addOnLifetimeRule.
  */
 
 import { ru } from './addOns.ru'

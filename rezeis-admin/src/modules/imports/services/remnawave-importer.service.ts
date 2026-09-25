@@ -20,6 +20,10 @@ import {
 } from '../../remnawave/services/term-model-readback';
 import { panelTrafficLimitToGb } from '../../remnawave/utils/panel-traffic-limit.util';
 import {
+  readRemnawaveProfileFacts,
+  stampRemnawaveProfileFacts,
+} from '../../remnawave/utils/remnawave-profile-facts.util';
+import {
   readProfileOwnerMarker,
   readProfileOwnerMarkers,
 } from '../../profile-sync/panel-owner-marker';
@@ -624,6 +628,7 @@ export class RemnawaveImporterService {
             ? withLocalOpenEndKept(subscriptionData, existing.expiresAt)
             : withoutWithheldReadbackFields(subscriptionData, verdict),
       });
+      await this.stampProfileFacts(existing.id, panelUser);
       if (verdict !== null) {
         // After the write: the push is built from the columns when it runs.
         // Queued, not sent from here — this service has no queue, and the
@@ -647,7 +652,9 @@ export class RemnawaveImporterService {
       return 'updated';
     }
 
-    // Create new subscription
+    // Create new subscription. A new row has no earlier fact to keep, so the
+    // profile's two facts go in with it (`remnawave-profile-facts.util.ts`).
+    const facts = readRemnawaveProfileFacts(panelUser);
     await this.prismaService.subscription.create({
       data: {
         user: { connect: { id: userId } },
@@ -661,6 +668,8 @@ export class RemnawaveImporterService {
         internalSquads: panelUser.activeInternalSquads?.map((s) => s.uuid) ?? [],
         externalSquad: panelUser.externalSquadUuid ?? null,
         ...panelIdentityColumns,
+        ...(facts.createdAt === null ? {} : { remnawaveProfileCreatedAt: facts.createdAt }),
+        ...(facts.lastTrafficResetAt === null ? {} : { remnawaveLastTrafficResetAt: facts.lastTrafficResetAt }),
         planSnapshot: {
           importedFrom: 'remnawave',
           // Durable link for bulk plan re-assignment (see BulkPlanAssignmentService).
@@ -691,6 +700,25 @@ export class RemnawaveImporterService {
     }
 
     return 'created';
+  }
+
+  /**
+   * The profile's `createdAt` and `lastTrafficResetAt` onto a row this import
+   * matched, whatever its status and whatever the read-back rule took of the
+   * rest — never null over a value, the reset only forward
+   * (`remnawave-profile-facts.util.ts`). A failure costs the stamp, not the
+   * import.
+   */
+  private async stampProfileFacts(subscriptionId: string, panelUser: RemnawavePanelUser): Promise<void> {
+    try {
+      await stampRemnawaveProfileFacts(this.prismaService, [subscriptionId], readRemnawaveProfileFacts(panelUser));
+    } catch (error: unknown) {
+      this.logger.warn(
+        `Remnawave profile facts not stamped for subscription ${subscriptionId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
   }
 
   private mapStatus(remnawaveStatus: string): SubscriptionStatus {

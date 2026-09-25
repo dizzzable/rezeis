@@ -8,6 +8,13 @@ import {
   type StoredPanelIdentity,
 } from '../src/modules/remnawave/services/panel-user-address';
 
+/**
+ * Stage 4 («Докупка трафика до сброса») is ON by default since 25.09.2026, so
+ * an activation first looks — outside its transaction — for a due
+ * MONTH_ROLLING term to anchor. None of the subscriptions below has one.
+ */
+const NO_DUE_ROLLING_TERM = { subscriptionTerm: { findFirst: async () => null } };
+
 function build(options: {
   due?: Array<{ id: string; type: string; state?: string }>;
   activeTerm?: { id: string } | null;
@@ -175,7 +182,7 @@ describe('EntitlementBoundaryService (T-008)', () => {
       subscription: { update: async () => ({ remnawaveId: 'rem-1' }) },
       profileSyncJob: { create: async () => ({ id: 'job-activate' }) },
     };
-    const prisma = { $transaction: async (cb: (t: unknown) => Promise<unknown>) => cb(tx) };
+    const prisma = { ...NO_DUE_ROLLING_TERM, $transaction: async (cb: (t: unknown) => Promise<unknown>) => cb(tx) };
     const entitlements = {
       transitionInTransaction: async (_t: unknown, input: { command: string }) => {
         commands.push(input.command);
@@ -227,7 +234,7 @@ describe('EntitlementBoundaryService (T-008)', () => {
       profileSyncJob: { create: async () => ({ id: 'job-plan-cutover' }) },
     };
     const service = new EntitlementBoundaryService(
-      { $transaction: async (cb: (t: unknown) => Promise<unknown>) => cb(tx) } as never,
+      { ...NO_DUE_ROLLING_TERM, $transaction: async (cb: (t: unknown) => Promise<unknown>) => cb(tx) } as never,
       { transitionInTransaction: async () => ({ changed: false }) } as never,
       { activateInTransaction: async () => ({ id: 'term-future-plan', status: 'ACTIVE', changed: true }) } as never,
       {
@@ -359,7 +366,7 @@ describe('EntitlementBoundaryService (T-008)', () => {
 
   it('activateDueScheduledTerm is a no-op when no scheduled term is due', async () => {
     const tx = { subscriptionTerm: { findFirst: async () => null } };
-    const prisma = { $transaction: async (cb: (t: unknown) => Promise<unknown>) => cb(tx) };
+    const prisma = { ...NO_DUE_ROLLING_TERM, $transaction: async (cb: (t: unknown) => Promise<unknown>) => cb(tx) };
     const service = new EntitlementBoundaryService(prisma as never, {} as never, {} as never, {} as never);
     const result = await service.activateDueScheduledTerm('sub-1');
     assert.equal(result.activated, false);
@@ -681,7 +688,7 @@ describe('EntitlementBoundaryService term activation preserves operator configur
     };
 
     const service = new EntitlementBoundaryService(
-      { $transaction: async (cb: (t: unknown) => Promise<unknown>) => cb(tx) } as never,
+      { ...NO_DUE_ROLLING_TERM, $transaction: async (cb: (t: unknown) => Promise<unknown>) => cb(tx) } as never,
       { transitionInTransaction: async () => ({ changed: false }) } as never,
       {
         activateInTransaction: async (_t: unknown, termId: string) => {

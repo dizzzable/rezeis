@@ -144,6 +144,7 @@ function refusalCodeOf(error: BadRequestException): string | null {
  */
 async function askBoth(world: {
   readonly lifetime: Lifetime;
+  readonly type?: 'EXTRA_TRAFFIC' | 'EXTRA_DEVICES' | 'RESET_TRAFFIC';
   readonly term?: Partial<TermRow> | null;
   readonly sub?: Partial<SubColumns>;
   /** `'0'` selects the free-add-on branch, which must be gated too. */
@@ -158,10 +159,11 @@ async function askBoth(world: {
     revision: 3,
     name: 'Extra 50GB',
     description: null,
-    type: 'EXTRA_TRAFFIC' as const,
+    type: world.type ?? ('EXTRA_TRAFFIC' as const),
     icon: null,
     value: 50,
     lifetime: world.lifetime,
+    freeUsesPerTerm: 0,
     isActive: true,
     archivedAt: null,
     orderIndex: 0,
@@ -182,7 +184,10 @@ async function askBoth(world: {
       ],
     },
   };
-  const offer = await new AddOnEligibilityService(eligibilityPrisma as never, {} as never).listForSubscription(
+  const trafficReset = {
+    describeAllowance: async () => ({ freeUsesPerTerm: 0, freeRemaining: 0, isFree: false }),
+  };
+  const offer = await new AddOnEligibilityService(eligibilityPrisma as never, trafficReset as never).listForSubscription(
     'sub-1',
   );
 
@@ -392,7 +397,10 @@ describe('add-on checkout can only sell a lifetime the intake can honour', () =>
     );
   });
 
-  it('refuses a reset-scoped add-on on a NO_RESET term even with both flags on', async () => {
+  it('sells traffic on a NO_RESET plan until the end of the subscription once stage 4 is on, whatever the row says', async () => {
+    // The owner's rule of 24.09.2026 (P12): a plan that never resets has no
+    // reset to end at, so its traffic add-on lasts until the subscription ends.
+    // Until then the row's «до следующего сброса» withheld it for good.
     await withEnv(
       { ADDON_RESET_EXPIRY_MONTH: 'true', ADDON_ENTITLEMENT_DIRECT_PURCHASE: 'true' },
       async () => {
@@ -401,11 +409,110 @@ describe('add-on checkout can only sell a lifetime the intake can honour', () =>
           term: { trafficResetStrategy: 'NO_RESET' },
         });
 
-        assert.equal(answer.offered, false, 'a strategy with no boundary has no reset to expire on');
-        assert.equal(answer.bought, false);
-        assert.equal(answer.refusalCode, LIFETIME_REFUSAL);
+        assert.equal(answer.offered, true, 'the offer lists it until the end of the subscription');
+        assert.equal(answer.bought, true, answer.refusalMessage ?? 'checkout refused it');
+        assert.equal(answer.marker?.lifetime, 'UNTIL_SUBSCRIPTION_END');
+        assert.equal(answer.marker?.quotedEndsBound, 'subscription_end');
+        assert.equal(answer.marker?.quotedExpiresAt, defaultSub.expiresAt?.toISOString());
+        assert.equal(answer.marker?.quotedResetAt, null);
       },
     );
+  });
+
+  it('keeps today\'s rule on a NO_RESET plan while stage 4 is off: the row\'s «до следующего сброса» is withheld', async () => {
+    await withEnv(FLAGS_OFF, async () => {
+      const answer = await askBoth({
+        lifetime: 'UNTIL_NEXT_RESET',
+        term: { trafficResetStrategy: 'NO_RESET' },
+      });
+
+      assert.equal(answer.offered, false);
+      assert.equal(answer.bought, false);
+      assert.equal(answer.refusalCode, LIFETIME_REFUSAL);
+    });
+  });
+
+  it('sells traffic «до сброса» on a plan that resets once stage 4 is on, although the row says «до конца подписки»', async () => {
+    await withEnv(
+      { ADDON_RESET_EXPIRY_MONTH: 'true', ADDON_ENTITLEMENT_DIRECT_PURCHASE: 'true' },
+      async () => {
+        const answer = await askBoth({ lifetime: 'UNTIL_SUBSCRIPTION_END' });
+
+        assert.equal(answer.offered, true);
+        assert.equal(answer.bought, true, answer.refusalMessage ?? 'checkout refused it');
+        assert.equal(answer.marker?.lifetime, 'UNTIL_NEXT_RESET');
+        assert.equal(answer.marker?.quotedEndsBound, 'reset');
+        const resetAt = Date.parse(String(answer.marker?.quotedResetAt));
+        // MONTH: Remnawave resets on the 1st at 00:20 UTC, and the add-on comes off 30 minutes later.
+        assert.equal(new Date(resetAt).getUTCDate(), 1);
+        assert.equal(new Date(resetAt).toISOString().slice(11, 16), '00:20');
+        assert.equal(Date.parse(String(answer.marker?.quotedExpiresAt)) - resetAt, 30 * 60 * 1000);
+        assert.ok(resetAt > Date.now());
+      },
+    );
+  });
+
+  it('sells a device add-on «до конца подписки» even when its row says «до следующего сброса» and stage 4 is on', async () => {
+    await withEnv(
+      { ADDON_RESET_EXPIRY_MONTH: 'true', ADDON_ENTITLEMENT_DIRECT_PURCHASE: 'true' },
+      async () => {
+        const answer = await askBoth({ lifetime: 'UNTIL_NEXT_RESET', type: 'EXTRA_DEVICES' });
+
+        assert.equal(answer.offered, true);
+        assert.equal(answer.bought, true, answer.refusalMessage ?? 'checkout refused it');
+        assert.equal(answer.marker?.lifetime, 'UNTIL_SUBSCRIPTION_END');
+        assert.equal(answer.marker?.quotedEndsBound, 'subscription_end');
+        assert.equal(answer.marker?.quotedResetAt, null);
+      },
+    );
+  });
+
+  it('ends a reset add-on with the subscription when the subscription ends before the reset', async () => {
+    // P5: the earlier of the two, and the customer is told which. The MONTH
+    // reset is on the 1st; this subscription ends in an hour, so it ends first
+    // — on every day but the last hour before a 1st, 00:50, which the second
+    // branch below states.
+    const subscriptionEnd = new Date(Date.now() + 60 * 60 * 1000);
+    await withEnv(
+      { ADDON_RESET_EXPIRY_MONTH: 'true', ADDON_ENTITLEMENT_DIRECT_PURCHASE: 'true' },
+      async () => {
+        const answer = await askBoth({
+          lifetime: 'UNTIL_SUBSCRIPTION_END',
+          term: { endsAt: subscriptionEnd },
+          sub: { expiresAt: subscriptionEnd },
+        });
+
+        assert.equal(answer.bought, true, answer.refusalMessage ?? 'checkout refused it');
+        assert.equal(answer.marker?.lifetime, 'UNTIL_NEXT_RESET');
+        const resetAt = Date.parse(String(answer.marker?.quotedResetAt));
+        if (resetAt + 30 * 60 * 1000 > subscriptionEnd.getTime()) {
+          assert.equal(answer.marker?.quotedEndsBound, 'subscription_end');
+          assert.equal(answer.marker?.quotedExpiresAt, subscriptionEnd.toISOString());
+        } else {
+          // Within the last hour before a 1st, 00:50 — the reset comes first.
+          assert.equal(answer.marker?.quotedEndsBound, 'reset');
+        }
+      },
+    );
+  });
+
+  it('sells «Обнулить трафик» on a subscription without an end, as the offer lists it', async () => {
+    // A reset is delivered the moment it is paid and holds nothing afterwards,
+    // so the offer lists it without asking "until when". The checkout asked
+    // anyway and refused it here: listed in the cabinet, refused at the till.
+    await withEnv(FLAGS_OFF, async () => {
+      const answer = await askBoth({
+        lifetime: 'UNTIL_SUBSCRIPTION_END',
+        type: 'RESET_TRAFFIC',
+        term: { endsAt: null },
+        sub: { expiresAt: null },
+      });
+
+      assert.equal(answer.offered, true);
+      assert.equal(answer.bought, true, answer.refusalMessage ?? 'checkout refused the reset');
+      assert.equal(answer.marker?.lifetime, 'UNTIL_SUBSCRIPTION_END');
+      assert.equal(answer.marker?.quotedExpiresAt, undefined, 'a reset has no end to quote');
+    });
   });
 
   it('refuses a reset-scoped add-on when the ACTIVE term carries no reset anchor', async () => {
@@ -492,12 +599,10 @@ describe('add-on checkout can only sell a lifetime the intake can honour', () =>
     });
   });
 
-  it('still sells a reset-scoped add-on on that same closed window', async () => {
-    // The control, and it is the reason the test sits on ONE arm of
-    // `resolveAddOnLifetimeGrant` rather than at its top. `UNTIL_NEXT_RESET`
-    // expires on the plan's reset boundary, which keeps rolling forward
-    // regardless of the term's own end — applying the `endsAt > now` test to it
-    // too would take a perfectly deliverable product off sale.
+  it('refuses a reset-scoped add-on once the subscription itself has ended', async () => {
+    // P5: a reset add-on never outlives the subscription, and a subscription
+    // that has already ended leaves nothing to deliver on — until 25.09.2026 it
+    // was sold here, because the reset boundary kept rolling forward.
     await withEnv(
       { ADDON_RESET_EXPIRY_MONTH: 'true', ADDON_ENTITLEMENT_DIRECT_PURCHASE: 'true' },
       async () => {
@@ -507,7 +612,28 @@ describe('add-on checkout can only sell a lifetime the intake can honour', () =>
           sub: { expiresAt: CLOSED_WINDOW_ENDED_AT },
         });
 
-        assert.equal(answer.offered, true, 'a reset boundary does not depend on the term window');
+        assert.equal(answer.offered, false, 'an ended subscription is not sold an add-on');
+        assert.equal(answer.bought, false);
+        assert.equal(answer.refusalCode, LIFETIME_REFUSAL);
+        assert.equal(answer.draftsCreated, 0);
+      },
+    );
+  });
+
+  it('still sells a reset-scoped add-on on a closed term window the subscription has run past', async () => {
+    // The control: the TERM's own end does not bound a reset add-on — the
+    // subscription's does. Bonus days moved `expiresAt` on; the checkout aligns
+    // the term and sells until the reset.
+    await withEnv(
+      { ADDON_RESET_EXPIRY_MONTH: 'true', ADDON_ENTITLEMENT_DIRECT_PURCHASE: 'true' },
+      async () => {
+        const answer = await askBoth({
+          lifetime: 'UNTIL_NEXT_RESET',
+          term: { endsAt: CLOSED_WINDOW_ENDED_AT },
+          sub: { expiresAt: new Date(Date.now() + 90 * DAY_MS) },
+        });
+
+        assert.equal(answer.offered, true, 'the subscription runs on, so the reset window is deliverable');
         assert.equal(
           answer.bought,
           true,
@@ -515,6 +641,7 @@ describe('add-on checkout can only sell a lifetime the intake can honour', () =>
         );
         assert.equal(answer.draftsCreated, 1);
         assert.equal(answer.marker?.lifetime, 'UNTIL_NEXT_RESET');
+        assert.equal(answer.marker?.quotedEndsBound, 'reset');
       },
     );
   });

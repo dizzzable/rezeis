@@ -45,6 +45,13 @@ export interface AddOnRolloutFlags {
   readonly directPurchase: boolean;
   readonly deviceCleanupAuto: boolean;
   readonly resetExpiry: Readonly<Record<Exclude<ResetStrategy, 'NO_RESET'>, boolean>>;
+  /**
+   * «Часовой пояс Remnawave»: the zone Remnawave's scheduler resets traffic
+   * in (`reset-cycle-policy.ts`); absent means UTC, its shipped default. It
+   * travels in this snapshot so that an operation that read the flags once,
+   * before its transaction, has the zone from the same read (review R2b-07).
+   */
+  readonly remnawaveTimeZone?: string;
 }
 
 /** The panel's switches, by the key the settings row stores each one under. */
@@ -75,8 +82,11 @@ export type AddOnRolloutFlagName =
  *    ON: the owner's decision of 24.09.2026, shipped once renewals, upgrades
  *    and plan changes gated on the term row, payments brought subscriptions in
  *    lazily, and the background cutover existed (`EntitlementCutoverJobService`).
- *  - «Докупка трафика до сброса» is OFF until the stage-4 work proves our reset
- *    instants against the served Remnawave 3.x lines; the default flips then.
+ *  - «Докупка трафика до сброса» is ON since 25.09.2026, once the panel's
+ *    reset instants (`reset-cycle-policy.ts`) predicted every reset a live
+ *    Remnawave 3.2.3, 3.3.2 and 3.4.4 made (`reset-schedule-lab-parity.spec.ts`).
+ *    Add-ons sold before keep their dates; an `ADDON_RESET_EXPIRY_*=false` in
+ *    `.env` still keeps the stage off.
  *
  * A stored value is only ever the operator's own choice: the row keeps no key
  * for a switch nobody touched, so a later change of THIS table reaches every
@@ -85,7 +95,7 @@ export type AddOnRolloutFlagName =
 export const ADD_ON_SWITCH_DEFAULTS: Readonly<Record<AddOnSwitchName, boolean>> = {
   durableAccounting: true,
   deviceCleanupAuto: true,
-  trafficResetExpiry: false,
+  trafficResetExpiry: true,
 };
 
 /**
@@ -130,6 +140,17 @@ export function readStoredAddOnSwitches(raw: unknown): StoredAddOnSwitches {
     if (typeof value === 'boolean') stored[name] = value;
   }
   return stored;
+}
+
+/**
+ * «Часовой пояс Remnawave» out of the same `addOnSettings` column: the key
+ * `remnawaveTimeZone`, an IANA name; anything else reads as unset (UTC). The
+ * setting's own writer validates it; this reader only refuses to guess.
+ */
+export function readStoredRemnawaveTimeZone(raw: unknown): string | undefined {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const value = (raw as Record<string, unknown>)['remnawaveTimeZone'];
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined;
 }
 
 const LOGGER = new Logger('AddOnRolloutFlags');
@@ -198,8 +219,10 @@ function resolveVariable(
 export function resolveAddOnRolloutFlags(
   stored: StoredAddOnSwitches = {},
   env: NodeJS.ProcessEnv = process.env,
+  extras: { readonly remnawaveTimeZone?: string | null } = {},
 ): AddOnRolloutFlags {
   const flag = (variable: AddOnRolloutFlagName): boolean => resolveVariable(variable, stored, env);
+  const zone = typeof extras.remnawaveTimeZone === 'string' ? extras.remnawaveTimeZone.trim() : '';
   return {
     entitlementShadow: flag('ADDON_ENTITLEMENT_SHADOW'),
     directPurchase: flag('ADDON_ENTITLEMENT_DIRECT_PURCHASE'),
@@ -210,6 +233,7 @@ export function resolveAddOnRolloutFlags(
       MONTH: flag('ADDON_RESET_EXPIRY_MONTH'),
       MONTH_ROLLING: flag('ADDON_RESET_EXPIRY_MONTH_ROLLING'),
     },
+    ...(zone === '' ? {} : { remnawaveTimeZone: zone }),
   };
 }
 
@@ -331,43 +355,21 @@ export function planAddOnSwitchUpdate(input: {
  * derives everything it needs from that one value. Two reads could straddle a
  * flip and disagree with each other inside a single fulfilment.
  *
- * TWO KINDS OF CALLER, and the second one is not obvious. The split stated on
- * {@link resolveIntakeResetCapabilities} below — intake-gated map for the
- * selling sides, flag-pure map for expiry — is real, but it does not describe
- * everything that reads THIS function:
+ * WHO READS THIS MAP. The split stated on {@link resolveIntakeResetCapabilities}
+ * below — intake-gated map for the selling sides, flag-pure map for what was
+ * already sold — is the whole story since 25.09.2026:
  *
  *   - `EntitlementBoundaryService` reads the MONTH_ROLLING capability to fetch
  *     and stamp the rolling anchor when a term activates. Flag-pure is the
  *     point there: closing direct purchase must not stop the anchoring of
  *     goods that were already sold.
- *   - `PaymentSubscriptionMutationService.applyAddOnViaLedger` passes this map
- *     into `ensureLiveResetEpoch` on the FULFILMENT path — which is a selling
- *     side, and on the face of it ought to be reading the intake-gated map.
- *
- * That second one is correct TODAY, and only because of a guard one frame up.
- * `applyAddOnViaLedger` is private with a single call site, inside
- * `applyAddOnTopUp`, and that call site sits behind `flags.directPurchase` —
- * of the SAME `flags` snapshot the map is then derived from, handed down
- * rather than read again. Reaching this map therefore already proves
- * `directPurchase` is on for it — and {@link resolveIntakeResetCapabilities}
- * is DEFINED as exactly `resolveResetCapabilities(flags)` whenever
- * `flags.directPurchase` is on. The two maps are the same value at that call
- * site, so the offer, the checkout and the fulfilment all quote one
- * `expiresAt`. That equivalence is load-bearing and nothing in the type system
- * holds it up, which is why it is written here.
- *
- * WHAT BREAKS IF IT EVER DIVERGES. Give
- * {@link resolveIntakeResetCapabilities} a second narrowing condition, drop or
- * widen the `flags.directPurchase` guard on the ledger branch, or let the
- * fulfilment read the flags a second time instead of using the snapshot its
- * guard passed, and the two maps stop agreeing silently — fulfilment carries
- * on reading the wider flag-pure one. The dangerous direction is the offer
- * quoting an `UNTIL_NEXT_RESET` expiry that fulfilment then refuses:
- * `ensureLiveResetEpoch` returns `null`, `applyAddOnViaLedger` falls through
- * to the PERMANENT legacy increment, and a temporary top-up is delivered
- * forever — unpriced, with no entitlement row to expire and no projection to
- * report drift against. Change either half and change that call site in the
- * same commit.
+ *   - The FULFILMENT no longer reads any map. It used to derive this one again
+ *     at capture and mint the epoch from it, which held only while nothing
+ *     moved between checkout and capture — and with stage 4 a panel switch,
+ *     a flip in between turned a «до сброса» quote into the PERMANENT legacy
+ *     increment. The checkout now writes its answer into the payment's marker
+ *     (`domain/add-on-quote.ts`) and `applyAddOnViaLedger` binds to that,
+ *     whatever the switches say by then.
  */
 export function resolveResetCapabilities(flags: AddOnRolloutFlags): ResetCapabilityMap {
   const map: Partial<Record<ResetStrategy, 'ENABLED'>> = {};
@@ -386,9 +388,8 @@ export function resolveResetCapabilities(flags: AddOnRolloutFlags): ResetCapabil
  * `directPurchase` must be on. That flag guards the intake
  * (`PaymentSubscriptionMutationService.applyAddOnViaLedger`) which is the only
  * code that binds a purchased entitlement to a reset epoch. With it off, a
- * captured add-on falls through to the PERMANENT legacy increment, so a
- * reset-scoped one would deliver the service forever instead of until the next
- * reset — more than was sold, unpriced, and with no entitlement row to expire.
+ * «до конца подписки» add-on is the legacy increment, so nothing «до сброса»
+ * is quoted at all; one quoted while it was on is still ledgered at capture.
  *
  * Both selling sides read THIS function and nothing else:
  *  - `AddOnEligibilityService.getResetCapabilities` (the offer), and
@@ -401,11 +402,6 @@ export function resolveResetCapabilities(flags: AddOnRolloutFlags): ResetCapabil
  * anchoring of prior goods must not depend on whether intake is open, so that
  * resolver stays flag-pure; fusing the two would strand paid entitlements the
  * day an operator closes direct purchase.
- *
- * The fulfilment path reads the flag-pure resolver too, and the note on
- * {@link resolveResetCapabilities} explains why the two maps coincide there
- * and what breaks if this function ever gains a second narrowing condition.
- * Read it before changing the condition below.
  */
 export function resolveIntakeResetCapabilities(flags: AddOnRolloutFlags): ResetCapabilityMap {
   if (!flags.directPurchase) return {};

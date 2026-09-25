@@ -477,6 +477,19 @@ export class SettingsService {
   }
 
   /**
+   * The whole `addOnSettings` column as stored — the switches AND «Часовой
+   * пояс Remnawave» beside them — through the same row cache, for the one
+   * reader that needs both from ONE read (`AddOnSwitchesService.flags`, which
+   * hands the zone to every money path in the same flags snapshot). `null`
+   * before the row exists. Does not swallow a failed read, for the reason
+   * `getStoredAddOnSwitches` gives.
+   */
+  public async getStoredAddOnSettings(): Promise<unknown> {
+    const settings = await this.getSettingsRecord();
+    return settings?.addOnSettings ?? null;
+  }
+
+  /**
    * Returns the current branding payload, falling back to safe defaults when
    * no settings record exists yet (very first install).
    */

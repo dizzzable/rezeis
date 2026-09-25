@@ -151,14 +151,14 @@ async function withEnv<T>(set: Record<string, string>, body: () => Promise<T>): 
 }
 
 describe('AddOnSwitchesService — what the panel runs with', () => {
-  it('runs on the defaults while the row holds no switch: stages 1, 2 and 6 ON, stage 4 OFF', async () => {
+  it('runs on the defaults while the row holds no switch: stages 1, 2, 4 and 6 ON (stage 4 since 25.09.2026)', async () => {
     await withEnv({}, async () => {
       const { prisma } = world();
       assert.deepEqual(await processOver(prisma).flags(), {
         entitlementShadow: true,
         directPurchase: true,
         deviceCleanupAuto: true,
-        resetExpiry: { DAY: false, WEEK: false, MONTH: false, MONTH_ROLLING: false },
+        resetExpiry: { DAY: true, WEEK: true, MONTH: true, MONTH_ROLLING: true },
       });
     });
   });
@@ -288,8 +288,11 @@ describe('AddOnSwitchesService — a change from the page', () => {
 
   it('turns a switch ON without asking', async () => {
     await withEnv({}, async () => {
-      const { db, prisma } = world();
+      // An OFF saved on the page earlier (confirmed then): ON is the default
+      // now, so only a stored OFF leaves a switch to turn back on.
+      const { db, prisma } = world({ trafficResetExpiry: false });
       const api = processOver(prisma);
+      assert.deepEqual((await api.flags()).resetExpiry, { DAY: false, WEEK: false, MONTH: false, MONTH_ROLLING: false });
       const view = await change(api, { trafficResetExpiry: true }, false);
       assert.deepEqual(db.writes, [{ addOnSettings: { trafficResetExpiry: true } }]);
       assert.equal(view.switches[2]!.enabled, true);

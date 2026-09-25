@@ -11,7 +11,8 @@ import { AddOnSwitchesService, AddOnSwitchesView } from './add-on-switches.servi
 import { UpdateAddOnSwitchesDto } from './update-add-on-switches.dto';
 
 /**
- * «Доп. услуги» → «Настройки»: the switches of the durable add-on model.
+ * «Доп. услуги» → «Настройки»: the switches of the durable add-on model, and
+ * «Часовой пояс Remnawave» beside them.
  *
  * The permissions are the page's own: `add_ons:view` to see them, as for the
  * catalogue beside them, and `add_ons:edit` to change them — the permission
@@ -47,6 +48,7 @@ export class AdminAddOnSwitchesController {
         ...(dto.trafficResetExpiry === undefined ? {} : { trafficResetExpiry: dto.trafficResetExpiry }),
       },
       confirmOff: dto.confirmOff === true,
+      ...(dto.remnawaveTimeZone === undefined ? {} : { remnawaveTimeZone: dto.remnawaveTimeZone }),
     });
   }
 }

@@ -232,6 +232,14 @@ enum SubscriptionTermStatus {
   RECONCILIATION_REQUIRED
 }
 
+/// How a reset epoch's boundary was settled (`SubscriptionResetEpoch.closeSource`).
+/// The boundary sweep writes the first two (`EntitlementBoundaryService`):
+///   WEBHOOK_RECONCILIATION  Remnawave's own report confirmed the reset — the
+///                           `lastTrafficResetAt` a webhook, a push answer or a
+///                           read of the profile carried;
+///   SCHEDULER               nothing confirmed it within the hold, and the sweep
+///                           closed it on the panel's clock (with one incident).
+/// TERM_END and OPERATOR are not written by anything today.
 enum ResetEpochCloseSource {
   SCHEDULER
   WEBHOOK_RECONCILIATION
@@ -1957,6 +1965,25 @@ model Subscription {
   /// `ProfileSyncProcessor.handleCreate`.
   remnawavePendingUsername   String?            @map("remnawave_pending_username")
   remnawavePendingOwnerId    String?            @map("remnawave_pending_owner_id")
+  /// The Remnawave profile's own `createdAt` — the anchor MONTH_ROLLING resets
+  /// count from: Remnawave resets such a profile on the UTC day of month of
+  /// this instant, never in its first month (`reset-cycle-policy.ts`). A fact
+  /// only Remnawave has (our CREATE never sends it), so it is stamped from every
+  /// full user the panel sees — the CREATE and PATCH answers, every webhook, ↻
+  /// and the importer — WHATEVER the subscription's status, and follows the
+  /// profile (a re-provisioned profile brings its own). Never written null over
+  /// a value; `null` = never seen. Written only by
+  /// `remnawave/utils/remnawave-profile-facts.util.ts`.
+  remnawaveProfileCreatedAt  DateTime?          @map("remnawave_profile_created_at") @db.Timestamptz(3)
+  /// When Remnawave last zeroed this profile's traffic counter, as Remnawave
+  /// reported it (`lastTrafficResetAt`): a scheduled reset or a manual one.
+  /// Stamped from the same answers as the column above, and it ONLY MOVES
+  /// FORWARD — a late event never takes it back. What the boundary sweep reads
+  /// to confirm that Remnawave really reset a rolling profile before it takes a
+  /// «до сброса» add-on off, and what the daily reset-schedule check compares
+  /// with the prediction. A scheduled reset sends no webhook, so a stale value
+  /// is normal until the profile is next read.
+  remnawaveLastTrafficResetAt DateTime?         @map("remnawave_last_traffic_reset_at") @db.Timestamptz(3)
   /// User-facing connect URL.
   configUrl                  String?            @map("config_url")
   startedAt                  DateTime?          @map("started_at") @db.Timestamptz(3)
@@ -2153,6 +2180,10 @@ model SubscriptionResetEpoch {
   ordinal       Int                    @map("ordinal")
   startsAt      DateTime               @map("starts_at") @db.Timestamptz(3)
   plannedEndsAt DateTime               @map("planned_ends_at") @db.Timestamptz(3)
+  /// When the boundary at `plannedEndsAt` was settled: Remnawave's reset
+  /// confirmed, or the hold ran out. While it is `null` a «до сброса» add-on
+  /// bound here stays ACTIVE past its `expiresAt` (at most the hold), so the
+  /// base limit never reaches Remnawave before its counter is zeroed.
   closedAt      DateTime?              @map("closed_at") @db.Timestamptz(3)
   closeSource   ResetEpochCloseSource? @map("close_source")
   createdAt     DateTime               @default(now()) @map("created_at") @db.Timestamptz(3)

@@ -17,6 +17,11 @@ export interface UserSubscription {
   readonly status: string
   readonly isTrial?: boolean
   readonly trafficLimit?: number | null
+  /**
+   * The ACTIVE traffic add-ons inside `trafficLimit` — each with its own end —
+   * or `null` when there are none. Absent from an older panel.
+   */
+  readonly trafficAddOns?: import('./traffic-add-on-line').TrafficAddOnShare | null
   readonly deviceLimit?: number | null
   /**
    * Expiry, or UNLIMITED — and unlimited is spelled two different ways on the
@@ -195,6 +200,8 @@ export interface UserDetail {
   readonly updatedAt?: string
   readonly lastSeenAt?: string | null
   readonly subscriptions?: ReadonlyArray<UserSubscription>
+  /** The panel's «Часовой пояс» (IANA); `null` or absent = UTC. The add-on times are shown in it. */
+  readonly displayTimeZone?: string | null
   readonly transactions?: ReadonlyArray<UserTransaction>
   readonly referral?: UserReferralBackref | null
   readonly referralsGiven?: ReadonlyArray<UserReferralEntry>

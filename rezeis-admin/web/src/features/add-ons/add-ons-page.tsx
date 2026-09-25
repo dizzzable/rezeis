@@ -90,11 +90,17 @@ interface AddOn {
   cashbackPoints?: number | null
 }
 
+/**
+ * No `lifetime`: the panel decides it (the owner's decision of 24.09.2026) —
+ * devices until the end of the subscription, traffic until the plan's next
+ * reset once «Докупка трафика до сброса» is on. Sending the stored value back
+ * would have the API refuse a row moved from traffic to devices while it
+ * still said «до следующего сброса»; left out, the API normalises it itself.
+ */
 interface AddOnFormData {
   name: string
   description?: string
   type: 'EXTRA_TRAFFIC' | 'EXTRA_DEVICES' | 'RESET_TRAFFIC'
-  lifetime: AddOnLifetime
   icon?: string | null
   value: number
   isActive: boolean
@@ -405,7 +411,6 @@ function AddOnDialog({
     'EXTRA_TRAFFIC',
   )
   const [freeUsesPerTerm, setFreeUsesPerTerm] = useState('0')
-  const [lifetime, setLifetime] = useState<AddOnLifetime>('UNTIL_SUBSCRIPTION_END')
   const [icon, setIcon] = useState<string | null>(null)
   const [value, setValue] = useState('1')
   const [isActive, setIsActive] = useState(true)
@@ -426,7 +431,6 @@ function AddOnDialog({
       setName(addOn.name)
       setDescription(addOn.description ?? '')
       setType(addOn.type)
-      setLifetime(addOn.lifetime)
       setIcon(addOn.icon ?? null)
       setValue(addOn.value.toString())
       setIsActive(addOn.isActive)
@@ -446,7 +450,6 @@ function AddOnDialog({
       setName('')
       setDescription('')
       setType('EXTRA_TRAFFIC')
-      setLifetime('UNTIL_SUBSCRIPTION_END')
       setIcon(null)
       setValue('1')
       setIsActive(true)
@@ -492,7 +495,6 @@ function AddOnDialog({
       name,
       description: description || undefined,
       type,
-      lifetime,
       icon: icon ?? null,
       // A reset grants nothing, so `value` is meaningless for it. Sent as `1`
       // rather than left to whatever the form last held: the column is NOT NULL
@@ -640,27 +642,7 @@ function AddOnDialog({
             </div>
           </div>
 
-          <div className="space-y-2">
-            <Label>{t('addOnsPage.form.lifetime')}</Label>
-            <Select value={lifetime} onValueChange={(v) => setLifetime(v as AddOnLifetime)}>
-              <SelectTrigger aria-label={t('addOnsPage.form.lifetime')}>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="UNTIL_SUBSCRIPTION_END">
-                  {t('addOnsPage.form.lifetimeSubscriptionEnd')}
-                </SelectItem>
-                <SelectItem value="UNTIL_NEXT_RESET">
-                  {t('addOnsPage.form.lifetimeNextReset')}
-                </SelectItem>
-              </SelectContent>
-            </Select>
-            <p className="text-[11px] text-muted-foreground">
-              {lifetime === 'UNTIL_NEXT_RESET'
-                ? t('addOnsPage.form.lifetimeResetNote')
-                : t('addOnsPage.form.lifetimeHint')}
-            </p>
-          </div>
+          <LifetimeRule type={type} />
 
           <div className="flex items-center justify-between">
             <Label>{t('addOnsPage.form.active')}</Label>
@@ -836,5 +818,61 @@ function AddOnDialog({
         </form>
       </DialogContent>
     </Dialog>
+  )
+}
+
+// ── «Срок действия»: stated, not chosen ────────────────────────────────────
+
+interface LifetimeRuleSettings {
+  /** «Докупка трафика до сброса» is on (every stage-4 variable it carries). */
+  readonly resetExpiryOn: boolean
+  /** «Часовой пояс Remnawave»; 'UTC' when unset. */
+  readonly zone: string
+}
+
+/** What the rule needs out of `GET /admin/add-on-settings`, read tolerantly: anything unreadable is "off", UTC. */
+function readLifetimeRuleSettings(raw: unknown): LifetimeRuleSettings {
+  const record = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : {}
+  const switches = Array.isArray(record.switches) ? (record.switches as unknown[]) : []
+  const reset = switches.find(
+    (entry) =>
+      typeof entry === 'object' && entry !== null && (entry as { name?: unknown }).name === 'trafficResetExpiry',
+  ) as { enabled?: unknown } | undefined
+  const zoneState = record.remnawaveTimeZone
+  const zone =
+    typeof zoneState === 'object' && zoneState !== null ? (zoneState as { value?: unknown }).value : undefined
+  return {
+    resetExpiryOn: reset?.enabled === true,
+    zone: typeof zone === 'string' && zone.trim() !== '' ? zone : 'UTC',
+  }
+}
+
+/**
+ * The lifetime the panel gives an add-on of this type — the owner's rule of
+ * 24.09.2026, which replaced the operator's choice: devices until the end of
+ * the subscription; traffic until the plan's next reset (in Remnawave's zone)
+ * while «Докупка трафика до сброса» is on, else until the end of the
+ * subscription. A traffic reset has no lifetime and shows none. Read under the
+ * switches card's query key, so saving a switch or the zone there refreshes it.
+ */
+function LifetimeRule({ type }: { readonly type: 'EXTRA_TRAFFIC' | 'EXTRA_DEVICES' | 'RESET_TRAFFIC' }) {
+  const { t } = useTranslation()
+  const settings = useQuery({
+    queryKey: ['admin', 'add-on-settings', 'lifetime-rule'],
+    queryFn: async () => readLifetimeRuleSettings((await api.get<unknown>('/admin/add-on-settings')).data),
+  })
+  if (type === 'RESET_TRAFFIC') return null
+  let rule: string | null
+  if (type === 'EXTRA_DEVICES') rule = t('addOnLifetimeRule.devices')
+  else if (settings.data !== undefined)
+    rule = settings.data.resetExpiryOn
+      ? t('addOnLifetimeRule.traffic', { zone: settings.data.zone })
+      : t('addOnLifetimeRule.trafficOff')
+  else rule = settings.isError ? t('addOnLifetimeRule.trafficOff') : null
+  return (
+    <div className="space-y-1">
+      <Label>{t('addOnsPage.form.lifetime')}</Label>
+      {rule === null ? null : <p className="text-[11px] text-muted-foreground">{rule}</p>}
+    </div>
   )
 }

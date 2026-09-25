@@ -1832,6 +1832,7 @@ export class UserNotificationsService {
           type: payloadRecord['addonType'],
           total: payloadRecord['addonTotal'],
           endsAt: payloadRecord['addonEndsAt'],
+          resetAt: payloadRecord['addonResetAt'],
           timezone: branding.timezone,
         },
         locale === 'en' ? 'en' : 'ru',

@@ -1,0 +1,1102 @@
+{
+  "remnawave": {
+    "version": "3.4.4",
+    "image": "remnawave/backend:3.4.4@sha256:63ef481550bbf49dabfa514c95d94109619cc85607730b308f7ad0b9b5599f06",
+    "backendCommit": "b22970cc88481a7e278b5767721672a18f8b2ada",
+    "buildTime": "2026-09-12T14:57:56Z"
+  },
+  "database": "postgres:17-alpine, TZ=UTC (Remnawave requires a UTC database)",
+  "recordedOn": "2026-09-25",
+  "howRecorded": [
+    "S4-lab, 25.09.2026: the official image with the compose file's shape (valkey 9 over a socket, a PostgreSQL database in UTC), ports on 127.0.0.1 only, a throwaway admin.",
+    "Profiles were created through POST /api/users with an explicit createdAt (the MONTH_ROLLING anchor) and lastTrafficResetAt = the sentinel 2020-01-01, so a profile Remnawave reset is one whose lastTrafficResetAt moved.",
+    "bulkAllReset: POST /api/users/bulk/all/reset-traffic, then GET /api/users/by-username/{name} for each profile of set A.",
+    "scheduledRuns: nothing was called; Remnawave's own scheduler reset the profiles. Instants are on the scheduler's clock.",
+    "Run 'shifted-clock': the backend was started with a lab-only preload (NODE_OPTIONS=--require) that adds processClockShiftMs to Date in every Remnawave process, so its scheduler read Monday 01.02.2027 (also the 1st) minutes after start and ran all four cron jobs within 20 minutes. Timers and PostgreSQL were not shifted: the database's CURRENT_DATE stayed the real date (databaseDate), which is why this run's MONTH_ROLLING result follows databaseDate, not the scheduler's date.",
+    "Run 'zone': the backend was restarted with TZ=processTimeZone and the real clock, so the zone's 00:05 and 00:10 came within the hour."
+  ],
+  "sentinelLastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+  "bulkAllReset": {
+    "calledAt": "2026-09-25T00:22:41.812Z",
+    "httpStatus": 202,
+    "profiles": [
+      {
+        "name": "noreset",
+        "strategy": "NO_RESET",
+        "createdAt": "2026-06-10T12:00:00.000Z",
+        "status": "ACTIVE",
+        "lastTrafficResetAt": "2026-09-25T00:22:41.825Z",
+        "wasReset": true
+      },
+      {
+        "name": "day",
+        "strategy": "DAY",
+        "createdAt": "2026-06-10T12:00:00.000Z",
+        "status": "ACTIVE",
+        "lastTrafficResetAt": "2026-09-25T00:22:41.834Z",
+        "wasReset": true
+      },
+      {
+        "name": "week",
+        "strategy": "WEEK",
+        "createdAt": "2026-06-10T12:00:00.000Z",
+        "status": "ACTIVE",
+        "lastTrafficResetAt": "2026-09-25T00:22:41.845Z",
+        "wasReset": true
+      },
+      {
+        "name": "month",
+        "strategy": "MONTH",
+        "createdAt": "2026-06-10T12:00:00.000Z",
+        "status": "ACTIVE",
+        "lastTrafficResetAt": "2026-09-25T00:22:41.849Z",
+        "wasReset": true
+      },
+      {
+        "name": "r25_0000",
+        "strategy": "MONTH_ROLLING",
+        "createdAt": "2026-08-25T00:00:00.000Z",
+        "status": "ACTIVE",
+        "lastTrafficResetAt": "2026-09-25T00:22:41.840Z",
+        "wasReset": true
+      },
+      {
+        "name": "r25_2359",
+        "strategy": "MONTH_ROLLING",
+        "createdAt": "2026-08-25T23:59:00.000Z",
+        "status": "ACTIVE",
+        "lastTrafficResetAt": "2026-09-25T00:22:41.840Z",
+        "wasReset": true
+      },
+      {
+        "name": "r25_y1",
+        "strategy": "MONTH_ROLLING",
+        "createdAt": "2025-09-25T12:00:00.000Z",
+        "status": "ACTIVE",
+        "lastTrafficResetAt": "2026-09-25T00:22:41.840Z",
+        "wasReset": true
+      },
+      {
+        "name": "r24_2359",
+        "strategy": "MONTH_ROLLING",
+        "createdAt": "2026-08-24T23:59:59.000Z",
+        "status": "ACTIVE",
+        "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+        "wasReset": false
+      },
+      {
+        "name": "r26_0000",
+        "strategy": "MONTH_ROLLING",
+        "createdAt": "2026-08-26T00:00:00.000Z",
+        "status": "ACTIVE",
+        "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+        "wasReset": false
+      },
+      {
+        "name": "r25_new",
+        "strategy": "MONTH_ROLLING",
+        "createdAt": "2026-09-25T00:00:01.000Z",
+        "status": "ACTIVE",
+        "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+        "wasReset": false
+      },
+      {
+        "name": "r29",
+        "strategy": "MONTH_ROLLING",
+        "createdAt": "2026-08-29T12:00:00.000Z",
+        "status": "ACTIVE",
+        "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+        "wasReset": false
+      },
+      {
+        "name": "r30",
+        "strategy": "MONTH_ROLLING",
+        "createdAt": "2026-08-30T12:00:00.000Z",
+        "status": "ACTIVE",
+        "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+        "wasReset": false
+      },
+      {
+        "name": "r31",
+        "strategy": "MONTH_ROLLING",
+        "createdAt": "2026-07-31T12:00:00.000Z",
+        "status": "ACTIVE",
+        "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+        "wasReset": false
+      },
+      {
+        "name": "r01",
+        "strategy": "MONTH_ROLLING",
+        "createdAt": "2026-08-01T12:00:00.000Z",
+        "status": "ACTIVE",
+        "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+        "wasReset": false
+      }
+    ]
+  },
+  "scheduledRuns": [
+    {
+      "label": "shifted-clock",
+      "what": "All four jobs on one clock: DAY 00:05, MONTH_ROLLING 00:10, WEEK Monday 00:15, MONTH the 1st 00:20 (scheduler zone UTC).",
+      "processTimeZone": "UTC",
+      "processClockShiftMs": 11144230000,
+      "watchedFrom": "2027-02-01T00:01:48.765Z",
+      "watchedUntil": "2027-02-01T00:20:30.124Z",
+      "databaseDate": "2026-09-25",
+      "reads": [
+        {
+          "label": "before",
+          "at": "2027-02-01T00:01:49.737Z",
+          "profiles": [
+            {
+              "name": "noreset",
+              "strategy": "NO_RESET",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "day",
+              "strategy": "DAY",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "week",
+              "strategy": "WEEK",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "month",
+              "strategy": "MONTH",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "r25_0000",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-08-25T00:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "r01",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-08-01T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "day_lim",
+              "strategy": "DAY",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "LIMITED",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            }
+          ]
+        },
+        {
+          "label": "after-day",
+          "at": "2027-02-01T00:05:30.113Z",
+          "profiles": [
+            {
+              "name": "noreset",
+              "strategy": "NO_RESET",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "day",
+              "strategy": "DAY",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2027-02-01T00:05:00.015Z",
+              "wasReset": true
+            },
+            {
+              "name": "week",
+              "strategy": "WEEK",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "month",
+              "strategy": "MONTH",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "r25_0000",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-08-25T00:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "r01",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-08-01T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "day_lim",
+              "strategy": "DAY",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2027-02-01T00:05:00.025Z",
+              "wasReset": true
+            }
+          ]
+        },
+        {
+          "label": "after-rolling",
+          "at": "2027-02-01T00:10:30.137Z",
+          "profiles": [
+            {
+              "name": "noreset",
+              "strategy": "NO_RESET",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "day",
+              "strategy": "DAY",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2027-02-01T00:05:00.015Z",
+              "wasReset": true
+            },
+            {
+              "name": "week",
+              "strategy": "WEEK",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "month",
+              "strategy": "MONTH",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "r25_0000",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-08-25T00:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2027-02-01T00:10:00.010Z",
+              "wasReset": true
+            },
+            {
+              "name": "r01",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-08-01T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "day_lim",
+              "strategy": "DAY",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2027-02-01T00:05:00.025Z",
+              "wasReset": true
+            }
+          ]
+        },
+        {
+          "label": "after-week",
+          "at": "2027-02-01T00:15:30.141Z",
+          "profiles": [
+            {
+              "name": "noreset",
+              "strategy": "NO_RESET",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "day",
+              "strategy": "DAY",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2027-02-01T00:05:00.015Z",
+              "wasReset": true
+            },
+            {
+              "name": "week",
+              "strategy": "WEEK",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2027-02-01T00:15:00.019Z",
+              "wasReset": true
+            },
+            {
+              "name": "month",
+              "strategy": "MONTH",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "r25_0000",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-08-25T00:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2027-02-01T00:10:00.010Z",
+              "wasReset": true
+            },
+            {
+              "name": "r01",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-08-01T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "day_lim",
+              "strategy": "DAY",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2027-02-01T00:05:00.025Z",
+              "wasReset": true
+            }
+          ]
+        },
+        {
+          "label": "after-month",
+          "at": "2027-02-01T00:20:30.124Z",
+          "profiles": [
+            {
+              "name": "noreset",
+              "strategy": "NO_RESET",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "day",
+              "strategy": "DAY",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2027-02-01T00:05:00.015Z",
+              "wasReset": true
+            },
+            {
+              "name": "week",
+              "strategy": "WEEK",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2027-02-01T00:15:00.019Z",
+              "wasReset": true
+            },
+            {
+              "name": "month",
+              "strategy": "MONTH",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2027-02-01T00:20:00.021Z",
+              "wasReset": true
+            },
+            {
+              "name": "r25_0000",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-08-25T00:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2027-02-01T00:10:00.010Z",
+              "wasReset": true
+            },
+            {
+              "name": "r01",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-08-01T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "day_lim",
+              "strategy": "DAY",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2027-02-01T00:05:00.025Z",
+              "wasReset": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "label": "zone",
+      "what": "The real clock with the scheduler in UTC-1 (TZ=Etc/GMT+1): its 00:05 is 01:05 UTC, its 00:10 is 01:10 UTC on the UTC date 25.09.",
+      "processTimeZone": "Etc/GMT+1",
+      "processClockShiftMs": 0,
+      "watchedFrom": "2026-09-25T00:44:24.059Z",
+      "watchedUntil": "2026-09-25T01:10:30.162Z",
+      "databaseDate": "2026-09-25",
+      "reads": [
+        {
+          "label": "before-day",
+          "at": "2026-09-25T01:04:30.151Z",
+          "profiles": [
+            {
+              "name": "noreset",
+              "strategy": "NO_RESET",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "day",
+              "strategy": "DAY",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "week",
+              "strategy": "WEEK",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "month",
+              "strategy": "MONTH",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "r25_0000",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-08-25T00:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "r25_2359",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-08-25T23:59:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "r25_y1",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2025-09-25T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "r24_2359",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-08-24T23:59:59.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "r26_0000",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-08-26T00:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "r25_new",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-09-25T00:00:01.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "r29",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-08-29T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "r30",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-08-30T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "r31",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-07-31T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "r01",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-08-01T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "day_lim",
+              "strategy": "DAY",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "LIMITED",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "day_dis",
+              "strategy": "DAY",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "DISABLED",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "r25_lim",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-08-25T00:00:00.000Z",
+              "status": "LIMITED",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            }
+          ]
+        },
+        {
+          "label": "after-day",
+          "at": "2026-09-25T01:05:30.141Z",
+          "profiles": [
+            {
+              "name": "noreset",
+              "strategy": "NO_RESET",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "day",
+              "strategy": "DAY",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2026-09-25T01:05:00.013Z",
+              "wasReset": true
+            },
+            {
+              "name": "week",
+              "strategy": "WEEK",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "month",
+              "strategy": "MONTH",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "r25_0000",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-08-25T00:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "r25_2359",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-08-25T23:59:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "r25_y1",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2025-09-25T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "r24_2359",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-08-24T23:59:59.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "r26_0000",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-08-26T00:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "r25_new",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-09-25T00:00:01.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "r29",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-08-29T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "r30",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-08-30T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "r31",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-07-31T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "r01",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-08-01T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "day_lim",
+              "strategy": "DAY",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2026-09-25T01:05:00.021Z",
+              "wasReset": true
+            },
+            {
+              "name": "day_dis",
+              "strategy": "DAY",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "DISABLED",
+              "lastTrafficResetAt": "2026-09-25T01:05:00.013Z",
+              "wasReset": true
+            },
+            {
+              "name": "r25_lim",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-08-25T00:00:00.000Z",
+              "status": "LIMITED",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            }
+          ]
+        },
+        {
+          "label": "after-rolling",
+          "at": "2026-09-25T01:10:30.162Z",
+          "profiles": [
+            {
+              "name": "noreset",
+              "strategy": "NO_RESET",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "day",
+              "strategy": "DAY",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2026-09-25T01:05:00.013Z",
+              "wasReset": true
+            },
+            {
+              "name": "week",
+              "strategy": "WEEK",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "month",
+              "strategy": "MONTH",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "r25_0000",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-08-25T00:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2026-09-25T01:10:00.018Z",
+              "wasReset": true
+            },
+            {
+              "name": "r25_2359",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-08-25T23:59:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2026-09-25T01:10:00.018Z",
+              "wasReset": true
+            },
+            {
+              "name": "r25_y1",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2025-09-25T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2026-09-25T01:10:00.018Z",
+              "wasReset": true
+            },
+            {
+              "name": "r24_2359",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-08-24T23:59:59.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "r26_0000",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-08-26T00:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "r25_new",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-09-25T00:00:01.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "r29",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-08-29T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "r30",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-08-30T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "r31",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-07-31T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "r01",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-08-01T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2020-01-01T00:00:00.000Z",
+              "wasReset": false
+            },
+            {
+              "name": "day_lim",
+              "strategy": "DAY",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2026-09-25T01:05:00.021Z",
+              "wasReset": true
+            },
+            {
+              "name": "day_dis",
+              "strategy": "DAY",
+              "createdAt": "2026-06-10T12:00:00.000Z",
+              "status": "DISABLED",
+              "lastTrafficResetAt": "2026-09-25T01:05:00.013Z",
+              "wasReset": true
+            },
+            {
+              "name": "r25_lim",
+              "strategy": "MONTH_ROLLING",
+              "createdAt": "2026-08-25T00:00:00.000Z",
+              "status": "ACTIVE",
+              "lastTrafficResetAt": "2026-09-25T01:10:00.024Z",
+              "wasReset": true
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "refillHeader": [
+    {
+      "label": "utc-real",
+      "processTimeZone": "UTC",
+      "readAt": "2026-09-25T00:23:39.288Z",
+      "profiles": [
+        {
+          "name": "noreset",
+          "strategy": "NO_RESET",
+          "createdAt": "2026-06-10T12:00:00.000Z",
+          "refillAt": null
+        },
+        {
+          "name": "day",
+          "strategy": "DAY",
+          "createdAt": "2026-06-10T12:00:00.000Z",
+          "refillAt": "2026-09-26T00:05:00.000Z"
+        },
+        {
+          "name": "week",
+          "strategy": "WEEK",
+          "createdAt": "2026-06-10T12:00:00.000Z",
+          "refillAt": "2026-09-28T00:15:00.000Z"
+        },
+        {
+          "name": "month",
+          "strategy": "MONTH",
+          "createdAt": "2026-06-10T12:00:00.000Z",
+          "refillAt": "2026-10-01T00:20:00.000Z"
+        },
+        {
+          "name": "r25_0000",
+          "strategy": "MONTH_ROLLING",
+          "createdAt": "2026-08-25T00:00:00.000Z",
+          "refillAt": "2026-10-25T00:10:00.000Z"
+        },
+        {
+          "name": "r25_2359",
+          "strategy": "MONTH_ROLLING",
+          "createdAt": "2026-08-25T23:59:00.000Z",
+          "refillAt": "2026-10-25T00:10:00.000Z"
+        },
+        {
+          "name": "r25_y1",
+          "strategy": "MONTH_ROLLING",
+          "createdAt": "2025-09-25T12:00:00.000Z",
+          "refillAt": "2026-10-25T00:10:00.000Z"
+        },
+        {
+          "name": "r24_2359",
+          "strategy": "MONTH_ROLLING",
+          "createdAt": "2026-08-24T23:59:59.000Z",
+          "refillAt": "2026-10-24T00:10:00.000Z"
+        },
+        {
+          "name": "r26_0000",
+          "strategy": "MONTH_ROLLING",
+          "createdAt": "2026-08-26T00:00:00.000Z",
+          "refillAt": "2026-09-26T00:10:00.000Z"
+        },
+        {
+          "name": "r25_new",
+          "strategy": "MONTH_ROLLING",
+          "createdAt": "2026-09-25T00:00:01.000Z",
+          "refillAt": "2026-10-25T00:10:00.000Z"
+        },
+        {
+          "name": "r29",
+          "strategy": "MONTH_ROLLING",
+          "createdAt": "2026-08-29T12:00:00.000Z",
+          "refillAt": "2026-09-29T00:10:00.000Z"
+        },
+        {
+          "name": "r30",
+          "strategy": "MONTH_ROLLING",
+          "createdAt": "2026-08-30T12:00:00.000Z",
+          "refillAt": "2026-09-30T00:10:00.000Z"
+        },
+        {
+          "name": "r31",
+          "strategy": "MONTH_ROLLING",
+          "createdAt": "2026-07-31T12:00:00.000Z",
+          "refillAt": "2026-09-30T00:10:00.000Z"
+        },
+        {
+          "name": "r01",
+          "strategy": "MONTH_ROLLING",
+          "createdAt": "2026-08-01T12:00:00.000Z",
+          "refillAt": "2026-10-01T00:10:00.000Z"
+        }
+      ]
+    },
+    {
+      "label": "gmt+1-real",
+      "processTimeZone": "Etc/GMT+1",
+      "readAt": "2026-09-25T00:44:24.875Z",
+      "profiles": [
+        {
+          "name": "noreset",
+          "strategy": "NO_RESET",
+          "createdAt": "2026-06-10T12:00:00.000Z",
+          "refillAt": null
+        },
+        {
+          "name": "day",
+          "strategy": "DAY",
+          "createdAt": "2026-06-10T12:00:00.000Z",
+          "refillAt": "2026-09-25T01:05:00.000Z"
+        },
+        {
+          "name": "week",
+          "strategy": "WEEK",
+          "createdAt": "2026-06-10T12:00:00.000Z",
+          "refillAt": "2026-09-28T01:15:00.000Z"
+        },
+        {
+          "name": "month",
+          "strategy": "MONTH",
+          "createdAt": "2026-06-10T12:00:00.000Z",
+          "refillAt": "2026-10-01T01:20:00.000Z"
+        },
+        {
+          "name": "r25_0000",
+          "strategy": "MONTH_ROLLING",
+          "createdAt": "2026-08-25T00:00:00.000Z",
+          "refillAt": "2026-10-24T01:10:00.000Z"
+        },
+        {
+          "name": "r25_2359",
+          "strategy": "MONTH_ROLLING",
+          "createdAt": "2026-08-25T23:59:00.000Z",
+          "refillAt": "2026-09-25T01:10:00.000Z"
+        },
+        {
+          "name": "r25_y1",
+          "strategy": "MONTH_ROLLING",
+          "createdAt": "2025-09-25T12:00:00.000Z",
+          "refillAt": "2026-09-25T01:10:00.000Z"
+        },
+        {
+          "name": "r24_2359",
+          "strategy": "MONTH_ROLLING",
+          "createdAt": "2026-08-24T23:59:59.000Z",
+          "refillAt": "2026-10-24T01:10:00.000Z"
+        },
+        {
+          "name": "r26_0000",
+          "strategy": "MONTH_ROLLING",
+          "createdAt": "2026-08-26T00:00:00.000Z",
+          "refillAt": "2026-09-25T01:10:00.000Z"
+        },
+        {
+          "name": "r25_new",
+          "strategy": "MONTH_ROLLING",
+          "createdAt": "2026-09-25T00:00:01.000Z",
+          "refillAt": "2026-10-24T01:10:00.000Z"
+        },
+        {
+          "name": "r29",
+          "strategy": "MONTH_ROLLING",
+          "createdAt": "2026-08-29T12:00:00.000Z",
+          "refillAt": "2026-09-29T01:10:00.000Z"
+        },
+        {
+          "name": "r30",
+          "strategy": "MONTH_ROLLING",
+          "createdAt": "2026-08-30T12:00:00.000Z",
+          "refillAt": "2026-09-30T01:10:00.000Z"
+        },
+        {
+          "name": "r31",
+          "strategy": "MONTH_ROLLING",
+          "createdAt": "2026-07-31T12:00:00.000Z",
+          "refillAt": "2026-09-30T01:10:00.000Z"
+        },
+        {
+          "name": "r01",
+          "strategy": "MONTH_ROLLING",
+          "createdAt": "2026-08-01T12:00:00.000Z",
+          "refillAt": "2026-10-01T01:10:00.000Z"
+        },
+        {
+          "name": "day_lim",
+          "strategy": "DAY",
+          "createdAt": "2026-06-10T12:00:00.000Z",
+          "refillAt": "2026-09-25T01:05:00.000Z"
+        },
+        {
+          "name": "day_dis",
+          "strategy": "DAY",
+          "createdAt": "2026-06-10T12:00:00.000Z",
+          "refillAt": "2026-09-25T01:05:00.000Z"
+        },
+        {
+          "name": "r25_lim",
+          "strategy": "MONTH_ROLLING",
+          "createdAt": "2026-08-25T00:00:00.000Z",
+          "refillAt": "2026-10-24T01:10:00.000Z"
+        }
+      ]
+    }
+  ],
+  "notes": [
+    "3.4.4 states its own schedule in the subscription-refill-date header (src/common/utils/get-next-traffic-reset-at.util.ts): recorded in refillHeader."
+  ]
+}

@@ -1,10 +1,30 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 
+import { i18nReady, loadFeatureBundle } from '@/i18n/i18n'
 import { api } from '@/lib/api'
 import { renderWithProviders } from '@/test/test-utils'
 import AddOnsPage from './add-ons-page'
+
+beforeAll(async () => {
+  // The lifetime rule's words live in the lazy `addOns` bundle, which the
+  // router loads and a bare render does not.
+  await i18nReady
+  await loadFeatureBundle('addOns')
+})
+
+/** `GET /admin/add-on-settings` as the switches service answers it. */
+function addOnSettings(resetExpiryOn: boolean, zone: string | null) {
+  return {
+    switches: [
+      { name: 'durableAccounting', enabled: true, defaultEnabled: true, stored: null, env: [] },
+      { name: 'deviceCleanupAuto', enabled: true, defaultEnabled: true, stored: null, env: [] },
+      { name: 'trafficResetExpiry', enabled: resetExpiryOn, defaultEnabled: false, stored: null, env: [] },
+    ],
+    remnawaveTimeZone: { value: zone ?? 'UTC', stored: zone, defaultValue: 'UTC' },
+  }
+}
 
 describe('AddOnsPage accessibility', () => {
   beforeEach(() => {
@@ -32,12 +52,13 @@ describe('AddOnsPage accessibility', () => {
     expect(screen.getByRole('button', { name: 'Remove price 2' })).toBeInTheDocument()
   })
 
-  it('shows an enabled lifetime selector defaulting to subscription-end when creating', async () => {
+  it('offers no lifetime choice: a traffic add-on lasts until the next reset, in Remnawave\'s zone, while stage 4 is on', async () => {
     const user = userEvent.setup()
     vi.spyOn(api, 'get').mockImplementation(async (path: string) => {
       if (path === '/admin/add-ons') return { data: [] }
       if (path === '/admin/plans') return { data: [] }
       if (path === '/admin/settings/icons') return { data: [] }
+      if (path === '/admin/add-on-settings') return { data: addOnSettings(true, 'Europe/Moscow') }
       return { data: {} }
     })
 
@@ -45,14 +66,29 @@ describe('AddOnsPage accessibility', () => {
 
     await user.click(await screen.findByRole('button', { name: 'Create add-on' }))
 
-    const lifetime = await screen.findByRole('combobox', { name: 'Lifetime' })
-    // Default type is traffic → the picker is enabled and defaults to the
-    // always-eligible "until subscription ends" option.
-    expect(lifetime).toBeEnabled()
-    expect(lifetime).toHaveTextContent('Until subscription ends')
+    const rule = await screen.findByText(/Lasts until the plan’s next traffic reset/)
+    expect(rule).toHaveTextContent('Remnawave’s clock: Europe/Moscow')
+    expect(screen.queryByRole('combobox', { name: 'Lifetime' })).not.toBeInTheDocument()
   })
 
-  it('keeps the lifetime selector enabled for a device add-on and prefills its reset-scoped mode', async () => {
+  it('says a traffic add-on lasts until the end of the subscription while stage 4 is off', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(api, 'get').mockImplementation(async (path: string) => {
+      if (path === '/admin/add-ons') return { data: [] }
+      if (path === '/admin/plans') return { data: [] }
+      if (path === '/admin/settings/icons') return { data: [] }
+      if (path === '/admin/add-on-settings') return { data: addOnSettings(false, null) }
+      return { data: {} }
+    })
+
+    renderWithProviders(<AddOnsPage />)
+
+    await user.click(await screen.findByRole('button', { name: 'Create add-on' }))
+
+    expect(await screen.findByText(/^Lasts until the end of the subscription\./)).toBeInTheDocument()
+  })
+
+  it('says a device add-on lasts until the end of the subscription, and sends no lifetime on save', async () => {
     const user = userEvent.setup()
     vi.spyOn(api, 'get').mockImplementation(async (path: string) => {
       if (path === '/admin/add-ons')
@@ -63,6 +99,7 @@ describe('AddOnsPage accessibility', () => {
               name: 'Extra device',
               description: null,
               type: 'EXTRA_DEVICES',
+              // A row stored before 25.09.2026 still saying «до следующего сброса».
               lifetime: 'UNTIL_NEXT_RESET',
               icon: null,
               value: 1,
@@ -75,18 +112,23 @@ describe('AddOnsPage accessibility', () => {
         }
       if (path === '/admin/plans') return { data: [] }
       if (path === '/admin/settings/icons') return { data: [] }
+      if (path === '/admin/add-on-settings') return { data: addOnSettings(true, null) }
       return { data: {} }
     })
+    const patch = vi.spyOn(api, 'patch').mockResolvedValue({ data: {} })
 
     renderWithProviders(<AddOnsPage />)
 
     await user.click(await screen.findByRole('button', { name: 'Edit add-on' }))
 
-    const lifetime = await screen.findByRole('combobox', { name: 'Lifetime' })
-    // Devices CAN be reset-scoped now → the selector is enabled and prefills
-    // the stored UNTIL_NEXT_RESET mode.
-    expect(lifetime).toBeEnabled()
-    expect(lifetime).toHaveTextContent('Until next reset')
+    expect(await screen.findByText('Extra devices last until the end of the subscription.')).toBeInTheDocument()
+    expect(screen.queryByRole('combobox', { name: 'Lifetime' })).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Update' }))
+    await waitFor(() => expect(patch).toHaveBeenCalledTimes(1))
+    // The panel decides the lifetime; the stored «до следующего сброса» sent
+    // back beside a device type would be refused by the API.
+    expect(patch.mock.calls[0]?.[1]).not.toHaveProperty('lifetime')
   })
 
   it('makes applicable plan chips keyboard-operable toggle buttons', async () => {

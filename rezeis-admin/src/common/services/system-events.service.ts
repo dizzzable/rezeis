@@ -3590,6 +3590,12 @@ const SYSTEM_ERROR_HEADERS = {
   backup_delivery_failed: { emoji: '📤', title: 'Бэкап не доставлен в Telegram' },
   // `BackupProcessor` — a restore threw.
   restore_failed: { emoji: '🧯', title: 'Восстановление базы не удалось' },
+  // `ResetBoundaryConfirmationService` — no reset confirmed within the hold:
+  // the add-ons «до сброса» ending at it were taken off anyway, once per boundary.
+  remnawave_reset_unconfirmed: { emoji: '⏰', title: 'Remnawave не сбросил трафик по расписанию' },
+  // `ResetScheduleCheckService` — the daily check: the resets Remnawave made
+  // differ from the schedule «Часовой пояс Remnawave» predicts. Once a day.
+  remnawave_reset_schedule_drift: { emoji: '🕒', title: 'Сбросы трафика в Remnawave расходятся с расписанием' },
 } as const;
 
 /**

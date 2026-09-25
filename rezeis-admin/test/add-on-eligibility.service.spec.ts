@@ -4,6 +4,7 @@ import { describe, it } from 'node:test';
 import { NotFoundException } from '@nestjs/common';
 
 import { AddOnEligibilityService } from '../src/modules/add-ons/services/add-on-eligibility.service';
+import { resolveAddOnRolloutFlags } from '../src/modules/add-on-entitlements/add-on-rollout.config';
 import { ResetCapabilityMap } from '../src/modules/add-on-entitlements/domain/reset-cycle-policy';
 
 type CatalogAddOn = {
@@ -35,12 +36,39 @@ type SubColumns = {
   expiresAt: Date | null;
   createdAt: Date;
   planSnapshot: unknown;
+  /** The Remnawave profile's `createdAt` the panel stored (P2); absent = never heard. */
+  remnawaveProfileCreatedAt?: Date | null;
 };
 
 class EnabledMonthEligibilityService extends AddOnEligibilityService {
   protected getResetCapabilities(): ResetCapabilityMap {
     return { MONTH: 'ENABLED' };
   }
+}
+
+class EnabledRollingEligibilityService extends AddOnEligibilityService {
+  protected getResetCapabilities(): ResetCapabilityMap {
+    return { MONTH_ROLLING: 'ENABLED' };
+  }
+}
+
+/** «Докупка трафика до сброса» switched OFF — ON by default since 25.09.2026. */
+class Stage4OffEligibilityService extends AddOnEligibilityService {
+  protected getResetCapabilities(): ResetCapabilityMap {
+    return {};
+  }
+}
+
+/** A double of S4-sync's read-once helper: what it answers, and every call. */
+function profileFactsDouble(answer: Date | null) {
+  const calls: string[] = [];
+  return {
+    calls,
+    readProfileCreatedAtOnce: async (subscriptionId: string) => {
+      calls.push(subscriptionId);
+      return answer;
+    },
+  };
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -94,6 +122,9 @@ function build(options: {
   projection?: Projection | null; // null → no projection row yet
   ownerUserId?: string; // the subscription's owner (default 'user-1')
   telegramUser?: { id: string } | null; // user.findFirst(byTelegramId) result
+  enabledRolling?: boolean; // «до сброса» on for MONTH_ROLLING only
+  stage4Off?: boolean; // «Докупка трафика до сброса» switched off
+  profileFacts?: ReturnType<typeof profileFactsDouble>;
 }) {
   const columns: SubColumns = { ...defaultSubColumns, ...options.sub };
   const ownerUserId = options.ownerUserId ?? 'user-1';
@@ -122,8 +153,17 @@ function build(options: {
       findMany: async () => options.catalog ?? [],
     },
   };
-  const Service = options.enabledMonth ? EnabledMonthEligibilityService : AddOnEligibilityService;
-  return { service: new Service(prisma as never, {} as never), stats };
+  const Service = options.stage4Off
+    ? Stage4OffEligibilityService
+    : options.enabledRolling
+      ? EnabledRollingEligibilityService
+      : options.enabledMonth
+        ? EnabledMonthEligibilityService
+        : AddOnEligibilityService;
+  return {
+    service: new Service(prisma as never, {} as never, undefined, undefined, options.profileFacts as never),
+    stats,
+  };
 }
 
 const financeTerm: Term = {
@@ -224,11 +264,20 @@ describe('AddOnEligibilityService.listForSubscription', () => {
     assert.equal(result.addOns.length, 0);
   });
 
-  it('fallback withholds UNTIL_NEXT_RESET even when capability is ENABLED if the snapshot strategy is NO_RESET', async () => {
+  it('fallback sells a NO_RESET plan\'s traffic «до конца подписки» once stage 4 is on, whatever the row says', async () => {
+    // P12: a plan that never resets has no reset to end at, so its traffic
+    // lasts until the subscription ends — the row's «до следующего сброса»
+    // used to withhold it for good.
     const nextReset: CatalogAddOn = { ...trafficAddOn, id: 'a-reset', lifetime: 'UNTIL_NEXT_RESET' };
     const { service } = build({ status: 'ACTIVE', term: null, catalog: [nextReset], enabledMonth: true });
     const result = await service.listForSubscription('sub-1');
-    assert.equal(result.addOns.length, 0);
+    assert.equal(result.addOns.length, 1);
+    const offered = result.addOns[0]!;
+    assert.equal(offered.lifetime, 'UNTIL_SUBSCRIPTION_END');
+    assert.equal(offered.eligibility.expiresAt, LIVE_TERM_ENDS_AT.toISOString());
+    assert.equal(offered.eligibility.endsBound, 'subscription_end');
+    assert.equal(offered.eligibility.nextResetAt, null);
+    assert.equal(offered.eligibility.resetSoon, false);
   });
 
   it('fallback withholds UNTIL_NEXT_RESET without a durable ACTIVE term even when capability is ENABLED', async () => {
@@ -259,7 +308,8 @@ describe('AddOnEligibilityService.listForSubscription', () => {
   });
 
   it('offers a finite-baseline UNTIL_SUBSCRIPTION_END add-on with the term end as expiry', async () => {
-    const { service } = build({ status: 'ACTIVE', term: financeTerm, catalog: [trafficAddOn, deviceAddOn] });
+    // Stage 4 off: with it on (the default) this traffic ends at the reset.
+    const { service } = build({ status: 'ACTIVE', term: financeTerm, catalog: [trafficAddOn, deviceAddOn], stage4Off: true });
     const result = await service.listForSubscription('sub-1');
     assert.equal(result.availability, 'AVAILABLE');
     assert.deepEqual(result.target, { subscriptionId: 'sub-1', termId: 'term-1', planId: 'plan-a' });
@@ -289,23 +339,30 @@ describe('AddOnEligibilityService.listForSubscription', () => {
     assert.equal(result.addOns.length, 0);
   });
 
-  it('offers a device add-on with UNTIL_NEXT_RESET when the plan has a reset cycle and capability is ENABLED (device one-time-until-reset)', async () => {
-    // A device add-on CAN be reset-scoped: the reset epoch is the profile's
-    // monthly refresh boundary (extra devices are removed on it). Offered when
-    // the strategy has a boundary (MONTH here) and the capability is ENABLED.
+  it('offers a device add-on «до конца подписки» even when its row says UNTIL_NEXT_RESET and the plan resets', async () => {
+    // P3: a device slot that ended at a traffic reset would be taken away at
+    // every reset (with automatic cleanup, the newest device deleted). Devices
+    // always last until the end of the subscription.
     const deviceReset: CatalogAddOn = { ...deviceAddOn, id: 'a-device-reset', lifetime: 'UNTIL_NEXT_RESET' };
     const { service } = build({ status: 'ACTIVE', term: financeTerm, catalog: [deviceReset], enabledMonth: true });
     const result = await service.listForSubscription('sub-1');
     assert.equal(result.addOns.length, 1);
-    assert.equal(result.addOns[0]!.eligibility.explanationCode, 'ELIGIBLE_UNTIL_NEXT_RESET');
+    const offered = result.addOns[0]!;
+    assert.equal(offered.lifetime, 'UNTIL_SUBSCRIPTION_END');
+    assert.equal(offered.eligibility.explanationCode, 'ELIGIBLE_UNTIL_SUBSCRIPTION_END');
+    assert.equal(offered.eligibility.expiresAt, LIVE_TERM_ENDS_AT.toISOString());
+    assert.equal(offered.eligibility.endsBound, 'subscription_end');
+    assert.equal(offered.eligibility.nextResetAt, null);
   });
 
-  it('withholds a device add-on carrying UNTIL_NEXT_RESET when the plan is NO_RESET (no cycle to reset on)', async () => {
+  it('offers a device add-on «до конца подписки» on a NO_RESET plan too, whatever its row says', async () => {
     const deviceReset: CatalogAddOn = { ...deviceAddOn, id: 'a-device-reset', lifetime: 'UNTIL_NEXT_RESET' };
     const term: Term = { ...financeTerm, trafficResetStrategy: 'NO_RESET' };
     const { service } = build({ status: 'ACTIVE', term, catalog: [deviceReset], enabledMonth: true });
     const result = await service.listForSubscription('sub-1');
-    assert.equal(result.addOns.length, 0);
+    assert.equal(result.addOns.length, 1);
+    assert.equal(result.addOns[0]!.lifetime, 'UNTIL_SUBSCRIPTION_END');
+    assert.equal(result.addOns[0]!.eligibility.expiresAt, LIVE_TERM_ENDS_AT.toISOString());
   });
 
   it('withholds EXTRA_DEVICES when a persisted term stores a non-positive device baseline (0/negative = unlimited)', async () => {
@@ -332,18 +389,143 @@ describe('AddOnEligibilityService.listForSubscription', () => {
     assert.equal(result.addOns.length, 0);
   });
 
+  // ── P2 / W7 test 8, the offer's side: MONTH_ROLLING counts from the profile ─
+  // Remnawave resets a MONTH_ROLLING profile at 00:10 UTC on the day of the
+  // month it was created (`reset-schedule-parity.spec.ts`). The profile here
+  // was created on a 10th, over a year ago, so its next reset is a 10th, 00:10
+  // UTC — a date no other anchor this spec uses would give.
+  const rollingTerm: Term = { ...financeTerm, trafficResetStrategy: 'MONTH_ROLLING', resetAnchorAt: null };
+  const profileCreatedAt = new Date('2025-03-10T15:00:00.000Z');
+
+  it('a MONTH_ROLLING term without an anchor: the offer reads the profile createdAt ONCE and sells «до сброса» from it', async () => {
+    const facts = profileFactsDouble(profileCreatedAt);
+    const { service } = build({
+      status: 'ACTIVE',
+      term: rollingTerm,
+      catalog: [trafficAddOn],
+      enabledRolling: true,
+      profileFacts: facts,
+    });
+    const result = await service.listForSubscription('sub-1');
+    assert.deepEqual(facts.calls, ['sub-1']);
+    assert.equal(result.addOns.length, 1);
+    const offered = result.addOns[0]!;
+    assert.equal(offered.lifetime, 'UNTIL_NEXT_RESET');
+    assert.equal(offered.eligibility.endsBound, 'reset');
+    assert.match(offered.eligibility.nextResetAt ?? '', /-10T00:10:00\.000Z$/);
+  });
+
+  it('a MONTH_ROLLING term whose anchor stays unknown after the one read: traffic is withheld, never sold «до конца подписки»', async () => {
+    const facts = profileFactsDouble(null);
+    const { service } = build({
+      status: 'ACTIVE',
+      term: rollingTerm,
+      catalog: [trafficAddOn, deviceAddOn],
+      enabledRolling: true,
+      profileFacts: facts,
+    });
+    const result = await service.listForSubscription('sub-1');
+    assert.deepEqual(facts.calls, ['sub-1']);
+    assert.deepEqual(
+      result.addOns.map((addOn) => addOn.id),
+      ['a-device'],
+      'only the device add-on, which does not end at a reset',
+    );
+  });
+
+  it('the profile createdAt the panel stored is used as it is, with no read', async () => {
+    const facts = profileFactsDouble(null);
+    const { service } = build({
+      status: 'ACTIVE',
+      term: rollingTerm,
+      catalog: [trafficAddOn],
+      enabledRolling: true,
+      profileFacts: facts,
+      sub: { remnawaveProfileCreatedAt: profileCreatedAt },
+    });
+    const result = await service.listForSubscription('sub-1');
+    assert.deepEqual(facts.calls, []);
+    assert.equal(result.addOns.length, 1);
+    assert.match(result.addOns[0]!.eligibility.nextResetAt ?? '', /-10T00:10:00\.000Z$/);
+  });
+
+  it('reads nothing when the read would decide nothing', async () => {
+    const cases: ReadonlyArray<{ readonly name: string; readonly options: Parameters<typeof build>[0] }> = [
+      {
+        name: 'the term already carries its anchor',
+        options: { term: { ...rollingTerm, resetAnchorAt: profileCreatedAt }, catalog: [trafficAddOn], enabledRolling: true },
+      },
+      { name: 'only devices on sale', options: { term: rollingTerm, catalog: [deviceAddOn], enabledRolling: true } },
+      {
+        name: 'traffic on sale for another plan only',
+        options: {
+          term: rollingTerm,
+          catalog: [{ ...trafficAddOn, applicablePlanIds: ['plan-z'] }],
+          enabledRolling: true,
+        },
+      },
+      { name: '«до сброса» not sold for MONTH_ROLLING', options: { term: rollingTerm, catalog: [trafficAddOn], enabledMonth: true } },
+      { name: 'a calendar strategy', options: { term: financeTerm, catalog: [trafficAddOn], enabledRolling: true } },
+      {
+        name: 'a calendar term without an anchor',
+        options: { term: { ...financeTerm, resetAnchorAt: null }, catalog: [trafficAddOn], enabledRolling: true },
+      },
+      {
+        // The no-term fallback withholds «до сброса» anyway: there is no term
+        // to bind its reset to.
+        name: 'no durable term yet',
+        options: {
+          term: null,
+          catalog: [trafficAddOn],
+          enabledRolling: true,
+          sub: { planSnapshot: { id: 'plan-a', trafficLimitStrategy: 'MONTH_ROLLING' } },
+        },
+      },
+    ];
+    for (const { name, options } of cases) {
+      const facts = profileFactsDouble(profileCreatedAt);
+      const { service } = build({ status: 'ACTIVE', ...options, profileFacts: facts });
+      const result = await service.listForSubscription('sub-1');
+      assert.deepEqual(facts.calls, [], name);
+      if (name === 'the term already carries its anchor') {
+        assert.match(result.addOns[0]?.eligibility.nextResetAt ?? '', /-10T00:10:00\.000Z$/, name);
+      }
+    }
+  });
+
   it('withholds UNTIL_SUBSCRIPTION_END when the term is open-ended (no end date)', async () => {
     const term: Term = { ...financeTerm, endsAt: null };
-    const { service } = build({ status: 'ACTIVE', term, catalog: [trafficAddOn] });
+    const { service } = build({ status: 'ACTIVE', term, catalog: [trafficAddOn], stage4Off: true });
     const result = await service.listForSubscription('sub-1');
     assert.equal(result.addOns.length, 0);
   });
 
-  it('withholds UNTIL_NEXT_RESET while the reset capability is DISABLED (default)', async () => {
+  it('withholds UNTIL_NEXT_RESET while the reset capability is DISABLED (stage 4 switched off)', async () => {
     const nextReset: CatalogAddOn = { ...trafficAddOn, id: 'a-reset', lifetime: 'UNTIL_NEXT_RESET' };
-    const { service } = build({ status: 'ACTIVE', term: financeTerm, catalog: [nextReset] });
+    const { service } = build({ status: 'ACTIVE', term: financeTerm, catalog: [nextReset], stage4Off: true });
     const result = await service.listForSubscription('sub-1');
     assert.equal(result.addOns.length, 0);
+  });
+
+  it('sells traffic «до сброса» by default: nothing set on the page or in .env (production seam, since 25.09.2026)', async () => {
+    const saved = new Map(
+      ['ADDON_RESET_EXPIRY_DAY', 'ADDON_RESET_EXPIRY_WEEK', 'ADDON_RESET_EXPIRY_MONTH', 'ADDON_RESET_EXPIRY_MONTH_ROLLING', 'ADDON_ENTITLEMENT_DIRECT_PURCHASE'].map(
+        (name) => [name, process.env[name]] as const,
+      ),
+    );
+    for (const name of saved.keys()) delete process.env[name];
+    try {
+      const { service } = build({ status: 'ACTIVE', term: financeTerm, catalog: [trafficAddOn] });
+      const result = await service.listForSubscription('sub-1');
+      assert.equal(result.addOns.length, 1);
+      assert.equal(result.addOns[0]!.lifetime, 'UNTIL_NEXT_RESET');
+      assert.equal(result.addOns[0]!.eligibility.explanationCode, 'ELIGIBLE_UNTIL_NEXT_RESET');
+    } finally {
+      for (const [name, value] of saved) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
   });
 
   // ── Cross-flag offer↔fulfillment guard (production getResetCapabilities seam) ─
@@ -392,21 +574,153 @@ describe('AddOnEligibilityService.listForSubscription', () => {
     }
   });
 
-  it('offers UNTIL_NEXT_RESET with the next reset epoch as expiry when the capability is ENABLED', async () => {
-    const nextReset: CatalogAddOn = { ...trafficAddOn, id: 'a-reset', lifetime: 'UNTIL_NEXT_RESET' };
-    const { service } = build({ status: 'ACTIVE', term: financeTerm, catalog: [nextReset], enabledMonth: true });
+  it('offers traffic until Remnawave\'s next reset, taken off half an hour after it, when the capability is ENABLED', async () => {
+    // The row says «до конца подписки»: with stage 4 on, traffic on a plan
+    // that resets is sold until the reset whatever the row says (P12).
+    const { service } = build({ status: 'ACTIVE', term: financeTerm, catalog: [trafficAddOn], enabledMonth: true });
     const result = await service.listForSubscription('sub-1');
     assert.equal(result.addOns.length, 1);
     const reset = result.addOns[0]!;
+    assert.equal(reset.lifetime, 'UNTIL_NEXT_RESET');
     assert.equal(reset.eligibility.explanationCode, 'ELIGIBLE_UNTIL_NEXT_RESET');
-    // MONTH strategy → epoch ends at the first of the next UTC month after now.
-    // Asserted non-null first: `expiresAt` became nullable for `RESET_TRAFFIC`,
-    // which grants nothing and so has no lifetime — a GRANT must still carry
-    // one, and a null here would mean the lifetime resolver was skipped.
+    assert.equal(reset.eligibility.endsBound, 'reset');
+    // MONTH → Remnawave resets on the 1st at 00:20 (UTC here), and the panel
+    // takes the add-on off at 00:50. Asserted non-null first: `expiresAt`
+    // became nullable for `RESET_TRAFFIC`, which grants nothing and so has no
+    // lifetime — a GRANT must still carry one.
     const expiresAt = reset.eligibility.expiresAt;
+    const nextResetAt = reset.eligibility.nextResetAt;
     assert.ok(expiresAt !== null, 'a grant must carry an expiry');
-    assert.ok(expiresAt.endsWith('T00:00:00.000Z'));
-    assert.match(expiresAt, /-01T00:00:00\.000Z$/);
+    assert.ok(nextResetAt !== null, 'a reset add-on names its reset');
+    assert.match(nextResetAt, /-01T00:20:00\.000Z$/);
+    assert.equal(Date.parse(expiresAt) - Date.parse(nextResetAt), 30 * 60 * 1000);
+    assert.equal(reset.eligibility.resetSoon, Date.parse(nextResetAt) - Date.now() < DAY_MS);
+  });
+
+  it('ends a reset add-on at the subscription\'s end when that comes first, and says so', async () => {
+    // P5. The subscription ends in two hours; the MONTH reset is on the 1st.
+    const endsSoon = new Date(Date.now() + 2 * 60 * 60 * 1000);
+    const { service } = build({
+      status: 'ACTIVE',
+      term: { ...financeTerm, endsAt: endsSoon },
+      catalog: [trafficAddOn],
+      enabledMonth: true,
+      sub: { expiresAt: endsSoon },
+    });
+    const result = await service.listForSubscription('sub-1');
+    const offered = result.addOns[0]!;
+    const nextResetAt = offered.eligibility.nextResetAt;
+    assert.ok(nextResetAt !== null);
+    if (Date.parse(nextResetAt) + 30 * 60 * 1000 > endsSoon.getTime()) {
+      assert.equal(offered.eligibility.expiresAt, endsSoon.toISOString());
+      assert.equal(offered.eligibility.endsBound, 'subscription_end');
+      assert.equal(offered.eligibility.explanationCode, 'ELIGIBLE_UNTIL_SUBSCRIPTION_END_BEFORE_RESET');
+      assert.equal(offered.eligibility.resetSoon, false, 'the reset does not end it, so it warns of nothing');
+    } else {
+      // Only in the last hours before a 1st, 00:50: the reset comes first.
+      assert.equal(offered.eligibility.endsBound, 'reset');
+    }
+  });
+
+  it('warns before payment when the reset that ends the add-on is less than a day away (DAY: always)', async () => {
+    class EnabledDayEligibilityService extends AddOnEligibilityService {
+      protected getResetCapabilities(): ResetCapabilityMap {
+        return { DAY: 'ENABLED' };
+      }
+    }
+    const prisma = {
+      subscription: {
+        findUnique: async () => ({ id: 'sub-1', userId: 'user-1', status: 'ACTIVE', ...defaultSubColumns }),
+      },
+      subscriptionTerm: { findFirst: async () => ({ ...financeTerm, trafficResetStrategy: 'DAY' }) },
+      subscriptionEffectiveProjection: { findUnique: async () => null },
+      user: { findFirst: async () => ({ id: 'user-1' }) },
+      addOn: { findMany: async () => [trafficAddOn] },
+    };
+    const result = await new EnabledDayEligibilityService(prisma as never, {} as never).listForSubscription('sub-1');
+    const offered = result.addOns[0]!;
+    assert.equal(offered.eligibility.endsBound, 'reset');
+    assert.match(offered.eligibility.nextResetAt ?? '', /T00:05:00\.000Z$/);
+    assert.equal(offered.eligibility.resetSoon, true);
+  });
+
+  it('does not warn of a reset that does not end the add-on: a DAY add-on the subscription\'s end cuts short', async () => {
+    class EnabledDayEligibilityService extends AddOnEligibilityService {
+      protected getResetCapabilities(): ResetCapabilityMap {
+        return { DAY: 'ENABLED' };
+      }
+    }
+    // Ends before the next 00:05 (UTC) whatever the hour: a minute from now.
+    const endsFirst = new Date(Date.now() + 60 * 1000);
+    const prisma = {
+      subscription: {
+        findUnique: async () => ({
+          id: 'sub-1',
+          userId: 'user-1',
+          status: 'ACTIVE',
+          ...defaultSubColumns,
+          expiresAt: endsFirst,
+        }),
+      },
+      subscriptionTerm: {
+        findFirst: async () => ({ ...financeTerm, trafficResetStrategy: 'DAY', endsAt: endsFirst }),
+      },
+      subscriptionEffectiveProjection: { findUnique: async () => null },
+      user: { findFirst: async () => ({ id: 'user-1' }) },
+      addOn: { findMany: async () => [trafficAddOn] },
+    };
+    const result = await new EnabledDayEligibilityService(prisma as never, {} as never).listForSubscription('sub-1');
+    const offered = result.addOns[0]!;
+    assert.equal(offered.eligibility.endsBound, 'subscription_end');
+    assert.ok(offered.eligibility.nextResetAt !== null, 'the reset is still named');
+    assert.equal(offered.eligibility.resetSoon, false);
+  });
+
+  it('computes the reset in «Часовой пояс Remnawave» and names the operator\'s display zone', async () => {
+    const prisma = {
+      subscription: {
+        findUnique: async () => ({ id: 'sub-1', userId: 'user-1', status: 'ACTIVE', ...defaultSubColumns }),
+      },
+      subscriptionTerm: { findFirst: async () => financeTerm },
+      subscriptionEffectiveProjection: { findUnique: async () => null },
+      user: { findFirst: async () => ({ id: 'user-1' }) },
+      addOn: { findMany: async () => [trafficAddOn] },
+    };
+    const switches = {
+      flags: async () => ({ ...resolveAddOnRolloutFlags({}, {}), remnawaveTimeZone: 'Europe/Moscow' }),
+    };
+    const settings = { getPlatformBranding: async () => ({ timezone: 'Asia/Yekaterinburg' }) };
+    const result = await new EnabledMonthEligibilityService(
+      prisma as never,
+      {} as never,
+      switches as never,
+      settings as never,
+    ).listForSubscription('sub-1');
+    // The 1st, 00:20 by Moscow is 21:20 UTC on the last day of the month before.
+    const nextResetAt = result.addOns[0]!.eligibility.nextResetAt ?? '';
+    assert.match(nextResetAt, /T21:20:00\.000Z$/);
+    const day = new Date(Date.parse(nextResetAt) + 3 * 60 * 60 * 1000).getUTCDate();
+    assert.equal(day, 1, 'the 1st by Moscow');
+    assert.equal(result.displayTimeZone, 'Asia/Yekaterinburg');
+  });
+
+  it('sends no display zone when none is set or the settings cannot be read (the dates are then UTC)', async () => {
+    const { service } = build({ status: 'ACTIVE', term: financeTerm, catalog: [trafficAddOn] });
+    assert.equal((await service.listForSubscription('sub-1')).displayTimeZone, null);
+    const prisma = {
+      subscription: {
+        findUnique: async () => ({ id: 'sub-1', userId: 'user-1', status: 'ACTIVE', ...defaultSubColumns }),
+      },
+      subscriptionTerm: { findFirst: async () => financeTerm },
+      subscriptionEffectiveProjection: { findUnique: async () => null },
+      user: { findFirst: async () => ({ id: 'user-1' }) },
+      addOn: { findMany: async () => [trafficAddOn] },
+    };
+    const broken = { getPlatformBranding: async () => Promise.reject(new Error('settings row unreadable')) };
+    const result = await new AddOnEligibilityService(prisma as never, {} as never, undefined, broken as never)
+      .listForSubscription('sub-1');
+    assert.equal(result.displayTimeZone, null);
+    assert.equal(result.addOns.length, 1, 'the listing itself does not fail');
   });
 
   it('respects plan applicability (excludes add-ons scoped to other plans)', async () => {

@@ -1037,7 +1037,7 @@ run('add-on entitlement PostgreSQL concurrency', () => {
     }
   });
 
-  it('direct-purchase UNTIL_NEXT_RESET: MINTS-and-binds the current-cycle reset epoch on demand when the capability is ENABLED, else falls back to legacy', async () => {
+  it('direct-purchase UNTIL_NEXT_RESET: MINTS-and-binds the current-cycle reset epoch on demand — and with the capability OFF at capture still binds it, never the permanent increment', async () => {
     const gib = 1024n * 1024n * 1024n;
     // Anchor in the past so the live cycle is a real calendar-MONTH window
     // relative to `now` (the money path reads `new Date()` internally, so the
@@ -1128,32 +1128,36 @@ run('add-on entitlement PostgreSQL concurrency', () => {
     assert.equal(await prisma.subscriptionResetEpoch.count({ where: { termId: on.termId } }), 1,
       'the current-cycle epoch is minted once (idempotent find-or-create)');
     const boundEpoch = await prisma.subscriptionResetEpoch.findUniqueOrThrow({ where: { id: ent.expiryEpochId! } });
-    // The bound epoch is a proper calendar-MONTH window (UTC month starts,
-    // one month wide) that CONTAINS the purchase instant — boundary-safe, no
+    // The bound epoch runs between two of Remnawave's MONTH resets — the 1st
+    // at 00:20 (UTC) — and CONTAINS the purchase instant: boundary-safe, no
     // dependence on an independently-captured `now`.
-    assert.equal(boundEpoch.startsAt.getUTCDate(), 1, 'epoch starts at a UTC month start');
-    assert.equal(boundEpoch.startsAt.getUTCHours(), 0);
-    assert.equal(boundEpoch.plannedEndsAt.getUTCDate(), 1, 'epoch ends at a UTC month start');
-    assert.equal(boundEpoch.plannedEndsAt.getUTCHours(), 0);
+    assert.equal(boundEpoch.startsAt.getUTCDate(), 1, 'epoch starts at a MONTH reset');
+    assert.equal(boundEpoch.startsAt.toISOString().slice(11, 16), '00:20');
+    assert.equal(boundEpoch.plannedEndsAt.getUTCDate(), 1, 'epoch ends at the next MONTH reset');
+    assert.equal(boundEpoch.plannedEndsAt.toISOString().slice(11, 16), '00:20');
     assert.ok(boundEpoch.plannedEndsAt.getTime() > boundEpoch.startsAt.getTime());
     assert.ok(
       ent.purchasedAt.getTime() >= boundEpoch.startsAt.getTime() &&
         ent.purchasedAt.getTime() < boundEpoch.plannedEndsAt.getTime(),
       'the purchase instant falls within the bound cycle window',
     );
-    assert.equal(ent.expiresAt!.getTime(), boundEpoch.plannedEndsAt.getTime(),
-      'entitlement expires exactly at the bound epoch boundary');
+    assert.equal(ent.expiresAt!.getTime() - boundEpoch.plannedEndsAt.getTime(), 30 * 60 * 1000,
+      'taken off half an hour after the reset the epoch ends at');
     const projOn = await prisma.subscriptionEffectiveProjection.findUniqueOrThrow({ where: { subscriptionId: on.subId } });
     assert.equal(projOn.desiredTrafficLimitBytes, 150n * gib);
 
-    // Reset capability OFF (default) → no ledger entitlement, no epoch minted,
-    // legacy increment on the traffic column.
+    // Reset capability OFF at capture: this draft has no quote (it was made
+    // before quotes were written), and it still said «до следующего сброса».
+    // It is bound to the current cycle, as if stage 4 were on — it was, when
+    // the draft was made. It used to take the PERMANENT legacy increment here:
+    // no entitlement row, a raised column nothing would ever take back.
     const off = await purchaseUntilNextReset('off', undefined, false);
-    assert.equal(await prisma.addOnEntitlement.count({ where: { sourceTransactionId: off.txnId } }), 0);
-    assert.equal(await prisma.subscriptionResetEpoch.count({ where: { termId: off.termId } }), 0,
-      'the disabled path mints no epoch');
-    assert.equal((await prisma.subscription.findUniqueOrThrow({ where: { id: off.subId } })).trafficLimit, 150,
-      'legacy path increments the traffic column directly');
+    const offEntitlement = await prisma.addOnEntitlement.findFirstOrThrow({ where: { sourceTransactionId: off.txnId } });
+    assert.equal(offEntitlement.lifetime, 'UNTIL_NEXT_RESET');
+    assert.notEqual(offEntitlement.expiryEpochId, null, 'bound to the current cycle, not permanent');
+    assert.equal(await prisma.subscriptionResetEpoch.count({ where: { termId: off.termId } }), 1);
+    const projOff = await prisma.subscriptionEffectiveProjection.findUniqueOrThrow({ where: { subscriptionId: off.subId } });
+    assert.equal(projOff.desiredTrafficLimitBytes, 150n * gib, 'the ledger, not the column, carries the 50 GB');
   });
 
   it('ensureLiveResetEpoch: two concurrent same-window mints converge to one epoch without aborting the transaction (M1)', async () => {

@@ -123,8 +123,11 @@ export const SUBSCRIBER_MUTABLE_NOTIFICATION_TYPES = [
 const SUBSCRIBER_SWITCH_OF_TYPE: Readonly<Record<string, string>> = {
   addon_devices_ends_in_3_days: 'addon_ends_in_3_days',
   addon_devices_auto_ends_in_3_days: 'addon_ends_in_3_days',
+  // Traffic that ends with the traffic reset: the same two switches.
+  addon_reset_ends_in_3_days: 'addon_ends_in_3_days',
   addon_devices_ended: 'addon_ended',
   addon_devices_auto_ended: 'addon_ended',
+  addon_reset_ended: 'addon_ended',
 };
 
 /** The customer's switch for `type`: its canonical key, or the switch it shares. */

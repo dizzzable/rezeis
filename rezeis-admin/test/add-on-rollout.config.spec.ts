@@ -31,23 +31,32 @@ const RESET_VARIABLES = [
 ] as const;
 
 describe('add-on switches — the defaults', () => {
-  it('ship «Новый учёт докупок» and «Удалять лишние устройства автоматически» ON, «Докупка трафика до сброса» OFF', () => {
+  it('ship all three ON — «Докупка трафика до сброса» since 25.09.2026, once the reset instants matched live Remnawave', () => {
     // The whole table, keys included: a missing or an extra switch fails here
     // as surely as a flipped default.
     assert.deepEqual(
       { ...ADD_ON_SWITCH_DEFAULTS },
-      { durableAccounting: true, deviceCleanupAuto: true, trafficResetExpiry: false },
+      { durableAccounting: true, deviceCleanupAuto: true, trafficResetExpiry: true },
     );
     assert.deepEqual([...ADD_ON_SWITCH_NAMES], ['durableAccounting', 'deviceCleanupAuto', 'trafficResetExpiry']);
   });
 
-  it('run stages 1, 2 and 6 and no reset strategy while nothing is set, on the page or in .env', () => {
+  it('run stages 1, 2, 4 and 6 — every reset strategy — while nothing is set, on the page or in .env', () => {
     assert.deepEqual(resolveAddOnRolloutFlags({}, NO_ENV), {
       entitlementShadow: true,
       directPurchase: true,
       deviceCleanupAuto: true,
-      resetExpiry: { DAY: false, WEEK: false, MONTH: false, MONTH_ROLLING: false },
+      resetExpiry: { DAY: true, WEEK: true, MONTH: true, MONTH_ROLLING: true },
     });
+  });
+
+  it('keep stage 4 OFF where .env says so, over the new default and over a stored ON', () => {
+    const off = Object.fromEntries(RESET_VARIABLES.map((name) => [name, 'false']));
+    const none = { DAY: false, WEEK: false, MONTH: false, MONTH_ROLLING: false };
+    assert.deepEqual(resolveAddOnRolloutFlags({}, off).resetExpiry, none);
+    assert.deepEqual(resolveAddOnRolloutFlags({ trafficResetExpiry: true }, off).resetExpiry, none);
+    // A switch the operator turned off stays off too.
+    assert.deepEqual(resolveAddOnRolloutFlags({ trafficResetExpiry: false }, NO_ENV).resetExpiry, none);
   });
 
   it('read the seven variables of the three switches and nothing else: a line for a deleted stage decides nothing', () => {
@@ -183,7 +192,7 @@ describe('add-on switches — what the page shows', () => {
     assert.deepEqual(describeAddOnSwitches({ deviceCleanupAuto: false }, NO_ENV), [
       { name: 'durableAccounting', enabled: true, defaultEnabled: true, stored: null, env: [] },
       { name: 'deviceCleanupAuto', enabled: false, defaultEnabled: true, stored: false, env: [] },
-      { name: 'trafficResetExpiry', enabled: false, defaultEnabled: false, stored: null, env: [] },
+      { name: 'trafficResetExpiry', enabled: true, defaultEnabled: true, stored: null, env: [] },
     ]);
   });
 
@@ -273,7 +282,12 @@ describe('add-on switches — a change from the page', () => {
 
   it('never asks to turn a switch ON, or to keep an OFF switch OFF', () => {
     assert.deepEqual(
-      planAddOnSwitchUpdate({ stored: {}, changes: { trafficResetExpiry: true }, confirmOff: false, env: NO_ENV }),
+      planAddOnSwitchUpdate({
+        stored: { trafficResetExpiry: false },
+        changes: { trafficResetExpiry: true },
+        confirmOff: false,
+        env: NO_ENV,
+      }),
       { kind: 'WRITE', next: { trafficResetExpiry: true }, changed: ['trafficResetExpiry'] },
     );
     assert.deepEqual(
@@ -290,7 +304,7 @@ describe('add-on switches — a change from the page', () => {
   it('lists as changed only the switches whose value moves', () => {
     assert.deepEqual(
       planAddOnSwitchUpdate({
-        stored: { deviceCleanupAuto: false },
+        stored: { deviceCleanupAuto: false, trafficResetExpiry: false },
         changes: { durableAccounting: true, deviceCleanupAuto: true, trafficResetExpiry: true },
         confirmOff: false,
         env: NO_ENV,
@@ -300,6 +314,11 @@ describe('add-on switches — a change from the page', () => {
         next: { durableAccounting: true, deviceCleanupAuto: true, trafficResetExpiry: true },
         changed: ['deviceCleanupAuto', 'trafficResetExpiry'],
       },
+    );
+    // A switch already ON by default does not move when it is turned ON.
+    assert.deepEqual(
+      planAddOnSwitchUpdate({ stored: {}, changes: { trafficResetExpiry: true }, confirmOff: false, env: NO_ENV }),
+      { kind: 'WRITE', next: { trafficResetExpiry: true }, changed: [] },
     );
   });
 });
@@ -337,9 +356,14 @@ describe('add-on switches — the reader', () => {
 
 describe('reset capabilities', () => {
   it('open a strategy only while its stage-4 flag is on', () => {
-    const flags = resolveAddOnRolloutFlags({}, { ADDON_RESET_EXPIRY_MONTH: 'true', ADDON_RESET_EXPIRY_DAY: '1' });
+    const flags = resolveAddOnRolloutFlags(
+      { trafficResetExpiry: false },
+      { ADDON_RESET_EXPIRY_MONTH: 'true', ADDON_RESET_EXPIRY_DAY: '1' },
+    );
     assert.deepEqual(resolveResetCapabilities(flags), { DAY: 'ENABLED', MONTH: 'ENABLED' });
-    assert.deepEqual(resolveResetCapabilities(resolveAddOnRolloutFlags({}, NO_ENV)), {});
+    assert.deepEqual(resolveResetCapabilities(resolveAddOnRolloutFlags({ trafficResetExpiry: false }, NO_ENV)), {});
+    // The default: every strategy.
+    assert.equal(Object.keys(resolveResetCapabilities(resolveAddOnRolloutFlags({}, NO_ENV))).length, 4);
   });
 
   it('sell nothing «до следующего сброса» while direct purchase is off, and exactly the flag-pure map while it is on', () => {

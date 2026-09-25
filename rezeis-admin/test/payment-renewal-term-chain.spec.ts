@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
+import { resolveAddOnRolloutFlags } from '../src/modules/add-on-entitlements/add-on-rollout.config';
 import { PaymentSubscriptionMutationService } from '../src/modules/payments/services/payment-subscription-mutation.service';
 import { pinAddOnStagesOffForThisFile } from './helpers/rollout-flags';
 
@@ -220,12 +221,15 @@ describe('PaymentSubscriptionMutationService renewal term queue', () => {
       service as unknown as {
         scheduleRenewalTermInTransaction(
           txClient: unknown,
-          input: { subscriptionId: string; plan: unknown; durationDays: number },
+          input: { subscriptionId: string; plan: unknown; durationDays: number; flags: unknown },
         ): Promise<{ id: string; startsAt: Date; endsAt: Date | null } | null>;
       }
     ).scheduleRenewalTermInTransaction.bind(service);
 
     const created = await append(tx, {
+      // Inside a transaction the switches are never read: the caller hands
+      // down the snapshot it read before opening it (review R2b-07).
+      flags: resolveAddOnRolloutFlags(),
       subscriptionId: 'sub-1',
       plan: {
         id: 'plan-2',

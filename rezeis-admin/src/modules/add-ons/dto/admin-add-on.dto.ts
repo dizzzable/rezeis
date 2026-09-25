@@ -11,12 +11,40 @@ import {
   Max,
   MaxLength,
   Min,
+  Validate,
   ValidateIf,
   ValidateNested,
+  ValidationArguments,
+  ValidatorConstraint,
+  ValidatorConstraintInterface,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 
 import { INT4_MAX } from '../../points/points-cashback.util';
+
+/** The refusal, in both the DTO and the service: one sentence for whoever reads the API. */
+export const ADD_ON_RESET_LIFETIME_TRAFFIC_ONLY =
+  'Only a traffic add-on can last until the next traffic reset; device add-ons and traffic resets last until the end of the subscription';
+
+/**
+ * «До следующего сброса» is for TRAFFIC only. A device slot that ended at a
+ * traffic reset would be taken away at every reset — with automatic cleanup,
+ * the customer's newest device deleted — and a traffic reset has no lifetime
+ * at all. Refused when the same body names another type; the service holds
+ * the same rule against the stored type when the body names none
+ * (`AddOnsService`).
+ */
+@ValidatorConstraint({ name: 'ResetLifetimeIsForTraffic', async: false })
+export class ResetLifetimeIsForTrafficValidator implements ValidatorConstraintInterface {
+  public validate(value: unknown, validationArguments: ValidationArguments): boolean {
+    const type = (validationArguments.object as { readonly type?: unknown }).type;
+    return !(value === AddOnLifetime.UNTIL_NEXT_RESET && type !== undefined && type !== AddOnType.EXTRA_TRAFFIC);
+  }
+
+  public defaultMessage(): string {
+    return ADD_ON_RESET_LIFETIME_TRAFFIC_ONLY;
+  }
+}
 
 /**
  * How many units this add-on adds — whole GIGABYTES for `EXTRA_TRAFFIC`, whole
@@ -67,8 +95,14 @@ export class AdminAddOnCreateDto {
   @IsEnum(AddOnType)
   public type!: AddOnType;
 
+  /**
+   * Stored, but no longer what decides the sale: the panel sells traffic
+   * «до следующего сброса» on a plan that resets once stage 4 is on, and
+   * everything else «до конца подписки» (`resolveEffectiveAddOnLifetime`).
+   */
   @IsOptional()
   @IsEnum(AddOnLifetime)
+  @Validate(ResetLifetimeIsForTrafficValidator)
   public lifetime?: AddOnLifetime;
 
   /**
@@ -158,8 +192,10 @@ export class AdminAddOnUpdateDto {
   @IsEnum(AddOnType)
   public type?: AddOnType;
 
+  /** See {@link AdminAddOnCreateDto.lifetime}. */
   @IsOptional()
   @IsEnum(AddOnLifetime)
+  @Validate(ResetLifetimeIsForTrafficValidator)
   public lifetime?: AddOnLifetime;
 
   /**

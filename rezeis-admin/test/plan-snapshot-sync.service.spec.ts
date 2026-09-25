@@ -14,7 +14,7 @@ describe('PlanSnapshotSyncService', () => {
     const updatedSnapshots: unknown[] = [];
     const service = new PlanSnapshotSyncService();
 
-    const updatedCount = await service.syncPlanSnapshotMetadata(
+    const { updated: updatedCount } = await service.syncPlanSnapshotMetadata(
       {
         $queryRaw: async () => [
           {

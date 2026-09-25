@@ -18,6 +18,8 @@ import { InternalUserEdgeService } from '../src/modules/internal-user/services/i
  */
 const STUB_SETTINGS_SERVICE = {
   getInternalPlatformPolicy: async () => ({ accessMode: 'PUBLIC' as const }),
+  // The operator's «Часовой пояс», which «Мои опции» sends with its dates.
+  getPlatformBranding: async () => ({ timezone: 'Europe/Moscow' }),
 };
 const STUB_ACCESS_MODE_GUARD = { evaluate: () => null };
 
@@ -136,12 +138,14 @@ describe('InternalUserEdgeService activity feed', () => {
     assert.deepStrictEqual(state.subscriptionFindManyCalls, [
       { where: { userId: 'user-1' }, select: { id: true } },
     ]);
+    const include = { expiryEpoch: { select: { plannedEndsAt: true } } };
     assert.deepStrictEqual(state.entitlementFindManyCalls, [
       {
         where: {
           subscriptionId: { in: ['sub-1'] },
           state: { in: ['ACTIVE', 'EXPIRING'] },
         },
+        include,
         orderBy: { purchasedAt: 'desc' },
       },
       {
@@ -149,6 +153,7 @@ describe('InternalUserEdgeService activity feed', () => {
           subscriptionId: { in: ['sub-1'] },
           state: { notIn: ['ACTIVE', 'EXPIRING'] },
         },
+        include,
         orderBy: { purchasedAt: 'desc' },
         take: 99,
       },
@@ -170,9 +175,64 @@ describe('InternalUserEdgeService activity feed', () => {
           purchasedAt: '2026-04-20T00:00:00.000Z',
           activatedAt: '2026-04-20T00:00:00.000Z',
           expiresAt: null,
+          endsBound: null,
+          resetAt: null,
+        },
+      ],
+      displayTimeZone: 'Europe/Moscow',
+    });
+  });
+
+  it('says which bound ends each add-on, and names the reset a reset-bound one runs up to', async () => {
+    const reset = new Date('2026-10-01T00:20:00.000Z');
+    const state = createState({
+      liveEntitlements: [
+        {
+          ...createEntitlement(),
+          id: 'ent-reset',
+          lifetime: 'UNTIL_NEXT_RESET',
+          expiresAt: new Date('2026-10-01T00:50:00.000Z'),
+          expiryEpoch: { plannedEndsAt: reset },
+        },
+        {
+          // Cut short by the subscription's end, before the reset.
+          ...createEntitlement(),
+          id: 'ent-capped',
+          lifetime: 'UNTIL_NEXT_RESET',
+          expiresAt: new Date('2026-09-28T12:00:00.000Z'),
+          expiryEpoch: { plannedEndsAt: reset },
+        },
+        {
+          // The subscription ends ten minutes after the reset: before the
+          // half hour at which a reset add-on is taken off, so its end is
+          // the subscription's, not the reset's.
+          ...createEntitlement(),
+          id: 'ent-capped-after-reset',
+          lifetime: 'UNTIL_NEXT_RESET',
+          expiresAt: new Date('2026-10-01T00:30:00.000Z'),
+          expiryEpoch: { plannedEndsAt: reset },
+        },
+        {
+          ...createEntitlement(),
+          id: 'ent-term',
+          lifetime: 'UNTIL_SUBSCRIPTION_END',
+          expiresAt: new Date('2026-11-01T00:00:00.000Z'),
+          expiryEpoch: null,
         },
       ],
     });
+    const service = buildService(createPrismaDouble(state));
+
+    const result = await service.listAddOnEntitlements('12345');
+
+    const byId = new Map(result.entitlements.map((row) => [row.id, row]));
+    assert.equal(byId.get('ent-reset')?.endsBound, 'reset');
+    assert.equal(byId.get('ent-reset')?.resetAt, '2026-10-01T00:20:00.000Z');
+    assert.equal(byId.get('ent-capped')?.endsBound, 'subscription_end');
+    assert.equal(byId.get('ent-capped')?.resetAt, null);
+    assert.equal(byId.get('ent-capped-after-reset')?.endsBound, 'subscription_end');
+    assert.equal(byId.get('ent-term')?.endsBound, 'subscription_end');
+    assert.equal(byId.get('ent-term')?.resetAt, null);
   });
 
   it('keeps an older live entitlement when more than 100 newer terminal rows exist', async () => {
@@ -303,13 +363,14 @@ function createEntitlement() {
     type: 'EXTRA_TRAFFIC',
     valuePerUnit: 50,
     quantity: 1,
-    lifetime: 'UNTIL_SUBSCRIPTION_END',
+    lifetime: 'UNTIL_SUBSCRIPTION_END' as 'UNTIL_SUBSCRIPTION_END' | 'UNTIL_NEXT_RESET',
     state: 'ACTIVE',
     currency: Currency.USD,
     totalAmount: { toString: (): string => '2.50' },
     purchasedAt: new Date('2026-04-20T00:00:00.000Z'),
     activatedAt: new Date('2026-04-20T00:00:00.000Z'),
-    expiresAt: null,
+    expiresAt: null as Date | null,
+    expiryEpoch: null as { plannedEndsAt: Date } | null,
   };
 }
 

@@ -75,6 +75,9 @@ function buildController(
       partner: { findUnique: async () => null },
       webAccount: { findFirst: async () => null },
       partnerReferral: { findFirst: async () => null },
+      // The card's add-on line and the operator's zone: none here.
+      addOnEntitlement: { findMany: async () => [] },
+      settings: { findUnique: async () => null },
     } as never,
     {} as never,
     {} as never,

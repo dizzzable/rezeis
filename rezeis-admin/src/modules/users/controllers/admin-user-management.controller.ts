@@ -85,9 +85,11 @@ import { UpdatePartnerSettingsDto } from '../dto/update-partner-settings.dto';
 import { UpdateUserInviteSettingsDto } from '../dto/update-user-invite-settings.dto';
 import { DeviceIntelligenceService } from '../../device-intelligence/services/device-intelligence.service';
 import { UserIpObservationService } from '../../device-intelligence/services/user-ip-observation.service';
+import { readPlatformBranding } from '../../settings/utils/platform-branding.util';
 import { UserBlockService } from '../services/user-block.service';
 import { UserDeletionService } from '../services/user-deletion.service';
 import { resolveIdentityKind } from '../utils/identity-kind.util';
+import { readTrafficAddOnShares } from '../utils/subscription-traffic-add-ons.util';
 
 @Controller('admin/users')
 @UseGuards(AdminJwtAuthGuard, RbacGuard)
@@ -401,6 +403,13 @@ export class AdminUserManagementController {
         },
       },
     });
+    // What part of each subscription's traffic limit is an add-on with an end
+    // of its own, shown next to the limit, with its end in the operator's
+    // zone — so a total is never typed around it unknowingly.
+    const [trafficAddOns, settingsRow] = await Promise.all([
+      readTrafficAddOnShares(this.prismaService, subscriptions.map((subscription) => subscription.id)),
+      this.prismaService.settings.findUnique({ where: { id: 1 }, select: { platformPolicy: true } }),
+    ]);
     const hasReferralAttribution = referral !== null;
     const hasPartnerAttribution = partnerReferral !== null;
     const attachReferrerReason = hasReferralAttribution
@@ -468,8 +477,12 @@ export class AdminUserManagementController {
           ...s,
           expireAt: s.expiresAt?.toISOString(),
           plan: s.planSnapshot,
+          /** The ACTIVE traffic add-ons inside `trafficLimit`; `null` when there are none. */
+          trafficAddOns: trafficAddOns.get(s.id) ?? null,
         })),
       ),
+      /** The panel's «Часовой пояс» (Settings → «Платформа»), IANA; `null` = not set, UTC. */
+      displayTimeZone: readPlatformBranding(settingsRow?.platformPolicy ?? null).timezone,
       transactions: transactions.map((t) => ({
         ...t,
         amount: t.amount.toString(),
