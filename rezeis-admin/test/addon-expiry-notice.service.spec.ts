@@ -606,4 +606,18 @@ describe('«Купить снова» on the subscription the notice is about', 
     );
     assert.equal(pushed[0]?.url, '/addons?subscriptionId=sub-1');
   });
+
+  it('«Докупка не применена» shares the prefix but opens support from the push, not the add-on page of a subscription that is no longer active', async () => {
+    const { service, pushed } = relayingService({
+      buttons: [{ labelRu: '💬 Поддержка', kind: 'webApp', target: '/support' }],
+    });
+    const payload = { addon: 'Трафик +50 ГБ', subscriptionId: 'sub-1', paymentId: 'pay-1' };
+    const notice = await service.createInTransaction(
+      { userNotificationEvent: { create: async () => ({ id: 'evt-2', userId: 'u-1', type: 'addon_not_applied', payload }) } } as never,
+      { userId: 'u-1', type: 'addon_not_applied', payload },
+    );
+    await notice.deliver();
+
+    assert.equal(pushed[0]?.url, '/support');
+  });
 });

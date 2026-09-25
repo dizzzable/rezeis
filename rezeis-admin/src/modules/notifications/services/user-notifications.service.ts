@@ -17,6 +17,7 @@ import { BotNotifierClient, NotifyButton } from './bot-notifier.client';
 import { ReiwaRelayQueueService } from './reiwa-relay-queue.service';
 import { TelegramDirectQueueService } from './telegram-direct-queue.service';
 import { NotificationTemplatesService } from './notification-templates.service';
+import { ADD_ON_NOT_APPLIED_NOTICE_TYPE } from '../catalog/default-templates.catalog';
 import {
   isNotificationDeliveryEnabled,
   isSubscriberMailableType,
@@ -2353,7 +2354,11 @@ function linkButtonsToSubscription(buttons: NotifyButton[], payload: unknown): N
   });
 }
 
-/** A dated add-on's notice (`AddOnExpiryNoticeService`): all six of its types. */
+/**
+ * A dated add-on's notice (`AddOnExpiryNoticeService`): all six of its types.
+ * «Докупка не применена» shares the prefix; `resolveNotificationPushUrl` sends
+ * it elsewhere before it asks this.
+ */
 function isAddOnNoticeType(type: string): boolean {
   return resolveToggleKey(type).startsWith('addon_');
 }
@@ -2429,6 +2434,11 @@ function offerTrafficTopUpForLifetime(
  */
 function resolveNotificationPushUrl(type: string, payload?: unknown): string {
   if (resolveToggleKey(type) === 'connect_help') return connectHelpPushUrl(payload);
+  // «Докупка не применена»: «мы разберёмся и свяжемся с вами» — support, the
+  // page its «💬 Поддержка» button opens. Ahead of the add-on branch, whose
+  // prefix it shares: the add-on page of a subscription that is no longer
+  // active has nothing for it.
+  if (resolveToggleKey(type) === ADD_ON_NOT_APPLIED_NOTICE_TYPE) return '/support';
   // «Трафик исчерпан» for a subscription that is never renewed and can buy
   // nothing that brings traffic back (N1 gap 4): not an empty add-on page, and
   // not the renewal it cannot take — the dashboard, like any other notice.

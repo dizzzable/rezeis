@@ -38,6 +38,15 @@ describe('notification-target-resolver', () => {
       assert.equal(resolveTerminalRouteFor('connect_help_trial'), '/dashboard');
     });
 
+    it('routes «Докупка не применена» to /support, not to the add-on page its prefix would pick', () => {
+      assert.equal(resolveTerminalRouteFor('addon_not_applied'), '/support');
+      assert.equal(resolveTerminalRouteFor('addon_ended'), '/addons');
+    });
+
+    it('files «Докупка не применена» with the subscription notices, like the other add-on notices', () => {
+      assert.equal(resolveNotificationCategory('addon_not_applied'), 'expires');
+    });
+
     it('falls back to /dashboard for unknown types', () => {
       assert.equal(resolveTerminalRouteFor('user_registered'), '/dashboard');
       assert.equal(resolveTerminalRouteFor('node_status'), '/dashboard');
