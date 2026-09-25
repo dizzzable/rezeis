@@ -143,6 +143,20 @@ const REMNAWAVE_ID_REQUIRED_MESSAGE =
   'A valid Remnawave profile identifier is required: the numeric profile id shown by panel 3.x';
 
 /**
+ * «Привязать профиль» lost the race: the row's link changed between this
+ * endpoint's read and its write — the automatic link check links rows by
+ * itself. In Russian, because the operator must read it as written: the safe
+ * filter scrubs a 4xx message carrying the English word for a profile.
+ */
+const REMNAWAVE_LINK_CHANGED_MESSAGE =
+  'Привязка этой подписки к Remnawave изменилась, пока шла проверка (например, её только что записала ' +
+  'автоматическая проверка привязки). Ничего не изменено — обновите страницу и посмотрите, какая привязка ' +
+  'у подписки сейчас.';
+
+/** The duplicate guard's refusal, before the panel read's answer is written and again under the lock. */
+const REMNAWAVE_PROFILE_TAKEN_MESSAGE = 'This Remnawave profile is already linked to another subscription';
+
+/**
  * The panel profile's numeric id as established by a verification read, or
  * `null` when this read cannot establish it.
  *
@@ -1032,7 +1046,7 @@ export class AdminUserSubscriptionsController {
       select: { id: true },
     });
     if (alreadyLinked !== null) {
-      throw new BadRequestException('This Remnawave profile is already linked to another subscription');
+      throw new BadRequestException(REMNAWAVE_PROFILE_TAKEN_MESSAGE);
     }
 
     // ── Whose profile it is, decided in this order ──────────────────────────
@@ -1088,25 +1102,52 @@ export class AdminUserSubscriptionsController {
       );
     }
 
-    const linked = await this.prismaService.subscription.update({
-      where: { id: subscriptionId },
-      data: {
-        remnawaveId,
-        // The verification read above already handed us the numeric id and the
-        // panel's own username, so record them with the link. A repair done on
-        // a 2.x panel that stored the uuid ALONE would leave exactly the row
-        // that becomes unaddressable the day the operator upgrades to 3.x —
-        // which is the situation this endpoint exists to get people out of.
-        // `?? undefined` so a panel that omitted a field leaves the stored one
-        // alone rather than clearing it.
-        remnawavePanelId: panelUser.panelId ?? undefined,
-        remnawavePanelUsername: panelUser.username || undefined,
-        configUrl: panelUser.subscriptionUrl || subscription.configUrl,
-        // Linked: nothing is left for a CREATE to look for under the name its
-        // last attempt recorded (`ProfileSyncProcessor.handleCreate`).
-        remnawavePendingUsername: null,
-        remnawavePendingOwnerId: null,
-      },
+    // ── The write: the same mutual exclusion every link writer takes ────────
+    //
+    // Between the read of the row above and this write sits a panel
+    // round-trip, and the automatic link check links rows by itself — the walk
+    // and the comparison, each under the profile advisory lock and a
+    // compare-and-swap. An unconditional write here replaced a numeric link one
+    // of them had just written, and without the lock it could also land a
+    // profile on a second row. So: the same lock, `persistProfileLink`'s key;
+    // the duplicate question asked again under it; and a write that happens
+    // only while the row still holds the link that was read — otherwise 409,
+    // and the operator reloads to see what it holds now.
+    const linked = await this.prismaService.$transaction(async (tx) => {
+      await tx.$executeRaw(Prisma.sql`
+        SELECT pg_advisory_xact_lock(hashtext(${`remnawave-profile:${remnawaveId}`})::bigint)
+      `);
+      const takenMeanwhile = await tx.subscription.findFirst({
+        where: { OR: namesSameProfile, NOT: { id: subscriptionId } },
+        select: { id: true },
+      });
+      if (takenMeanwhile !== null) {
+        throw new BadRequestException(REMNAWAVE_PROFILE_TAKEN_MESSAGE);
+      }
+      const written = await tx.subscription.updateMany({
+        where: { id: subscriptionId, remnawaveId: subscription.remnawaveId },
+        data: {
+          remnawaveId,
+          // The verification read above already handed us the numeric id and the
+          // panel's own username, so record them with the link. A repair done on
+          // a 2.x panel that stored the uuid ALONE would leave exactly the row
+          // that becomes unaddressable the day the operator upgrades to 3.x —
+          // which is the situation this endpoint exists to get people out of.
+          // `?? undefined` so a panel that omitted a field leaves the stored one
+          // alone rather than clearing it.
+          remnawavePanelId: panelUser.panelId ?? undefined,
+          remnawavePanelUsername: panelUser.username || undefined,
+          configUrl: panelUser.subscriptionUrl || subscription.configUrl,
+          // Linked: nothing is left for a CREATE to look for under the name its
+          // last attempt recorded (`ProfileSyncProcessor.handleCreate`).
+          remnawavePendingUsername: null,
+          remnawavePendingOwnerId: null,
+        },
+      });
+      if (written.count !== 1) {
+        throw new ConflictException(REMNAWAVE_LINK_CHANGED_MESSAGE);
+      }
+      return tx.subscription.findUniqueOrThrow({ where: { id: subscriptionId } });
     });
     await this.auditLog(admin, req, 'user.subscription.remnawave_linked', {
       userId: subscription.userId,

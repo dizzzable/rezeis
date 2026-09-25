@@ -20,17 +20,16 @@
  * it decodes through our own tolerant `mapExternalSquadDetails` instead of the
  * vendor schema. These decoders extend that shape to the option and status
  * reads, which need `{ uuid, name }` and a handful of booleans respectively —
- * nothing that any panel era has ever spelled differently.
+ * nothing any 3.x release spells differently.
  *
- * BOTH ERAS BY CONSTRUCTION. A panel that reports 2.x is refused only through
- * the contract-driven clients (`LegacyPanelRefusal` in `panel-transport.ts`),
- * `PanelInfraClient`'s squad reads among them; the same reads made by
- * `remnawave-api.service.ts` still reach it, as they reach every 3.x panel.
- * These decoders read only fields present and identically spelled in every
- * era, so there is nothing here to narrow. The renamed field is simply never
- * consulted. Pinned per era, against fixtures derived mechanically from the
- * vendor's own OpenAPI documents, by
- * `test/remnawave-squad-status-era-decode.spec.ts`.
+ * EVERY 3.x RELEASE BY CONSTRUCTION. A panel that reports 2.x is refused on
+ * every path — the contract-driven clients (`LegacyPanelRefusal` in
+ * `panel-transport.ts`) and `remnawave-api.service.ts` (`refuseIfPanelTooOld`)
+ * alike — so these reads only ever meet a 3.x panel. They read only fields
+ * present and identically spelled in every 3.x release, so there is nothing
+ * here to narrow; the renamed field is simply never consulted. Pinned per
+ * release, against fixtures derived mechanically from the vendor's own OpenAPI
+ * documents, by `test/remnawave-squad-status-era-decode.spec.ts`.
  *
  * TOLERANT IS NOT CREDULOUS — the rule this module exists to enforce. Two
  * outcomes wear the same clothes and must never be collapsed:
@@ -62,7 +61,7 @@ export type PanelReadResult<T> =
   | { readonly ok: true; readonly value: T }
   | { readonly ok: false; readonly reason: string };
 
-/** Which list a squad payload is expected to carry. Spelled identically in every era. */
+/** Which list a squad payload is expected to carry. Spelled identically in every 3.x release. */
 export type PanelSquadListKey = 'internalSquads' | 'externalSquads';
 
 /** The part of {@link RemnawaveStatusInterface} the panel actually answers. */
@@ -166,11 +165,11 @@ export function decodeSquadOptionList(
  * is asked, so they must be READ, not guessed: defaulting an unreadable one to
  * `false` would tell an operator "the panel has login switched off" when the
  * truth is "we could not tell", and the admin SPA renders that as fact. Both
- * are booleans in every era; anything else fails the read.
+ * are booleans in every 3.x release; anything else fails the read.
  *
  * `authentication` and `branding` decorate a login screen. Absent or explicitly
- * `null` means the panel published no such block — a legitimate answer both
- * eras declare — and produces `null`. Present-but-not-an-object is a shape we
+ * `null` means the panel published no such block — a legitimate answer the
+ * 3.x specs declare — and produces `null`. Present-but-not-an-object is a shape we
  * did not understand and fails the read. Inside a present block, individual
  * sub-fields degrade quietly: a provider map entry that is not a boolean is
  * dropped rather than failing the whole status read, since a future panel

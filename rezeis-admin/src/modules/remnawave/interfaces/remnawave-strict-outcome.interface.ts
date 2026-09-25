@@ -10,7 +10,7 @@
  *
  *  - `ok`             — validated value; `detectedVersion` records the panel
  *                       build when derivable (else `null`), so callers can log
- *                       which 2.7.4/2.8.0 wire shape they saw.
+ *                       which panel build answered.
  *  - `notFound`       — the target user/device is absent (HTTP 404). For a
  *                       delete this is only idempotent-success once a strict
  *                       read-back proves the absence.
@@ -77,17 +77,15 @@ export function describeStrictOutcome(outcome: RemnawaveStrictOutcome<unknown>):
 /** A strict user snapshot with the canonical nullable-unlimited encoding. */
 export interface RemnawaveStrictUser {
   /**
-   * How this panel names the profile: a 2.x uuid, or a 3.x numeric id rendered
-   * in decimal. It is the identity as the ROW gave it, not a value converted
-   * from one era to the other.
+   * How the panel names the profile: its numeric id, in decimal — 3.x has no
+   * user uuid, and a row without a usable id is refused as `invalidContract`
+   * (`parseStrictUser`). The field keeps its old name.
    */
   readonly uuid: string;
   /**
-   * The panel's numeric id, present on every supported version. Carried so a
+   * The panel's numeric id — the number {@link uuid} spells. Carried so a
    * caller can back-fill `Subscription.remnawavePanelId` from a read it was
-   * making anyway — which is what keeps a 2.x-created profile addressable after
-   * the operator upgrades to 3.x and the panel drops the uuid column.
-   * `null` only when the panel omitted the field entirely.
+   * making anyway.
    */
   readonly panelId: number | null;
   readonly status: string;

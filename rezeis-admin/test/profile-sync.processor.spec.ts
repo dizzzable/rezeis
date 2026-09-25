@@ -2064,6 +2064,48 @@ describe('ProfileSyncProcessor', () => {
     data: { errorCode: 'A063', message: 'User with specified params not found' },
   } as const;
 
+  /** Another subscription row, with the columns the adopt path's lookups name. */
+  interface OtherSubscriptionRow {
+    readonly id: string;
+    readonly userId: string;
+    readonly status: SubscriptionStatus;
+    readonly remnawaveId?: string | null;
+    readonly remnawavePanelId?: number | null;
+    readonly remnawavePanelUsername?: string | null;
+  }
+
+  /** The `where` shapes the adopt path sends — anything else is refused loudly. */
+  interface SubscriptionWhereShape {
+    readonly id?: { readonly not?: string };
+    readonly status?: { readonly not?: SubscriptionStatus };
+    readonly OR?: ReadonlyArray<Record<string, unknown>>;
+  }
+
+  /**
+   * `findFirst` over `rows` as PostgreSQL would answer it. A key this stub does
+   * not understand throws instead of being ignored: a stub that drops a
+   * condition cannot see the condition go missing from the product.
+   */
+  function firstMatchingRow(
+    rows: readonly OtherSubscriptionRow[],
+    where: SubscriptionWhereShape,
+  ): { id: string; userId: string } | null {
+    for (const key of Object.keys(where)) {
+      if (!['id', 'status', 'OR'].includes(key)) throw new Error(`unexpected where key '${key}'`);
+    }
+    const found = rows.find((row) => {
+      if (where.id?.not !== undefined && row.id === where.id.not) return false;
+      if (where.status?.not !== undefined && row.status === where.status.not) return false;
+      if (where.OR === undefined) return true;
+      return where.OR.some((claim) =>
+        Object.entries(claim).every(
+          ([column, value]) => (row as unknown as Record<string, unknown>)[column] === value,
+        ),
+      );
+    });
+    return found === undefined ? null : { id: found.id, userId: found.userId };
+  }
+
   interface CreateRunResult {
     readonly failureWrites: unknown[];
     readonly completedWrites: unknown[];
@@ -2085,6 +2127,15 @@ describe('ProfileSyncProcessor', () => {
     expectRejection?: boolean;
     /** The subscription the adopt path finds already live on the profile. */
     profileHolder?: { id: string; userId: string };
+    /**
+     * The OTHER subscription rows, asked through the `where` the processor
+     * sends — unlike `profileHolder`, which answers every lookup alike. With
+     * it, which claim found a holder (and which row status hid one) is part of
+     * what the test observes.
+     */
+    otherRows?: readonly OtherSubscriptionRow[];
+    /** Extra columns on the row being provisioned (its recorded names). */
+    row?: Record<string, unknown>;
     /** What the naming service offers when the primary name is somebody else's. */
     fallbackUsernames?: readonly string[];
   }): Promise<CreateRunResult> {
@@ -2118,6 +2169,7 @@ describe('ProfileSyncProcessor', () => {
               status: SubscriptionStatus.ACTIVE,
               expiresAt: new Date('2099-01-01T00:00:00.000Z'),
               planSnapshot: options.planSnapshot ?? {},
+              ...options.row,
               ...linked,
             },
           }),
@@ -2131,7 +2183,10 @@ describe('ProfileSyncProcessor', () => {
         subscription: {
           // The exclusivity lookup on the adopt path: "is another live
           // subscription already on this panel profile?"
-          findFirst: async () => options.profileHolder ?? null,
+          findFirst: async (input: { where: SubscriptionWhereShape }) =>
+            options.otherRows === undefined
+              ? options.profileHolder ?? null
+              : firstMatchingRow(options.otherRows, input.where),
           // The name recorded before the POST.
           updateMany: async () => ({ count: 1 }),
         },
@@ -2663,6 +2718,137 @@ describe('ProfileSyncProcessor', () => {
       'nothing new is created',
     );
     assert.equal(((linkWrites[0] as { data: Record<string, unknown> }).data)['remnawaveId'], '1301');
+  });
+
+  // ── The subscription_id line meets a live holder (review R2b-01) ─────────
+  //
+  // The «Дубль после импорта» pair: subscription-1 is the older half whose
+  // link was lost (the 19.08 defect: `remnawave_id` NULL while the stored name
+  // and config URL still name profile 1203); subscription-2 was minted for 1203
+  // by an import and links it numerically. Every ordinary UPDATE of
+  // subscription-2 writes ITS `subscription_id` line into 1203's description,
+  // so the line and the holder always arrive together — the two cases above
+  // each carry only one of them.
+
+  const pairProfile = {
+    status: 200,
+    data: {
+      response: {
+        id: 1203,
+        username: 'rz_login_sub',
+        subscriptionUrl: 'https://sub/taken',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        description: 'name: Test\nreiwa_id: user-1\nsubscription_id: subscription-2',
+      },
+    },
+  };
+  const mintedProfile = {
+    status: 200,
+    data: {
+      response: {
+        id: 1302,
+        username: 'rz_login_9c1d_sub',
+        subscriptionUrl: 'https://sub/new',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        description: 'name: Test\nreiwa_id: user-1\nsubscription_id: subscription-1',
+      },
+    },
+  };
+  /** The live half: linked to 1203 by id and by the name the link recorded. */
+  const liveHalf: OtherSubscriptionRow = {
+    id: 'subscription-2',
+    userId: 'user-1',
+    status: SubscriptionStatus.ACTIVE,
+    remnawaveId: '1203',
+    remnawavePanelId: 1203,
+    remnawavePanelUsername: 'rz_login_sub',
+  };
+  const respondToPair = (request: PanelRequest) => {
+    if (request.url === '/api/users/by-username/rz_login_sub') return pairProfile;
+    if (request.url.startsWith('/api/users/by-username/')) return USER_NOT_FOUND;
+    return mintedProfile;
+  };
+  const postsOf = (requests: PanelRequest[]) =>
+    requests.filter((request) => request.method.toLowerCase() === 'post' && request.url === '/api/users/');
+  const lastErrorOf = (failureWrites: unknown[]) =>
+    String((failureWrites[0] as { data: { lastError?: unknown } }).data.lastError);
+
+  it("R2b-01: under the row's own STORED name, a profile a live sibling holds is contested even though its subscription_id line names that sibling", async () => {
+    const { linkWrites, failureWrites, errorEvents, requests } = await runCreate({
+      attempts: PROFILE_SYNC_MAX_ATTEMPTS - 1,
+      row: { remnawavePanelUsername: 'rz_login_sub', configUrl: 'https://sub/taken' },
+      otherRows: [liveHalf],
+      fallbackUsernames: ['rz_login_9c1d_sub'],
+      respond: respondToPair,
+    });
+
+    assert.deepEqual(postsOf(requests), [], 'no second live profile is minted for the pair');
+    assert.deepEqual(linkWrites, []);
+    assert.equal(recordedClassification(failureWrites), 'TERMINAL');
+    assert.match(
+      lastErrorOf(failureWrites),
+      /Refusing to link Remnawave profile '1203' to subscription subscription-1: subscription subscription-2 \(user user-1\) is already live on it/,
+    );
+    assert.equal(errorEvents.length, 1, 'the operator is told, as before the line existed');
+  });
+
+  it("R2b-01: under the name the row's own last CREATE recorded, a profile a live sibling holds is contested as well", async () => {
+    const { linkWrites, failureWrites, requests } = await runCreate({
+      attempts: PROFILE_SYNC_MAX_ATTEMPTS - 1,
+      // Today's rule names something else; only the recorded name finds 1203.
+      username: 'rz_login_2_sub',
+      row: { remnawavePendingUsername: 'rz_login_sub', remnawavePendingOwnerId: 'user-1' },
+      otherRows: [liveHalf],
+      fallbackUsernames: ['rz_login_9c1d_sub'],
+      respond: respondToPair,
+    });
+
+    assert.deepEqual(postsOf(requests), []);
+    assert.deepEqual(linkWrites, []);
+    assert.equal(recordedClassification(failureWrites), 'TERMINAL');
+    assert.match(lastErrorOf(failureWrites), /subscription subscription-2 \(user user-1\) is already live on it/);
+  });
+
+  it('R2b-01: under its own stored name, a profile marked for another subscription that NO live row is on is still not adopted — a profile of its own is made', async () => {
+    // The marked subscription was deleted without its profile going with it
+    // (profile deletion switched off, or its link cleared first). Nothing live
+    // is on 1203, so a new profile cannot put two rows on one; adopting it
+    // would give the profile to a subscription its line does not name, which
+    // no automatic link does. 1203 stays listed under «Лишние профили».
+    const { linkWrites, failureWrites, requests } = await runCreate({
+      expectRejection: false,
+      row: { remnawavePanelUsername: 'rz_login_sub', configUrl: 'https://sub/taken' },
+      otherRows: [{ ...liveHalf, status: SubscriptionStatus.DELETED }],
+      fallbackUsernames: ['rz_login_9c1d_sub'],
+      respond: respondToPair,
+    });
+
+    assert.equal(failureWrites.length, 0);
+    const posts = postsOf(requests);
+    assert.equal(posts.length, 1);
+    assert.equal((posts[0].data as Record<string, unknown>)['username'], 'rz_login_9c1d_sub');
+    assert.equal(linkWrites.length, 1);
+    assert.equal(((linkWrites[0] as { data: Record<string, unknown> }).data)['remnawaveId'], '1302');
+  });
+
+  it('R2b-01 control: under a COMPUTED name only, the line still wins over a live holder — a profile of its own is made', async () => {
+    // Today's rule, the login-first rule and the fallbacks are names this row
+    // never recorded; another subscription of the customer's may carry one of
+    // them legitimately (an import that back-dates a row moves every ordinal
+    // after it). So a profile marked for that subscription is skipped there,
+    // held or not, and only the row's own recorded names ask about the holder.
+    const { linkWrites, failureWrites, requests } = await runCreate({
+      expectRejection: false,
+      otherRows: [liveHalf],
+      fallbackUsernames: ['rz_login_9c1d_sub'],
+      respond: respondToPair,
+    });
+
+    assert.equal(failureWrites.length, 0);
+    const posts = postsOf(requests);
+    assert.equal(posts.length, 1);
+    assert.equal((posts[0].data as Record<string, unknown>)['username'], 'rz_login_9c1d_sub');
+    assert.equal(((linkWrites[0] as { data: Record<string, unknown> }).data)['remnawaveId'], '1302');
   });
 
   // ── Live 400 #3: PATCH /api/users only accepts ACTIVE | DISABLED ──────────

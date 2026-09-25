@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { performance } from 'node:perf_hooks';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 
 import { SubscriptionStatus } from '@prisma/client';
@@ -35,10 +36,36 @@ class FakeCache {
   public readonly claims: Array<{ key: string; ttl: number }> = [];
   public ready = true;
   public failWrites = false;
+  private readonly pausedGets = new Map<string, { reached: () => void; released: Promise<void> }>();
+
+  /**
+   * Holds the NEXT `get` of `key` right after it has read the value, until
+   * `release` — a read-then-write caught between its two halves, which is the
+   * whole shape of a lost or resurrected request.
+   */
+  pauseNextGet(key: string): { readonly reached: Promise<void>; readonly release: () => void } {
+    let reached!: () => void;
+    let release!: () => void;
+    const reachedPromise = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.pausedGets.set(key, { reached, released });
+    return { reached: reachedPromise, release };
+  }
 
   async get<T>(key: string): Promise<T | null> {
     if (!this.ready) return null;
-    return (this.store.has(key) ? structuredClone(this.store.get(key)) : null) as T | null;
+    const value = (this.store.has(key) ? structuredClone(this.store.get(key)) : null) as T | null;
+    const pause = this.pausedGets.get(key);
+    if (pause !== undefined) {
+      this.pausedGets.delete(key);
+      pause.reached();
+      await pause.released;
+    }
+    return value;
   }
   async set(key: string, value: unknown, ttl?: number): Promise<void> {
     if (this.failWrites) throw new Error('Redis write failed');
@@ -49,8 +76,10 @@ class FakeCache {
   async del(key: string): Promise<void> {
     this.store.delete(key);
   }
+  /** GET and DEL in one step, as `RawCacheService.take` runs them (MULTI): nothing lands in between. */
   async take<T>(key: string): Promise<T | null> {
-    const value = await this.get<T>(key);
+    if (!this.ready) return null;
+    const value = (this.store.has(key) ? structuredClone(this.store.get(key)) : null) as T | null;
     this.store.delete(key);
     return value;
   }
@@ -250,6 +279,18 @@ function settle(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
+/** The claims of the pass lock alone — a pass also leases the import requests. */
+function lockClaims(cache: FakeCache): Array<{ key: string; ttl: number }> {
+  return cache.claims.filter((claim) => claim.key === PANEL_LINK_CHECK_KEYS.lock);
+}
+
+/** The imports each «После импорта…» card named, card by card. */
+function namedImports(test: Rig): string[][] {
+  return test.events
+    .filter((event) => event.metadata['reason'] === 'links_unproven_after_import')
+    .map((event) => [...(event.metadata['importRecordIds'] as string[])].sort());
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 
 describe('PanelLinkCheckService — worker only', () => {
@@ -384,7 +425,7 @@ describe('PanelLinkCheckService — never two at once', () => {
 
     await test.service.run('daily');
 
-    assert.deepEqual(test.cache.claims, [
+    assert.deepEqual(lockClaims(test.cache), [
       { key: PANEL_LINK_CHECK_KEYS.lock, ttl: PANEL_LINK_CHECK_LOCK_TTL_SECONDS },
     ]);
     assert.equal(test.cache.store.has(PANEL_LINK_CHECK_KEYS.lock), false);
@@ -418,7 +459,7 @@ describe('PanelLinkCheckService — never two at once', () => {
     await settle();
     assert.equal(await test.service.run('daily'), 'busy');
     assert.equal(await test.service.tick(), 'busy');
-    assert.equal(test.cache.claims.length, 1, 'the second call does not even reach for the lock');
+    assert.equal(lockClaims(test.cache).length, 1, 'the second call does not even reach for the lock');
     release();
     assert.equal(await first, 'ran');
     assert.equal(test.walks.length, 1);
@@ -701,6 +742,89 @@ describe('PanelLinkCheckService — after a backup import', () => {
     await test.service.run('daily');
 
     assert.deepEqual(test.events, []);
+  });
+});
+
+/**
+ * THE REQUESTS AND THE LOCK ARE SHARED BY PROCESSES (review R2b-06). An import
+ * records its request from whichever process ran it while the worker's pass
+ * takes them, and a pass that outlives its lock's TTL finishes after the next
+ * holder has taken it. A read-then-write of the request list lost one of two
+ * requests, or put an answered one back; a plain `del` deleted the next
+ * holder's lock.
+ */
+describe('PanelLinkCheckService — the requests and the lock under concurrency', () => {
+  // Bounded: a lease that is never given back must fail these cases, not hang them.
+  const bounded = { timeout: 10_000 };
+
+  it('R2b-06: two imports finishing together — neither request is lost, the card names both', bounded, async () => {
+    const test = rig();
+    test.db.population = [{ id: 'sub-a', userId: 'user-1', remnawaveId: null }];
+
+    const recorded = await Promise.all([
+      test.service.requestAfterImport({ importRecordId: 'imp-1', sourceType: 'remnashop' }),
+      test.service.requestAfterImport({ importRecordId: 'imp-2', sourceType: 'bedolaga' }),
+    ]);
+    await test.service.tick();
+
+    assert.deepEqual(recorded, [true, true]);
+    assert.deepEqual(namedImports(test), [['imp-1', 'imp-2']]);
+  });
+
+  it('R2b-06: a request taken while another import was recording its own is not answered twice', bounded, async () => {
+    const test = rig();
+    test.db.population = [{ id: 'sub-a', userId: 'user-1', remnawaveId: null }];
+    await test.service.requestAfterImport({ importRecordId: 'imp-1', sourceType: 'remnashop' });
+
+    // The second import has READ the list ([imp-1]) and stalls before writing it back.
+    const stalled = test.cache.pauseNextGet(PANEL_LINK_CHECK_KEYS.requests);
+    const second = test.service.requestAfterImport({ importRecordId: 'imp-2', sourceType: 'altshop' });
+    await stalled.reached;
+    // Meanwhile the worker's pass runs and takes whatever it may.
+    const pass = test.service.run('daily');
+    await settle();
+    await settle();
+    stalled.release();
+    assert.equal(await second, true);
+    await pass;
+    // And the next pass answers whatever is left.
+    await test.service.run('daily');
+
+    const named = namedImports(test).flat().sort();
+    assert.deepEqual(named, ['imp-1', 'imp-2'], 'each import is named on exactly one card');
+    assert.equal(test.cache.store.has(PANEL_LINK_CHECK_KEYS.requests), false, 'nothing is left to answer again');
+  });
+
+  it('R2b-06: a pass that outlived its lock does not delete the next holder\'s', bounded, async (context) => {
+    const test = rig();
+    let clock = 5_000_000;
+    context.mock.method(performance, 'now', () => clock);
+    test.walk = async () => {
+      // The pass runs past its lock's time-to-live: the key expires, and the
+      // next worker's pass takes the lock.
+      clock += (PANEL_LINK_CHECK_LOCK_TTL_SECONDS + 60) * 1000;
+      test.cache.store.delete(PANEL_LINK_CHECK_KEYS.lock);
+      assert.equal(await test.cache.claimOnce(PANEL_LINK_CHECK_KEYS.lock, PANEL_LINK_CHECK_LOCK_TTL_SECONDS), true);
+      return report();
+    };
+
+    assert.equal(await test.service.run('daily'), 'ran');
+
+    assert.equal(test.cache.store.has(PANEL_LINK_CHECK_KEYS.lock), true, "the next holder's lock stands");
+  });
+
+  it('R2b-06 control: a pass that finished inside its lock gives it back', bounded, async (context) => {
+    const test = rig();
+    let clock = 5_000_000;
+    context.mock.method(performance, 'now', () => clock);
+    test.walk = async () => {
+      clock += (PANEL_LINK_CHECK_LOCK_TTL_SECONDS - 600) * 1000;
+      return report();
+    };
+
+    await test.service.run('daily');
+
+    assert.equal(test.cache.store.has(PANEL_LINK_CHECK_KEYS.lock), false);
   });
 });
 

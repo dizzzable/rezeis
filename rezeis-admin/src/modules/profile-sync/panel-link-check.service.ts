@@ -1,3 +1,6 @@
+import { performance } from 'node:perf_hooks';
+import { setTimeout as sleep } from 'node:timers/promises';
+
 import { Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { Prisma, SubscriptionStatus } from '@prisma/client';
@@ -42,6 +45,8 @@ export const PANEL_LINK_CHECK_KEYS = {
   state: 'panel-link-check:state',
   /** Backup imports that finished and still wait for their pass (and card). */
   requests: 'panel-link-check:requests',
+  /** Held for one change of `requests` — an append or a take — so no two changes interleave. */
+  requestsLease: 'panel-link-check:requests-lease',
   /** Why each row the walk could not prove was not proven. */
   verdicts: 'panel-link-check:verdicts',
   /** The last per-customer comparison. */
@@ -70,6 +75,48 @@ const STORED_TTL_SECONDS = 30 * 24 * 60 * 60;
 const REQUEST_TTL_SECONDS = 2 * 24 * 60 * 60;
 /** At most this many import requests wait at once; older ones are folded into the next pass anyway. */
 const MAX_PENDING_IMPORTS = 20;
+/** One change of the import requests holds their lease at most this long… */
+const REQUESTS_LEASE_TTL_SECONDS = 10;
+/** …and waits at most this long for it, polling. */
+const REQUESTS_LEASE_WAIT_MS = 2_000;
+const REQUESTS_LEASE_POLL_MS = 25;
+/**
+ * A lease is given back only while at least this much of its time-to-live is
+ * left — enough for the `DEL` to arrive before the key could expire by itself.
+ */
+const LEASE_RELEASE_MARGIN_MS = 5_000;
+
+/**
+ * A LEASE: a key taken with `SET NX EX` (`RawCacheService.claimOnce`), which no
+ * one else can take until it expires by itself.
+ *
+ * WHY THE RELEASE READS A CLOCK. Given back with a plain `DEL`, a holder that
+ * outlived the time-to-live deleted the NEXT holder's key — and two passes ran
+ * at once. A per-holder token compared and deleted in one step would say "is it
+ * still mine?"; the cache wrapper offers no such step (no script, no
+ * WATCH/MULTI). The lease's own clock answers the same question: before the
+ * key expires nobody else can hold it, so it is still this holder's; after,
+ * it may not be, and it is left to expire. `startedAt` is read on the monotonic
+ * clock BEFORE the claim is sent, so the key is never older than this lease
+ * believes.
+ */
+interface Lease {
+  readonly key: string;
+  readonly ttlSeconds: number;
+  readonly startedAt: number;
+}
+
+async function claimLease(cache: RawCacheService, key: string, ttlSeconds: number): Promise<Lease | null> {
+  const startedAt = performance.now();
+  return (await cache.claimOnce(key, ttlSeconds)) ? { key, ttlSeconds, startedAt } : null;
+}
+
+/** Gives the lease back if it is certainly still held; `false` when it was left to expire. */
+async function releaseLease(cache: RawCacheService, lease: Lease): Promise<boolean> {
+  if (performance.now() - lease.startedAt >= lease.ttlSeconds * 1000 - LEASE_RELEASE_MARGIN_MS) return false;
+  await cache.del(lease.key);
+  return true;
+}
 
 /**
  * The backup importers that WRITE `remnawave_id` — Remnashop, Altshop,
@@ -215,9 +262,12 @@ function readImportRequests(raw: unknown): ImportRequest[] {
  *
  * In one process a flag; across processes a Redis lock (`SET NX EX`,
  * {@link PANEL_LINK_CHECK_LOCK_TTL_SECONDS}), released at the end of the pass
- * and expiring by itself if the holder dies. A pass that finds the lock taken
+ * — only while it is certainly still this pass's ({@link Lease}) — and
+ * expiring by itself if the holder dies. A pass that finds the lock taken
  * does nothing and leaves the import requests where they are, so the holder's
- * next tick — or the next worker's — picks them up.
+ * next tick — or the next worker's — picks them up. The request list itself
+ * changes only under a short lease of its own: an import's append and a
+ * pass's take never interleave.
  *
  * ── BOUNDED ───────────────────────────────────────────────────────────────
  *
@@ -299,13 +349,26 @@ export class PanelLinkCheckService implements OnApplicationBootstrap {
   }): Promise<boolean> {
     if (!IMPORT_SOURCES_THAT_LINK.has(input.sourceType)) return false;
     try {
-      const pending = readImportRequests(await this.cache.get<unknown>(PANEL_LINK_CHECK_KEYS.requests));
-      const next = [
-        ...pending.filter((request) => request.importRecordId !== input.importRecordId),
-        { importRecordId: input.importRecordId, sourceType: input.sourceType, requestedAt: new Date().toISOString() },
-      ].slice(-MAX_PENDING_IMPORTS);
-      await this.cache.set(PANEL_LINK_CHECK_KEYS.requests, next, REQUEST_TTL_SECONDS);
-      return true;
+      // UNDER THE REQUESTS' LEASE, like the pass's take: a read-then-write that
+      // interleaved with another import's lost one of the two requests, and one
+      // that straddled the take wrote an answered request back — a second card.
+      const recorded =
+        (await this.withRequestsLease(async () => {
+          const pending = readImportRequests(await this.cache.get<unknown>(PANEL_LINK_CHECK_KEYS.requests));
+          const next = [
+            ...pending.filter((request) => request.importRecordId !== input.importRecordId),
+            { importRecordId: input.importRecordId, sourceType: input.sourceType, requestedAt: new Date().toISOString() },
+          ].slice(-MAX_PENDING_IMPORTS);
+          await this.cache.set(PANEL_LINK_CHECK_KEYS.requests, next, REQUEST_TTL_SECONDS);
+          return true;
+        })) === true;
+      if (!recorded) {
+        this.logger.warn(
+          `Panel link check was not requested after import ${input.importRecordId}: the request list stayed ` +
+            'busy (or Redis is unavailable); the daily run still covers its rows, but no card will name them',
+        );
+      }
+      return recorded;
     } catch (error: unknown) {
       this.logger.warn(
         `Panel link check was not requested after import ${input.importRecordId}; the daily run still ` +
@@ -323,19 +386,27 @@ export class PanelLinkCheckService implements OnApplicationBootstrap {
     if (this.inFlight) return 'busy';
     this.inFlight = true;
     try {
-      let claimed = false;
+      let lock: Lease | null = null;
       try {
-        claimed = await this.cache.claimOnce(PANEL_LINK_CHECK_KEYS.lock, PANEL_LINK_CHECK_LOCK_TTL_SECONDS);
+        lock = await claimLease(this.cache, PANEL_LINK_CHECK_KEYS.lock, PANEL_LINK_CHECK_LOCK_TTL_SECONDS);
       } catch (error: unknown) {
         this.logger.warn(`Panel link check could not take its lock: ${message(error)}`);
       }
-      if (!claimed) return 'busy';
+      if (lock === null) return 'busy';
       try {
-        // TAKEN, not read: a request that lands while this pass runs stays for
-        // the next one, and no request is answered twice.
+        // TAKEN, not read — and under the requests' lease, so an import that is
+        // recording its request finishes first: a request that lands while this
+        // pass runs stays for the next one, and no request is answered twice.
         let imports: ImportRequest[] = [];
         try {
-          imports = readImportRequests(await this.cache.take<unknown>(PANEL_LINK_CHECK_KEYS.requests));
+          const taken = await this.withRequestsLease(async () =>
+            readImportRequests(await this.cache.take<unknown>(PANEL_LINK_CHECK_KEYS.requests)),
+          );
+          if (taken === false) {
+            this.logger.warn('Panel link check could not take the import requests now; the next pass takes them');
+          } else {
+            imports = taken;
+          }
         } catch (error: unknown) {
           this.logger.warn(`Panel link check could not read the import requests: ${message(error)}`);
         }
@@ -343,7 +414,12 @@ export class PanelLinkCheckService implements OnApplicationBootstrap {
         this.bootPending = false;
       } finally {
         try {
-          await this.cache.del(PANEL_LINK_CHECK_KEYS.lock);
+          if (!(await releaseLease(this.cache, lock))) {
+            this.logger.warn(
+              `Panel link check outlived its lock (${PANEL_LINK_CHECK_LOCK_TTL_SECONDS} s); not giving it back — ` +
+                'it has expired, and another pass may hold it now',
+            );
+          }
         } catch (error: unknown) {
           this.logger.warn(`Panel link check lock not released; it expires by itself: ${message(error)}`);
         }
@@ -351,6 +427,31 @@ export class PanelLinkCheckService implements OnApplicationBootstrap {
       return 'ran';
     } finally {
       this.inFlight = false;
+    }
+  }
+
+  /**
+   * Runs `work` holding the import requests' lease, so no two changes of the
+   * list — an import's append, a pass's take — interleave. Waits for the lease
+   * up to {@link REQUESTS_LEASE_WAIT_MS}; `false` when it could not be had (busy
+   * that long, or no Redis), and then `work` did not run.
+   */
+  private async withRequestsLease<T>(work: () => Promise<T>): Promise<T | false> {
+    const deadline = performance.now() + REQUESTS_LEASE_WAIT_MS;
+    let lease = await claimLease(this.cache, PANEL_LINK_CHECK_KEYS.requestsLease, REQUESTS_LEASE_TTL_SECONDS);
+    while (lease === null) {
+      if (performance.now() >= deadline) return false;
+      await sleep(REQUESTS_LEASE_POLL_MS);
+      lease = await claimLease(this.cache, PANEL_LINK_CHECK_KEYS.requestsLease, REQUESTS_LEASE_TTL_SECONDS);
+    }
+    try {
+      return await work();
+    } finally {
+      try {
+        await releaseLease(this.cache, lease);
+      } catch (error: unknown) {
+        this.logger.warn(`Panel link check request lease not released; it expires by itself: ${message(error)}`);
+      }
     }
   }
 

@@ -298,7 +298,7 @@ export interface SignalLiveIpNode {
   ips: Array<{ ip: string; lastSeen: string }>;
 }
 
-/** Live per-node source IPs for a signal's user (ip-control drilldown). */
+/** Live per-node source IPs for a signal's user (Remnawave `connections/*` drilldown). */
 export async function getSignalLiveIps(signalId: string): Promise<SignalLiveIpNode[]> {
   const res = await api.get(`${BASE}/signals/${signalId}/live-ips`);
   return expectArray<SignalLiveIpNode>(res.data);

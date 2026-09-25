@@ -251,6 +251,7 @@ export const ru = {
           restored: 'Бессрочность возвращена',
           alreadyLifetime: 'Уже бессрочная',
           notEligible: 'Нет оснований',
+          refunded: 'Оплата возвращена (возврат или чарджбэк) — не восстанавливается',
           deleted: 'Удалена',
           notFound: 'Не найдена',
           failed: 'Ошибка: {{message}}',

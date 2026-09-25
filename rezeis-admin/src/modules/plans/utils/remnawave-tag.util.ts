@@ -1,14 +1,13 @@
 /**
  * The panel's own rule for `User.tag`, restated at the admin boundary.
  *
- * Remnawave declares the field identically in every contract from 2.7 through
- * 3.4: in each `@remnawave/contract-panel-*` oracle,
+ * Remnawave declares the field identically in every 3.x contract, 3.2.1
+ * through 3.4.4: in each `@remnawave/contract-panel-*` oracle,
  * `users/create-user.command` and `users/update-user.command` both carry
  * `z.string().regex(/^[A-Z0-9_]+$/).max(16).nullable()`. The tests ask the
  * panel's own update schema of every one of those contracts
  * (`test/helpers/remnawave-tag-contract.ts`), not a copy of this regex. A 2.x
- * panel is refused at runtime (`REZEIS_PANEL_TOO_OLD`); its contracts stay as
- * oracles of the same rule.
+ * panel is refused at runtime (`REZEIS_PANEL_TOO_OLD`).
  *
  * It is restated HERE, at the DTO, rather than only inside the sync path,
  * because the sync forwards the tag verbatim and the panel answers 400: the

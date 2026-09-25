@@ -299,10 +299,15 @@ describe('«Бессрочные подписки с датой»', () => {
     await waitFor(() => expect(post).toHaveBeenCalledTimes(1))
     // Not the pre-selected rows: the per-row button is about its own row.
     expect(sentIds(post)).toEqual({ subscriptionIds: ['sub-l2'] })
+    // Waited as long as the panel lets the route run — not the 30 s default,
+    // which read a batch the server was still restoring as «Нет ответа».
+    expect(post.mock.calls[0]?.[2]).toEqual({ timeout: 120_000 })
   })
 
   it('shows a line per id — every outcome in words — and reads the census again', async () => {
-    const more = ['sub-x1', 'sub-x2', 'sub-x3', 'sub-x4'].map((subscriptionId) => censusRow({ subscriptionId }))
+    const more = ['sub-x1', 'sub-x2', 'sub-x3', 'sub-x4', 'sub-x5'].map((subscriptionId) =>
+      censusRow({ subscriptionId }),
+    )
     const get = mockCensus(censusBody([...ROWS, ...more]), censusBody([PAID_AFTER, PLAN_ONLY]))
     const post = vi.spyOn(api, 'post').mockResolvedValue({
       data: {
@@ -319,6 +324,8 @@ describe('«Бессрочные подписки с датой»', () => {
           result('sub-x2', 'deleted'),
           result('sub-x3', 'notFound'),
           result('sub-x4', 'failed', { error: 'boom' }),
+          // Its "no end" purchase was refunded since the list was read.
+          result('sub-x5', 'refunded'),
         ],
       },
     } as never)
@@ -331,7 +338,7 @@ describe('«Бессрочные подписки с датой»', () => {
     await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Вернуть бессрочность' }))
     await waitFor(() => expect(post).toHaveBeenCalledTimes(1))
     expect(sentIds(post)).toEqual({
-      subscriptionIds: ['sub-l1', 'sub-l4', 'sub-x1', 'sub-x2', 'sub-x3', 'sub-x4'],
+      subscriptionIds: ['sub-l1', 'sub-l4', 'sub-x1', 'sub-x2', 'sub-x3', 'sub-x4', 'sub-x5'],
     })
 
     const results = (await screen.findByText('Результат')).closest('div') as HTMLElement
@@ -351,6 +358,7 @@ describe('«Бессрочные подписки с датой»', () => {
     expect(line('sub-x2')).toHaveTextContent('Удалена')
     expect(line('sub-x3')).toHaveTextContent('Не найдена')
     expect(line('sub-x4')).toHaveTextContent('Ошибка: boom')
+    expect(line('sub-x5')).toHaveTextContent('Оплата возвращена (возврат или чарджбэк) — не восстанавливается')
 
     // The restored rows leave the census; the refetch is what shows it.
     await waitFor(() =>

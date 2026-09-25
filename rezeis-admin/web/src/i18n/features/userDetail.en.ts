@@ -281,6 +281,8 @@ export const en = {
         link: 'Link',
         linkTitle: 'Link an existing Remnawave profile',
         linkHint: 'Enter the numeric id of an existing Remnawave profile, as the panel shows it. The profile is checked before it is linked.',
+        linkReplacesStale:
+          'This subscription still stores a Remnawave 2.x identifier ({{id}}) that a 3.x panel does not know. The new link replaces it, with the same check that the profile is this customer\'s.',
         linkLabel: 'Remnawave profile identifier',
         linkPlaceholder: 'Numeric profile id, e.g. 4471',
         linkInvalid: 'Enter the numeric profile id from Remnawave 3.x — digits only. A UUID from panel 2.x is no longer accepted.',

@@ -40,11 +40,15 @@ import { isRetryableTransactionConflict } from '../../referrals/services/referra
  *  2. Add-ons bought «до конца подписки» that ENDED at the wrong date come back:
  *     they were sold "until the end", which for this subscription is never.
  *  3. No customer notice of any kind.
+ *  4. A refunded purchase never comes back: a row whose "no end" purchase was
+ *     refunded or charged back is neither listed nor restored, unless a paid
+ *     one stands beside it (`refundedWithoutEndSql`).
  *
  * ── One restore, in one transaction per subscription ─────────────────────────
  *
  * Under the row lock: refuse a missing, DELETED or already-open row; re-check
- * the evidence for THIS row (the operator's list may be stale); then remove the
+ * the evidence for THIS row (the operator's list may be stale) and refuse one
+ * whose "no end" purchase was refunded since; then remove the
  * date, lift EXPIRED to ACTIVE (it expired only by the wrong date — DISABLED and
  * LIMITED keep theirs), let the term model follow (the tail term becomes
  * open-ended and so do the live add-ons that ended with it), bring back the
@@ -147,6 +151,12 @@ export type LifetimeRestoreOutcome =
   | 'alreadyLifetime'
   /** Nothing shows any more that it was sold without an end — refused. */
   | 'notEligible'
+  /**
+   * What sold it without an end was refunded or charged back, and no paid
+   * "no end" purchase stands beside it — refused: a refunded purchase never
+   * comes back (owner's rule).
+   */
+  | 'refunded'
   /** DELETED subscriptions are not restored. */
   | 'deleted'
   | 'notFound'
@@ -282,10 +292,64 @@ function lifetimeEvidenceSql(onlySubscriptionId: string | null): Prisma.Sql {
   `;
 }
 
+/** The evidence that a "no end" purchase was PAID for, and stands. */
+const PAID_EVIDENCE_KINDS: readonly LifetimeEvidence['kind'][] = ['payment', 'paymentLine'];
+
+/**
+ * THE PAYMENT WAS REFUNDED OR CHARGED BACK IN FULL — as the reversal
+ * (`PaymentReconciliationService.reverseFulfilledPayment`, every door: the
+ * provider's notice, the panel's «Вернуть», «Отметить возврат») leaves it:
+ *  - its own stamp, `refundReversedAt`;
+ *  - CANCELED after fulfilment applied it — a checkout abandoned before it was
+ *    paid is CANCELED too, but was never applied; this also covers the full
+ *    refunds whose stamp an older build's «Мой налог» write erased;
+ *  - REFUNDED, the status an older build gave a refund.
+ * A PARTIAL refund leaves the payment COMPLETED and the purchase standing
+ * (`handleRefundReversal`), so it is not one.
+ */
+const REFUNDED_IN_FULL = Prisma.sql`(
+  t."gateway_data" ->> 'refundReversedAt' IS NOT NULL
+  OR (t."status" = 'CANCELED' AND t."fulfilled_at" IS NOT NULL)
+  OR t."status" = 'REFUNDED'
+)`;
+
+/**
+ * EVERY SUBSCRIPTION WHOSE "NO END" PURCHASE WAS REFUNDED — keyed on that
+ * purchase itself: the payment for it that recorded -1 days, or a combined
+ * renewal whose line for it had -1 days, refunded or charged back in full
+ * ({@link REFUNDED_IN_FULL}). A refund of any other payment of the subscription
+ * — a dated renewal, an add-on — says nothing about "no end" and is not here.
+ * The owner's rule: a refunded purchase never comes back. The census and the
+ * restore's re-check both keep such a row out unless a PAID "no end" purchase
+ * stands beside it ({@link PAID_EVIDENCE_KINDS}) — bought again after the
+ * refund, say. A lifetime an operator granted has no payment to refund.
+ */
+function refundedWithoutEndSql(onlySubscriptionId: string | null): Prisma.Sql {
+  const only = (column: Prisma.Sql): Prisma.Sql =>
+    onlySubscriptionId === null ? Prisma.empty : Prisma.sql`AND ${column} = ${onlySubscriptionId}`;
+  return Prisma.sql`
+    SELECT t."subscription_id" AS "subscriptionId"
+      FROM "transactions" t
+     WHERE t."subscription_id" IS NOT NULL
+       AND t."plan_snapshot" ->> 'selectedDurationDays' = '-1'
+       AND ${REFUNDED_IN_FULL}
+       ${only(Prisma.sql`t."subscription_id"`)}
+    UNION
+    SELECT i."subscription_id"
+      FROM "transaction_items" i
+      JOIN "transactions" t ON t."id" = i."transaction_id"
+     WHERE i."duration_days" = -1
+       AND ${REFUNDED_IN_FULL}
+       ${only(Prisma.sql`i."subscription_id"`)}
+  `;
+}
+
 /**
  * THE CENSUS: every live (not DELETED) subscription that carries a date and has
- * evidence it was sold without one, with its customer, its evidence and two
- * hints — never filters, the operator decides:
+ * evidence it was sold without one — unless what sold it was refunded and no
+ * paid "no end" purchase stands beside it ({@link refundedWithoutEndSql}) —
+ * with its customer, its evidence and two hints — never filters, the operator
+ * decides:
  *  - `thirtyDaysAfterCreate`: the date is a completed CREATE's completion + 30
  *    days, ±1 day — what the old CREATE gave the profile, the re-dating's own
  *    fingerprint (any CREATE: a re-provision sent thirty days as well);
@@ -312,6 +376,9 @@ function lifetimeCensusSql(limit: number): Prisma.Sql {
        WHERE s."expires_at" IS NOT NULL
          AND s."status" <> 'DELETED'
        GROUP BY s."id"
+      HAVING bool_or(e."kind" IN (${Prisma.join(PAID_EVIDENCE_KINDS)}))
+          OR NOT EXISTS (
+               SELECT 1 FROM (${refundedWithoutEndSql(null)}) AS rf WHERE rf."subscriptionId" = s."id")
     )
     SELECT r."id" AS "subscriptionId",
            r."user_id" AS "userId",
@@ -546,6 +613,16 @@ export class LifetimeRestoreService {
       ),
     );
     if (evidence.length === 0) return refused(subscriptionId, 'notEligible', row);
+    // …AND WHAT SOLD IT WAS NOT REFUNDED — the census's own rule, for this row:
+    // a snapshot or a plan still says "no end" after the money went back, and
+    // a refunded purchase never comes back. A paid "no end" purchase beside it
+    // (bought again after the refund) still stands.
+    if (!evidence.some((item) => PAID_EVIDENCE_KINDS.includes(item.kind))) {
+      const refundedPurchase = await tx.$queryRaw<unknown[]>(
+        Prisma.sql`SELECT 1 FROM (${refundedWithoutEndSql(subscriptionId)}) AS rf LIMIT 1`,
+      );
+      if (refundedPurchase.length > 0) return refused(subscriptionId, 'refunded', row);
+    }
 
     // NO END. EXPIRED only because of the wrong date, so it is ACTIVE again;
     // DISABLED (an operator's or Remnawave's switch-off) and LIMITED (out of

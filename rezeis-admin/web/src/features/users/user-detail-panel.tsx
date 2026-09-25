@@ -1446,6 +1446,13 @@ function RemnawaveProfileRow({
   const profileName = sub.remnawaveProfileName?.trim()
   const remnawaveId = sub.remnawaveId
   const presence = remnawaveProfilePresence(sub)
+  // A stored id that is not a decimal is a 2.x identity: it names nobody on a
+  // 3.x panel, every destructive path refuses it, and the server replaces it
+  // under the same ownership proof (`isStalePanelIdentity`, owner's decision
+  // 24.09.2026) — so «Привязать» is offered for it as for an empty link. A
+  // numeric link is a working one and is never offered for replacement.
+  const staleId = remnawaveId && !REMNAWAVE_NUMERIC_ID_PATTERN.test(remnawaveId) ? remnawaveId : null
+  const canLink = !remnawaveId || staleId !== null
   const [linkDialogOpen, setLinkDialogOpen] = useState(false)
   // The operator's word that the profile is this customer's, for when nothing
   // proves it. It belongs to one attempt, so closing the dialog forgets it.
@@ -1512,7 +1519,8 @@ function RemnawaveProfileRow({
           >
             <Copy className="h-3 w-3" />
           </button>
-        ) : (
+        ) : null}
+        {canLink ? (
           <PermissionGate resource="subscriptions" action="edit">
             <Dialog open={linkDialogOpen} onOpenChange={openLinkDialog}>
               <DialogTrigger asChild>
@@ -1529,6 +1537,11 @@ function RemnawaveProfileRow({
                   <p id={`remnawave-profile-hint-${sub.id}`} className="text-sm text-muted-foreground">
                     {t('userDetailPanel.subscriptions.remnawaveProfile.linkHint')}
                   </p>
+                  {staleId !== null ? (
+                    <p className="break-all text-sm text-muted-foreground">
+                      {t('userDetailPanel.subscriptions.remnawaveProfile.linkReplacesStale', { id: staleId })}
+                    </p>
+                  ) : null}
                   <Label htmlFor={`remnawave-profile-${sub.id}`} className="sr-only">
                     {t('userDetailPanel.subscriptions.remnawaveProfile.linkLabel')}
                   </Label>
@@ -1595,7 +1608,7 @@ function RemnawaveProfileRow({
               </DialogContent>
             </Dialog>
           </PermissionGate>
-        )}
+        ) : null}
       </span>
     </div>
   )

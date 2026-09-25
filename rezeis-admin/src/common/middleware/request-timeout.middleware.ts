@@ -12,6 +12,7 @@ import { Request, Response, NextFunction } from 'express';
  *   - Backup download (/admin/backup/download/...) - 120s
  *   - Plan migration start, preview and retry (/admin/plans/:id/migrations...) - 120s
  *   - Running an automation rule by hand (/admin/automations/rules/:id/run) - 120s
+ *   - «Вернуть бессрочность» (/admin/subscriptions/lifetime-restore) - 120s
  *
  * This prevents slow/hung requests from consuming worker threads
  * indefinitely and protects against slowloris-style attacks.
@@ -58,6 +59,14 @@ const LONG_TIMEOUT_PATTERNS = [
   // Only the run itself: the rule's reads, save, toggle and execution log stay
   // at the default.
   /\/admin\/automations\/rules\/[^/?]+\/run(?:[?]|$)/,
+  // «ВЕРНУТЬ БЕССРОЧНОСТЬ». The POST restores up to 200 subscriptions, each in
+  // a transaction of its own — the term model, the add-ons it brings back, the
+  // projection, the audit row — and the tab sends them fifty at a time. At the
+  // default the app answered 408 while the restores went on and committed, and
+  // the tab showed «Нет ответа» for rows that were restored. The census GET
+  // shares the path and is a single bounded read; the extra time costs it
+  // nothing. Nothing else under /admin/subscriptions is widened.
+  /\/admin\/subscriptions\/lifetime-restore(?:[?]|$)/,
 ];
 
 // `:userRef` on the SSE stream is EITHER a numeric telegramId OR a CUID

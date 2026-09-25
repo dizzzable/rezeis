@@ -34,7 +34,24 @@ const UNLINKED_SUBSCRIPTION = {
   plan: { id: 'plan-1', name: 'Base', type: 'BOTH' },
 }
 
-function customer() {
+/** A subscription linked on 2.x that still stores the uuid — a 3.x panel knows no such id. */
+const STALE_SUBSCRIPTION = {
+  ...UNLINKED_SUBSCRIPTION,
+  id: 'subscription-2x',
+  remnawaveId: 'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+  remnawaveSyncState: 'MISSING',
+}
+
+/** A working 3.x link. */
+const LINKED_SUBSCRIPTION = {
+  ...UNLINKED_SUBSCRIPTION,
+  id: 'subscription-3x',
+  remnawaveId: '4471',
+  remnawaveProfileName: 'rz_alice_sub',
+  remnawaveSyncState: 'SYNCED',
+}
+
+function customer(subscriptions: ReadonlyArray<Record<string, unknown>> = [UNLINKED_SUBSCRIPTION]) {
   return {
     id: 'user-1',
     telegramId: '12345',
@@ -50,7 +67,7 @@ function customer() {
     maxSubscriptions: 1,
     createdAt: '2026-06-04T10:00:00.000Z',
     updatedAt: '2026-06-04T10:00:00.000Z',
-    subscriptions: [UNLINKED_SUBSCRIPTION],
+    subscriptions,
     transactions: [],
     referralsGiven: [],
     partner: null,
@@ -159,5 +176,67 @@ describe('linking a Remnawave profile on the card', () => {
     const checkbox = within(dialog).getByRole('checkbox', { name: text('confirmWithoutProof') })
     expect(checkbox).toHaveAccessibleDescription(/verified web-account e-mail/)
     expect(checkbox).toHaveAccessibleDescription(/naming another customer refuses the link whatever you confirm/)
+  })
+})
+
+/**
+ * A subscription that still stores a 2.x id is linked from the card too
+ * (owner's decision, 24.09.2026): the server replaces a non-decimal id under
+ * the same ownership proof, and «Подписки» → «Инструменты» was the only place
+ * that offered it. A NUMERIC link is a working one — never offered.
+ */
+describe('linking over a 2.x id on the card', () => {
+  beforeAll(async () => {
+    await loadFeatureBundle('userDetail')
+  })
+
+  beforeEach(() => {
+    usePermissionStore.setState({ loaded: true, role: 'DEV' })
+  })
+
+  afterEach(() => {
+    cleanup()
+    usePermissionStore.getState().reset()
+    vi.restoreAllMocks()
+  })
+
+  async function renderCard(user: ReturnType<typeof userEvent.setup>) {
+    vi.spyOn(api, 'get').mockResolvedValue({ data: customer([STALE_SUBSCRIPTION, LINKED_SUBSCRIPTION]) } as never)
+    const patch = vi.spyOn(api, 'patch').mockResolvedValue({ data: {} } as never)
+    renderWithProviders(<UserDetailPanel telegramId="12345" />)
+    await user.click(
+      await screen.findByRole('tab', { name: new RegExp(i18n.t('userDetailPanel.tabs.subscriptions')) }),
+    )
+    // Both cards are on screen before anything is counted.
+    await screen.findByText('rz_alice_sub')
+    return { patch }
+  }
+
+  it('offers «Link» for the 2.x id — and only for it, never over the numeric link', async () => {
+    const user = userEvent.setup()
+    await renderCard(user)
+
+    const buttons = screen.getAllByRole('button', { name: text('link') })
+    expect(buttons).toHaveLength(1)
+  })
+
+  it('says the 2.x id is replaced, and sends the link like any other', async () => {
+    const user = userEvent.setup()
+    const { patch } = await renderCard(user)
+
+    await user.click(screen.getByRole('button', { name: text('link') }))
+    const dialog = await screen.findByRole('dialog')
+    expect(dialog).toHaveTextContent(
+      i18n.t('userDetailPanel.subscriptions.remnawaveProfile.linkReplacesStale', {
+        id: STALE_SUBSCRIPTION.remnawaveId,
+      }),
+    )
+    await user.type(within(dialog).getByLabelText(text('linkLabel')), '5150')
+    await user.click(within(dialog).getByRole('button', { name: text('linkAction') }))
+
+    expect(patch).toHaveBeenCalledWith('/admin/users/subscriptions/subscription-2x/remnawave-link', {
+      remnawaveId: '5150',
+      confirmedWithoutProof: false,
+    })
   })
 })

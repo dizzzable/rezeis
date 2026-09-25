@@ -142,6 +142,10 @@ async function payment(
     readonly days?: number;
     readonly status?: TransactionStatus;
     readonly createdAt?: Date;
+    readonly purchaseType?: 'NEW' | 'RENEW' | 'UPGRADE' | 'ADDITIONAL';
+    /** When fulfilment applied it; unset for a payment never applied. */
+    readonly fulfilledAt?: Date;
+    readonly gatewayData?: Record<string, unknown>;
   },
 ): Promise<{ readonly id: string; readonly paymentId: string }> {
   return prisma.transaction.create({
@@ -149,14 +153,59 @@ async function payment(
       userId: owner.userId,
       subscriptionId: input.subscriptionId,
       status: input.status ?? TransactionStatus.COMPLETED,
-      purchaseType: input.days === undefined ? 'ADDITIONAL' : input.days === -1 ? 'NEW' : 'RENEW',
+      purchaseType: input.purchaseType ?? (input.days === undefined ? 'ADDITIONAL' : input.days === -1 ? 'NEW' : 'RENEW'),
       gatewayType: 'YOOKASSA',
       currency: 'RUB',
       amount: new Prisma.Decimal('999'),
       planSnapshot: input.days === undefined ? {} : { id: datedPlan, selectedDurationDays: input.days },
       ...(input.createdAt === undefined ? {} : { createdAt: input.createdAt }),
+      ...(input.fulfilledAt === undefined ? {} : { fulfilledAt: input.fulfilledAt }),
+      ...(input.gatewayData === undefined ? {} : { gatewayData: input.gatewayData as Prisma.InputJsonValue }),
     },
     select: { id: true, paymentId: true },
+  });
+}
+
+/**
+ * A payment `reverseFulfilledPayment` reversed: CANCELED, stamped, and — for a
+ * NEW purchase it could revoke — with the revocation's own audit, exactly the
+ * keys that function merges (`payment-reconciliation.service.ts`).
+ */
+async function refundedPayment(
+  owner: Owner,
+  input: {
+    readonly subscriptionId: string | null;
+    readonly days?: number;
+    readonly createdAt: Date;
+    readonly refundedAt: Date;
+    readonly providerStatus?: string;
+    /**
+     * False for a payment reversed before `fulfilled_at` existed: the column's
+     * migration stamped only the payments COMPLETED at the time.
+     */
+    readonly fulfilled?: boolean;
+  },
+): Promise<{ readonly id: string; readonly paymentId: string }> {
+  const revoked = input.days === -1 && input.subscriptionId !== null;
+  return payment(owner, {
+    subscriptionId: input.subscriptionId,
+    ...(input.days === undefined ? {} : { days: input.days }),
+    status: TransactionStatus.CANCELED,
+    createdAt: input.createdAt,
+    ...(input.fulfilled === false ? {} : { fulfilledAt: input.createdAt }),
+    gatewayData: {
+      providerStatus: input.providerStatus ?? 'refunded',
+      refundReversedAt: input.refundedAt.toISOString(),
+      subscriptionRevoked: revoked,
+      ...(revoked
+        ? {
+            refundRevokedSubscriptionId: input.subscriptionId,
+            refundRevokedFromExpiresAt: null,
+            refundRevokedFromStatus: 'ACTIVE',
+            refundRevokedAt: input.refundedAt.toISOString(),
+          }
+        : {}),
+    },
   });
 }
 
@@ -556,6 +605,150 @@ run('«Вернуть бессрочность»: the census and the restore (Po
     assert.equal(cut.rows.length, 2);
     assert.equal(cut.truncated, true);
     assert.equal(cut.total, census.total, 'the total counts the whole population, not the page');
+  });
+
+  // ── A refunded "no end" purchase never comes back (review R2b-02) ────────
+
+  it('R2b-02: a "no end" purchase refunded or charged back is neither listed nor restored — `refunded`, nothing written', async () => {
+    // Bought for ever 31 days ago and refunded after 30: the reversal expired
+    // the row at the refund's instant, and the row's own snapshot (or its plan)
+    // still says "no end" — which used to list it pre-selected and restore it.
+    const boughtAt = at(-31);
+    const refundedAt = at(-1);
+    const expired = { expiresAt: refundedAt, status: SubscriptionStatus.EXPIRED, createdAt: boughtAt } as const;
+    const lifetimeSnapshot = { id: lifetimePlan, name: 'Навсегда' };
+
+    const refundedNew = await subscription(expired);
+    await created(refundedNew, boughtAt);
+    await refundedPayment(refundedNew, { subscriptionId: refundedNew.subscriptionId, days: -1, createdAt: boughtAt, refundedAt });
+    // A chargeback reversed before `fulfilled_at` existed: the stamp alone says so.
+    const chargedBack = await subscription({ ...expired, snapshot: lifetimeSnapshot });
+    await refundedPayment(chargedBack, {
+      subscriptionId: chargedBack.subscriptionId,
+      days: -1,
+      createdAt: boughtAt,
+      refundedAt,
+      providerStatus: 'CHARGEBACK',
+      fulfilled: false,
+    });
+    // An older build's refund: the legacy REFUNDED status.
+    const legacyRefunded = await subscription(expired);
+    await payment(legacyRefunded, {
+      subscriptionId: legacyRefunded.subscriptionId,
+      days: -1,
+      status: TransactionStatus.REFUNDED,
+      createdAt: boughtAt,
+    });
+    // A full refund whose stamp an older build's «Мой налог» write erased:
+    // CANCELED after it was applied, its ledger left.
+    const stampErased = await subscription(expired);
+    await payment(stampErased, {
+      subscriptionId: stampErased.subscriptionId,
+      days: -1,
+      status: TransactionStatus.CANCELED,
+      createdAt: boughtAt,
+      fulfilledAt: boughtAt,
+      gatewayData: { refundedAmountTotal: '999.00' },
+    });
+    // A combined renewal refunded whole, whose line for this row was "no end".
+    const lineRefunded = await subscription({ ...expired, snapshot: lifetimeSnapshot });
+    const combined = await refundedPayment(lineRefunded, { subscriptionId: null, days: 30, createdAt: boughtAt, refundedAt });
+    await prisma.transactionItem.create({
+      data: {
+        transactionId: combined.id,
+        subscriptionId: lineRefunded.subscriptionId,
+        planId: lifetimePlan,
+        durationDays: -1,
+        amount: new Prisma.Decimal('999'),
+        currency: 'RUB',
+      },
+    });
+
+    const refunded = [refundedNew, chargedBack, legacyRefunded, stampErased, lineRefunded];
+    const census = await service.census();
+    for (const owner of refunded) {
+      assert.equal(
+        census.rows.some((row) => row.subscriptionId === owner.subscriptionId),
+        false,
+        `a refunded "no end" purchase is not a lifetime subscription that lost its date (${owner.subscriptionId})`,
+      );
+    }
+
+    const jobsBefore = new Map<string, Array<{ id: string }>>();
+    for (const owner of refunded) jobsBefore.set(owner.subscriptionId, await jobsOf(owner.subscriptionId));
+    const results = await restore(refunded.map((owner) => owner.subscriptionId));
+    for (const owner of refunded) {
+      assert.deepEqual(results.get(owner.subscriptionId), {
+        subscriptionId: owner.subscriptionId,
+        outcome: 'refunded',
+        previousExpiresAt: refundedAt.toISOString(),
+        statusBefore: 'EXPIRED',
+        statusAfter: 'EXPIRED',
+        revivedAddOns: 0,
+        syncQueued: false,
+        error: null,
+      });
+      const row = await read(owner.subscriptionId);
+      assert.deepEqual([row.status, row.expiresAt?.toISOString()], [SubscriptionStatus.EXPIRED, refundedAt.toISOString()]);
+      assert.deepEqual(await jobsSince(owner.subscriptionId, jobsBefore.get(owner.subscriptionId)!), [], 'nothing pushed');
+      assert.deepEqual(await auditOf(owner.subscriptionId), [], 'nothing audited: nothing was restored');
+    }
+    assert.deepEqual(enqueued, []);
+  });
+
+  it('R2b-02 controls: a refund of ANOTHER payment, a later paid "no end" purchase, a lifetime granted without payment, an abandoned checkout and a partial refund stay listed and restorable', async () => {
+    const boughtAt = at(-31);
+    const expired = { expiresAt: at(-2), status: SubscriptionStatus.EXPIRED, createdAt: boughtAt } as const;
+
+    // Granted by an operator: no payment at all.
+    const granted = await subscription(expired);
+    // Granted too; its dated renewal and an add-on were refunded, not what sold "no end".
+    const otherRefunded = await subscription(expired);
+    await refundedPayment(otherRefunded, { subscriptionId: otherRefunded.subscriptionId, days: 30, createdAt: at(-20), refundedAt: at(-10) });
+    await refundedPayment(otherRefunded, { subscriptionId: otherRefunded.subscriptionId, createdAt: at(-15), refundedAt: at(-9) });
+    // Refunded, then bought for ever again — and that one is paid.
+    const boughtAgain = await subscription(expired);
+    await refundedPayment(boughtAgain, { subscriptionId: boughtAgain.subscriptionId, days: -1, createdAt: boughtAt, refundedAt: at(-25) });
+    const paidAgain = await payment(boughtAgain, {
+      subscriptionId: boughtAgain.subscriptionId,
+      days: -1,
+      purchaseType: 'RENEW',
+      createdAt: at(-20),
+      fulfilledAt: at(-20),
+    });
+    // A "no end" checkout abandoned before it was paid: never applied, nothing refunded.
+    const abandoned = await subscription(expired);
+    await payment(abandoned, { subscriptionId: abandoned.subscriptionId, days: -1, status: TransactionStatus.CANCELED, createdAt: at(-30) });
+    // A partial refund leaves the purchase standing (`handleRefundReversal`).
+    const partial = await subscription(expired);
+    const partlyRefunded = await payment(partial, {
+      subscriptionId: partial.subscriptionId,
+      days: -1,
+      createdAt: boughtAt,
+      fulfilledAt: boughtAt,
+      gatewayData: { partialRefundAt: at(-5).toISOString(), refundNeedsManualReview: true, refundedAmountTotal: '100.00' },
+    });
+
+    const kept = [granted, otherRefunded, boughtAgain, abandoned, partial];
+    const census = await service.census();
+    const byId = new Map(census.rows.map((row) => [row.subscriptionId, row]));
+    for (const owner of kept) assert.ok(byId.has(owner.subscriptionId), `listed: ${owner.subscriptionId}`);
+    assert.deepEqual(byId.get(granted.subscriptionId)!.evidence, [{ kind: 'snapshot' }]);
+    assert.deepEqual(byId.get(otherRefunded.subscriptionId)!.evidence, [{ kind: 'snapshot' }]);
+    assert.deepEqual(byId.get(boughtAgain.subscriptionId)!.evidence, [
+      { kind: 'snapshot' },
+      { kind: 'payment', paymentId: paidAgain.paymentId },
+    ]);
+    assert.deepEqual(byId.get(partial.subscriptionId)!.evidence, [
+      { kind: 'snapshot' },
+      { kind: 'payment', paymentId: partlyRefunded.paymentId },
+    ]);
+
+    const results = await restore(kept.map((owner) => owner.subscriptionId));
+    for (const owner of kept) {
+      assert.equal(results.get(owner.subscriptionId)?.outcome, 'restored', `restored: ${owner.subscriptionId}`);
+      assert.equal((await read(owner.subscriptionId)).expiresAt, null);
+    }
   });
 
   // ── The restore ─────────────────────────────────────────────────────────

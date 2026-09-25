@@ -312,23 +312,22 @@ async function getHealth(): Promise<RemnawaveHealth | null> {
 
 // `RemnawaveSubRequestStats` / `getSubscriptionRequestStats()` used to sit
 // here. The declared shape (`totalRequests`, `uniqueUsers`, `perClient`,
-// `perDay`) is sent by neither 2.7.4 nor 2.8.0 — the panel answers
+// `perDay`) is sent by no supported panel — the panel answers
 // `{ byParsedApp, hourlyRequestStats }` — and no screen ever called the
 // function. Deleted here and on the backend rather than retyped.
 
 /**
  * One row of the panel's subscription-request log.
  *
- * The owner identifier is version-dependent and exactly one side is populated:
- * Remnawave 2.7.4 records carry `userUuid`, 2.8.0 records carry the
- * panel-internal integer instead. `username` used to be declared here and is
- * sent by neither panel version, so it was always absent.
+ * The owner is the panel-internal integer, `panelUserId` (Remnawave 3.x
+ * `userId`). `username` used to be declared here and is sent by no supported
+ * panel, so it was always absent.
  */
 export interface RemnawaveSubRequestEntry {
   id: string
-  /** 2.7.4 only. */
+  /** Always null: no supported panel names the owner by a uuid. */
   userUuid: string | null
-  /** 2.8.0 only — panel-internal numeric id, NOT a uuid. */
+  /** The panel-internal numeric id, NOT a uuid. */
   panelUserId: number | null
   userAgent: string | null
   /** Derived server-side from `userAgent`; the panel sends no client field. */
@@ -346,7 +345,7 @@ async function getSubscriptionRequestHistory(params?: { userUuid?: string; limit
   return expectArray<RemnawaveSubRequestEntry>(res.data)
 }
 
-/** One node a provider bills for. `nodeUuid` is null for an orphaned 2.8.0 line. */
+/** One node a provider bills for. `nodeUuid` is null for a billing line whose node is gone. */
 export interface RemnawaveInfraBillingNode {
   nodeUuid: string | null
   name: string
@@ -357,11 +356,11 @@ export interface RemnawaveInfraBillingNode {
  * An infra-billing provider.
  *
  * `type`, `currency`, `monthlyCost` and `nodesCount` used to be declared here
- * and are sent by neither 2.7.4 nor 2.8.0, so the Costs table rendered `—`,
- * `0` and a blank cost for every provider. What the panel does send is a
- * lifetime bill tally plus the nodes the provider bills for.
+ * and are sent by no supported panel, so the Costs table rendered `—`, `0` and
+ * a blank cost for every provider. What the panel does send is a lifetime bill
+ * tally plus the nodes the provider bills for.
  *
- * `billedTotalAmount` HAS NO CURRENCY — neither spec mentions one anywhere —
+ * `billedTotalAmount` HAS NO CURRENCY — no 3.x spec mentions one anywhere —
  * so it must never be rendered beside a currency symbol.
  */
 export interface RemnawaveInfraProvider {
@@ -606,7 +605,7 @@ async function getCapabilities(): Promise<RemnawaveCapabilities> {
   return normalizeCapabilities(res.data);
 }
 
-// ── Live (ip-control: active sessions / source IPs) ───────────────────────────
+// ── Live (Remnawave `connections/*`: active sessions / source IPs) ────────────
 
 export interface RemnawaveIpSample {
   ip: string;

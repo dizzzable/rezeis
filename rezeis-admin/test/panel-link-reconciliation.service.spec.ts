@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 
 import { SubscriptionStatus } from '@prisma/client';
 
+import { DuplicateSubscriptionMergeService } from '../src/modules/profile-sync/duplicate-subscription-merge.service';
 import { PanelLinkReconciliationService } from '../src/modules/profile-sync/panel-link-reconciliation.service';
 import { answerPanelLinkWalkPage, isPanelLinkWalkPage } from './helpers/panel-link-walk-fake';
 
@@ -1935,6 +1936,101 @@ describe('PanelLinkReconciliationService — the subscription line narrows an au
     assert.equal(report.linked, 0);
     assert.equal(report.unrepaired[0]?.otherSubscriptionId, 'sub-other');
   });
+});
+
+/**
+ * THE LINE MEETS THE PAIR IT WAS WRITTEN BY (review R2b-03). The classic
+ * «Дубль после импорта» pair: the older row lost its link, the importer minted
+ * a second row for the same profile, and that live half's every ordinary UPDATE
+ * writes ITS `subscription_id` line into the profile. Refusing on the line
+ * before asking who is on the profile reported the scanned half as
+ * `markedForOtherSubscription`, and the merge — which finds pairs only in
+ * `duplicatePair` verdicts — found none.
+ */
+describe('PanelLinkReconciliationService — a duplicate pair whose profile names its LIVE half', () => {
+  const markedFor = (subscriptionId: string) => () => ({
+    kind: 'ok',
+    user: { description: `reiwa_id: user-1\nsubscription_id: ${subscriptionId}`, username: 'rz_alice_sub' },
+  });
+  /** The newer row the importer minted, linked numerically to profile 5150. */
+  const liveHalf = (overrides: Record<string, unknown> = {}) =>
+    subscriptionRow({
+      id: 'sub-z-duplicate',
+      createdAt: minutesAgo(60),
+      remnawaveId: '5150',
+      remnawavePanelId: 5150,
+      ...overrides,
+    });
+  /** What the merge would look at: `discoverPairs` over this very walk. */
+  async function discoveredPairs(prisma: PrismaHarness, panel: PanelHarness) {
+    const merge = new DuplicateSubscriptionMergeService(
+      prisma.client as never,
+      panel.api as never,
+      service(prisma, panel),
+      { info: () => undefined, warn: () => undefined, error: () => undefined } as never,
+    ) as unknown as {
+      discoverPairs(startAfterId: string | null): Promise<{
+        pairs: Array<{ survivorSubscriptionId: string; duplicateSubscriptionId: string }>;
+      }>;
+    };
+    const found = await merge.discoverPairs(null);
+    return found.pairs.map((pair) => [pair.survivorSubscriptionId, pair.duplicateSubscriptionId].sort());
+  }
+
+  const populations: ReadonlyArray<readonly [string, { readonly remnawaveId?: string }]> = [
+    ['population 1 (NULL link, name and config URL kept)', {}],
+    ['population 2 (a 2.x uuid and no panel id)', { remnawaveId: DEAD_UUID }],
+  ];
+  for (const [population, scanned] of populations) {
+    it(`${population}: still a duplicatePair once the live half has pushed — and the merge finds it`, async () => {
+      const rows = () => [subscriptionRow({ id: 'sub-a-original', ...scanned }), liveHalf()];
+      const panel = panelHarness({ profile: markedFor('sub-z-duplicate') });
+
+      const preview = await service(prismaHarness(rows()), panel).reconcile({ dryRun: true });
+      assert.equal(preview.duplicatePairs, 1);
+      const scannedRow = preview.unrepaired.find((row) => row.subscriptionId === 'sub-a-original');
+      assert.equal(scannedRow?.outcome, 'duplicatePair');
+      assert.equal(scannedRow?.duplicateOfSubscriptionId, 'sub-z-duplicate');
+
+      const live = prismaHarness(rows());
+      const report = await service(live, panel).reconcile({ dryRun: false });
+      assert.equal(report.unrepaired.find((row) => row.subscriptionId === 'sub-a-original')?.outcome, 'duplicatePair');
+      assert.deepEqual(live.writes, [], 'a pair is reported, never written');
+      assert.equal(live.table[0]['remnawaveId'], scanned.remnawaveId ?? null);
+
+      assert.deepEqual(await discoveredPairs(prismaHarness(rows()), panel), [['sub-a-original', 'sub-z-duplicate']]);
+    });
+  }
+
+  it('control: the same pair before the line existed is the same duplicatePair', async () => {
+    const prisma = prismaHarness([subscriptionRow({ id: 'sub-a-original' }), liveHalf()]);
+    const preview = await service(prisma, panelHarness({})).reconcile({ dryRun: true });
+    assert.equal(preview.unrepaired.find((row) => row.subscriptionId === 'sub-a-original')?.outcome, 'duplicatePair');
+  });
+
+  for (const [what, holder, named] of [
+    ["the line names the row on the profile, but it is ANOTHER customer's", liveHalf({ userId: 'user-2' }), 'sub-z-duplicate'],
+    ['the line names a subscription that is not on the profile', liveHalf(), 'sub-other'],
+    [
+      'the line names a live row of this customer that is on ANOTHER profile',
+      liveHalf({ remnawaveId: '7777', remnawavePanelId: 7777 }),
+      'sub-z-duplicate',
+    ],
+    ['the line names a DELETED row', liveHalf({ status: SubscriptionStatus.DELETED }), 'sub-z-duplicate'],
+  ] as const) {
+    it(`${what}: still markedForOtherSubscription, nothing written`, async () => {
+      const prisma = prismaHarness([subscriptionRow({ id: 'sub-a-original' }), holder]);
+      const panel = panelHarness({ profile: markedFor(named) });
+
+      const report = await service(prisma, panel).reconcile({ dryRun: false });
+      const row = report.unrepaired.find((candidate) => candidate.subscriptionId === 'sub-a-original');
+      assert.equal(row?.outcome, 'markedForOtherSubscription');
+      assert.equal(row?.otherSubscriptionId, named);
+      assert.equal(report.duplicatePairs, 0);
+      assert.deepEqual(prisma.writes, []);
+      assert.deepEqual(await discoveredPairs(prismaHarness([subscriptionRow({ id: 'sub-a-original' }), holder]), panel), []);
+    });
+  }
 });
 
 /**

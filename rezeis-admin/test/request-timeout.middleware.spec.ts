@@ -84,6 +84,21 @@ describe('request timeout route policy', () => {
     assert.equal(resolveRequestTimeoutMs('/api/admin/automations/executions'), 30_000);
   });
 
+  it('gives «Вернуть бессрочность» the long timeout: up to 200 restores, one transaction each', () => {
+    // POST /admin/subscriptions/lifetime-restore. At 30 s the app answered 408
+    // while the restores went on and committed.
+    assert.equal(resolveRequestTimeoutMs('/api/admin/subscriptions/lifetime-restore'), 120_000);
+    assert.equal(resolveRequestTimeoutMs('/api/admin/subscriptions/lifetime-restore?x=1'), 120_000);
+  });
+
+  it('keeps every other subscriptions route at the default', () => {
+    assert.equal(resolveRequestTimeoutMs('/api/admin/subscriptions'), 30_000);
+    assert.equal(resolveRequestTimeoutMs('/api/admin/subscriptions?page=2'), 30_000);
+    assert.equal(resolveRequestTimeoutMs('/api/admin/subscriptions/cmf1sub'), 30_000);
+    assert.equal(resolveRequestTimeoutMs('/api/admin/subscriptions/lifetime-restore-extra'), 30_000);
+    assert.equal(resolveRequestTimeoutMs('/api/admin/subscriptions/lifetime-restore/cmf1sub'), 30_000);
+  });
+
   it('does not widen similarly named backup routes', () => {
     // The widened pattern must not swallow a neighbour: `restored-*` shares the
     // prefix, and the settings/list routes are ordinary JSON.

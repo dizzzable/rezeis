@@ -1148,6 +1148,34 @@ export class PanelLinkReconciliationService {
     const namedSubscriptions = [...new Set(readProfileSubscriptionMarkers(profile.description))];
     const otherNamed = namedSubscriptions.find((named) => named !== row.id);
     if (otherNamed !== undefined) {
+      // WHO IS ON THE PROFILE IS ASKED BEFORE THE LINE REFUSES. A live row's
+      // every ordinary UPDATE writes its own line, so the half of a duplicate
+      // pair whose link was lost meets its sibling's profile marked for that
+      // sibling — and refusing on the line alone reported the pair as
+      // `markedForOtherSubscription`, which the merge (`discoverPairs` reads
+      // `duplicatePair` verdicts only) never finds. When the line names a live
+      // row of THIS customer that is on this very profile, the two are that
+      // pair. Anything else is refused as before. Nothing is written either
+      // way, so no lock is taken for the question.
+      const namedHolder = await this.prismaService.subscription.findFirst({
+        where: {
+          id: { in: namedSubscriptions.filter((named) => named !== row.id) },
+          userId: row.userId,
+          status: { not: SubscriptionStatus.DELETED },
+          OR: [{ remnawaveId }, { remnawavePanelId: resolved.id }],
+        },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        select: {
+          id: true,
+          userId: true,
+          remnawaveId: true,
+          remnawavePanelId: true,
+          remnawavePanelUsername: true,
+        },
+      });
+      if (namedHolder !== null) {
+        return this.describeCollision(row, namedHolder, remnawaveId, resolved.id, describe, resolvedBy);
+      }
       return alone(
         describe(
           'markedForOtherSubscription',

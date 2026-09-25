@@ -22,12 +22,21 @@ export const LIFETIME_RESTORE_PATH = '/admin/subscriptions/lifetime-restore'
 
 /**
  * How many ids one POST carries. The server accepts up to 200, but it restores
- * each id in a transaction of its own and the panel cuts a request at 30 s, so
- * 200 on a slow server can be cut mid-run. A larger selection goes out as
+ * each id in a transaction of its own and the panel cuts even this route at two
+ * minutes ({@link LIFETIME_RESTORE_TIMEOUT_MS}), so 200 on a slow server can be
+ * cut mid-run. A larger selection goes out as
  * consecutive batches of this size — see {@link restoreLifetime}; the operator
  * still presses one button.
  */
 export const LIFETIME_RESTORE_BATCH_SIZE = 50
+
+/**
+ * How long one batch is waited for. The panel gives this route two minutes
+ * (its long-timeout list, `request-timeout.middleware.ts`); the client default
+ * is thirty seconds, and giving up first would read as «Нет ответа» a batch the
+ * server is still restoring.
+ */
+export const LIFETIME_RESTORE_TIMEOUT_MS = 120_000
 
 export const LIFETIME_EVIDENCE_KINDS = ['snapshot', 'payment', 'paymentLine', 'plan'] as const
 
@@ -73,6 +82,8 @@ export const LIFETIME_RESTORE_OUTCOMES = [
   'restored',
   'alreadyLifetime',
   'notEligible',
+  // What sold it without an end was refunded or charged back: never restored.
+  'refunded',
   'deleted',
   'notFound',
   'failed',
@@ -210,7 +221,7 @@ function unanswered(subscriptionId: string, outcome: string): LifetimeRestoreRes
  * added, nothing dropped, no duplicates.
  *
  * In batches of {@link LIFETIME_RESTORE_BATCH_SIZE}, one after another: a request
- * the server needs longer than 30 s for is cut, and the census can list more. A batch
+ * the server needs longer than two minutes for is cut, and the census can list more. A batch
  * that fails as a REQUEST (a dead host, a 500) stops the run: the server may or
  * may not have written it, so nothing is fired after it. Every id the server
  * did not answer for still gets a line — `noAnswer` for the ids that went out,
@@ -226,7 +237,11 @@ export async function restoreLifetime(subscriptionIds: readonly string[]): Promi
     const batch = ids.slice(start, start + LIFETIME_RESTORE_BATCH_SIZE)
     for (const id of batch) sent.add(id)
     try {
-      const { data } = await api.post<unknown>(LIFETIME_RESTORE_PATH, { subscriptionIds: batch })
+      const { data } = await api.post<unknown>(
+        LIFETIME_RESTORE_PATH,
+        { subscriptionIds: batch },
+        { timeout: LIFETIME_RESTORE_TIMEOUT_MS },
+      )
       const body = isRecord(data) ? data : {}
       for (const result of expectArray<unknown>(body.results)) {
         const read = readResult(result)

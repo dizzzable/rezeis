@@ -129,7 +129,9 @@ export const POPUP_CAPABLE_EVENTS: readonly PopupCapableEvent[] = [
     type: 'remnawave.user.expire_soon',
     namedBy: 'userId',
     emittedIn: 'src/modules/remnawave/services/remnawave-webhook.service.ts',
-    moment: 'The subscription expires within 24-72 hours',
+    // Remnawave 3.x `user.expiration`, raised at each of the hours the
+    // operator set in Remnawave's expiry notifications.
+    moment: 'The subscription expires soon',
   },
   {
     type: 'remnawave.user.expired',

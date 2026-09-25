@@ -235,10 +235,10 @@ function UserSummaryPanel({ user }: { user: RemnawaveUserSummary }) {
 }
 
 /**
- * On-demand "where is this user connecting from right now" drilldown. Uses the
- * panel ip-control endpoint (matured on 2.8+), so it's gated behind the
- * detected capability and only fetches when the operator clicks — the call
- * runs an async panel job we poll, so we never fire it automatically.
+ * On-demand "where is this user connecting from right now" drilldown. Uses
+ * Remnawave's `connections/*` routes, so it's gated behind the detected
+ * capability and only fetches when the operator clicks — the call runs an
+ * async panel job we poll, so we never fire it automatically.
  */
 function UserLiveSessions({ uuid }: { uuid: string }) {
   const { t } = useTranslation()
@@ -412,10 +412,10 @@ function HwidTopUsersCard() {
                 <TableRow key={rowKey('hwid', row.userUuid, index)}>
                   <TableCell>
                     <p className="font-medium">{row.username}</p>
-                    {/* The panel identity, which is a uuid only on 2.x — 3.x has
-                        no uuid column and sends its numeric id, and the mapper
-                        leaves the field empty when the row carries neither. Cut
-                        and ellipsise only when there is something to cut. */}
+                    {/* The panel identity: Remnawave 3.x sends the numeric id
+                        (the field keeps its old name), and the mapper leaves it
+                        empty when the row carries none. Cut and ellipsise only
+                        when there is something to cut. */}
                     {row.userUuid ? (
                       <p className="font-mono text-[10px] text-muted-foreground/70">
                         {truncate(row.userUuid, 8)}
@@ -478,9 +478,10 @@ function SubscriptionRequestLogCard() {
                 <TableRow key={entry.id}>
                   <TableCell className="text-xs">
                     {entry.requestedAt ? new Date(entry.requestedAt).toLocaleString(activeLocale()) : '—'}
-                    {/* 2.7.4 identifies the owner by uuid, 2.8.0 by a panel-internal
-                        integer. Rendering `userUuid.slice(0, 8)` for both used to
-                        display the integer as though it were a uuid prefix. */}
+                    {/* The owner is the panel-internal integer, `panelUserId`;
+                        no supported panel names it by a uuid. Rendering
+                        `userUuid.slice(0, 8)` used to display the integer as
+                        though it were a uuid prefix. */}
                     {entry.userUuid ? (
                       <p className="font-mono text-[10px] text-muted-foreground/70">{truncate(entry.userUuid, 8)}</p>
                     ) : entry.panelUserId !== null && entry.panelUserId !== undefined ? (
@@ -510,9 +511,9 @@ function SubscriptionRequestLogCard() {
 /**
  * A React key for a row whose panel identifier is allowed to be empty.
  *
- * Both mappers behind this tab fall back to `''` — `mapHwidTopUser` for a 2.x
- * row whose uuid came back damaged, `mapUserNodeIps` for a node the panel named
- * with something other than a string — and React treats two `''` keys as the
+ * Both mappers behind this tab fall back to `''` — `mapHwidTopUser` for a row
+ * that carried no usable id, `mapUserNodeIps` for a node the panel named with
+ * something other than a string — and React treats two `''` keys as the
  * same element, so it reuses one customer's row DOM for another's. Falling back
  * to the index instead keeps them distinct; the `#` prefix keeps the fallback
  * out of the identity namespace, since a panel identity is a uuid or a decimal

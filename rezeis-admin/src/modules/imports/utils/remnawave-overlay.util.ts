@@ -112,13 +112,12 @@ export interface PanelLookup {
    * Which NAMESPACE the map's keys live in, read off the rows themselves.
    *
    * This exists because a miss only means "gone" when the key we looked up
-   * COULD have been in the map. Remnawave 3.x dropped the user uuid, so its
-   * rows decode to their numeric id, while `Subscription.remnawaveId` keeps the
-   * 2.x uuid it was created with — deliberately, it is the design invariant.
-   * Look a uuid up in an id-keyed map and it misses every time, for every
-   * subscription, and a `complete` list turns that into "the panel proves this
-   * profile is gone" → EXPIRED written over every live paying customer on the
-   * first import after an upgrade.
+   * COULD have been in the map. Remnawave 3.x has no user uuid, so its rows
+   * decode to their numeric id, while a backup taken on 2.x still names each
+   * profile by its 2.x uuid. Look a uuid up in an id-keyed map and it misses
+   * every time, for every subscription, and a `complete` list turns that into
+   * "the panel proves this profile is gone" → EXPIRED written over every live
+   * paying customer.
    *
    * `'mixed'` when the rows disagree and `'unknown'` when there are none; both
    * are treated as "cannot rule out a namespace mismatch", which costs a
@@ -253,8 +252,8 @@ export interface PanelAbsenceProbe {
  * Order matters: `fetchOne` runs FIRST and a hit ends it. On a truncated panel
  * the misses are dominated by users living past the page ceiling — users who
  * DO exist — so confirming first would buy nothing and cost every one of them a
- * second round trip. A healthy 2.7.4/2.8.0 run makes exactly the calls it made
- * before; only the path that used to lose data pays for the extra read.
+ * second round trip. A healthy run makes exactly the calls it made before;
+ * only the path that used to lose data pays for the extra read.
  */
 export async function resolvePanelProfile(
   uuid: string,
@@ -267,8 +266,8 @@ export async function resolvePanelProfile(
   if (hit !== undefined) return { panel: hit, known: true };
 
   // A miss only means "gone" if this key could have been in the map at all.
-  // After a 2.x → 3.x panel upgrade the rows are keyed by numeric id while the
-  // stored identifiers are still 2.x uuids, so EVERY lookup misses — and a
+  // A 3.x panel keys its rows by numeric id while a backup taken on 2.x names
+  // them by uuid, so EVERY lookup misses — and a
   // `complete` list would turn that into "the panel proves it is gone" for the
   // whole customer base at once. Namespace mismatch is not evidence; fall
   // through to the per-profile confirmation, which addresses the profile

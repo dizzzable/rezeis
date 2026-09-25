@@ -266,6 +266,7 @@ export const en = {
           restored: 'Made lifetime again',
           alreadyLifetime: 'Already lifetime',
           notEligible: 'No grounds',
+          refunded: 'Payment refunded or charged back — not restored',
           deleted: 'Deleted',
           notFound: 'Not found',
           failed: 'Error: {{message}}',

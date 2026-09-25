@@ -48,6 +48,16 @@ const REMNAWAVE_PROFILE_TAKEN_MESSAGE =
   'This Remnawave profile is already linked to another subscription';
 
 /**
+ * The 409 an operator gets when the subscription's link changed between the
+ * endpoint's read and its write (review R2b-05). Asserted verbatim and THROUGH
+ * the safe filter: its English twin would carry the word the filter scrubs.
+ */
+const REMNAWAVE_LINK_CHANGED_MESSAGE =
+  'Привязка этой подписки к Remnawave изменилась, пока шла проверка (например, её только что записала ' +
+  'автоматическая проверка привязки). Ничего не изменено — обновите страницу и посмотрите, какая привязка ' +
+  'у подписки сейчас.';
+
+/**
  * A subscription row as the panel-facing endpoints select it. Both supplementary
  * columns are present because a real row has them on every supported version —
  * a fake carrying only `remnawaveId` would let a caller that drops them keep
@@ -143,23 +153,39 @@ function linkRepairFor(options: {
 }) {
   const updateCalls: unknown[] = [];
   const guardQueries: unknown[] = [];
+  const locks: string[] = [];
   const auditWrites: Array<{ data: { action: string; metadata: Record<string, unknown>; adminUser: unknown } }> = [];
+  const subscription = {
+    findUnique: async () => ({
+      id: 'legacy-subscription',
+      userId: 'user-1',
+      remnawaveId: null,
+      configUrl: null,
+      user: { id: 'user-1', telegramId: BigInt(42), email: null, webAccount: null, ...options.user },
+    }),
+    findFirst: findFirstOver(options.rows, guardQueries),
+    // The write, whichever way it is spelled: a write that happened is recorded.
+    update: async (input: unknown) => {
+      updateCalls.push(input);
+      return { id: 'legacy-subscription' };
+    },
+    updateMany: async (input: unknown) => {
+      updateCalls.push(input);
+      return { count: 1 };
+    },
+    findUniqueOrThrow: async () => ({ id: 'legacy-subscription' }),
+  };
   const controller = new AdminUserSubscriptionsController(
     {
-      subscription: {
-        findUnique: async () => ({
-          id: 'legacy-subscription',
-          userId: 'user-1',
-          remnawaveId: null,
-          configUrl: null,
-          user: { id: 'user-1', telegramId: BigInt(42), email: null, webAccount: null, ...options.user },
+      subscription,
+      $transaction: async (callback: (tx: unknown) => Promise<unknown>) =>
+        callback({
+          $executeRaw: async (query: { values?: unknown[] }) => {
+            locks.push(String(query.values?.[0]));
+            return 1;
+          },
+          subscription,
         }),
-        findFirst: findFirstOver(options.rows, guardQueries),
-        update: async (input: unknown) => {
-          updateCalls.push(input);
-          return { id: 'legacy-subscription' };
-        },
-      },
       adminAuditLog: {
         create: async (input: (typeof auditWrites)[number]) => {
           auditWrites.push(input);
@@ -177,7 +203,7 @@ function linkRepairFor(options: {
     {} as never,
     NOT_IN_TERM_MODEL as never,
   );
-  return { controller, updateCalls, guardQueries, auditWrites };
+  return { controller, updateCalls, guardQueries, auditWrites, locks };
 }
 
 /** The endpoint call itself, so each case shows only the identifier it pastes. */
@@ -384,22 +410,26 @@ describe('AdminUserSubscriptionsController', () => {
     const staleUuid = 'f47ac10b-58cc-4372-a567-0e02b2c3d479';
     const updateCalls: unknown[] = [];
     const auditCalls: Array<{ data: { metadata: Record<string, unknown> } }> = [];
+    const subscription = {
+      findUnique: async () => ({
+        id: 'legacy-subscription',
+        userId: 'user-1',
+        remnawaveId: staleUuid,
+        configUrl: null,
+        user: { id: 'user-1', telegramId: BigInt(42), email: null },
+      }),
+      findFirst: async () => null,
+      updateMany: async (input: unknown) => {
+        updateCalls.push(input);
+        return { count: 1 };
+      },
+      findUniqueOrThrow: async () => ({ id: 'legacy-subscription', remnawaveId: '4471' }),
+    };
     const controller = new AdminUserSubscriptionsController(
       {
-        subscription: {
-          findUnique: async () => ({
-            id: 'legacy-subscription',
-            userId: 'user-1',
-            remnawaveId: staleUuid,
-            configUrl: null,
-            user: { id: 'user-1', telegramId: BigInt(42), email: null },
-          }),
-          findFirst: async () => null,
-          update: async (input: unknown) => {
-            updateCalls.push(input);
-            return { id: 'legacy-subscription', remnawaveId: '4471' };
-          },
-        },
+        subscription,
+        $transaction: async (callback: (tx: unknown) => Promise<unknown>) =>
+          callback({ $executeRaw: async () => 1, subscription }),
         adminAuditLog: {
           create: async (input: { data: { metadata: Record<string, unknown> } }) => auditCalls.push(input),
         },
@@ -434,7 +464,8 @@ describe('AdminUserSubscriptionsController', () => {
 
     assert.deepStrictEqual(result, { id: 'legacy-subscription', remnawaveId: '4471' });
     assert.deepStrictEqual(updateCalls, [{
-      where: { id: 'legacy-subscription' },
+      // Written only over the stale id it read (review R2b-05).
+      where: { id: 'legacy-subscription', remnawaveId: staleUuid },
       data: {
         remnawaveId: '4471',
         remnawavePanelId: 4471,
@@ -465,6 +496,8 @@ describe('AdminUserSubscriptionsController', () => {
           findFirst: async () => null,
           update: async () => { updated = true; return {}; },
         },
+        // The write runs in its own transaction: starting it is writing.
+        $transaction: async () => { updated = true; return {}; },
       } as never,
       {
         getPanelUserOutcome: async () => ({
@@ -517,6 +550,7 @@ describe('AdminUserSubscriptionsController', () => {
             findFirst: async () => null,
             update: async () => { updated = true; return {}; },
           },
+          $transaction: async () => { updated = true; return {}; },
         } as never,
         {
           getPanelUserOutcome: async () => {
@@ -584,22 +618,26 @@ describe('AdminUserSubscriptionsController', () => {
   it('links a Remnawave 3.x numeric profile id, which has no uuid form to offer', async () => {
     const panelReads: unknown[] = [];
     const updateCalls: unknown[] = [];
+    const subscription = {
+      findUnique: async () => ({
+        id: 'legacy-subscription',
+        userId: 'user-1',
+        remnawaveId: null,
+        configUrl: null,
+        user: { id: 'user-1', telegramId: BigInt(42), email: null },
+      }),
+      findFirst: async () => null,
+      updateMany: async (input: unknown) => {
+        updateCalls.push(input);
+        return { count: 1 };
+      },
+      findUniqueOrThrow: async () => ({ id: 'legacy-subscription', remnawaveId: '4471' }),
+    };
     const controller = new AdminUserSubscriptionsController(
       {
-        subscription: {
-          findUnique: async () => ({
-            id: 'legacy-subscription',
-            userId: 'user-1',
-            remnawaveId: null,
-            configUrl: null,
-            user: { id: 'user-1', telegramId: BigInt(42), email: null },
-          }),
-          findFirst: async () => null,
-          update: async (input: unknown) => {
-            updateCalls.push(input);
-            return { id: 'legacy-subscription', remnawaveId: '4471' };
-          },
-        },
+        subscription,
+        $transaction: async (callback: (tx: unknown) => Promise<unknown>) =>
+          callback({ $executeRaw: async () => 1, subscription }),
         adminAuditLog: { create: async () => undefined },
       } as never,
       {
@@ -640,7 +678,7 @@ describe('AdminUserSubscriptionsController', () => {
     // `PanelUserRef`, and nothing along the way reshapes it into a uuid.
     assert.deepStrictEqual(panelReads, ['4471']);
     assert.deepStrictEqual(updateCalls, [{
-      where: { id: 'legacy-subscription' },
+      where: { id: 'legacy-subscription', remnawaveId: null },
       data: {
         remnawaveId: '4471',
         remnawavePanelId: 4471,
@@ -814,12 +852,13 @@ describe('AdminUserSubscriptionsController', () => {
       await repairLink(controller, pasted);
 
       // Self-check: the guard really did query, so the pass above means "no row
-      // matched" rather than "the guard never ran".
-      assert.equal(guardQueries.length, 1, `${pasted}: the duplicate guard did not query`);
+      // matched" rather than "the guard never ran" — once after the panel read,
+      // and once more under the profile lock, right before the write.
+      assert.equal(guardQueries.length, 2, `${pasted}: the duplicate guard did not query twice`);
       assert.deepStrictEqual(
         updateCalls,
         [{
-          where: { id: 'legacy-subscription' },
+          where: { id: 'legacy-subscription', remnawaveId: null },
           data: {
             // Never `005150`: every later lookup compares the stored string.
             remnawaveId: String(PROFILE_P_PANEL_ID),
@@ -850,6 +889,7 @@ describe('AdminUserSubscriptionsController', () => {
           findFirst: async () => null,
           update: async () => { updated = true; return {}; },
         },
+        $transaction: async () => { updated = true; return {}; },
         // No local account carries the id the line names.
         user: { findMany: async () => [] },
       } as never,
@@ -1129,6 +1169,7 @@ describe('AdminUserSubscriptionsController', () => {
           findFirst: async () => null,
           update: async () => { updated = true; return {}; },
         },
+        $transaction: async () => { updated = true; return {}; },
       } as never,
       { getPanelUserOutcome: async () => ({ kind: 'unavailable' }) } as never,
       {} as never,
@@ -1192,6 +1233,119 @@ describe('AdminUserSubscriptionsController', () => {
     assert.equal(failure instanceof NotFoundException, true);
     assert.equal((failure as NotFoundException).getStatus(), 404);
     assert.equal((failure as Error).message, 'Remnawave profile was not found');
+  });
+
+  // ── A link written while the operator's was in flight (review R2b-05) ────
+  //
+  // Between this endpoint's read of the row and its write sits a panel
+  // round-trip. The automatic check links rows by itself — the walk and the
+  // comparison, each under the profile lock and a compare-and-swap — so a row
+  // read as empty or stale can hold a working numeric link by the time the
+  // operator's write lands. That write is a compare-and-swap too now, under the
+  // same lock: a link that changed meanwhile is never overwritten.
+
+  /**
+   * The endpoint over ONE table row and the rows around it. `update` is kept
+   * beside `updateMany` so the case can tell an unconditional write from a
+   * fenced one on any version of the code: whatever the controller writes lands
+   * on `row`.
+   */
+  function racingLink(options: {
+    /** What the automatic check writes onto the row during the panel read. */
+    readonly linkedMeanwhile?: Record<string, unknown>;
+    /**
+     * Another row that takes the profile AFTER the endpoint's duplicate check
+     * answered "nobody" — so only a question asked again under the lock sees it.
+     */
+    readonly takenAfterCheck?: { readonly id: string };
+  }) {
+    const row: Record<string, unknown> = {
+      id: 'legacy-subscription',
+      userId: 'user-1',
+      remnawaveId: null,
+      remnawavePanelId: null,
+      remnawavePanelUsername: null,
+      configUrl: null,
+    };
+    let guardQuestions = 0;
+    const locks: string[] = [];
+    const matchesRow = (where: Record<string, unknown>) =>
+      Object.entries(where).every(([field, value]) => row[field] === value);
+    const subscription = {
+      findUnique: async () => ({ ...row, user: { id: 'user-1', telegramId: BigInt(42), email: null, webAccount: null } }),
+      findFirst: async () => {
+        guardQuestions += 1;
+        return guardQuestions > 1 && options.takenAfterCheck !== undefined ? { ...options.takenAfterCheck } : null;
+      },
+      update: async (input: { data: Record<string, unknown> }) => {
+        Object.assign(row, input.data);
+        return { ...row };
+      },
+      updateMany: async (input: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
+        if (!matchesRow(input.where)) return { count: 0 };
+        Object.assign(row, input.data);
+        return { count: 1 };
+      },
+      findUniqueOrThrow: async () => ({ ...row }),
+    };
+    const controller = new AdminUserSubscriptionsController(
+      {
+        subscription,
+        $transaction: async (callback: (tx: unknown) => Promise<unknown>) =>
+          callback({
+            $executeRaw: async (query: { values?: unknown[] }) => {
+              locks.push(String(query.values?.[0]));
+              return 1;
+            },
+            subscription,
+          }),
+        adminAuditLog: { create: async () => undefined },
+      } as never,
+      {
+        getPanelUserOutcome: async () => {
+          if (options.linkedMeanwhile !== undefined) Object.assign(row, options.linkedMeanwhile);
+          return { kind: 'ok', user: panelProfile({ panelId: PROFILE_P_PANEL_ID }) };
+        },
+      } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      NOT_IN_TERM_MODEL as never,
+    );
+    return { controller, row, locks };
+  }
+
+  it('R2b-05: a numeric link written during the panel read wins — 409 in words, the numeric link survives', async () => {
+    const { controller, row } = racingLink({ linkedMeanwhile: { remnawaveId: '7777', remnawavePanelId: 7777 } });
+
+    const failure = await captureRejection(() => repairLink(controller, String(PROFILE_P_PANEL_ID)));
+
+    assert.equal(failure instanceof ConflictException, true, String(failure));
+    assert.equal((failure as ConflictException).getStatus(), 409);
+    assert.equal((failure as Error).message, REMNAWAVE_LINK_CHANGED_MESSAGE);
+    assert.equal(sentToOperator(failure), REMNAWAVE_LINK_CHANGED_MESSAGE, 'the operator reads it as written');
+    assert.equal(row['remnawaveId'], '7777', 'the working numeric link is not overwritten');
+    assert.equal(row['remnawavePanelId'], 7777);
+  });
+
+  it('R2b-05: a profile another row took after the duplicate check is refused under the lock, and nothing is written', async () => {
+    const { controller, row } = racingLink({ takenAfterCheck: { id: 'other-subscription' } });
+
+    const failure = await captureRejection(() => repairLink(controller, String(PROFILE_P_PANEL_ID)));
+
+    assert.equal(failure instanceof BadRequestException, true, String(failure));
+    assert.equal((failure as Error).message, REMNAWAVE_PROFILE_TAKEN_MESSAGE);
+    assert.equal(row['remnawaveId'], null, 'one profile never lands on two rows');
+  });
+
+  it('R2b-05 control: with nothing in between, it links — under the lock every link writer takes', async () => {
+    const { controller, row, locks } = racingLink({});
+
+    await repairLink(controller, String(PROFILE_P_PANEL_ID));
+
+    assert.equal(row['remnawaveId'], String(PROFILE_P_PANEL_ID));
+    assert.deepStrictEqual(locks, [`remnawave-profile:${PROFILE_P_PANEL_ID}`]);
   });
 
   // ── The one row a bare `remnawaveId` cannot name ─────────────────────────

@@ -32,9 +32,8 @@ export interface RemnawaveHostInterface {
   readonly remark: string;
   /**
    * A short LABEL under the host's name in VPN clients — at most 30
-   * characters, present since Remnawave 2.0.0. Null when the operator left it
-   * empty. Optional so every fixture that builds a host by hand keeps
-   * compiling.
+   * characters. Null when the operator left it empty. Optional so every
+   * fixture that builds a host by hand keeps compiling.
    *
    * Not the name, and this used to say otherwise. Both this and `remark` are
    * shown to customers; they are a title and a label. Incy draws the remark in
@@ -49,11 +48,11 @@ export interface RemnawaveHostInterface {
   readonly isDisabled: boolean;
   readonly isHidden: boolean;
   readonly securityLayer: string;
+  /** The first of {@link tags}, or null — kept because the admin SPA still reads it. */
   readonly tag: string | null;
   /**
-   * 2.8 replaced the single `tag` string with a `tags` array. We normalize to
-   * an array for both versions (legacy `tag` → `[tag]`), keeping `tag` as the
-   * first element for back-compat.
+   * The host's labels: Remnawave's `tags` array (optional in the 3.3.2 and
+   * 3.4.3 specs), empty when the panel sent none (`remnawave-host-mapper.ts`).
    */
   readonly tags: readonly string[];
   /**

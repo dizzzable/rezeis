@@ -3,7 +3,10 @@ import { describe, it } from 'node:test';
 
 import { SubscriptionStatus, SyncJobStatus } from '@prisma/client';
 
-import { PanelProfileComparisonService } from '../src/modules/profile-sync/panel-profile-comparison.service';
+import {
+  PANEL_PROFILE_COMPARISON_MAX_CUSTOMERS,
+  PanelProfileComparisonService,
+} from '../src/modules/profile-sync/panel-profile-comparison.service';
 import {
   strictInvalidContract,
   strictOk,
@@ -344,13 +347,26 @@ describe('PanelProfileComparisonService — never a guess', () => {
     assert.deepEqual(prisma.writes, []);
   });
 
-  it('a customer who is not in this panel gets no link', async () => {
+  it('an owner who is not a user of this install is left out altogether: not listed, not linked', async () => {
+    // Another install's customer on a shared Remnawave (review R2b-04): the
+    // line names a user that exists nowhere here.
     const prisma = harness({ users: [], subscriptions: [] });
 
     const result = await compareOk(prisma, [profile(4711, 'reiwa_id: user-gone')]);
 
-    assert.equal(result.customers[0]?.userId, 'user-gone');
+    assert.deepEqual(result.customers, []);
+    assert.equal(result.truncated, false);
+    assert.deepEqual(prisma.writes, []);
+  });
+
+  it('a customer of this install with no live subscription at all is still listed with their profile', async () => {
+    const prisma = harness({ users: ['user-1'], subscriptions: [] });
+
+    const result = await compareOk(prisma, [profile(4711, 'reiwa_id: user-1')]);
+
+    assert.equal(result.customers[0]?.userId, 'user-1');
     assert.equal(result.customers[0]?.profiles[0]?.autoLink, 'noSubscriptionWithoutLink');
+    assert.deepEqual(prisma.writes, []);
   });
 
   it('a DELETED subscription without a link is not a candidate', async () => {
@@ -392,6 +408,54 @@ describe('PanelProfileComparisonService — never a guess', () => {
 
     assert.equal(result.autoLinked, 1);
     assert.equal(prisma.subscriptions[0]['remnawaveId'], '4712');
+  });
+});
+
+/**
+ * ONE REMNAWAVE, TWO INSTALLS (review R2b-04). The other install writes the same
+ * `reiwa_id` lines for ITS users — ids that exist nowhere here. Sorted and cut
+ * to the cap before anybody asked whether they are customers here, 500 of them
+ * filled the list: this install's own customers were never compared or linked.
+ */
+describe('PanelProfileComparisonService — a Remnawave shared with another install', () => {
+  it("drops the other install's customers BEFORE the cap: this install's customer is compared and linked", async () => {
+    assert.equal(PANEL_PROFILE_COMPARISON_MAX_CUSTOMERS, 500, 'the fixture below is sized to the cap');
+    // 500 foreign owners, every one of them sorting before 'user-1'.
+    const foreign = Array.from({ length: 500 }, (_unused, index) =>
+      profile(9000 + index, `reiwa_id: aaa-other-install-${String(index).padStart(3, '0')}`),
+    );
+    const prisma = harness({ users: ['user-1', 'user-2'], subscriptions: [subscription('sub-a')] });
+
+    const result = await compareOk(prisma, [
+      ...foreign,
+      profile(4711, 'reiwa_id: user-1'),
+      // A customer here with no live subscription: listed all the same.
+      profile(4712, 'reiwa_id: user-2'),
+    ]);
+
+    assert.equal(result.autoLinked, 1, "this install's own customer is linked");
+    assert.equal(prisma.subscriptions[0]['remnawaveId'], '4711');
+    assert.deepEqual(
+      result.customers.map((customer) => customer.userId),
+      ['user-1', 'user-2'],
+      "none of the other install's customers is listed",
+    );
+    assert.equal(result.customers[1]?.profiles[0]?.autoLink, 'noSubscriptionWithoutLink');
+    assert.equal(result.truncated, false, "the other install's customers do not count towards the cap");
+  });
+
+  it("the cap still cuts this install's own customers, and says so", async () => {
+    const owners = Array.from({ length: 501 }, (_unused, index) => `user-${String(index).padStart(3, '0')}`);
+    const prisma = harness({ users: owners, subscriptions: [] });
+
+    const result = await compareOk(
+      prisma,
+      owners.map((owner, index) => profile(20_000 + index, `reiwa_id: ${owner}`)),
+    );
+
+    assert.equal(result.truncated, true);
+    assert.equal(result.customers.length, 500);
+    assert.equal(result.customers[0]?.userId, 'user-000');
   });
 });
 

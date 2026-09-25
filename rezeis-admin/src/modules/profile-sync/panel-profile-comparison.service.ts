@@ -161,8 +161,10 @@ function chunks<T>(items: readonly T[], size: number): T[][] {
  * PanelProfileComparisonService
  * ─────────────────────────────
  * The per-customer comparison (owner's decision, 24.09.2026): every Remnawave
- * profile whose `reiwa_id` line names a customer, set against that customer's
- * live subscriptions. A profile none of their live subscriptions links is an
+ * profile whose `reiwa_id` line names a customer of THIS install, set against
+ * that customer's live subscriptions (a line naming a user that exists nowhere
+ * here — another install's, on a shared Remnawave — is not this comparison's
+ * business). A profile none of their live subscriptions links is an
  * EXTRA profile, listed in «Подписки» → «Инструменты» → «Лишние профили в
  * Remnawave».
  *
@@ -255,25 +257,29 @@ export class PanelProfileComparisonService {
     const deletedNamers = await this.readDeletedNamers(ownedPanelIds);
 
     // ── 3. The customers with an extra profile ─────────────────────────────
-    const candidates = [...byOwner.entries()]
-      .filter(([owner, profiles]) =>
-        profiles.some(
-          (profile) => !(linkers.get(profile.panelId) ?? []).some((row) => row.userId === owner),
-        ),
-      )
+    //
+    // ONLY THIS INSTALL'S CUSTOMERS, AND ASKED BEFORE THE CAP. A Remnawave
+    // shared with another install carries that install's `reiwa_id` lines for
+    // users that exist nowhere here; sorted and cut first, they could fill all
+    // {@link PANEL_PROFILE_COMPARISON_MAX_CUSTOMERS} places, and this install's
+    // own customers were then never compared, listed or linked. A customer of
+    // this install with no live subscription stays: their profiles are extra
+    // all the same.
+    const withExtra = [...byOwner.entries()].filter(([owner, profiles]) =>
+      profiles.some(
+        (profile) => !(linkers.get(profile.panelId) ?? []).some((row) => row.userId === owner),
+      ),
+    );
+    const localUsers = await this.readLocalUsers(withExtra.map(([owner]) => owner));
+    const candidates = withExtra
+      .filter(([owner]) => localUsers.has(owner))
       .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
     const truncated = candidates.length > PANEL_PROFILE_COMPARISON_MAX_CUSTOMERS;
     const kept = candidates.slice(0, PANEL_PROFILE_COMPARISON_MAX_CUSTOMERS);
     const ownerIds = kept.map(([owner]) => owner);
 
-    const existing = new Set<string>();
     const withoutLink = new Map<string, LiveRow[]>();
     for (const batch of chunks(ownerIds, COMPARISON_BATCH)) {
-      const users = await this.prismaService.user.findMany({
-        where: { id: { in: batch } },
-        select: { id: true },
-      });
-      for (const user of users) existing.add(user.id);
       const rows = await this.prismaService.subscription.findMany({
         where: { userId: { in: batch }, status: { not: SubscriptionStatus.DELETED } },
         orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
@@ -300,7 +306,7 @@ export class PanelProfileComparisonService {
       const free = extra.filter(
         (profile) => (linkers.get(profile.panelId) ?? []).length === 0 && !deletedNamers.has(profile.panelId),
       );
-      const rows = existing.has(owner) ? (withoutLink.get(owner) ?? []) : [];
+      const rows = withoutLink.get(owner) ?? [];
       const compared: ComparedProfile[] = [];
       for (const profile of extra) {
         const holder = (linkers.get(profile.panelId) ?? []).find((row) => row.userId !== owner) ?? null;
@@ -449,6 +455,19 @@ export class PanelProfileComparisonService {
       });
       return written.count === 1 ? 'linked' : 'changedDuringCheck';
     });
+  }
+
+  /** Which of `userIds` are users of this install. */
+  private async readLocalUsers(userIds: readonly string[]): Promise<Set<string>> {
+    const local = new Set<string>();
+    for (const batch of chunks(userIds, COMPARISON_BATCH)) {
+      const users = await this.prismaService.user.findMany({
+        where: { id: { in: batch } },
+        select: { id: true },
+      });
+      for (const user of users) local.add(user.id);
+    }
+    return local;
   }
 
   /** Every live row that names one of `panelIds`, by either identifier. */

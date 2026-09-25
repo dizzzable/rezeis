@@ -1005,7 +1005,10 @@ export class ProfileSyncProcessor extends WorkerHost {
    *    automatic link (`subscriptionMarkerAllows`). A profile provisioned for
    *    another of this customer's subscriptions is that subscription's, even
    *    when no live row holds it any more. A profile without the line predates
-   *    it and is judged by the other two tests alone.
+   *    it and is judged by the other two tests alone. Under a name this row
+   *    RECORDED (the pending name, the stored name) the next test is asked
+   *    first: a profile another live row is on is `contested` whatever its line
+   *    says, because that line is the holder's own push.
    *  • no other live subscription is on it. The marker says WHOSE profile it
    *    is and nothing about which of that user's subscriptions holds it.
    *    Adopting one another live subscription is on puts two rows on one panel
@@ -1060,6 +1063,14 @@ export class ProfileSyncProcessor extends WorkerHost {
     const free = new Set<string>();
     let contested: Extract<OwnPanelProfileSearch, { kind: 'contested' }> | null = null;
     let recordedUnproven: Extract<OwnPanelProfileSearch, { kind: 'recordedUnproven' }> | null = null;
+    // The names THIS row recorded for its own profile: the one its last CREATE
+    // chose before the POST, and the one the panel gave the profile it was last
+    // linked to. Every other name on the list is computed.
+    const ownNames = new Set(
+      [recorded?.name ?? null, readPanelString(subscription.remnawavePanelUsername)].filter(
+        (ownName): ownName is string => ownName !== null,
+      ),
+    );
     for (const name of names) {
       const lookup = await this.panelUsers.getUserByUsername(name);
       if (lookup.kind !== 'ok') {
@@ -1094,7 +1105,19 @@ export class ProfileSyncProcessor extends WorkerHost {
         );
         continue;
       }
-      if (!subscriptionMarkerAllows(existing.description, subscription.id)) {
+      // THE subscription_id LINE IS ASKED AFTER THE HOLDER under this row's own
+      // recorded name, and before it under a computed one. A live row's every
+      // ordinary UPDATE writes its own line, so the half of a duplicate pair
+      // whose link was lost meets the profile its sibling is live on MARKED for
+      // that sibling — and skipping it here minted a second live profile for one
+      // purchase, silenced the operator's refusal, and left the two rows on
+      // different profiles, where no detector pairs them again. A name the row
+      // recorded says it was on this profile, so that stays the `contested`
+      // refusal it always was. A computed name says no such thing: another of
+      // the customer's subscriptions may carry it by right (a back-dated import
+      // shifts every ordinal after it), and there the line decides.
+      const markerAllows = subscriptionMarkerAllows(existing.description, subscription.id);
+      if (!markerAllows && !ownNames.has(name)) {
         this.logger.warn(
           `Remnawave profile '${name}' is user ${subscription.userId}'s, but its subscription_id ` +
             `line names another subscription (${readProfileSubscriptionMarkers(existing.description).join(', ')}); ` +
@@ -1131,6 +1154,19 @@ export class ProfileSyncProcessor extends WorkerHost {
       });
       if (holder !== null) {
         contested ??= { kind: 'contested', panelId: existingPanelId, holder };
+        continue;
+      }
+      if (!markerAllows) {
+        // Under a recorded name with nothing live on it: the marked subscription
+        // is gone or has moved on. Still not adopted — no automatic link gives
+        // a profile to a subscription its line does not name — and a profile
+        // of its own cannot put two live rows on one, so the CREATE goes on.
+        this.logger.warn(
+          `Remnawave profile '${name}', a name subscription ${subscription.id} recorded, is user ` +
+            `${subscription.userId}'s and no live subscription is on it, but its subscription_id line ` +
+            `names another subscription (${readProfileSubscriptionMarkers(existing.description).join(', ')}); ` +
+            `not adopting it for subscription ${subscription.id}`,
+        );
         continue;
       }
       // Another customer's row that carries only the NAME — its own identity
