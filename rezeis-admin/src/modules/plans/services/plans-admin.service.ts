@@ -3,13 +3,13 @@ import {
   Injectable,
   Logger,
   NotFoundException,
-  OnApplicationShutdown,
+  OnModuleDestroy,
   Optional,
 } from '@nestjs/common';
 import { PlanAvailability, Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
-import { followResetRules } from '../../add-on-entitlements/services/reset-rule-follow';
+import { enqueueResetRulePushes, followResetRules } from '../../add-on-entitlements/services/reset-rule-follow';
 import { SubscriptionTermService } from '../../add-on-entitlements/services/subscription-term.service';
 import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
 import { RequestMetadataInterface } from '../../auth/interfaces/request-metadata.interface';
@@ -90,6 +90,14 @@ export interface AdminPlanUpdateResultInterface extends AdminPlanInterface {
 }
 
 /**
+ * How long a stop waits for the reset-rule follow under way to finish the
+ * subscriber it is on; see `onModuleDestroy`. One step takes milliseconds, so
+ * this is a bound, not a pause — well inside the 10 s Docker gives a container,
+ * beside the 5 s the refund cards may take (`AFTER_RESPONSE_SHUTDOWN_WAIT_MS`).
+ */
+export const RESET_RULE_FOLLOW_SHUTDOWN_WAIT_MS = 2_000;
+
+/**
  * PlansAdminService
  * ─────────────────
  * Orchestrates plan-write operations exposed to the admin panel. Pure
@@ -98,12 +106,14 @@ export interface AdminPlanUpdateResultInterface extends AdminPlanInterface {
  * keeps only the persistence / audit / cross-system sync logic.
  */
 @Injectable()
-export class PlansAdminService implements OnApplicationShutdown {
+export class PlansAdminService implements OnModuleDestroy {
   private readonly logger = new Logger(PlansAdminService.name);
   /** The terms of a plan's subscribers follow a changed reset rule through it. Stateless. */
   private readonly subscriptionTermService = new SubscriptionTermService();
   /** Reset-rule follows started after an edit's commit and not finished yet. */
   private readonly resetRuleFollows = new Set<Promise<void>>();
+  /** Set when the process stops: a follow under way ends after the subscriber it is on. */
+  private stopping = false;
 
   public constructor(
     private readonly prismaService: PrismaService,
@@ -120,12 +130,33 @@ export class PlansAdminService implements OnApplicationShutdown {
   ) {}
 
   /**
-   * A stop waits for the reset-rule follows this process started: what is cut
-   * short is finished by the boundary scheduler's sweep anyway, but a graceful
-   * stop should not leave that to it.
+   * A STOP ENDS A FOLLOW BETWEEN TWO SUBSCRIBERS, NOT IN ONE. The follow under
+   * way finishes the subscriber it is on — its short transaction commits, and
+   * its push is enqueued — and starts no other; {@link RESET_RULE_FOLLOW_SHUTDOWN_WAIT_MS}
+   * bounds the wait. Nothing is lost by stopping: a subscriber in the term
+   * model not reached yet still has a term naming the old rule, which the
+   * boundary scheduler's sweep finds; every other one got its push with the
+   * edit itself (`PlanSnapshotSyncService`), which the profile-sync sweep sends.
+   *
+   * `onModuleDestroy`, not `onApplicationShutdown` (review R4): Nest destroys
+   * this module before the global one whose `PrismaService` disconnects, and
+   * runs every shutdown hook only after that — the wait used to sit there, with
+   * the database already gone under the follow it waited for.
    */
-  public async onApplicationShutdown(): Promise<void> {
-    await this.settleResetRuleFollows();
+  public async onModuleDestroy(): Promise<void> {
+    this.stopping = true;
+    if (this.resetRuleFollows.size === 0) return;
+    let timer: NodeJS.Timeout | undefined;
+    const settled = await Promise.race([
+      this.settleResetRuleFollows().then(() => true),
+      new Promise<false>((resolve) => {
+        timer = setTimeout(() => resolve(false), RESET_RULE_FOLLOW_SHUTDOWN_WAIT_MS);
+      }),
+    ]);
+    clearTimeout(timer);
+    if (!settled) {
+      this.logger.warn('A reset-rule follow was still running at the stop; the sweeps finish what it left');
+    }
   }
 
   /** Resolves once every reset-rule follow started so far has finished (it never rejects). */
@@ -279,9 +310,11 @@ export class PlansAdminService implements OnApplicationShutdown {
           },
           include: PLAN_INCLUDE,
         });
-        // The snapshots only, in one statement whatever the plan's size. A
-        // changed reset rule reaches the subscribers' terms, their «до сброса»
-        // add-ons and Remnawave AFTER the commit (`followResetRuleAfterCommit`).
+        // The snapshots, in one statement whatever the plan's size. A changed
+        // reset rule reaches the terms of the subscribers in the term model,
+        // their «до сброса» add-ons and then Remnawave AFTER the commit
+        // (`followResetRuleAfterCommit`); every other live linked subscriber's
+        // push is written here, with the rule (review R4-01).
         const snapshotSync = await this.planSnapshotSyncService.syncPlanSnapshotMetadata(transactionClient, {
           id: updatedPlan.id,
           name: updatedPlan.name,
@@ -347,7 +380,8 @@ export class PlansAdminService implements OnApplicationShutdown {
             source: PLAN_UPDATE_SOURCES.PLANS_TAB,
             squadPropagation: { ...squadPropagation.summary },
             // How many subscribers' reset rule the edit changed: they follow it
-            // after the commit, each on its own (`followResetRuleAfterCommit`).
+            // after the commit, each on its own, or were pushed with it
+            // (`followResetRuleAfterCommit`).
             ...(snapshotSync.strategyChanged > 0
               ? { resetRuleChange: { subscriptions: snapshotSync.strategyChanged } }
               : {}),
@@ -366,50 +400,55 @@ export class PlansAdminService implements OnApplicationShutdown {
 
   /**
    * A CHANGED RESET RULE REACHES THE SUBSCRIBERS AFTER THE COMMIT (P6, review
-   * R3a-01). Each one's terms take the rule, its «до сброса» add-ons end at the
-   * first reset under it (never later than promised), and a live profile is
-   * pushed to Remnawave at once — each subscriber in a short transaction of
-   * its own (`followResetRules`), its push enqueued the moment that
-   * transaction commits.
+   * R3a-01), in two groups:
+   *  - the pushes the edit wrote for the subscribers outside the term model
+   *    (`snapshots.syncJobIds`, review R4-01) are put on the queue first;
+   *  - then each subscriber in the model follows: its terms take the rule, its
+   *    «до сброса» add-ons end at the first reset under it (never later than
+   *    promised), and then its live profile is pushed — each in a short
+   *    transaction of its own (`followResetRules`), its push enqueued the
+   *    moment that transaction commits.
    *
    * NOT AWAITED by the edit: a plan with tens of thousands of subscribers
    * would hold the operator's request for minutes, past the 30-second request
-   * timeout. The edit has committed the plan and every snapshot by now, so what
-   * this leaves undone — a restart, a failed step — is visible in the data (a
-   * term still naming the old rule) and the boundary scheduler's sweep finishes
-   * it (`EntitlementBoundarySchedulerService.followChangedResetRules`). How
-   * many subscribers it concerns is on the audit row (`resetRuleChange`).
+   * timeout. Nothing this leaves undone is lost — a restart, a stop
+   * ({@link onModuleDestroy}), a failed step: a subscriber in the model still
+   * has a term naming the old rule, which the boundary scheduler's sweep finds
+   * (`EntitlementBoundarySchedulerService.followChangedResetRules`, 500 a run
+   * every 5 minutes), and every other push is a PENDING row since the commit,
+   * which the profile-sync sweep sends. How many subscribers the edit concerns
+   * is on the audit row (`resetRuleChange`).
    */
   private followResetRuleAfterCommit(planId: string, snapshots: PlanSnapshotSyncResult): void {
     // `?? []`: a spec's double of the snapshot sync answers a bare count.
     const subscriptionIds = snapshots.followSubscriptionIds ?? [];
-    if (subscriptionIds.length === 0) return;
+    const pushed = snapshots.syncJobIds ?? [];
+    if (subscriptionIds.length === 0 && pushed.length === 0) return;
     const queue = this.profileSyncQueueService;
-    const run = followResetRules(
-      {
-        prisma: this.prismaService,
-        terms: this.subscriptionTermService,
-        enqueue: queue === undefined ? undefined : (syncJobId) => queue.enqueue(syncJobId),
-        logger: this.logger,
-      },
-      subscriptionIds,
-      { correlationId: `plan-edit:${planId}`, push: 'always' },
-    ).then(
-      (summary) => {
-        this.logger.log(
-          `Plan ${planId}: reset rule followed by ${summary.followed} of ${subscriptionIds.length} subscriber(s), ` +
-            `${summary.enqueued} push(es) enqueued` +
-            (summary.failed > 0 ? `, ${summary.failed} left for the sweep` : ''),
-        );
-      },
-      (error: unknown) => {
-        this.logger.warn(
-          `Plan ${planId}: reset-rule follow stopped, the sweep finishes it: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      },
-    );
+    const enqueue = queue === undefined ? undefined : (syncJobId: string) => queue.enqueue(syncJobId);
+    const shouldStop = (): boolean => this.stopping;
+    const run = (async () => {
+      const outside =
+        enqueue === undefined ? 0 : await enqueueResetRulePushes(enqueue, pushed, { logger: this.logger, shouldStop });
+      const summary = await followResetRules(
+        { prisma: this.prismaService, terms: this.subscriptionTermService, enqueue, logger: this.logger },
+        subscriptionIds,
+        { correlationId: `plan-edit:${planId}`, push: 'always', shouldStop },
+      );
+      this.logger.log(
+        `Plan ${planId}: reset rule followed by ${summary.followed} of ${subscriptionIds.length} subscriber(s) ` +
+          `in the term model, ${summary.enqueued + outside} push(es) enqueued (${outside} of ${pushed.length} ` +
+          'written with the edit)' +
+          (summary.failed > 0 ? `, ${summary.failed} left for the sweep` : '') +
+          (this.stopping ? '; stopped by the shutdown, the sweeps finish the rest' : ''),
+      );
+    })().catch((error: unknown) => {
+      this.logger.warn(
+        `Plan ${planId}: reset-rule follow stopped, the sweeps finish it: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    });
     this.resetRuleFollows.add(run);
     void run.finally(() => this.resetRuleFollows.delete(run));
   }

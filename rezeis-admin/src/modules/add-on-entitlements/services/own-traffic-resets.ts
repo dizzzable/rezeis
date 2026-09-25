@@ -14,7 +14,8 @@ import { Prisma } from '@prisma/client';
  *
  *  - a paid renewal zeroes the counter after its PATCH — the UPDATE job
  *    carries `resetTraffic: true` (`ProfileSyncProcessor`);
- *  - a TRAFFIC_RESET job, and the operator's «Сбросить», recorded as one
+ *  - a TRAFFIC_RESET job, and the operator's «Сбросить» on the subscription
+ *    and the users toolbar's «Сбросить трафик», each recorded as one
  *    (`recordOperatorTrafficReset`);
  *  - a paid or free «Обнулить трафик» — a `subscription_traffic_resets` row
  *    (`TrafficResetService`).
@@ -24,7 +25,8 @@ import { Prisma } from '@prisma/client';
  * the panel's own. The bracket is widened by {@link OWN_RESET_CLOCK_SKEW_MS}:
  * the panel's clock and Remnawave's are not one clock. A reset somebody makes
  * in Remnawave's own UI leaves no such row; those are what the readers' other
- * rule is for (a scheduled run stamps MANY profiles with ONE instant).
+ * rule is for (a scheduled run stamps MANY profiles with one instant per
+ * status group, the groups milliseconds apart — `RUN_STAMP_SPREAD_MS`).
  */
 
 /** How far outside its own record a reset the panel asked for may be stamped: the two clocks differ. */

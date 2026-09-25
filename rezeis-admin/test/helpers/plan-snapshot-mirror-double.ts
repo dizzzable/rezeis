@@ -1,28 +1,36 @@
 import assert from 'node:assert/strict';
 
 /**
- * A double of the ONE statement `PlanSnapshotSyncService.syncPlanSnapshotMetadata`
+ * A double of the mirror statement `PlanSnapshotSyncService.syncPlanSnapshotMetadata`
  * runs (review R3a-01): it updates the rows whose `plan_snapshot->>'<key>'` is
  * the plan, merging `jsonb_build_object('<k1>', $1, '<k2>', $2, …)` into the
- * stored JSON, and returns each row's id, the reset rule it named before, and
- * its status.
+ * stored JSON, and returns each row's id, the reset rule it named before, its
+ * status, whether it is linked, and whether it is in the term model.
  *
  * Everything is read OUT OF THE STATEMENT — the key it selects on, the keys it
  * merges and the values it binds, in the order it binds them (the selected
  * plan id first) — so a statement that selected on another key, or merged a
  * key it must not (a frozen limit, the icon), is emulated doing exactly that,
  * and the spec using this double sees it.
+ *
+ * The mirror only: a row that is live, LINKED, outside the model and whose
+ * rule the edit changes makes the service write its push in a second
+ * statement (review R4-01), which this double does not answer. A row is
+ * linked only when it says so (`remnawaveId`).
  */
 export interface MirroredRow {
   readonly id: string;
   planSnapshot: Record<string, unknown>;
   readonly status?: string;
+  readonly remnawaveId?: string | null;
+  /** Has an ACTIVE or SCHEDULED term of the plan; outside the model when absent. */
+  readonly inModel?: boolean;
 }
 
 export function emulatePlanSnapshotMirror(
   query: { readonly strings?: readonly string[]; readonly values?: readonly unknown[] },
   rows: MirroredRow[],
-): Array<{ id: string; previousStrategy: unknown; status: string }> {
+): Array<{ id: string; previousStrategy: unknown; status: string; linked: boolean; inModel: boolean }> {
   const text = (query.strings ?? []).join('?');
   assert.match(text, /UPDATE "subscriptions"/, 'the mirror is one UPDATE of the subscriptions');
   const selectedOn = /WHERE\s+"plan_snapshot"->>'([^']+)'\s*=\s*\?/.exec(text)?.[1];
@@ -36,6 +44,12 @@ export function emulatePlanSnapshotMirror(
     const previousStrategy = row.planSnapshot['trafficLimitStrategy'] ?? null;
     const patch = Object.fromEntries(keys.map((key, index) => [key, bound[index] ?? null]));
     row.planSnapshot = { ...row.planSnapshot, ...patch };
-    return { id: row.id, previousStrategy, status: row.status ?? 'ACTIVE' };
+    return {
+      id: row.id,
+      previousStrategy,
+      status: row.status ?? 'ACTIVE',
+      linked: row.remnawaveId !== undefined && row.remnawaveId !== null,
+      inModel: row.inModel ?? false,
+    };
   });
 }

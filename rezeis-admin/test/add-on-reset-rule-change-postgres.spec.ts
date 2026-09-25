@@ -25,6 +25,7 @@ import { EffectiveProjectionService } from '../src/modules/add-on-entitlements/s
 import { EntitlementBoundarySchedulerService } from '../src/modules/add-on-entitlements/services/entitlement-boundary-scheduler.service';
 import { EntitlementCutoverService } from '../src/modules/add-on-entitlements/services/entitlement-cutover.service';
 import {
+  enqueueResetRulePushes,
   followChangedResetRules,
   followResetRules,
   PLAN_STRATEGY_UPDATE_CAUSE,
@@ -245,15 +246,49 @@ function recordingQueue() {
   return { ids, enqueue: async (syncJobId: string): Promise<void> => void ids.push(syncJobId) };
 }
 
-/** The plan edit whole: the commit, then the follow after it, as `PlansAdminService.updatePlan` runs it. */
+/**
+ * The plan edit whole, as `PlansAdminService.updatePlan` runs it: the commit,
+ * the pushes it wrote put on the queue, then the follow of the rows in the model.
+ */
 async function editStrategy(planId: string, strategy: TrafficLimitStrategy) {
   const committed = await commitStrategyEdit(planId, strategy);
   const queue = recordingQueue();
+  await enqueueResetRulePushes(queue.enqueue, committed.syncJobIds);
   const follow = await followResetRules({ prisma, terms, enqueue: queue.enqueue }, committed.followSubscriptionIds, {
     correlationId: `plan-edit:${planId}`,
     push: 'always',
   });
   return { ...committed, follow, pushed: queue.ids };
+}
+
+/** A live linked subscription on `planId` OUTSIDE the term model (no terms), as stage 1 off leaves it. */
+async function outsideSubscription(
+  planId: string,
+  options: { readonly status?: SubscriptionStatus; readonly linked?: boolean } = {},
+): Promise<string> {
+  const userId = `${prefix}-user-${next()}`;
+  await prisma.user.create({ data: { id: userId, referralCode: `${userId}-ref`, name: userId } });
+  created.users.push(userId);
+  const panelId = 890_000 + next();
+  const row = await prisma.subscription.create({
+    data: {
+      userId,
+      status: options.status ?? SubscriptionStatus.ACTIVE,
+      planSnapshot: { id: planId, name: planId, trafficLimitStrategy: 'MONTH' } as Prisma.InputJsonValue,
+      trafficLimit: 100,
+      deviceLimit: 3,
+      ...(options.linked === false ? {} : { remnawaveId: String(panelId), remnawavePanelId: panelId }),
+      expiresAt: inDays(30),
+    },
+    select: { id: true },
+  });
+  return row.id;
+}
+
+/** Postgres gave up waiting for a row lock (`lock_timeout`, SQLSTATE 55P03), however Prisma 7 wraps it. */
+function isLockTimeout(error: unknown): boolean {
+  const text = `${error instanceof Error ? error.message : String(error)} ${JSON.stringify(error)}`;
+  return /55P03|lock timeout/i.test(text);
 }
 
 /** The boundary scheduler, for its reset-rule sweep only. */
@@ -585,30 +620,147 @@ run('a plan\'s reset rule changes mid-period (PostgreSQL)', () => {
     assert.deepEqual(idle.ids.filter((id) => allPushes.includes(id)), []);
   });
 
-  it('a live subscriber outside the term model is pushed too: the push is all a changed rule needs there (R3a-01)', async () => {
+  it('a live subscriber outside the term model is pushed with the edit itself: the push is all a changed rule needs there (R4-01)', async () => {
     const planId = await plan(TrafficLimitStrategy.MONTH);
-    const userId = `${prefix}-user-${next()}`;
-    await prisma.user.create({ data: { id: userId, referralCode: `${userId}-ref`, name: userId } });
-    created.users.push(userId);
-    const outside = await prisma.subscription.create({
+    const outside = await outsideSubscription(planId, { status: SubscriptionStatus.LIMITED });
+
+    const result = await editStrategy(planId, TrafficLimitStrategy.DAY);
+
+    const pushes = await strategyPushes(outside);
+    assert.equal(pushes.length, 1, 'no term to follow, and still pushed');
+    assert.deepEqual(result.syncJobIds, [pushes[0]!.id], 'written by the edit, handed back to enqueue');
+    assert.deepEqual(result.pushed, [pushes[0]!.id], 'and enqueued after the commit');
+    assert.deepEqual(result.followSubscriptionIds, [], 'nothing for the follow');
+    assert.equal(result.strategyChanged, 1);
+    assert.equal(pushes[0]!.status, 'PENDING');
+    assert.equal(pushes[0]!.action, 'UPDATE');
+    assert.deepEqual(pushes[0]!.payload, { source: PLAN_STRATEGY_UPDATE_CAUSE, planId });
+  });
+
+  it('the process stops right after the edit commits: the sweep follows and pushes the rows in the model, and the edit\'s own push waits for everyone else (R4-01)', async () => {
+    // Review R4's probe. The follow after the commit never runs — a redeploy,
+    // a crash. The durable resumption, the boundary scheduler's sweep, finds
+    // work through the terms only; a row outside the model has none.
+    const planId = await plan(TrafficLimitStrategy.MONTH);
+    const inside = (await liveSubscription(planId)).subscriptionId;
+    const outside = await outsideSubscription(planId);
+
+    const committed = await commitStrategyEdit(planId, TrafficLimitStrategy.DAY);
+    assert.deepEqual(committed.followSubscriptionIds, [inside]);
+    // …the process stops here. After the restart, the sweep runs, every 5 minutes.
+    const resumed = recordingQueue();
+    for (let pass = 0; pass < 3; pass += 1) await sweeper(resumed).followChangedResetRules();
+
+    assert.equal(await activeStrategy(inside), 'DAY', 'the model is followed');
+    const insidePushes = await strategyPushes(inside);
+    assert.equal(insidePushes.length, 1, '…and pushed, once');
+    assert.ok(resumed.ids.includes(insidePushes[0]!.id));
+    const outsidePushes = await strategyPushes(outside);
+    assert.equal(outsidePushes.length, 1, 'the row outside the model has its push since the commit, and only that one');
+    assert.deepEqual(committed.syncJobIds, [outsidePushes[0]!.id]);
+    // What the profile-sync sweep (`ProfileSyncQueueService.sweepPending`) sends.
+    assert.equal(outsidePushes[0]!.status, 'PENDING');
+    assert.equal(outsidePushes[0]!.supersededAt, null);
+  });
+
+  it('keeps a push of that cause already waiting instead of writing a second one (R4-01)', async () => {
+    const planId = await plan(TrafficLimitStrategy.MONTH);
+    const outside = await outsideSubscription(planId);
+    const waiting = await prisma.profileSyncJob.create({
       data: {
-        userId,
-        status: SubscriptionStatus.LIMITED,
-        planSnapshot: { id: planId, name: planId, trafficLimitStrategy: 'MONTH' } as Prisma.InputJsonValue,
-        trafficLimit: 100,
-        deviceLimit: 3,
-        remnawaveId: String(890_000 + next()),
-        expiresAt: inDays(30),
+        subscriptionId: outside,
+        action: 'UPDATE',
+        status: 'PENDING',
+        cause: PLAN_STRATEGY_UPDATE_CAUSE,
+        payload: { source: PLAN_STRATEGY_UPDATE_CAUSE, planId },
       },
-      select: { id: true },
     });
 
     const result = await editStrategy(planId, TrafficLimitStrategy.DAY);
 
-    const pushes = await strategyPushes(outside.id);
-    assert.equal(pushes.length, 1, 'no term to follow, and still pushed');
-    assert.deepEqual(result.pushed, [pushes[0]!.id]);
-    assert.equal(result.follow.followed, 0, 'nothing moved in the model');
+    const pushes = await strategyPushes(outside);
+    assert.deepEqual(pushes.map((push) => push.id), [waiting.id], 'no second push');
+    assert.deepEqual(result.syncJobIds, [waiting.id], 'the waiting one is enqueued after the commit');
+    // A push of that cause that is no longer waiting is not reused.
+    await prisma.profileSyncJob.update({ where: { id: waiting.id }, data: { status: 'COMPLETED' } });
+    await editStrategy(planId, TrafficLimitStrategy.WEEK);
+    assert.equal((await strategyPushes(outside)).length, 2);
+  });
+
+  it('holds the waiting push it keeps until the edit commits: a worker cannot claim it and push the old rule (R4-01)', async () => {
+    const planId = await plan(TrafficLimitStrategy.MONTH);
+    const outside = await outsideSubscription(planId);
+    const waiting = await prisma.profileSyncJob.create({
+      data: { subscriptionId: outside, action: 'UPDATE', status: 'PENDING', cause: PLAN_STRATEGY_UPDATE_CAUSE },
+    });
+
+    let claim: unknown = null;
+    await prisma.$transaction(
+      async (tx) => {
+        const edited = await tx.plan.update({ where: { id: planId }, data: { trafficLimitStrategy: 'DAY' } });
+        const committed = await snapshots.syncPlanSnapshotMetadata(tx, edited);
+        assert.deepEqual(committed.syncJobIds, [waiting.id]);
+        // A profile-sync worker claims it meanwhile, as `claimSyncJob` does. It
+        // would read the subscription as it stands before this commit.
+        claim = await prisma
+          .$transaction(async (other) => {
+            await other.$executeRawUnsafe(`SET LOCAL lock_timeout = '300ms'`);
+            return other.profileSyncJob.updateMany({
+              where: { id: waiting.id, status: 'PENDING', supersededAt: null },
+              data: { status: 'RUNNING', startedAt: new Date() },
+            });
+          })
+          .catch((error: unknown) => error);
+      },
+      { timeout: 15_000 },
+    );
+
+    assert.ok(isLockTimeout(claim), `the claim waited for the commit, and gave up: ${String(claim)}`);
+    const after = await prisma.profileSyncJob.findUniqueOrThrow({ where: { id: waiting.id } });
+    assert.equal(after.status, 'PENDING', 'claimed only after the commit, and then reading DAY');
+  });
+
+  it('writes no push for a subscriber outside the model that is not live or not linked (R4-01)', async () => {
+    const planId = await plan(TrafficLimitStrategy.MONTH);
+    const expired = await outsideSubscription(planId, { status: SubscriptionStatus.EXPIRED });
+    const disabled = await outsideSubscription(planId, { status: SubscriptionStatus.DISABLED });
+    const unlinked = await outsideSubscription(planId, { linked: false });
+
+    const result = await editStrategy(planId, TrafficLimitStrategy.DAY);
+
+    assert.equal(result.strategyChanged, 3);
+    assert.deepEqual(result.syncJobIds, []);
+    for (const id of [expired, disabled, unlinked]) assert.equal((await strategyPushes(id)).length, 0, id);
+  });
+
+  it('a subscriber whose terms are another plan\'s is one the sweep cannot find: it is pushed with the edit too (R4-01)', async () => {
+    // The sweep finds work only through a term of the SNAPSHOT's plan
+    // (`selectResetRuleFollowCandidates`); a term minted before the row got
+    // its plan — an import's, `plan_id` null — is not one.
+    const planId = await plan(TrafficLimitStrategy.MONTH);
+    const foreign = (await liveSubscription(planId)).subscriptionId;
+    await prisma.subscriptionTerm.updateMany({ where: { subscriptionId: foreign }, data: { planId: null } });
+
+    const committed = await commitStrategyEdit(planId, TrafficLimitStrategy.DAY);
+
+    assert.deepEqual(committed.followSubscriptionIds, []);
+    const pushes = await strategyPushes(foreign);
+    assert.equal(pushes.length, 1);
+    assert.deepEqual(committed.syncJobIds, [pushes[0]!.id]);
+    // Why it has to be: the sweep does not find it — its term is not the plan's.
+    await sweeper(recordingQueue()).followChangedResetRules();
+    assert.equal(await activeStrategy(foreign), 'MONTH', 'not followed by the sweep');
+    assert.equal((await strategyPushes(foreign)).length, 1);
+  });
+
+  it('an edit that keeps the rule writes no push for a subscriber outside the model either (R4-01)', async () => {
+    const planId = await plan(TrafficLimitStrategy.MONTH);
+    const outside = await outsideSubscription(planId);
+
+    const result = await editStrategy(planId, TrafficLimitStrategy.MONTH);
+
+    assert.deepEqual(result.syncJobIds, []);
+    assert.equal((await strategyPushes(outside)).length, 0);
   });
 
   it('one subscriber whose step fails holds up nobody; the sweep takes it up again (R3a-01)', async () => {
@@ -651,6 +803,7 @@ run('a plan\'s reset rule changes mid-period (PostgreSQL)', () => {
   it('«Тарифы» → «Редактировать тариф»: the edit returns, and its subscribers follow the new rule after the commit (R3a-01)', async () => {
     const planId = await plan(TrafficLimitStrategy.MONTH);
     const owner = await subscriptionWithResetAddOn(planId);
+    const outside = await outsideSubscription(planId);
     const admin = await prisma.adminUser.create({
       data: { login: `${prefix}-admin`, loginNormalized: `${prefix}-admin`, passwordHash: 'not-a-real-hash' },
       select: { id: true },
@@ -681,11 +834,65 @@ run('a plan\'s reset rule changes mid-period (PostgreSQL)', () => {
     );
     const pushes = await strategyPushes(owner.subscriptionId);
     assert.equal(pushes.length, 1);
-    assert.deepEqual(queue.ids, [pushes[0]!.id], 'enqueued at once, not left for the five-minute sweep');
+    const outsidePushes = await strategyPushes(outside);
+    assert.equal(outsidePushes.length, 1, 'the subscriber outside the model: pushed with the edit (R4-01)');
+    assert.deepEqual(
+      queue.ids,
+      [outsidePushes[0]!.id, pushes[0]!.id],
+      'both enqueued at once, not left for the five-minute sweep — the one written with the edit first',
+    );
     const audit = await prisma.adminAuditLog.findFirstOrThrow({
       where: { adminUserId: admin.id, action: 'plans.updated' },
     });
-    assert.deepEqual((audit.metadata as Record<string, unknown>)['resetRuleChange'], { subscriptions: 1 });
+    assert.deepEqual((audit.metadata as Record<string, unknown>)['resetRuleChange'], { subscriptions: 2 });
+  });
+
+  it('a stop during the follow ends it between two subscribers, BEFORE the database goes: the rest is the sweep\'s (R4-01)', async () => {
+    const planId = await plan(TrafficLimitStrategy.MONTH);
+    const owners = [];
+    for (let index = 0; index < 4; index += 1) owners.push((await liveSubscription(planId)).subscriptionId);
+    const admin = await prisma.adminUser.create({
+      data: { login: `${prefix}-admin-stop`, loginNormalized: `${prefix}-admin-stop`, passwordHash: 'not-a-real-hash' },
+      select: { id: true },
+    });
+    created.admins.push(admin.id);
+    const remnawave = { getInternalSquadOptions: async () => [], getExternalSquadOptions: async () => [] };
+    // The stop comes while the first push is being put on the queue.
+    const stopping: { stop?: Promise<void>; plansAdmin?: PlansAdminService } = {};
+    const enqueued: string[] = [];
+    const queue = {
+      enqueue: async (syncJobId: string): Promise<void> => {
+        enqueued.push(syncJobId);
+        stopping.stop ??= stopping.plansAdmin!.onModuleDestroy();
+      },
+    };
+    const plansAdmin = new PlansAdminService(
+      prisma,
+      remnawave as never,
+      new PlanSnapshotSyncService(),
+      new PlansAdminValidators(prisma, remnawave as never),
+      new PlanSquadPropagationService(prisma, { enqueue: async () => undefined } as never),
+      queue as never,
+    );
+    stopping.plansAdmin = plansAdmin;
+
+    await plansAdmin.updatePlan(planId, { trafficLimitStrategy: 'DAY' } as never, {
+      currentAdmin: { id: admin.id } as never,
+      requestMetadata: { requestId: `${prefix}-req-stop`, remoteAddress: '203.0.113.9', userAgent: 'fx3a' },
+    });
+    await plansAdmin.settleResetRuleFollows();
+    assert.ok(stopping.stop, 'fixture: the stop came during the follow');
+    await stopping.stop;
+
+    const strategies = await Promise.all(owners.map((id) => activeStrategy(id)));
+    assert.equal(strategies.filter((strategy) => strategy === 'DAY').length, 1, 'the subscriber it was on, finished');
+    assert.equal(enqueued.length, 1, '…with its push; no other started');
+    // The database is still there for whoever stops after this module: the sweep finishes the rest.
+    await sweeper(recordingQueue()).followChangedResetRules();
+    for (const id of owners) {
+      assert.equal(await activeStrategy(id), 'DAY');
+      assert.equal((await strategyPushes(id)).length, 1, `pushed once: ${id}`);
+    }
   });
 
   it('a capture after the rule changed binds the quote to the CURRENT rule: DAY quote, plan now MONTH → ends by its date, no card (R3a-02)', async () => {

@@ -19,12 +19,14 @@ import { ownTrafficResetSql } from '../services/own-traffic-resets';
  * operator set (`reset-cycle-policy.ts`), and nothing in Remnawave's API states
  * its zone. What the panel CAN see is the resets themselves: every answer of
  * Remnawave's carries `lastTrafficResetAt`, stamped on the subscription
- * (`remnawave_last_traffic_reset_at`). A scheduled run stamps every profile it
- * resets with the SAME instant — the run's start, a few milliseconds after the
- * cron minute on Remnawave's clock — so a scheduled reset is recognisable by
- * its shape: within {@link SCHEDULED_RUN_SLACK_MS} of a whole minute, and on a
- * minute that is the strategy's cron minute in SOME real zone (every zone's
- * offset is a multiple of 15 minutes). A manual reset lands on any second.
+ * (`remnawave_last_traffic_reset_at`). A scheduled run stamps the profiles it
+ * resets with one instant per STATUS GROUP — the LIMITED ones about ten
+ * milliseconds after the others, {@link RUN_STAMP_SPREAD_MS} — a few
+ * milliseconds after the cron minute on Remnawave's clock. So a scheduled reset
+ * is recognisable by its shape: within {@link SCHEDULED_RUN_SLACK_MS} of a
+ * whole minute, and on a minute that is the strategy's cron minute in SOME real
+ * zone (every zone's offset is a multiple of 15 minutes). A manual reset lands
+ * on any second.
  *
  * …but not always: a renewal from the auto-renew cron (every minute, at second
  * 0) zeroes its counter a second or two after a whole minute, in the shape for
@@ -37,8 +39,9 @@ import { ownTrafficResetSql } from '../services/own-traffic-resets';
  *  - a reset that AGREES with the prediction is judged as it is: it can only
  *    ever say «ok»;
  *  - a reset in a run's shape that does not agree is judged only as a BATCH —
- *    its instant stamped on two or more profiles of the strategy, which one
- *    subscriber's reset never is — wherever a batch can exist: a calendar
+ *    its instant, give or take {@link RUN_STAMP_SPREAD_MS}, stamped on two or
+ *    more profiles of the strategy, which one subscriber's reset never is —
+ *    wherever a batch can exist: a calendar
  *    strategy with two or more profiles on the install
  *    ({@link ResetObservation.strategyProfiles}). An install with ONE profile
  *    on a strategy can show no batch; there a lone reset in the shape is
@@ -72,6 +75,32 @@ export const RESET_SCHEDULE_AGREEMENT_MS = 2 * 60 * 1000;
 
 /** A scheduled run stamps its start: this close after a whole minute. */
 export const SCHEDULED_RUN_SLACK_MS = 5_000;
+
+/**
+ * How far apart the instants ONE scheduled run stamps can lie (review R4-03).
+ * A run stamps the profiles it resets with one instant per STATUS GROUP: the
+ * ones that were LIMITED get their own, 7–10 ms after the others' (the S4 lab,
+ * the same in 3.2.3, 3.3.2 and 3.4.4: `test/fixtures/remnawave-reset-lab`).
+ * Instants this close count as one run. Two resets of different people are not
+ * this close — the panel's own, a bulk toolbar's included, are left out before
+ * this is asked (`own-traffic-resets.ts`); a bulk reset in Remnawave's own UI
+ * is, and «Reset all users traffic» rightly reads as a run.
+ */
+export const RUN_STAMP_SPREAD_MS = 100;
+
+/** One instant stamped on `profiles` profiles. */
+export interface StampedInstant {
+  readonly at: number;
+  readonly profiles: number;
+}
+
+/**
+ * How many profiles carry the run `at` belongs to: every stamp within
+ * {@link RUN_STAMP_SPREAD_MS} of it, its own included. A run is two or more.
+ */
+export function profilesOfRun(stamps: readonly StampedInstant[], at: number): number {
+  return stamps.reduce((sum, stamp) => (Math.abs(stamp.at - at) <= RUN_STAMP_SPREAD_MS ? sum + stamp.profiles : sum), 0);
+}
 
 /** One reset Remnawave reported for a profile. */
 export interface ResetObservation {
@@ -179,11 +208,8 @@ export function judgeResetSchedule(input: {
     const inWindow = input.observations
       .filter((row) => row.strategy === strategy)
       .filter((row) => row.observedAt.getTime() >= since && row.observedAt.getTime() <= input.now.getTime());
-    // How many profiles of the strategy carry each instant: a run stamps all it resets with one.
-    const sharing = new Map<number, number>();
-    for (const row of inWindow) {
-      sharing.set(row.observedAt.getTime(), (sharing.get(row.observedAt.getTime()) ?? 0) + 1);
-    }
+    // Each profile's stamp, to count the profiles one run stamped (`profilesOfRun`).
+    const stamps = inWindow.map((row) => ({ at: row.observedAt.getTime(), profiles: 1 }));
     // The latest observation that says something about the schedule: an
     // exact agreement, or a run — see the header. Other resets say nothing.
     const latest = inWindow
@@ -196,7 +222,7 @@ export function judgeResetSchedule(input: {
           return row.createdAt !== null && isRollingResetDay(row.createdAt, row.observedAt);
         }
         const batchPossible = row.strategyProfiles === undefined || row.strategyProfiles >= 2;
-        return !batchPossible || (sharing.get(row.observedAt.getTime()) ?? 0) >= 2;
+        return !batchPossible || profilesOfRun(stamps, row.observedAt.getTime()) >= 2;
       })
       .sort((left, right) => right.row.observedAt.getTime() - left.row.observedAt.getTime())[0];
     if (latest === undefined || latest.expected === null) continue;

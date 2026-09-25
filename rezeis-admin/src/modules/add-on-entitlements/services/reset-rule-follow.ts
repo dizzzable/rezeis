@@ -40,6 +40,19 @@ import type { SubscriptionTermService } from './subscription-term.service';
  * the runner enqueues it the moment the step has committed — no worker ever
  * sees a job whose row is not committed, and nobody waits for the five-minute
  * sweep. A push already waiting for the same reason is reused, not doubled.
+ *
+ * …EXCEPT FOR THE ROWS THE SWEEP CANNOT SEE (review R4-01). A subscription with
+ * no ACTIVE or SCHEDULED term of its snapshot's plan — outside the term model:
+ * created while «Новый учёт докупок» was off, held by a failed cutover, or one
+ * the background cutover has not reached — has nothing to follow, so nothing in
+ * the data says a push is owed. Left to the runner, a restart before it reached
+ * such a row lost its push for good, and Remnawave went on resetting it by the
+ * old rule while the panel read the new one. Its push is therefore written BY
+ * THE EDIT ITSELF, in the edit's own transaction
+ * ({@link writeResetRulePushesInTransaction}): durable from the commit, put on
+ * the queue by the edit's caller, and sent by the profile-sync sweep after any
+ * crash. Rows in the model keep this order — the terms follow first, then the
+ * push — so their add-ons move before Remnawave does.
  */
 
 /** `cause` and `payload.source` of the push a changed reset rule queues for a live subscriber. */
@@ -67,16 +80,20 @@ export interface ResetRuleFollowOptions {
   readonly correlationId: string;
   /**
    * `always` — the caller knows the rule changed for these subscriptions (a
-   * plan edit), so a live one is pushed even with no term to follow (a row
-   * outside the term model: the push is all it needs). `if-followed` — only a
-   * subscription whose terms moved is pushed (the sweep, which finds only rows
-   * whose terms disagree).
+   * plan edit), so a live one is pushed even when no term moved. `if-followed`
+   * — only a subscription whose terms moved is pushed (the sweep, which finds
+   * only rows whose terms disagree).
    */
   readonly push: 'always' | 'if-followed';
   /** «Часовой пояс Remnawave»; read once, before the first step, when absent. */
   readonly remnawaveTimeZone?: string;
   /** The instant the new rule's first reset is counted from; each step's own "now" when absent. */
   readonly now?: Date;
+  /**
+   * Asked before each subscription: `true` stops the run there — a stopping
+   * process lets the step in progress finish and leaves the rest to the sweep.
+   */
+  readonly shouldStop?: () => boolean;
 }
 
 export interface ResetRuleFollowSummary {
@@ -186,6 +203,7 @@ export async function followResetRules(
   let failed = 0;
   let enqueued = 0;
   for (const subscriptionId of subscriptionIds) {
+    if (options.shouldStop?.() === true) break;
     let step: { readonly termsUpdated: number; readonly syncJobIds: readonly string[] };
     try {
       step = await deps.prisma.$transaction((tx) =>
@@ -206,21 +224,91 @@ export async function followResetRules(
       continue;
     }
     if (step.termsUpdated > 0) followed += 1;
-    for (const syncJobId of step.syncJobIds) {
-      if (deps.enqueue === undefined) break;
-      try {
-        await deps.enqueue(syncJobId);
-        enqueued += 1;
-      } catch (error: unknown) {
-        deps.logger?.warn(
-          `Reset rule push ${syncJobId} committed but not enqueued; the profile-sync sweep sends it: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      }
+    if (deps.enqueue !== undefined) {
+      enqueued += await enqueueResetRulePushes(deps.enqueue, step.syncJobIds, { logger: deps.logger });
     }
   }
   return { followed, failed, enqueued };
+}
+
+/**
+ * The push of a changed reset rule for the subscriptions the sweep cannot see
+ * (see the header: no ACTIVE or SCHEDULED term of their snapshot's plan),
+ * written in the CALLER's transaction — the one that changes the rule — so it
+ * is as durable as the change: one PENDING `PLAN_STRATEGY_UPDATE` UPDATE per
+ * subscription, in ONE statement whatever their number.
+ *
+ * The caller hands only live, linked subscriptions (a push reaches nobody
+ * else). One with a push of this cause already PENDING keeps that one — no
+ * second push — and that row is LOCKED until the caller commits: a worker that
+ * claimed it in between would read the subscription as it was before the
+ * change and push the old rule, and the change would then have no push at all.
+ * Locked, the claim waits for the commit and the worker reads the new rule.
+ *
+ * Returns every push that now carries the change, written or kept, for the
+ * caller to enqueue once it has committed ({@link enqueueResetRulePushes}).
+ * Ids are UUIDs: the table has no database default (Prisma writes a cuid), and
+ * the id is only ever read back as a key.
+ */
+export async function writeResetRulePushesInTransaction(
+  tx: Pick<Prisma.TransactionClient, '$queryRaw'>,
+  subscriptionIds: readonly string[],
+  input: { readonly planId: string; readonly now: Date },
+): Promise<string[]> {
+  if (subscriptionIds.length === 0) return [];
+  const ids = [...subscriptionIds];
+  const rows = await tx.$queryRaw<Array<{ readonly id: string }>>(Prisma.sql`
+    WITH "waiting" AS (
+      SELECT j."id", j."subscription_id"
+        FROM "profile_sync_jobs" j
+       WHERE j."subscription_id" = ANY(${ids}::text[])
+         AND j."status" = 'PENDING'
+         AND j."superseded_at" IS NULL
+         AND j."cause" = ${PLAN_STRATEGY_UPDATE_CAUSE}
+         FOR UPDATE
+    ), "written" AS (
+      INSERT INTO "profile_sync_jobs"
+             ("id", "subscription_id", "action", "status", "cause", "payload", "created_at", "updated_at")
+      SELECT gen_random_uuid()::text, x."id", 'UPDATE'::"SyncAction", 'PENDING'::"SyncJobStatus",
+             ${PLAN_STRATEGY_UPDATE_CAUSE}::text,
+             jsonb_build_object('source', ${PLAN_STRATEGY_UPDATE_CAUSE}::text, 'planId', ${input.planId}::text),
+             ${input.now}, ${input.now}
+        FROM unnest(${ids}::text[]) AS x("id")
+       WHERE NOT EXISTS (SELECT 1 FROM "waiting" w WHERE w."subscription_id" = x."id")
+      RETURNING "id"
+    )
+    SELECT "id" FROM "written"
+    UNION ALL
+    SELECT "id" FROM "waiting"
+  `);
+  return rows.map((row) => row.id);
+}
+
+/**
+ * Puts committed pushes on the profile-sync queue, one by one, stopping when
+ * `shouldStop` says so. Never throws: a push that is not enqueued stays
+ * PENDING, and the profile-sync sweep sends it. Returns how many were enqueued.
+ */
+export async function enqueueResetRulePushes(
+  enqueue: (syncJobId: string) => Promise<void>,
+  syncJobIds: readonly string[],
+  options: { readonly logger?: { warn(message: string): void }; readonly shouldStop?: () => boolean } = {},
+): Promise<number> {
+  let enqueued = 0;
+  for (const syncJobId of syncJobIds) {
+    if (options.shouldStop?.() === true) break;
+    try {
+      await enqueue(syncJobId);
+      enqueued += 1;
+    } catch (error: unknown) {
+      options.logger?.warn(
+        `Reset rule push ${syncJobId} committed but not enqueued; the profile-sync sweep sends it: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+  return enqueued;
 }
 
 /**

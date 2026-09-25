@@ -8,7 +8,7 @@ import { readAddOnRolloutFlags } from '../add-on-rollout.config';
 import { entitlementEndBound } from '../domain/add-on-lifetime';
 import { DEFAULT_REMNAWAVE_TIME_ZONE, RESET_EXPIRY_MARGIN_MS, type ResetStrategy } from '../domain/reset-cycle-policy';
 import { AddOnSwitchesService } from '../switches/add-on-switches.service';
-import { SCHEDULED_RUN_SLACK_MS } from '../switches/reset-schedule-check';
+import { profilesOfRun, SCHEDULED_RUN_SLACK_MS } from '../switches/reset-schedule-check';
 import { ownTrafficResetSql } from './own-traffic-resets';
 
 /**
@@ -26,12 +26,14 @@ import { ownTrafficResetSql } from './own-traffic-resets';
  * So the sweep takes such an add-on off only once its `expiresAt` has passed
  * AND Remnawave's reset is CONFIRMED:
  *  - DAY / WEEK / MONTH — Remnawave resets every profile of the strategy in
- *    one batch, and stamps them all with ONE instant, the run's `now` (W7
- *    §1.1). So the boundary is confirmed for everybody by the RUN — an instant
- *    within the batch window that is stamped on two or more profiles of the
- *    strategy, or one stamped within seconds after the planned instant, the
- *    shape only the cron minute has ({@link showsScheduledRun}) — never by one
- *    subscriber's own reset. Before (review R3a-04) any stamped reset within
+ *    one batch, and stamps them with one instant per STATUS GROUP: the run's
+ *    `now` (W7 §1.1), and the LIMITED ones about ten milliseconds later (the S4
+ *    lab; review R4-03). So the boundary is confirmed for everybody by the RUN
+ *    — two or more profiles of the strategy stamped within the batch window at
+ *    one instant, give or take `RUN_STAMP_SPREAD_MS`, or one stamped
+ *    within seconds after the planned instant, the shape only the cron minute
+ *    has ({@link showsScheduledRun}) — never by one subscriber's own reset.
+ *    Before (review R3a-04) any stamped reset within
  *    the hour confirmed the boundary: one customer who renewed at 00:25 took
  *    everyone's add-ons off although Remnawave had missed its 00:05 run, and
  *    their counters were never zeroed. The panel's own resets (a renewal, the
@@ -173,9 +175,12 @@ export interface StampedReset {
  * Does what is stamped show Remnawave's SCHEDULED RUN for the calendar
  * boundary at `plannedAt` — not one subscriber's reset? Within the batch
  * window ({@link confirmsCalendarReset}), an instant that is either
- *  - shared by two or more profiles of the strategy: a run stamps every
- *    profile it resets with its one `now`, and two resets that are not one
- *    run never share a millisecond; or
+ *  - shared by two or more profiles of the strategy, give or take
+ *    `RUN_STAMP_SPREAD_MS` (`reset-schedule-check.ts`): a run stamps the
+ *    profiles it resets with one `now` per status group, the LIMITED ones a
+ *    few milliseconds after the rest (review R4-03), and two resets that are
+ *    not one run are never that close — the panel's own are left out first
+ *    (`ownTrafficResetSql`); or
  *  - within {@link SCHEDULED_RUN_SLACK_MS} after the planned instant: the cron
  *    fires on the minute of Remnawave's own clock and stamps that clock, so a
  *    run on time lands there whatever the two clocks' difference — the one
@@ -186,10 +191,11 @@ export interface StampedReset {
  * after a whole minute too.
  */
 export function showsScheduledRun(stamps: readonly StampedReset[], plannedAt: Date): boolean {
-  return stamps.some((stamp) => {
-    if (!confirmsCalendarReset(stamp.resetAt, plannedAt)) return false;
+  const inWindow = stamps.filter((stamp) => confirmsCalendarReset(stamp.resetAt, plannedAt));
+  const instants = inWindow.map((stamp) => ({ at: stamp.resetAt.getTime(), profiles: stamp.profiles }));
+  return inWindow.some((stamp) => {
     const late = stamp.resetAt.getTime() - plannedAt.getTime();
-    return stamp.profiles >= 2 || (late >= 0 && late <= SCHEDULED_RUN_SLACK_MS);
+    return profilesOfRun(instants, stamp.resetAt.getTime()) >= 2 || (late >= 0 && late <= SCHEDULED_RUN_SLACK_MS);
   });
 }
 

@@ -27,6 +27,7 @@ import {
   type RemnawaveProfileFacts,
   stampRemnawaveProfileFacts,
 } from '../src/modules/remnawave/utils/remnawave-profile-facts.util';
+import { BulkUserOperationsService } from '../src/modules/users/services/bulk-user-operations.service';
 import { removeDurableFixtures } from './helpers/durable-rows-cleanup';
 
 /**
@@ -459,6 +460,82 @@ run('an add-on «до сброса» waits for Remnawave\'s reset — PostgreSQL
 
     assert.equal(await stateOf(third.subscriptionId), AddOnEntitlementState.EXPIRED, 'the batch confirms for all');
     assert.equal((await epochOf(third.epochId)).closeSource, 'WEBHOOK_RECONCILIATION');
+  });
+
+  it('a run that waited, seen on one LIMITED and one other profile milliseconds apart, confirms the boundary for everybody (R4-03)', async () => {
+    // One run stamps a LIMITED profile with its own instant, 7–10 ms after the
+    // others (the lab). Three minutes late: out of the cron minute's shape, so
+    // only the two instants together say «run».
+    const now = new Date();
+    const plannedAt = new Date(now.getTime() - 55 * MINUTE);
+    const batch = plannedAt.getTime() + 3 * MINUTE + 15;
+    await seedHeld({ tag: 'split-run-a', strategy: 'DAY', plannedAt, lastReset: new Date(batch) });
+    await seedHeld({ tag: 'split-run-lim', strategy: 'DAY', plannedAt, lastReset: new Date(batch + 10) });
+    const third = await seedHeld({ tag: 'split-run-c', strategy: 'DAY', plannedAt });
+
+    await scheduler.runDueBoundaries(now);
+
+    assert.equal(await stateOf(third.subscriptionId), AddOnEntitlementState.EXPIRED, 'the run confirms for all');
+    assert.equal((await epochOf(third.epochId)).closeSource, 'WEBHOOK_RECONCILIATION');
+  });
+
+  it('the users toolbar\'s «Сбросить трафик» after a missed run is the panel\'s own, however close its resets land (R4-03)', async () => {
+    // Remnawave missed the run. Forty minutes on, an operator resets two
+    // customers from the users toolbar: two stamps milliseconds apart — the
+    // shape of a run — and nobody else's counter zeroed.
+    const now = new Date();
+    const plannedAt = new Date(now.getTime() - 40 * MINUTE);
+    const first = await seedHeld({ tag: 'toolbar-a', strategy: 'MONTH', plannedAt });
+    const second = await seedHeld({ tag: 'toolbar-b', strategy: 'MONTH', plannedAt });
+    const untouched = await seedHeld({ tag: 'toolbar-other', strategy: 'MONTH', plannedAt });
+    remnawave.answers.set(untouched.subscriptionId, {
+      facts: { createdAt: null, lastTrafficResetAt: new Date(plannedAt.getTime() - 30 * 24 * HOUR) },
+    });
+    const admin = await prisma.adminUser.create({
+      data: { login: `${prefix}-toolbar`, loginNormalized: `${prefix}-toolbar`, passwordHash: 'not-a-real-hash' },
+      select: { id: true },
+    });
+    // Remnawave zeroes the counter and stamps its own `now`: 30 ms between the two.
+    let base: number | null = null;
+    const panel = {
+      resetPanelUserTraffic: async (identity: { readonly remnawaveId: string }) => {
+        base ??= Date.now();
+        const row = await prisma.subscription.findFirstOrThrow({
+          where: { remnawaveId: identity.remnawaveId, userId: { startsWith: `${prefix}-toolbar-` } },
+        });
+        const stampedAt = new Date(base + (row.id === first.subscriptionId ? 0 : 30));
+        await prisma.subscription.update({ where: { id: row.id }, data: { remnawaveLastTrafficResetAt: stampedAt } });
+      },
+    };
+    const toolbar = new BulkUserOperationsService(
+      prisma,
+      { warn: () => undefined, info: () => undefined } as never,
+      {} as never,
+      {} as never,
+      { hasPermission: async () => true } as never,
+      panel as never,
+      { enqueue: async () => undefined } as never,
+    );
+    try {
+      const result = await toolbar.execute({
+        userIds: [`${prefix}-toolbar-a`, `${prefix}-toolbar-b`],
+        action: 'reset_traffic' as never,
+        currentAdmin: { id: admin.id } as never,
+        requestMetadata: { requestId: null, remoteAddress: null, userAgent: null },
+      });
+      assert.equal(result.succeeded, 2, JSON.stringify(result));
+
+      await scheduler.runDueBoundaries(new Date());
+
+      assert.equal(await stateOf(untouched.subscriptionId), AddOnEntitlementState.ACTIVE, 'no run: still held');
+      assert.equal((await epochOf(untouched.epochId)).closedAt, null);
+      // Their own counters were zeroed: released, each alone.
+      assert.equal(await stateOf(first.subscriptionId), AddOnEntitlementState.EXPIRED);
+      assert.equal(await stateOf(second.subscriptionId), AddOnEntitlementState.EXPIRED);
+    } finally {
+      await prisma.adminAuditLog.deleteMany({ where: { adminUserId: admin.id } });
+      await prisma.adminUser.delete({ where: { id: admin.id } });
+    }
   });
 
   it('a reset made in Remnawave\'s own UI inside the hour, on one profile, confirms nothing for the others (R3a-04)', async () => {

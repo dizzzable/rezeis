@@ -20,6 +20,7 @@ import {
   StalePanelIdentityRefusal,
 } from '../../remnawave/services/remnawave-api.service';
 import { UNLINKED_SUBSCRIPTIONS_PATH } from '../../remnawave/services/stale-panel-link';
+import { recordOperatorTrafficReset } from '../../remnawave/services/term-model-readback';
 import { UserBlockService } from './user-block.service';
 import { UserDeletionService } from './user-deletion.service';
 
@@ -369,11 +370,14 @@ export class BulkUserOperationsService {
    */
   private async forEachPanelProfile(
     userId: string,
-    run: (identity: {
-      readonly remnawaveId: string;
-      readonly panelId: number | null;
-      readonly panelUsername: string | null;
-    }) => Promise<void>,
+    run: (
+      identity: {
+        readonly remnawaveId: string;
+        readonly panelId: number | null;
+        readonly panelUsername: string | null;
+      },
+      subscriptionId: string,
+    ) => Promise<void>,
   ): Promise<{
     readonly attempted: number;
     readonly succeeded: number;
@@ -396,11 +400,14 @@ export class BulkUserOperationsService {
     let refusedStale = 0;
     for (const subscription of subscriptions) {
       try {
-        await run({
-          remnawaveId: subscription.remnawaveId as string,
-          panelId: subscription.remnawavePanelId,
-          panelUsername: subscription.remnawavePanelUsername,
-        });
+        await run(
+          {
+            remnawaveId: subscription.remnawaveId as string,
+            panelId: subscription.remnawavePanelId,
+            panelUsername: subscription.remnawavePanelUsername,
+          },
+          subscription.id,
+        );
         succeeded += 1;
       } catch (err) {
         failed += 1;
@@ -417,6 +424,27 @@ export class BulkUserOperationsService {
       refusedStale,
       reason: 'No linked VPN profiles',
     };
+  }
+
+  /**
+   * A traffic reset this toolbar made is a push of ours, recorded as the
+   * subscription card's «Сбросить» records it (`recordOperatorTrafficReset`):
+   * a TRAFFIC_RESET job, COMPLETED now that Remnawave has answered. Without it
+   * the stamp Remnawave writes looked like anybody's reset — and a bulk run
+   * stamps many profiles within milliseconds of each other, the very shape of
+   * Remnawave's scheduled run, which confirms a missed reset boundary for
+   * everybody and feeds the daily zone check (review R4-03,
+   * `own-traffic-resets.ts`). Best-effort: the counter is zeroed whatever this
+   * bookkeeping does, and the row's result says so.
+   */
+  private async recordTrafficReset(subscriptionId: string): Promise<void> {
+    try {
+      await recordOperatorTrafficReset(this.prismaService, subscriptionId);
+    } catch (err) {
+      this.logger.warn(
+        `Bulk traffic reset of subscription ${subscriptionId} was not recorded as the panel's own: ${(err as Error).message}`,
+      );
+    }
   }
 
   private async resolveUser(
@@ -587,8 +615,9 @@ export class BulkUserOperationsService {
       case 'reset_traffic': {
         // Not a destructive verb: the reset reaches a stale row's profile
         // through the address chain, as every read and PATCH does.
-        const outcome = await this.forEachPanelProfile(user.id, async (identity) => {
+        const outcome = await this.forEachPanelProfile(user.id, async (identity, subscriptionId) => {
           await this.remnawaveApiService?.resetPanelUserTraffic(identity);
+          await this.recordTrafficReset(subscriptionId);
         });
         if (outcome.attempted === 0) {
           return { userId, status: 'skipped', message: outcome.reason };

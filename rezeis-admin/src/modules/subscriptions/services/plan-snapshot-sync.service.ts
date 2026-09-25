@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma, PrismaClient, SubscriptionStatus } from '@prisma/client';
 
+import { writeResetRulePushesInTransaction } from '../../add-on-entitlements/services/reset-rule-follow';
 import { TrafficLimitStrategyValue } from '../../plans/dto/traffic-limit-strategy.dto';
 
 /** Marks the push a changed reset rule queues for each live subscriber (`reset-rule-follow.ts`). */
@@ -12,12 +13,20 @@ export interface PlanSnapshotSyncResult {
   /** Of those, the ones whose reset rule the edit changed (DELETED rows aside). */
   readonly strategyChanged: number;
   /**
-   * Those subscriptions, for the caller to hand to `followResetRules` once its
+   * Of those, the ones in the term model — with an ACTIVE or SCHEDULED term of
+   * the plan — for the caller to hand to `followResetRules` once its
    * transaction has COMMITTED: their terms and «до сброса» add-ons follow the
-   * new rule, and a live one is pushed to Remnawave — each in a short
-   * transaction of its own (`reset-rule-follow.ts`).
+   * new rule, and then a live one is pushed to Remnawave — each in a short
+   * transaction of its own (`reset-rule-follow.ts`). One a crash cuts short is
+   * found again by its terms (the boundary scheduler's sweep).
    */
   readonly followSubscriptionIds: readonly string[];
+  /**
+   * The pushes written IN this transaction for the others — live, linked,
+   * nothing to follow (review R4-01) — for the caller to enqueue once it has
+   * committed. After a crash the profile-sync sweep sends them.
+   */
+  readonly syncJobIds: readonly string[];
 }
 
 interface SnapshotSyncPlanInput {
@@ -37,6 +46,10 @@ type MirroredSubscriptionRow = {
   /** The rule the snapshot named before this write; `null` when it named none. */
   readonly previousStrategy: string | null;
   readonly status: string;
+  /** Linked to a Remnawave profile. */
+  readonly linked: boolean;
+  /** Has an ACTIVE or SCHEDULED term of the plan — what the follow's sweep can find. */
+  readonly inModel: boolean;
 };
 
 @Injectable()
@@ -129,12 +142,18 @@ export class PlanSnapshotSyncService {
    * interactive transaction with Prisma's 5-second timeout — some 4.7 ms a
    * subscriber, so the rule of a plan that ever had about 1,000 buyers could
    * not be changed at all: P2028, everything rolled back. This method now
-   * writes the snapshots only, in ONE statement whatever the plan's size, and
-   * RETURNS the subscribers whose rule changed; the caller hands them to
-   * `followResetRules` (`reset-rule-follow.ts`) once it has committed — one
-   * short transaction per subscriber, each push enqueued right after its
-   * commit, and the boundary scheduler's sweep finishing whatever a crash
-   * left behind (the terms that still name the old rule say so).
+   * writes the snapshots in ONE statement whatever the plan's size, and
+   * RETURNS the subscribers in the term model whose rule changed; the caller
+   * hands them to `followResetRules` (`reset-rule-follow.ts`) once it has
+   * committed — one short transaction per subscriber, each push enqueued right
+   * after its commit, and the boundary scheduler's sweep finishing whatever a
+   * crash left behind (the terms that still name the old rule say so).
+   *
+   * A subscriber OUTSIDE the term model has no terms to say so (review R4-01):
+   * a crash before the follow reached it lost its push for good. So its push
+   * is written here, in the edit's transaction, in ONE more statement
+   * (`writeResetRulePushesInTransaction`) — as durable as the new rule itself —
+   * and handed back for the caller to enqueue once it has committed.
    */
   public async syncPlanSnapshotMetadata(
     prismaClient: Prisma.TransactionClient | PrismaClient,
@@ -167,7 +186,13 @@ export class PlanSnapshotSyncService {
     // ONE STATEMENT, merged in the database under each row's lock: the rule
     // each snapshot named BEFORE the write comes back from the locking read in
     // the same statement, so it cannot be raced, and no other key of the JSON
-    // is written back from a stale copy.
+    // is written back from a stale copy. With it, whether the row is in the
+    // term model by the very test the follow's sweep finds work by (an ACTIVE
+    // or SCHEDULED term of the snapshot's plan): what the sweep can find is
+    // followed after the commit, what it cannot is pushed from here. Every
+    // writer of a term takes this row's lock first, so the answer holds until
+    // the commit.
+    const now = options.now ?? new Date();
     const rows = await prismaClient.$queryRaw<MirroredSubscriptionRow[]>(Prisma.sql`
       WITH "previous" AS (
         SELECT "id", "plan_snapshot"->>'trafficLimitStrategy' AS "previousStrategy"
@@ -182,20 +207,36 @@ export class PlanSnapshotSyncService {
                'type', ${plan.type}::text,
                'trafficLimitStrategy', ${plan.trafficLimitStrategy}::text
              ),
-             "updated_at" = ${options.now ?? new Date()}
+             "updated_at" = ${now}
         FROM "previous"
        WHERE s."id" = "previous"."id"
-      RETURNING s."id", "previous"."previousStrategy", s."status"::text AS "status"
+      RETURNING s."id", "previous"."previousStrategy", s."status"::text AS "status",
+                s."remnawave_id" IS NOT NULL AS "linked",
+                EXISTS (
+                  SELECT 1
+                    FROM "subscription_terms" t
+                   WHERE t."subscription_id" = s."id"
+                     AND t."status" IN ('ACTIVE', 'SCHEDULED')
+                     AND t."plan_id" IS NOT DISTINCT FROM s."plan_snapshot"->>'id'
+                ) AS "inModel"
     `);
 
-    const followSubscriptionIds = rows
+    const changed = rows.filter(
+      (row) =>
+        row.status !== SubscriptionStatus.DELETED &&
+        typeof row.previousStrategy === 'string' &&
+        row.previousStrategy !== plan.trafficLimitStrategy,
+    );
+    const followSubscriptionIds = changed.filter((row) => row.inModel).map((row) => row.id);
+    const pushNow = changed
       .filter(
         (row) =>
-          row.status !== SubscriptionStatus.DELETED &&
-          typeof row.previousStrategy === 'string' &&
-          row.previousStrategy !== plan.trafficLimitStrategy,
+          !row.inModel &&
+          row.linked &&
+          (row.status === SubscriptionStatus.ACTIVE || row.status === SubscriptionStatus.LIMITED),
       )
       .map((row) => row.id);
-    return { updated: rows.length, strategyChanged: followSubscriptionIds.length, followSubscriptionIds };
+    const syncJobIds = await writeResetRulePushesInTransaction(prismaClient, pushNow, { planId: plan.id, now });
+    return { updated: rows.length, strategyChanged: changed.length, followSubscriptionIds, syncJobIds };
   }
 }

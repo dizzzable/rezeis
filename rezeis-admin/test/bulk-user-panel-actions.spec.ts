@@ -30,6 +30,8 @@ function buildService(options: {
   readonly withoutPanel?: boolean;
   /** 1-based index of the `subscription.update` call that should throw. */
   readonly updateThrowsOn?: number;
+  /** The record of a traffic reset as the panel's own cannot be written. */
+  readonly resetRecordThrows?: boolean;
 } = {}) {
   const calls: string[] = [];
   const updates: Array<Record<string, unknown>> = [];
@@ -63,6 +65,9 @@ function buildService(options: {
     },
     profileSyncJob: {
       create: async (args: { data: Record<string, unknown> }) => {
+        if (options.resetRecordThrows === true && args.data['action'] === 'TRAFFIC_RESET') {
+          throw new Error('the database is gone');
+        }
         syncJobs.push(args.data);
         return { id: `job-${syncJobs.length}` };
       },
@@ -160,6 +165,58 @@ describe('resetting traffic in bulk', () => {
 
     assert.equal(result.skipped, 1);
     assert.match(result.items[0].message ?? '', /not configured/);
+  });
+
+  // Review R4-03: each reset the toolbar makes is recorded as the panel's own,
+  // as the subscription card's «Сбросить» records it. A bulk run stamps many
+  // profiles milliseconds apart — the shape of Remnawave's scheduled run —
+  // and without the record the reset boundary and the daily zone check took
+  // it for one (`own-traffic-resets.ts`).
+
+  it('records every reset that landed as the panel\'s own, one per subscription', async () => {
+    const { run, syncJobs } = buildService({
+      subscriptions: [
+        { id: 'sub-1', status: 'ACTIVE', expiresAt: null, remnawaveId: '1', remnawavePanelId: 1, remnawavePanelUsername: 'a' },
+        { id: 'sub-2', status: 'LIMITED', expiresAt: null, remnawaveId: '2', remnawavePanelId: 2, remnawavePanelUsername: 'b' },
+      ],
+    });
+    const before = Date.now();
+    await run('reset_traffic');
+
+    assert.deepStrictEqual(
+      syncJobs.map((job) => [job['subscriptionId'], job['action'], job['status'], job['cause']]),
+      [
+        ['sub-1', 'TRAFFIC_RESET', 'COMPLETED', 'OPERATOR_TRAFFIC_RESET'],
+        ['sub-2', 'TRAFFIC_RESET', 'COMPLETED', 'OPERATOR_TRAFFIC_RESET'],
+      ],
+    );
+    for (const job of syncJobs) {
+      // Completed once Remnawave answered, and born superseded: it never stands for the sync state.
+      assert.ok((job['completedAt'] as Date).getTime() >= before);
+      assert.ok(job['supersededAt'] instanceof Date);
+    }
+  });
+
+  it('records nothing for a reset Remnawave refused', async () => {
+    const { run, syncJobs } = buildService({
+      subscriptions: [
+        { id: 'sub-1', status: 'ACTIVE', expiresAt: null, remnawaveId: '1', remnawavePanelId: 1, remnawavePanelUsername: 'a' },
+        { id: 'sub-2', status: 'ACTIVE', expiresAt: null, remnawaveId: '2', remnawavePanelId: 2, remnawavePanelUsername: 'b' },
+      ],
+      panelThrowsOn: 2,
+    });
+    await run('reset_traffic');
+
+    assert.deepStrictEqual(syncJobs.map((job) => job['subscriptionId']), ['sub-1']);
+  });
+
+  it('a record that cannot be written leaves the reset a success: the counter is zeroed all the same', async () => {
+    const { run, calls } = buildService({ resetRecordThrows: true });
+    const result = await run('reset_traffic');
+
+    assert.deepStrictEqual(calls, ['reset']);
+    assert.equal(result.succeeded, 1);
+    assert.equal(result.failed, 0);
   });
 });
 

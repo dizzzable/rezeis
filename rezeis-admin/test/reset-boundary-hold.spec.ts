@@ -15,7 +15,11 @@ import {
   RESET_CONFIRMATION_TOLERANCE_MS,
   showsScheduledRun,
 } from '../src/modules/add-on-entitlements/services/reset-boundary-confirmation.service';
-import { SCHEDULED_RUN_SLACK_MS } from '../src/modules/add-on-entitlements/switches/reset-schedule-check';
+import {
+  RUN_STAMP_SPREAD_MS,
+  SCHEDULED_RUN_SLACK_MS,
+} from '../src/modules/add-on-entitlements/switches/reset-schedule-check';
+import { labRun } from './helpers/remnawave-reset-lab';
 
 /**
  * The hold, as a rule on one row, and the two confirmations — the pieces of
@@ -116,6 +120,24 @@ describe('what confirms a reset', () => {
     // Outside the batch window nothing is the run, shared or not.
     assert.equal(showsScheduledRun([at(60 * MINUTE + 1, 5)], PLANNED), false);
     assert.equal(showsScheduledRun([], PLANNED), false);
+  });
+
+  it('one run stamps a LIMITED profile milliseconds after the rest: a late run seen on one of each is still the run (R4-03)', () => {
+    // The lab's DAY run on 3.4.4, as the stamps of a run that waited three
+    // minutes behind another reset job — out of the cron minute's shape.
+    const lab = labRun('3.4.4', 'shifted-clock', 'DAY');
+    const limited = lab.find((stamp) => stamp.statusBefore === 'LIMITED')!;
+    const other = lab.find((stamp) => stamp.statusBefore !== 'LIMITED')!;
+    const spread = limited.at.getTime() - other.at.getTime();
+    assert.ok(spread > 0 && spread <= RUN_STAMP_SPREAD_MS, `fixture: the lab's spread, ${spread} ms`);
+    const late = (ms: number) => ({ resetAt: new Date(PLANNED.getTime() + 3 * MINUTE + ms), profiles: 1 });
+
+    assert.equal(showsScheduledRun([late(0), late(spread)], PLANNED), true);
+    assert.equal(showsScheduledRun([late(0), late(RUN_STAMP_SPREAD_MS)], PLANNED), true);
+    assert.equal(showsScheduledRun([late(0), late(RUN_STAMP_SPREAD_MS + 1)], PLANNED), false, 'two resets, not one run');
+    // A stamp outside the batch window is no part of the run.
+    const outside = { resetAt: new Date(PLANNED.getTime() + 60 * MINUTE + 50), profiles: 1 };
+    assert.equal(showsScheduledRun([{ resetAt: new Date(PLANNED.getTime() + 60 * MINUTE - 20), profiles: 1 }, outside], PLANNED), false);
   });
 });
 

@@ -11,7 +11,9 @@ import {
   judgeResetSchedule,
   RESET_SCHEDULE_WINDOW_MS,
   type ResetObservation,
+  RUN_STAMP_SPREAD_MS,
 } from '../src/modules/add-on-entitlements/switches/reset-schedule-check';
+import { labRun } from './helpers/remnawave-reset-lab';
 
 /**
  * The daily reset-schedule check, as a pure verdict over observed resets.
@@ -145,6 +147,37 @@ describe('judgeResetSchedule', () => {
         .status,
       'no_data',
     );
+  });
+
+  // ── Review R4-03: one run, one instant per STATUS GROUP ─────────────────────
+  //
+  // The lab (all three versions): a run stamps the profiles that were LIMITED
+  // with their own instant, 7–10 ms after the others. On a strategy with two
+  // profiles, one of them LIMITED at the run, no instant was shared, so a wrong
+  // zone went unreported.
+
+  it('counts the LIMITED profile\'s instant, milliseconds after the rest, as the same run — the lab\'s zone run', () => {
+    const run = labRun('3.4.4', 'zone', 'DAY');
+    assert.deepEqual(run.map((stamp) => stamp.name).sort(), ['day', 'day_dis', 'day_lim'], 'fixture: the lab\'s DAY run');
+    const limited = run.find((stamp) => stamp.name === 'day_lim')!;
+    const other = run.find((stamp) => stamp.name === 'day')!;
+    assert.notEqual(limited.at.getTime(), other.at.getTime(), 'fixture: two instants, one run');
+    const observations = [other, limited].map((stamp) => ({ ...day(stamp.at.toISOString()), strategyProfiles: 2 }));
+
+    // The panel was told UTC; Remnawave ran in Etc/GMT+1.
+    const verdict = judgeResetSchedule({ observations, timeZone: 'UTC', resetScoped: true, now: new Date('2026-09-25T04:00:00.000Z') });
+
+    assert.equal(verdict.status, 'mismatch', JSON.stringify(verdict));
+    assert.equal(verdict.mismatches[0]!.impliedUtcOffsetMinutes, -60);
+  });
+
+  it('counts instants as one run within RUN_STAMP_SPREAD_MS of each other, and no further', () => {
+    const at = (ms: number) => ({ ...day(new Date(Date.parse('2026-09-25T03:05:00.013Z') + ms).toISOString()), strategyProfiles: 2 });
+    const judge = (observations: ResetObservation[]) =>
+      judgeResetSchedule({ observations, timeZone: 'UTC', resetScoped: true, now: NOW }).status;
+    assert.equal(RUN_STAMP_SPREAD_MS, 100);
+    assert.equal(judge([at(0), at(RUN_STAMP_SPREAD_MS)]), 'mismatch');
+    assert.equal(judge([at(0), at(RUN_STAMP_SPREAD_MS + 1)]), 'no_data', 'two resets, not one run');
   });
 
   it('takes a manual reset for nothing: any second of any minute is not a scheduled run', () => {
