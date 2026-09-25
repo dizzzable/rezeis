@@ -3,6 +3,7 @@ import { afterEach, describe, it } from 'node:test';
 import 'reflect-metadata';
 
 import { PaymentSubscriptionMutationService } from '../src/modules/payments/services/payment-subscription-mutation.service';
+import { executeGatewayDataWrites } from './helpers/gateway-data-write-double';
 import { pinAddOnStagesOffForThisFile } from './helpers/rollout-flags';
 
 // Written against every stage off (stage 1's lazy entry would take the row
@@ -89,6 +90,8 @@ function directPurchaseEnv(input: {
   const captured: CapturedEntitlement[] = [];
   const syncJobs: Array<Record<string, unknown>> = [];
   const transactionWrites: Array<Record<string, unknown>> = [];
+  /** What the capture stamped on the payment (`addOnNotApplied`): a refund of it takes nothing back. */
+  const stamps: Array<Record<string, unknown>> = [];
   const subscription: Record<string, unknown> = {
     id: 'sub-1',
     userId: 'user-1',
@@ -135,6 +138,13 @@ function directPurchaseEnv(input: {
             return {};
           },
         },
+        $executeRaw: executeGatewayDataWrites({
+          currentGatewayData: () => ({}),
+          update: async (args) => {
+            stamps.push(args.data.gatewayData);
+            return {};
+          },
+        }),
       };
       return cb(txClient);
     },
@@ -193,7 +203,13 @@ function directPurchaseEnv(input: {
     },
   };
 
-  return { service, transaction, captured, syncJobs, transactionWrites };
+  /** The reason the capture stamped, or `undefined` for a capture that added something. */
+  const stampedReason = (): unknown => {
+    assert.ok(stamps.length <= 1, `stamped ${stamps.length} times`);
+    return (stamps[0]?.['addOnNotApplied'] as Record<string, unknown> | undefined)?.['reason'];
+  };
+
+  return { service, transaction, captured, syncJobs, transactionWrites, stampedReason };
 }
 
 describe('direct-purchase capture — the no-op is judged against the baseline, not the raw term', () => {
@@ -225,6 +241,11 @@ describe('direct-purchase capture — the no-op is judged against the baseline, 
     assert.ok(
       env.transactionWrites.some((write) => write.fulfilledAt !== undefined),
       'fulfillment is still stamped so the webhook does not re-process the payment forever',
+    );
+    assert.equal(
+      env.stampedReason(),
+      'UNLIMITED_BASELINE',
+      'nothing was added: a refund after the column turns finite again must take nothing back',
     );
   });
 
@@ -262,6 +283,7 @@ describe('direct-purchase capture — the no-op is judged against the baseline, 
       (env.syncJobs[0]!.payload as Record<string, unknown>).source,
       'ADDON_PURCHASE_LEDGER',
     );
+    assert.equal(env.stampedReason(), undefined, 'applied: its refund takes it back');
   });
 
   it('creates the entitlement for an imported row whose snapshot carries no limit keys (UNDECIDABLE)', async () => {

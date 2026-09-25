@@ -36,7 +36,7 @@ import {
 } from '../../add-on-entitlements/domain/add-on-lifetime';
 import { addOnQuoteMarkerFields } from '../../add-on-entitlements/domain/add-on-quote';
 import { deriveCutoverBaseline } from '../../add-on-entitlements/domain/cutover-baseline';
-import { saleResetAnchor } from '../../add-on-entitlements/domain/reset-cycle-policy';
+import { saleResetRule } from '../../add-on-entitlements/domain/reset-cycle-policy';
 import {
   isBaselineExtendable,
   resolveConfiguredEntitlementBaseline,
@@ -186,7 +186,7 @@ export class AddOnPurchaseService {
         createdAt: true,
         expiresAt: true,
         // MONTH_ROLLING's anchor for a term minted before it was known (P2),
-        // as the offer reads it (`saleResetAnchor`).
+        // as the offer reads it (`saleResetRule`).
         remnawaveProfileCreatedAt: true,
       },
     });
@@ -253,11 +253,14 @@ export class AddOnPurchaseService {
         select: {
           baseTrafficLimitBytes: true,
           baseDeviceLimit: true,
-          // The three fields the LIFETIME guard below needs. They are selected
-          // here rather than in a second query because they describe the same
-          // term the resource baseline is resolved against: reading the window
-          // from one row and the limits from another is how two guards start
-          // judging two different terms.
+          // The fields the LIFETIME guard below needs. They are selected here
+          // rather than in a second query because they describe the same term
+          // the resource baseline is resolved against: reading the window from
+          // one row and the limits from another is how two guards start judging
+          // two different terms. `planId` and `startsAt` tell the rule the
+          // subscriber is moving to (`saleResetRule`).
+          planId: true,
+          startsAt: true,
           endsAt: true,
           trafficResetStrategy: true,
           resetAnchorAt: true,
@@ -317,15 +320,19 @@ export class AddOnPurchaseService {
         term: activeTerm,
         subscription,
       });
+      // By the rule the subscriber is moving to, as the offer quoted it: a plan
+      // edit whose follow has not reached it yet (review R4-02). The capture
+      // follows the subscriber first and binds under that rule.
+      const saleRule = saleResetRule({
+        term: activeTerm,
+        planSnapshot: subscription.planSnapshot,
+        profileCreatedAt: subscription.remnawaveProfileCreatedAt ?? null,
+      });
       lifetimeBaseline = {
         endsAt: activeTerm.endsAt,
         subscriptionEndsAt: subscription.expiresAt,
-        trafficResetStrategy: activeTerm.trafficResetStrategy,
-        resetAnchorAt: saleResetAnchor(
-          activeTerm.trafficResetStrategy,
-          activeTerm.resetAnchorAt,
-          subscription.remnawaveProfileCreatedAt ?? null,
-        ),
+        trafficResetStrategy: saleRule.strategy,
+        resetAnchorAt: saleRule.anchorAt,
       };
     }
     if (!isBaselineExtendable(addOn.type, baseline)) {

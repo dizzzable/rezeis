@@ -24,6 +24,8 @@ function build(options: {
   readonly ownerUserId?: string;
   readonly subscription?: Record<string, unknown> | null;
   readonly panelAnswer?: 'ok' | 'refused';
+  /** Remnawave's exact answer to the reset, over `panelAnswer`. */
+  readonly panelOutcome?: Record<string, unknown>;
   readonly noPanel?: boolean;
   readonly addOn?: Record<string, unknown> | null;
   readonly termId?: { id: string } | null;
@@ -139,6 +141,7 @@ function build(options: {
             // the whole ordering assertion: a reservation written first is
             // visible here, and the count-then-reset order that shipped is not.
             rowsWhenPanelCalled.push(rows.length);
+            if (options.panelOutcome !== undefined) return options.panelOutcome;
             return options.panelAnswer === 'refused'
               ? { kind: 'rejected' as const, status: 500, code: null, detail: null }
               : { kind: 'ok' as const, data: {} };
@@ -394,6 +397,86 @@ describe('performing the reset', () => {
 
     assert.equal(outcome.ok, false);
     assert.deepStrictEqual(created, []);
+  });
+});
+
+/**
+ * WHY IT DID NOT HAPPEN, for a PAID reset (FX5a): the capture releases a reset
+ * Remnawave could not be reached for to the profile-sync machinery, which
+ * retries it, and settles anything else as not applied at once — the
+ * operator's card and the customer's notice. Classified the way the
+ * profile-sync worker classifies the same answers (`readPanelFailure`).
+ */
+describe('a reset that did not happen says why, and whether trying again can help', () => {
+  const perform = (service: TrafficResetService) =>
+    service.perform({ subscriptionId: 'sub-1', termId: null, addOnId: 'a-1', transactionId: 'tx-1' });
+
+  const cases: ReadonlyArray<{
+    readonly name: string;
+    readonly options: Parameters<typeof build>[0];
+    readonly failure: string;
+    readonly retryable: boolean;
+  }> = [
+    {
+      name: 'Remnawave did not answer',
+      options: { panelOutcome: { kind: 'network', detail: 'ECONNREFUSED' } },
+      failure: 'PANEL_UNREACHABLE',
+      retryable: true,
+    },
+    {
+      name: 'Remnawave answered 503',
+      options: { panelOutcome: { kind: 'rejected', status: 503, code: null, detail: null, retryAfterMs: null } },
+      failure: 'PANEL_UNREACHABLE',
+      retryable: true,
+    },
+    {
+      name: 'Remnawave refused (400)',
+      options: { panelOutcome: { kind: 'rejected', status: 400, code: 'A001', detail: 'no', retryAfterMs: null } },
+      failure: 'PANEL_REFUSED',
+      retryable: false,
+    },
+    {
+      name: 'Remnawave knows no such profile (its own 404)',
+      options: { panelOutcome: { kind: 'rejected', status: 404, code: 'A063', detail: 'User not found', retryAfterMs: null } },
+      failure: 'PROFILE_NOT_FOUND',
+      retryable: false,
+    },
+    {
+      name: 'no address or token set for Remnawave',
+      options: { panelOutcome: { kind: 'unconfigured' } },
+      failure: 'PANEL_NOT_CONFIGURED',
+      retryable: false,
+    },
+    { name: 'no Remnawave client at all', options: { noPanel: true }, failure: 'PANEL_NOT_CONFIGURED', retryable: false },
+    {
+      name: 'the subscription has no profile in Remnawave',
+      options: { subscription: { id: 'sub-1', remnawaveId: null, configUrl: null } },
+      failure: 'NO_PANEL_PROFILE',
+      retryable: false,
+    },
+    { name: 'the subscription is gone', options: { subscription: null }, failure: 'SUBSCRIPTION_NOT_FOUND', retryable: false },
+  ];
+
+  for (const { name, options, failure, retryable } of cases) {
+    it(`${name}: ${failure}, ${retryable ? 'worth another attempt' : 'said at once'}`, async () => {
+      const { service, created } = build(options);
+
+      const outcome = await perform(service);
+
+      assert.equal(outcome.ok, false);
+      assert.ok(!outcome.ok);
+      assert.equal(outcome.failure, failure);
+      assert.equal(outcome.retryable, retryable);
+      assert.deepStrictEqual(created, [], 'recorded a reset that did not happen');
+    });
+  }
+
+  it('the free claim answers as it always did: whether, and why in its own words', async () => {
+    const { service } = build({ panelOutcome: { kind: 'network', detail: 'ECONNREFUSED' } });
+
+    const outcome = await service.claimFree({ subscriptionId: 'sub-1', addOnId: 'a-1', owner: OWNER });
+
+    assert.deepStrictEqual(outcome, { ok: false, reason: 'the panel refused the reset' });
   });
 });
 

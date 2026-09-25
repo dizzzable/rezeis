@@ -164,6 +164,18 @@ export function isSubscriberNotificationEnabled(prefs: unknown, type: string): b
   return (prefs as Record<string, unknown>)[key] !== false;
 }
 
+/**
+ * Mailable, and NOT a switch the customer owns: a paid add-on that could not be
+ * applied (`addon_not_applied`, `addon_not_applied_other`). The customer paid,
+ * nothing was delivered, and the operator will be in touch — an answer to
+ * their own purchase, like a receipt, which a customer with no Telegram and no
+ * browser push would otherwise never get. The same letter as every notice
+ * (the catalogue's template in the branded layout), under the same three gates
+ * (`UserNotificationsService.deliverEmail`): SMTP on, «Слать уведомления
+ * клиентам на почту» on, a verified address.
+ */
+export const MAILABLE_WITHOUT_SWITCH_TYPES = ['addon_not_applied', 'addon_not_applied_other'] as const;
+
 /** Whether `key` is one of the switches a subscriber owns. Canonical keys only. */
 function isSubscriberMutableType(key: string): boolean {
   return (SUBSCRIBER_MUTABLE_NOTIFICATION_TYPES as readonly string[]).includes(key);
@@ -182,9 +194,14 @@ function isSubscriberMutableType(key: string): boolean {
  * Without this the operator's single `notifyUsers` switch opened the inbox to
  * every active template — cashback, referrals, promo codes, partner payouts,
  * placement approvals — while the cabinet offered a way to stop exactly five.
+ *
+ * One exception, {@link MAILABLE_WITHOUT_SWITCH_TYPES}: a notice about money the
+ * customer has just paid is not the product talking to them, and nothing about
+ * it is theirs to stop.
  */
 export function isSubscriberMailableType(type: string): boolean {
-  return isSubscriberMutableType(subscriberSwitchOf(type));
+  const key = subscriberSwitchOf(type);
+  return isSubscriberMutableType(key) || (MAILABLE_WITHOUT_SWITCH_TYPES as readonly string[]).includes(key);
 }
 
 /**

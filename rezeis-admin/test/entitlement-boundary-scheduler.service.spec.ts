@@ -3,6 +3,7 @@ import { afterEach, describe, it } from 'node:test';
 
 import { Prisma } from '@prisma/client';
 
+import { _resetProcessRoleCacheForTests } from '../src/common/runtime/process-role.util';
 import { EntitlementBoundarySchedulerService } from '../src/modules/add-on-entitlements/services/entitlement-boundary-scheduler.service';
 
 type DueRow = { subscriptionId: string; status?: string };
@@ -200,5 +201,37 @@ describe('EntitlementBoundarySchedulerService (T-008)', () => {
     await service.runDueBoundaries();
     assert.deepStrictEqual(planned, ['sub-dev']);
     assert.deepStrictEqual(executions, []);
+  });
+});
+
+describe('the 5-minute reset-rule sweep (FX5 item 3)', () => {
+  const savedRole = process.env.RUID_PROCESS_ROLE;
+  afterEach(() => {
+    if (savedRole === undefined) delete process.env.RUID_PROCESS_ROLE;
+    else process.env.RUID_PROCESS_ROLE = savedRole;
+    _resetProcessRoleCacheForTests();
+  });
+
+  it('follows what is left AND puts the waiting pushes on the queue — the second even when the first fails', async () => {
+    process.env.RUID_PROCESS_ROLE = 'worker';
+    _resetProcessRoleCacheForTests();
+    const { service } = build();
+    const calls: string[] = [];
+    const sweep = service as unknown as {
+      followChangedResetRules: () => Promise<unknown>;
+      enqueueWaitingResetRulePushes: () => Promise<unknown>;
+    };
+    sweep.followChangedResetRules = async () => {
+      calls.push('follow');
+      throw new Error('a follow step blew up');
+    };
+    sweep.enqueueWaitingResetRulePushes = async () => {
+      calls.push('pushes');
+      return { waiting: 0, enqueued: 0 };
+    };
+
+    await service.resetRuleSweep();
+
+    assert.deepStrictEqual(calls, ['follow', 'pushes']);
   });
 });

@@ -150,7 +150,19 @@ async function askBoth(world: {
   /** `'0'` selects the free-add-on branch, which must be gated too. */
   readonly amount?: string;
 }): Promise<Answer> {
-  const columns: SubColumns = { ...defaultSub, ...world.sub };
+  // A subscriber on its term's own reset rule: the snapshot names the term's.
+  // A snapshot of the term's plan naming another rule is a subscriber a plan
+  // edit is moving to it, sold by that rule (`saleResetRule`, review R4-02).
+  const onTermRule =
+    world.term?.trafficResetStrategy === undefined
+      ? {}
+      : {
+          planSnapshot: {
+            ...(defaultSub.planSnapshot as Record<string, unknown>),
+            trafficLimitStrategy: world.term.trafficResetStrategy,
+          },
+        };
+  const columns: SubColumns = { ...defaultSub, ...onTermRule, ...world.sub };
   const term = world.term === null ? null : { ...defaultTerm, ...(world.term ?? {}) };
   const amount = world.amount ?? '2.50';
 

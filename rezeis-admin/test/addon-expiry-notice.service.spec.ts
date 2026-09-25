@@ -620,4 +620,18 @@ describe('«Купить снова» on the subscription the notice is about', 
 
     assert.equal(pushed[0]?.url, '/support');
   });
+
+  it('«Докупка не применена» for any other reason opens support from the push too (FX5 item 5)', async () => {
+    const { service, pushed } = relayingService({
+      buttons: [{ labelRu: '💬 Поддержка', kind: 'webApp', target: '/support' }],
+    });
+    const payload = { addon: 'Трафик +50 ГБ', subscriptionId: 'sub-1', paymentId: 'pay-2', reason: 'ENDED_BEFORE_CAPTURE' };
+    const notice = await service.createInTransaction(
+      { userNotificationEvent: { create: async () => ({ id: 'evt-3', userId: 'u-1', type: 'addon_not_applied_other', payload }) } } as never,
+      { userId: 'u-1', type: 'addon_not_applied_other', payload },
+    );
+    await notice.deliver();
+
+    assert.equal(pushed[0]?.url, '/support');
+  });
 });

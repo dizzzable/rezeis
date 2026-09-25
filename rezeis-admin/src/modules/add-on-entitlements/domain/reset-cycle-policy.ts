@@ -149,6 +149,66 @@ export function saleResetAnchor(
   return strategy === 'MONTH_ROLLING' ? profileCreatedAt : null;
 }
 
+const RESET_STRATEGY_NAMES: ReadonlySet<string> = new Set(['NO_RESET', 'DAY', 'WEEK', 'MONTH', 'MONTH_ROLLING']);
+
+/**
+ * The reset rule a SALE on this term counts by: the rule its subscriber is
+ * MOVING TO (review R4-02). A plan edit commits the new rule into every
+ * subscriber's snapshot at once and moves their terms one subscriber at a time
+ * after it (`reset-rule-follow.ts`); in between, a sale by the term's own rule
+ * quoted the rule that was on its way out, and the follow then re-dated what
+ * was sold — earlier than the checkout said, or bound to a reset Remnawave no
+ * longer runs.
+ *
+ * So when the snapshot names another rule for a term the follow will move — a
+ * term of the snapshot's own plan, or any term when the snapshot names no plan
+ * (the follow's own filter) — the sale counts by the snapshot's rule, from the
+ * anchor the follow will give the term (`provisionalResetAnchor`: the term's
+ * start, or for MONTH_ROLLING the profile's `createdAt`). Otherwise the term's
+ * own rule and anchor ({@link saleResetAnchor}). The offer, the checkout and
+ * the capture read it here; the capture follows the subscriber first, in its
+ * own transaction, so what it binds is what was quoted.
+ */
+export function saleResetRule(input: {
+  readonly term: {
+    readonly planId: string | null;
+    readonly trafficResetStrategy: ResetStrategy;
+    readonly resetAnchorAt: Date | null;
+    readonly startsAt: Date;
+  };
+  readonly planSnapshot: unknown;
+  readonly profileCreatedAt: Date | null;
+}): { readonly strategy: ResetStrategy; readonly anchorAt: Date | null; readonly moving: boolean } {
+  const snapshot =
+    typeof input.planSnapshot === 'object' && input.planSnapshot !== null && !Array.isArray(input.planSnapshot)
+      ? (input.planSnapshot as Record<string, unknown>)
+      : {};
+  const named = snapshot['trafficLimitStrategy'];
+  const snapshotPlanId = typeof snapshot['id'] === 'string' ? snapshot['id'] : null;
+  const moving =
+    typeof named === 'string' &&
+    RESET_STRATEGY_NAMES.has(named) &&
+    named !== input.term.trafficResetStrategy &&
+    (snapshotPlanId === null || snapshotPlanId === input.term.planId);
+  if (!moving) {
+    return {
+      strategy: input.term.trafficResetStrategy,
+      anchorAt: saleResetAnchor(input.term.trafficResetStrategy, input.term.resetAnchorAt, input.profileCreatedAt),
+      moving: false,
+    };
+  }
+  const strategy = named as ResetStrategy;
+  return {
+    strategy,
+    anchorAt: saleResetAnchor(
+      strategy,
+      provisionalResetAnchor(strategy, input.term.startsAt, input.profileCreatedAt),
+      input.profileCreatedAt,
+    ),
+    moving: true,
+  };
+}
+
 // ── Zone arithmetic ─────────────────────────────────────────────────────────
 //
 // Plain `Intl`, no library: the zone's offset at an instant is read off

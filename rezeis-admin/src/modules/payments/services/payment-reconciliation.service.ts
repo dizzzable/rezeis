@@ -60,6 +60,7 @@ import {
 } from '../utils/refund-autopay.util';
 import { writeTransactionGatewayData } from '../utils/transaction-gateway-data.util';
 import { isWithheldConversion } from '../utils/trial-conversion.util';
+import { wasAddOnNotApplied } from '../utils/add-on-not-applied.util';
 import { enqueueSyncJobsDeferringFailure } from './payment-fulfillment-claim.util';
 import { PaymentOpsAlertService } from './payment-ops-alert.service';
 import { PaymentSubscriptionMutationService } from './payment-subscription-mutation.service';
@@ -305,8 +306,11 @@ export class PaymentReconciliationService implements OnModuleDestroy {
           // `payment.withheld` (operator-only), not as a mismatch every rule and
           // integration bound to one would hear.
           const withheld = isWithheldConversion(transaction.gatewayData);
+          // And so is an add-on payment settled as not applied: no sale of it
+          // was announced either (`wasAddOnNotApplied`).
+          const addOnNotApplied = wasAddOnNotApplied(transaction.gatewayData);
           this.systemEvents.warn(
-            withheld ? EVENT_TYPES.PAYMENT_WITHHELD : EVENT_TYPES.PAYMENT_AMOUNT_MISMATCH,
+            withheld || addOnNotApplied ? EVENT_TYPES.PAYMENT_WITHHELD : EVENT_TYPES.PAYMENT_AMOUNT_MISMATCH,
             'PAYMENT',
             // Operator-facing detail lives in the metadata, not the message: an
             // event type can be bound to a customer email template, whose
@@ -323,6 +327,7 @@ export class PaymentReconciliationService implements OnModuleDestroy {
               paidAfterRefund: true,
               needsManualReview: true,
               ...(withheld ? { conversionWithheld: true } : {}),
+              ...(addOnNotApplied ? { addOnNotApplied: true } : {}),
             },
           );
         }
@@ -929,15 +934,17 @@ export class PaymentReconciliationService implements OnModuleDestroy {
         : NO_AUTOPAY;
       const autopayNote = describeAutopayOutcome(autopay);
       // A withheld payment's refund is the operator's alone, in part as in
-      // full — see `reverseFulfilledPayment`.
+      // full — see `reverseFulfilledPayment`. So is a not-applied add-on's.
       const withheld = isWithheldConversion(commit.gatewayData);
+      const addOnNotApplied = wasAddOnNotApplied(commit.gatewayData);
+      const operatorOnly = withheld || addOnNotApplied;
       this.systemEvents.warn(
-        withheld ? EVENT_TYPES.PAYMENT_WITHHELD_REFUNDED : EVENT_TYPES.PAYMENT_REFUND_PARTIAL,
+        operatorOnly ? EVENT_TYPES.PAYMENT_WITHHELD_REFUNDED : EVENT_TYPES.PAYMENT_REFUND_PARTIAL,
         'PAYMENT',
         // Operator-facing detail lives in the metadata, not the message: an
         // event type can be bound to a customer email template, whose subject
         // is the message itself.
-        withheld
+        operatorOnly
           ? `Частичный возврат неприменённого платежа: ${transaction.purchaseType}`
           : `Частичный возврат платежа: ${transaction.purchaseType}`,
         {
@@ -954,6 +961,7 @@ export class PaymentReconciliationService implements OnModuleDestroy {
           partial: true,
           needsManualReview: true,
           ...(withheld ? { conversionWithheld: true } : {}),
+          ...(addOnNotApplied ? { addOnNotApplied: true } : {}),
           ...(autopayNote === null ? {} : autopayMetadata(autopay, autopayNote)),
         },
       );
@@ -1401,8 +1409,13 @@ export class PaymentReconciliationService implements OnModuleDestroy {
     // well: `payment.withheld_refunded`, operator-only. As `payment.refunded` it
     // reached every rule, outbound webhook and refund email bound to one, with a
     // refund of a sale none of them had seen. The same for every door here:
-    // «Отметить возврат», the panel's refund, a provider's notification.
+    // «Отметить возврат», the panel's refund, a provider's notification. And
+    // the same for an add-on payment settled as not applied — told as
+    // `payment.withheld`, never as a sale (`wasAddOnNotApplied`): its customer
+    // was told «мы разберёмся и свяжемся с вами», so the operator tells them.
     const withheld = isWithheldConversion(transaction.gatewayData);
+    const addOnNotApplied = wasAddOnNotApplied(transaction.gatewayData);
+    const operatorOnly = withheld || addOnNotApplied;
     // The card's «📝 Заметка», before what became of the autopay: what ended
     // of the add-on, what becomes of its extra devices, then the days an
     // upgrade converted this payment's money into, which stay with the
@@ -1428,9 +1441,9 @@ export class PaymentReconciliationService implements OnModuleDestroy {
         ...(autopayNote === null ? [] : [autopayNote]),
       ].join(' ');
       this.systemEvents.warn(
-        withheld ? EVENT_TYPES.PAYMENT_WITHHELD_REFUNDED : EVENT_TYPES.PAYMENT_REFUNDED,
+        operatorOnly ? EVENT_TYPES.PAYMENT_WITHHELD_REFUNDED : EVENT_TYPES.PAYMENT_REFUNDED,
         'PAYMENT',
-        withheld
+        operatorOnly
           ? `Возврат неприменённого платежа: ${transaction.purchaseType}`
           : `Платёж возвращён (refund/chargeback): ${transaction.purchaseType}`,
         {
@@ -1445,6 +1458,7 @@ export class PaymentReconciliationService implements OnModuleDestroy {
           subscriptionRevoked: revocation.revoked,
           needsManualReview: revocation.needsManualReview,
           ...(withheld ? { conversionWithheld: true } : {}),
+          ...(addOnNotApplied ? { addOnNotApplied: true } : {}),
           ...(addOn === null
             ? {}
             : { addOnType: addOn.addOnType, addOnValue: addOn.addOnValue, addOnEnded: addOn.ended }),

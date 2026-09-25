@@ -229,6 +229,23 @@ function completionOf(paymentId: string): Emitted {
   return found[0]!;
 }
 
+/**
+ * The card of a payment that was not applied: `payment.withheld`, operator-only
+ * — never `payment.completed`, which the automations, pop-ups and outbound
+ * webhooks read as a sale (FX5 item 4).
+ */
+function withheldOf(paymentId: string): Emitted {
+  const forPayment = emitted.filter((event) => event.metadata['paymentId'] === paymentId);
+  assert.deepEqual(
+    forPayment.filter((event) => event.type === EVENT_TYPES.PAYMENT_COMPLETED).map((event) => event.message),
+    [],
+    `announced as a sale: ${paymentId}`,
+  );
+  const found = forPayment.filter((event) => event.type === EVENT_TYPES.PAYMENT_WITHHELD);
+  assert.equal(found.length, 1, `exactly one withheld card for ${paymentId}`);
+  return found[0]!;
+}
+
 run('«до сброса» on the money path (PostgreSQL)', () => {
   before(async () => {
     process.env.DATABASE_URL = testUrl;
@@ -426,9 +443,10 @@ run('«до сброса» on the money path (PostgreSQL)', () => {
       assert.equal(after.trafficLimit, 100, 'the permanent increment would have made it 150');
       const settled = await prisma.transaction.findUniqueOrThrow({ where: { id: draft.id } });
       assert.notEqual(settled.fulfilledAt, null, 'settled, so it is not retried');
-      const card = completionOf(draft.paymentId);
+      const card = withheldOf(draft.paymentId);
       assert.equal(card.severity, 'WARNING');
-      assert.equal(card.metadata['userId'], owner.userId, 'pop-ups and automations still find the customer');
+      assert.equal(card.metadata['userId'], owner.userId, 'the card names the customer');
+      assert.equal(card.metadata['addOnNotAppliedReason'], 'SUBSCRIPTION_NOT_ACTIVE');
       assert.equal(card.message, 'Докупка оплачена, но не применена');
       assert.match(String(card.metadata['note']), /подписка уже не активна/);
       assert.match(String(card.metadata['note']), /Верните деньги/);
@@ -471,7 +489,7 @@ run('«до сброса» on the money path (PostgreSQL)', () => {
 
       assert.equal(await entitlementOf(draft.id), null);
       assert.equal((await subscriptionOf(owner.subscriptionId)).trafficLimit, 100);
-      assert.match(String(completionOf(draft.paymentId).metadata['note']), /нет действующего срока/);
+      assert.match(String(withheldOf(draft.paymentId).metadata['note']), /нет действующего срока/);
     });
 
     it('paid after its quoted end: not applied — an entitlement born expired is not delivered', async () => {
@@ -495,7 +513,7 @@ run('«до сброса» on the money path (PostgreSQL)', () => {
 
       assert.equal(await entitlementOf(draft.id), null);
       assert.equal((await subscriptionOf(owner.subscriptionId)).trafficLimit, 100);
-      const card = completionOf(draft.paymentId);
+      const card = withheldOf(draft.paymentId);
       assert.equal(card.message, 'Докупка оплачена, но не применена');
       assert.match(String(card.metadata['note']), /после окончания её срока/);
     });
@@ -671,6 +689,108 @@ run('«до сброса» on the money path (PostgreSQL)', () => {
       });
       assert.equal(projection.desiredTrafficLimitBytes, 100n * GIB);
       assert.equal((await subscriptionOf(owner.subscriptionId)).trafficLimit, 100);
+    });
+
+    it('a refund of a «до сброса» add-on that was not applied takes nothing back: the capture stamped it (FX5 item 4)', async () => {
+      const owner = await subscription();
+      const draft = await checkOut(owner, await catalogAddOn());
+      await prisma.subscription.update({ where: { id: owner.subscriptionId }, data: { status: 'EXPIRED' } });
+      await capture(draft);
+      const paid = await prisma.transaction.findUniqueOrThrow({ where: { id: draft.id } });
+      assert.equal(
+        ((paid.gatewayData as Record<string, unknown> | null)?.['addOnNotApplied'] as Record<string, unknown> | undefined)?.[
+          'reason'
+        ],
+        'SUBSCRIPTION_NOT_ACTIVE',
+        'stamped in the capture',
+      );
+      // Renewed since, and 50 GB more from the operator: nothing of the add-on's.
+      await prisma.subscription.update({
+        where: { id: owner.subscriptionId },
+        data: { status: 'ACTIVE', trafficLimit: 150 },
+      });
+      const termsBefore = await prisma.subscriptionTerm.findMany({
+        where: { subscriptionId: owner.subscriptionId },
+        select: { id: true, status: true },
+        orderBy: { generation: 'asc' },
+      });
+
+      const refunds = new AddOnRefundService(
+        prisma,
+        new AddOnEntitlementService(),
+        new EffectiveProjectionService(),
+        { enqueue: async () => undefined } as never,
+      );
+      const outcome = await refunds.endForRefund(paid, 'REFUND');
+
+      assert.equal(outcome?.ended, true);
+      assert.equal(outcome?.note, 'Докупка «+50 ГБ» не была применена — отключать нечего.');
+      assert.deepEqual(outcome?.syncJobIds, []);
+      assert.equal(
+        (await subscriptionOf(owner.subscriptionId)).trafficLimit,
+        150,
+        'the refund took away 50 GB the payment never added',
+      );
+      assert.deepEqual(
+        await prisma.subscriptionTerm.findMany({
+          where: { subscriptionId: owner.subscriptionId },
+          select: { id: true, status: true },
+          orderBy: { generation: 'asc' },
+        }),
+        termsBefore,
+        'no term rebased',
+      );
+    });
+
+    it('an add-on the legacy way added nothing to — unlimited traffic — takes nothing back once the limit is finite (FX5 item 4)', async () => {
+      const owner = await subscription();
+      // Unlimited, and no longer active when the money came: the old raw
+      // increment, which has nothing to raise. It leaves no ledger push to find.
+      await prisma.subscription.update({
+        where: { id: owner.subscriptionId },
+        data: { status: 'EXPIRED', trafficLimit: null },
+      });
+      const addOnId = await catalogAddOn();
+      const draft = await paidDraft(owner, {
+        addOnId,
+        addOnType: 'EXTRA_TRAFFIC',
+        addOnValue: 50,
+        name: 'Extra 50 GB',
+        sourceLineKey: addOnId,
+        lifetime: 'UNTIL_SUBSCRIPTION_END',
+      });
+      await fulfilment.applyCompletedTransaction(draft);
+      const paid = await prisma.transaction.findUniqueOrThrow({ where: { id: draft.id } });
+      assert.equal(
+        ((paid.gatewayData as Record<string, unknown> | null)?.['addOnNotApplied'] as Record<string, unknown> | undefined)?.[
+          'reason'
+        ],
+        'UNLIMITED_BASELINE',
+        'stamped in the capture',
+      );
+      assert.equal(
+        await prisma.profileSyncJob.count({
+          where: { subscriptionId: owner.subscriptionId, payload: { path: ['source'], equals: 'ADDON_PURCHASE_LEDGER' } },
+        }),
+        0,
+        'fixture: the legacy way, no ledger push',
+      );
+      // Renewed onto a finite limit since, with 50 GB more from the operator.
+      await prisma.subscription.update({
+        where: { id: owner.subscriptionId },
+        data: { status: 'ACTIVE', trafficLimit: 150 },
+      });
+
+      const refunds = new AddOnRefundService(
+        prisma,
+        new AddOnEntitlementService(),
+        new EffectiveProjectionService(),
+        { enqueue: async () => undefined } as never,
+      );
+      const outcome = await refunds.endForRefund(paid, 'REFUND');
+
+      assert.equal(outcome?.note, 'Докупка «+50 ГБ» не была применена — отключать нечего.');
+      assert.equal((await subscriptionOf(owner.subscriptionId)).trafficLimit, 150, 'the refund took 50 GB it never added');
     });
 
     it('a renewal does not take a «до сброса» add-on away: it keeps its promised date and keeps counting', async () => {

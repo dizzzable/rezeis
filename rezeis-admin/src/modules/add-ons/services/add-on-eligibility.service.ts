@@ -25,7 +25,7 @@ import { deriveCutoverBaseline } from '../../add-on-entitlements/domain/cutover-
 import {
   getResetCapability,
   ResetCapabilityMap,
-  saleResetAnchor,
+  saleResetRule,
 } from '../../add-on-entitlements/domain/reset-cycle-policy';
 import {
   isBaselineExtendable,
@@ -280,6 +280,7 @@ export class AddOnEligibilityService {
       select: {
         id: true,
         planId: true,
+        startsAt: true,
         endsAt: true,
         baseTrafficLimitBytes: true,
         baseDeviceLimit: true,
@@ -287,6 +288,16 @@ export class AddOnEligibilityService {
         resetAnchorAt: true,
       },
     });
+    // The rule a sale counts by is the one the subscriber is moving to: a plan
+    // edit whose follow has not reached it yet (review R4-02, `saleResetRule`).
+    const saleRule =
+      term === null
+        ? null
+        : saleResetRule({
+            term,
+            planSnapshot: subscription.planSnapshot,
+            profileCreatedAt: subscription.remnawaveProfileCreatedAt ?? null,
+          });
 
     // Prefer the ACTIVE durable term; otherwise derive a synthetic baseline
     // from the subscription's own columns (still server-side, no client drift).
@@ -295,7 +306,7 @@ export class AddOnEligibilityService {
     // one the offer is judged against; the fallback already reads those
     // columns directly.
     const resolved =
-      term === null
+      term === null || saleRule === null
         ? this.deriveFallbackBaseline(subscription)
         : {
             termId: term.id,
@@ -304,12 +315,8 @@ export class AddOnEligibilityService {
               endsAt: term.endsAt,
               subscriptionEndsAt: subscription.expiresAt,
               ...(await this.resolveConfiguredBaseline(subscriptionId, term, subscription)),
-              trafficResetStrategy: term.trafficResetStrategy,
-              resetAnchorAt: saleResetAnchor(
-                term.trafficResetStrategy,
-                term.resetAnchorAt,
-                subscription.remnawaveProfileCreatedAt ?? null,
-              ),
+              trafficResetStrategy: saleRule.strategy,
+              resetAnchorAt: saleRule.anchorAt,
             },
           };
 

@@ -715,6 +715,9 @@ const ADD_ON_TEMPLATES: ReadonlyArray<DefaultNotificationTemplate> = [
 /** The type of the notice to a customer whose paid add-on could not be applied (`ADD_ON_PAYMENT_TEMPLATES`). */
 export const ADD_ON_NOT_APPLIED_NOTICE_TYPE = 'addon_not_applied';
 
+/** The same notice for any other reason it could not be applied (FX5 item 5). */
+export const ADD_ON_NOT_APPLIED_OTHER_NOTICE_TYPE = 'addon_not_applied_other';
+
 /** The payment's problem is the operator's to sort out: the customer's way to them. */
 const ADD_ON_NOT_APPLIED_BUTTONS: ReadonlyArray<DefaultNotificationTemplateButton> = [
   { labelRu: '💬 Поддержка', labelEn: '💬 Support', kind: 'webApp', target: '/support' },
@@ -722,12 +725,16 @@ const ADD_ON_NOT_APPLIED_BUTTONS: ReadonlyArray<DefaultNotificationTemplateButto
 ];
 
 /**
- * A paid add-on «до сброса» the payment could not apply because the
- * subscription was no longer active when the money came in (review R3a-07).
- * The operator gets the card «Докупка оплачена, но не применена» and decides
- * about the money — nothing is refunded by itself — and the customer, who used
- * to be told nothing while the return page showed a completed payment, gets
- * this one notice (`PaymentSubscriptionMutationService.applyAddOnTopUp`).
+ * A paid add-on the payment could not apply. The operator gets the card
+ * «Докупка оплачена, но не применена» and decides about the money — nothing is
+ * refunded by itself — and the customer, who used to be told nothing while the
+ * return page showed a completed payment, gets ONE of these notices
+ * (`PaymentSubscriptionMutationService.applyAddOnTopUp`):
+ *  - `addon_not_applied` — the subscription was no longer active when the
+ *    money came in (review R3a-07), in the owner's words;
+ *  - `addon_not_applied_other` — any other reason (FX5 item 5): paid after the
+ *    quoted end, no term, no end, a catalogue value that adds nothing — the
+ *    same sentence without the clause about the subscription.
  * `{{addon}}` is the add-on's name as it was sold. Not a switch the customer
  * may turn off: it is about their money.
  */
@@ -742,6 +749,16 @@ const ADD_ON_PAYMENT_TEMPLATES: ReadonlyArray<DefaultNotificationTemplate> = [
     bodyEn:
       'We received your payment for the add-on “{{addon}}”, but could not apply it — your subscription ' +
       'is not active right now. We will look into it and get back to you.',
+    buttons: ADD_ON_NOT_APPLIED_BUTTONS,
+  },
+  {
+    type: ADD_ON_NOT_APPLIED_OTHER_NOTICE_TYPE,
+    title: '⚠️ Докупка не применена',
+    titleEn: '⚠️ Add-on not applied',
+    body: 'Оплата докупки «{{addon}}» получена, но применить её не удалось. Мы разберёмся и свяжемся с вами.',
+    bodyEn:
+      'We received your payment for the add-on “{{addon}}”, but could not apply it. ' +
+      'We will look into it and get back to you.',
     buttons: ADD_ON_NOT_APPLIED_BUTTONS,
   },
 ];

@@ -11,7 +11,13 @@ import { DeviceReductionExecutionService } from './device-reduction-execution.se
 import { DeviceReductionPlanService } from './device-reduction-plan.service';
 import { EntitlementBoundaryService } from './entitlement-boundary.service';
 import { ResetBoundaryConfirmationService, resetAddOnHeldSql } from './reset-boundary-confirmation.service';
-import { followResetRules, selectResetRuleFollowCandidates } from './reset-rule-follow';
+import {
+  enqueueResetRulePushes,
+  followResetRules,
+  selectResetRuleFollowCandidates,
+  selectWaitingResetRulePushes,
+  type WaitingPushCursor,
+} from './reset-rule-follow';
 import { SubscriptionTermService, TERM_SHORTENED_ACROSS_SCHEDULED_TERM } from './subscription-term.service';
 
 /** Max subscriptions swept for due boundaries per tick. */
@@ -19,6 +25,15 @@ const MAX_PER_TICK = 200;
 
 /** Subscriptions whose terms the reset-rule sweep brings to their snapshot's rule per run. */
 const MAX_RESET_RULE_FOLLOWS_PER_RUN = 500;
+
+/**
+ * Waiting `PLAN_STRATEGY_UPDATE` pushes the reset-rule sweep puts on the queue
+ * per run (FX5 item 3): ten times the profile-sync sweep's 100, so a plan of
+ * 10,000 left PENDING by a crash drains in under an hour, not in eight. The
+ * queue holds them and the worker takes them at its own pace; a job already
+ * queued is not added twice (its id is the row's).
+ */
+export const MAX_RESET_RULE_PUSHES_PER_RUN = 1_000;
 
 /** Max subscriptions the hourly re-drive of parked device expiries takes. */
 const MAX_PARKED_PER_RUN = 100;
@@ -128,6 +143,8 @@ export class EntitlementBoundarySchedulerService {
   private driftCursor = '';
   /** Where the reset-rule sweep resumes; in memory, so a restart starts it over. */
   private resetRuleCursor = '';
+  /** Where the walk over waiting reset-rule pushes resumes; in memory, like the one above. */
+  private resetRulePushCursor: WaitingPushCursor | null = null;
 
   public constructor(
     private readonly prismaService: PrismaService,
@@ -189,6 +206,38 @@ export class EntitlementBoundarySchedulerService {
     } catch (err: unknown) {
       this.logger.warn(`Reset-rule sweep failed: ${err instanceof Error ? err.message : String(err)}`);
     }
+    try {
+      const { waiting, enqueued } = await this.enqueueWaitingResetRulePushes();
+      if (waiting > 0) {
+        this.logger.log(`Reset-rule sweep: ${enqueued} of ${waiting} waiting push(es) put on the queue`);
+      }
+    } catch (err: unknown) {
+      this.logger.warn(`Reset-rule pushes not put on the queue: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * THE TAIL AFTER A CRASH (FX5 item 3). A reset-rule edit's pushes are
+   * PENDING rows from its commit (or from each follow step's); the process
+   * enqueues them right after, and when it stops in between — or Redis is
+   * down — only the profile-sync sweep sent them, 100 every five minutes. Here
+   * the next {@link MAX_RESET_RULE_PUSHES_PER_RUN} of them, in creation order
+   * from where the last run stopped, go on the queue each run. A job already on
+   * the queue is not added again (BullMQ's job id is the row's), and the cursor
+   * walks on, so the same rows are not re-added run after run while the worker
+   * drains them; at the end it starts over.
+   */
+  public async enqueueWaitingResetRulePushes(
+    limit: number = MAX_RESET_RULE_PUSHES_PER_RUN,
+  ): Promise<{ readonly waiting: number; readonly enqueued: number }> {
+    const waiting = await selectWaitingResetRulePushes(this.prismaService, this.resetRulePushCursor, limit);
+    this.resetRulePushCursor = waiting.length < limit ? null : waiting[waiting.length - 1]!;
+    const enqueued = await enqueueResetRulePushes(
+      (syncJobId) => this.profileSyncQueueService.enqueue(syncJobId),
+      waiting.map((push) => push.id),
+      { logger: this.logger },
+    );
+    return { waiting: waiting.length, enqueued };
   }
 
   /**

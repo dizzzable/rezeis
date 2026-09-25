@@ -8,6 +8,7 @@ import {
   planResetEpoch,
   remnawaveResetsBetween,
   saleResetAnchor,
+  saleResetRule,
 } from '../src/modules/add-on-entitlements/domain/reset-cycle-policy';
 
 const at = (value: string) => new Date(value);
@@ -41,6 +42,44 @@ describe('reset cycle policy', () => {
     assert.equal(saleResetAnchor('MONTH_ROLLING', null, null), null);
     assert.equal(saleResetAnchor('MONTH', null, createdAt), null);
     assert.equal(saleResetAnchor('WEEK', termAnchor, createdAt), termAnchor);
+  });
+
+  it('a sale counts by the rule the subscriber is MOVING TO while a plan edit\'s follow has not reached it (R4-02)', () => {
+    const startsAt = at('2026-09-10T08:00:00.000Z');
+    const createdAt = at('2025-11-03T08:00:00.000Z');
+    const term = { planId: 'plan-1', trafficResetStrategy: 'MONTH' as const, resetAnchorAt: startsAt, startsAt };
+    // The snapshot names DAY for the term's own plan: the follow will move it.
+    assert.deepEqual(
+      saleResetRule({ term, planSnapshot: { id: 'plan-1', trafficLimitStrategy: 'DAY' }, profileCreatedAt: createdAt }),
+      { strategy: 'DAY', anchorAt: startsAt, moving: true },
+    );
+    // …to MONTH_ROLLING: from the profile's createdAt, as the follow mints it.
+    assert.deepEqual(
+      saleResetRule({ term, planSnapshot: { id: 'plan-1', trafficLimitStrategy: 'MONTH_ROLLING' }, profileCreatedAt: createdAt }),
+      { strategy: 'MONTH_ROLLING', anchorAt: createdAt, moving: true },
+    );
+    assert.deepEqual(
+      saleResetRule({ term, planSnapshot: { id: 'plan-1', trafficLimitStrategy: 'MONTH_ROLLING' }, profileCreatedAt: null }),
+      { strategy: 'MONTH_ROLLING', anchorAt: null, moving: true },
+      'no anchor yet: the rolling sale stays withheld',
+    );
+    // A snapshot that names no plan: the follow moves every term.
+    assert.equal(saleResetRule({ term, planSnapshot: { trafficLimitStrategy: 'WEEK' }, profileCreatedAt: null }).moving, true);
+  });
+
+  it('a sale counts by the term\'s own rule when nothing is moving it', () => {
+    const startsAt = at('2026-09-10T08:00:00.000Z');
+    const anchor = at('2026-09-01T00:20:00.000Z');
+    const term = { planId: 'plan-1', trafficResetStrategy: 'MONTH' as const, resetAnchorAt: anchor, startsAt };
+    const own = { strategy: 'MONTH', anchorAt: anchor, moving: false };
+    // The same rule.
+    assert.deepEqual(saleResetRule({ term, planSnapshot: { id: 'plan-1', trafficLimitStrategy: 'MONTH' }, profileCreatedAt: null }), own);
+    // Another plan's snapshot: a queued plan change does not move this term.
+    assert.deepEqual(saleResetRule({ term, planSnapshot: { id: 'plan-2', trafficLimitStrategy: 'DAY' }, profileCreatedAt: null }), own);
+    // No rule, or none the panel knows.
+    assert.deepEqual(saleResetRule({ term, planSnapshot: { id: 'plan-1' }, profileCreatedAt: null }), own);
+    assert.deepEqual(saleResetRule({ term, planSnapshot: { id: 'plan-1', trafficLimitStrategy: 'HOURLY' }, profileCreatedAt: null }), own);
+    assert.deepEqual(saleResetRule({ term, planSnapshot: null, profileCreatedAt: null }), own);
   });
 
   it('returns no epoch for NO_RESET', () => {

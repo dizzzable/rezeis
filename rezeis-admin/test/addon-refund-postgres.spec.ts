@@ -654,6 +654,63 @@ run('an add-on refund ends the add-on, on PostgreSQL', () => {
     assert.equal(cardFor(payment.paymentId)?.metadata['note'], 'Докупка «+2 устройства» отключена.');
   });
 
+  it('an add-on captured as not applied before the stamp takes nothing back: its ledger no-op is the record (FX5 item 4)', async () => {
+    // The plan's 100 GB and 50 more the customer really has — another add-on's.
+    const { userId, subscriptionId } = await customer({ deviceLimit: 3, trafficLimit: 150 });
+    const notApplied = await addOnPayment({ userId, subscriptionId, type: AddOnType.EXTRA_TRAFFIC, value: 50 });
+    // All a capture before this release left for it (`recordAddOnLedgerNoOp`):
+    // no stamp on the payment, one push with a no-op note.
+    await db.profileSyncJob.create({
+      data: {
+        subscriptionId,
+        action: 'UPDATE',
+        status: 'COMPLETED',
+        payload: { source: 'ADDON_PURCHASE_LEDGER', paymentId: notApplied.paymentId, note: 'RESET_QUOTE_NOT_APPLIED' },
+      },
+    });
+    const applied = await addOnPayment({ userId, subscriptionId, type: AddOnType.EXTRA_TRAFFIC, value: 50 });
+
+    await recordRefund(notApplied.id);
+
+    assert.equal(
+      (await db.subscription.findUniqueOrThrow({ where: { id: subscriptionId } })).trafficLimit,
+      150,
+      'the refund took away 50 GB the payment never added',
+    );
+    const card = cardFor(notApplied.paymentId);
+    assert.equal(card?.metadata['note'], 'Докупка «+50 ГБ» не была применена — отключать нечего.');
+    assert.equal(card?.metadata['needsManualReview'], false);
+    assert.equal(await db.profileSyncJob.count({ where: { subscriptionId, cause: 'ADDON_REFUND' } }), 0, 'nothing to push');
+    const refunded = await db.transaction.findUniqueOrThrow({ where: { id: notApplied.id } });
+    assert.equal(refunded.status, 'CANCELED', 'the money records are reversed as for any refund');
+    assert.equal((refunded.gatewayData as Record<string, unknown>)['addOnRefundNothingApplied'], true);
+
+    // Another payment's no-op is not this one's: a real add-on still comes off.
+    await recordRefund(applied.id);
+
+    assert.equal((await db.subscription.findUniqueOrThrow({ where: { id: subscriptionId } })).trafficLimit, 100);
+    assert.equal(cardFor(applied.paymentId)?.metadata['note'], 'Докупка «+50 ГБ» отключена.');
+  });
+
+  it('the refund of an add-on settled as not applied is told to the operator alone: its sale was never announced (FX5a)', async () => {
+    const { userId, subscriptionId } = await customer({ deviceLimit: 3, trafficLimit: 150 });
+    const notApplied = await addOnPayment({ userId, subscriptionId, type: AddOnType.EXTRA_TRAFFIC, value: 50 });
+    // What its capture wrote, and why it told `payment.withheld` rather than a sale.
+    await db.transaction.update({
+      where: { id: notApplied.id },
+      data: { gatewayData: { addOnNotApplied: { reason: 'NO_END', at: new Date().toISOString() } } },
+    });
+
+    await recordRefund(notApplied.id);
+
+    const told = events.filter((event) => event.metadata['paymentId'] === notApplied.paymentId);
+    assert.deepEqual(told.map((event) => event.type), ['payment.withheld_refunded'], 'integrations saw the refund of a sale they never saw');
+    assert.equal(told[0]?.metadata['addOnNotApplied'], true);
+    assert.equal(told[0]?.metadata['note'], 'Докупка «+50 ГБ» не была применена — отключать нечего.');
+    assert.equal((await db.subscription.findUniqueOrThrow({ where: { id: subscriptionId } })).trafficLimit, 150);
+    assert.equal((await db.transaction.findUniqueOrThrow({ where: { id: notApplied.id } })).status, 'CANCELED');
+  });
+
   it('names the days an upgrade converted a refunded payment into, and where to take them off', async () => {
     const { userId, subscriptionId } = await customer({ deviceLimit: 3, trafficLimit: 100 });
     const bought = await db.transaction.create({

@@ -23,6 +23,8 @@ type CatalogAddOn = {
 type Term = {
   id: string;
   planId: string | null;
+  /** Read only for a subscriber a plan edit is moving to another reset rule (`saleResetRule`). */
+  startsAt?: Date;
   endsAt: Date | null;
   baseTrafficLimitBytes: bigint | null;
   baseDeviceLimit: number | null;
@@ -104,6 +106,17 @@ const defaultSubColumns: SubColumns = {
 };
 
 /**
+ * The columns of a subscriber on its term's own reset rule: the snapshot names
+ * the term's. A snapshot of the term's plan naming ANOTHER rule is a subscriber
+ * a plan edit is moving to that rule, and a sale counts by the rule it is
+ * moving to (`saleResetRule`, review R4-02) — the cases below that are about
+ * that say so with their own snapshot.
+ */
+function onRuleOf(term: Pick<Term, 'trafficResetStrategy'>): SubColumns {
+  return { ...defaultSubColumns, planSnapshot: { id: 'plan-a', trafficLimitStrategy: term.trafficResetStrategy } };
+}
+
+/**
  * The projection row the previous recompute left behind. Its recorded
  * contribution is the only quantity that may be subtracted back out of the
  * mirrored limit columns before they are compared with the stored snapshot.
@@ -126,7 +139,10 @@ function build(options: {
   stage4Off?: boolean; // «Докупка трафика до сброса» switched off
   profileFacts?: ReturnType<typeof profileFactsDouble>;
 }) {
-  const columns: SubColumns = { ...defaultSubColumns, ...options.sub };
+  const columns: SubColumns = {
+    ...(options.term === undefined || options.term === null ? defaultSubColumns : onRuleOf(options.term)),
+    ...options.sub,
+  };
   const ownerUserId = options.ownerUserId ?? 'user-1';
   const stats = { projectionReads: 0 };
   const prisma = {
@@ -654,6 +670,49 @@ describe('AddOnEligibilityService.listForSubscription', () => {
     assert.equal(reset.eligibility.resetSoon, Date.parse(nextResetAt) - Date.now() < DAY_MS);
   });
 
+  it('a subscriber a plan edit is moving to another reset rule is offered by that rule, not the term’s (review R4-02)', async () => {
+    // The plan went from «каждый месяц» to «без сброса»: the snapshot says so
+    // already, the term moves later (`reset-rule-follow.ts`). Sold by the term,
+    // «до сброса 1-го» would be re-dated by the follow to a reset that never
+    // comes.
+    const toNoReset = build({
+      status: 'ACTIVE',
+      term: { ...financeTerm, startsAt: new Date('2026-01-01T00:00:00.000Z') },
+      catalog: [trafficAddOn],
+      enabledMonth: true,
+      sub: { planSnapshot: { id: 'plan-a', trafficLimitStrategy: 'NO_RESET' } },
+    });
+    const kept = (await toNoReset.service.listForSubscription('sub-1')).addOns[0]!;
+    assert.equal(kept.lifetime, 'UNTIL_SUBSCRIPTION_END');
+    assert.equal(kept.eligibility.nextResetAt, null);
+    assert.equal(kept.eligibility.expiresAt, LIVE_TERM_ENDS_AT.toISOString());
+
+    // And the other way: a term with no reset whose plan now resets monthly.
+    const toMonth = build({
+      status: 'ACTIVE',
+      term: { ...financeTerm, trafficResetStrategy: 'NO_RESET', startsAt: new Date('2026-01-01T00:00:00.000Z') },
+      catalog: [trafficAddOn],
+      enabledMonth: true,
+      sub: { planSnapshot: { id: 'plan-a', trafficLimitStrategy: 'MONTH' } },
+    });
+    const reset = (await toMonth.service.listForSubscription('sub-1')).addOns[0]!;
+    assert.equal(reset.lifetime, 'UNTIL_NEXT_RESET');
+    assert.match(reset.eligibility.nextResetAt ?? '', /-01T00:20:00\.000Z$/);
+  });
+
+  it('a snapshot of another plan does not move the term: the term’s own rule is sold', async () => {
+    const { service } = build({
+      status: 'ACTIVE',
+      term: financeTerm,
+      catalog: [trafficAddOn],
+      enabledMonth: true,
+      sub: { planSnapshot: { id: 'plan-b', trafficLimitStrategy: 'NO_RESET' } },
+    });
+    const offered = (await service.listForSubscription('sub-1')).addOns[0]!;
+    assert.equal(offered.lifetime, 'UNTIL_NEXT_RESET');
+    assert.match(offered.eligibility.nextResetAt ?? '', /-01T00:20:00\.000Z$/);
+  });
+
   it('ends a reset add-on at the subscription\'s end when that comes first, and says so', async () => {
     // P5. The subscription ends in two hours; the MONTH reset is on the 1st.
     const endsSoon = new Date(Date.now() + 2 * 60 * 60 * 1000);
@@ -687,7 +746,12 @@ describe('AddOnEligibilityService.listForSubscription', () => {
     }
     const prisma = {
       subscription: {
-        findUnique: async () => ({ id: 'sub-1', userId: 'user-1', status: 'ACTIVE', ...defaultSubColumns }),
+        findUnique: async () => ({
+          id: 'sub-1',
+          userId: 'user-1',
+          status: 'ACTIVE',
+          ...onRuleOf({ trafficResetStrategy: 'DAY' }),
+        }),
       },
       subscriptionTerm: { findFirst: async () => ({ ...financeTerm, trafficResetStrategy: 'DAY' }) },
       subscriptionEffectiveProjection: { findUnique: async () => null },
@@ -715,7 +779,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
           id: 'sub-1',
           userId: 'user-1',
           status: 'ACTIVE',
-          ...defaultSubColumns,
+          ...onRuleOf({ trafficResetStrategy: 'DAY' }),
           expiresAt: endsFirst,
         }),
       },
@@ -736,7 +800,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
   it('computes the reset in «Часовой пояс Remnawave» and names the operator\'s display zone', async () => {
     const prisma = {
       subscription: {
-        findUnique: async () => ({ id: 'sub-1', userId: 'user-1', status: 'ACTIVE', ...defaultSubColumns }),
+        findUnique: async () => ({ id: 'sub-1', userId: 'user-1', status: 'ACTIVE', ...onRuleOf(financeTerm) }),
       },
       subscriptionTerm: { findFirst: async () => financeTerm },
       subscriptionEffectiveProjection: { findUnique: async () => null },
@@ -766,7 +830,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
     assert.equal((await service.listForSubscription('sub-1')).displayTimeZone, null);
     const prisma = {
       subscription: {
-        findUnique: async () => ({ id: 'sub-1', userId: 'user-1', status: 'ACTIVE', ...defaultSubColumns }),
+        findUnique: async () => ({ id: 'sub-1', userId: 'user-1', status: 'ACTIVE', ...onRuleOf(financeTerm) }),
       },
       subscriptionTerm: { findFirst: async () => financeTerm },
       subscriptionEffectiveProjection: { findUnique: async () => null },

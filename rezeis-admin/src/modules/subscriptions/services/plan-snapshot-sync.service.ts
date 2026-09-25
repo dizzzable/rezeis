@@ -13,6 +13,12 @@ export interface PlanSnapshotSyncResult {
   /** Of those, the ones whose reset rule the edit changed (DELETED rows aside). */
   readonly strategyChanged: number;
   /**
+   * Those subscriptions, in the term model or not. Their push is the reset
+   * rule's — the follow's or the one written here — so a squad propagation of
+   * the same save leaves them without a push of its own (review R4-02).
+   */
+  readonly strategyChangedSubscriptionIds: readonly string[];
+  /**
    * Of those, the ones in the term model — with an ACTIVE or SCHEDULED term of
    * the plan — for the caller to hand to `followResetRules` once its
    * transaction has COMMITTED: their terms and «до сброса» add-ons follow the
@@ -237,6 +243,12 @@ export class PlanSnapshotSyncService {
       )
       .map((row) => row.id);
     const syncJobIds = await writeResetRulePushesInTransaction(prismaClient, pushNow, { planId: plan.id, now });
-    return { updated: rows.length, strategyChanged: changed.length, followSubscriptionIds, syncJobIds };
+    return {
+      updated: rows.length,
+      strategyChanged: changed.length,
+      strategyChangedSubscriptionIds: changed.map((row) => row.id),
+      followSubscriptionIds,
+      syncJobIds,
+    };
   }
 }

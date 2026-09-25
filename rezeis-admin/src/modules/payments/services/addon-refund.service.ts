@@ -24,6 +24,11 @@ import { SubscriptionTermService } from '../../add-on-entitlements/services/subs
 import { AddOnSwitchesService } from '../../add-on-entitlements/switches/add-on-switches.service';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { writeTransactionGatewayData } from '../utils/transaction-gateway-data.util';
+import {
+  ADD_ON_LEDGER_NO_OP_NOTES,
+  ADD_ON_LEDGER_SOURCE,
+  readAddOnNotApplied,
+} from '../utils/add-on-not-applied.util';
 
 /**
  * Stamped on a refunded add-on payment, in the same database transaction that
@@ -173,6 +178,22 @@ export class AddOnRefundService {
           rows.map((row) => row.subscriptionId),
           marker,
         );
+      } else if (marker !== null && (await this.addedNothing(transaction, marker))) {
+        // Settled without adding anything — not applied, or on a subscription
+        // unlimited in what it adds (`add-on-not-applied.util.ts`). Taken for a
+        // raw `+N`, its refund lowered the column, or rebased the ACTIVE term,
+        // by a value it never added: traffic or devices the customer had from
+        // somewhere else (FX5 item 4).
+        outcome = {
+          ended: true,
+          note: `Докупка «${describeAddOn(marker.addOnType, marker.addOnValue)}» не была применена — отключать нечего.`,
+          audit: { addOnRefundNothingApplied: true },
+          syncJobIds: [],
+          reduceDevicesOf: null,
+          devicesLine: null,
+          addOnType: marker.addOnType,
+          addOnValue: marker.addOnValue,
+        };
       } else if (marker !== null) {
         outcome = await this.endLegacy(transaction, marker);
       }
@@ -431,6 +452,37 @@ export class AddOnRefundService {
       ],
       skipDuplicates: true,
     });
+  }
+
+  /**
+   * Whether the add-on payment was settled without adding anything: its
+   * capture's stamp (`addOnNotApplied`, `add-on-not-applied.util.ts`), or — a
+   * capture from before the stamp — the ledger no-op it left, the
+   * `ADDON_PURCHASE_LEDGER` push of this payment with a no-op note
+   * (`profile_sync_jobs` is never pruned). Read from the rows as they are now.
+   * A capture that went down the old raw increment and added nothing (an
+   * unlimited column, a refused value) left no such mark; its refund reads the
+   * column as before, and an unlimited one is still left alone.
+   */
+  private async addedNothing(transaction: Transaction, marker: RefundedAddOnMarker): Promise<boolean> {
+    const current = await this.prismaService.transaction.findUnique({
+      where: { id: transaction.id },
+      select: { gatewayData: true, subscriptionId: true },
+    });
+    if (readAddOnNotApplied(current?.gatewayData ?? transaction.gatewayData) !== null) return true;
+    const subscriptionId = current?.subscriptionId ?? transaction.subscriptionId ?? marker.targetSubscriptionId;
+    const noOp = await this.prismaService.profileSyncJob.findFirst({
+      where: {
+        ...(subscriptionId === null ? {} : { subscriptionId }),
+        AND: [
+          { payload: { path: ['paymentId'], equals: transaction.paymentId } },
+          { payload: { path: ['source'], equals: ADD_ON_LEDGER_SOURCE } },
+          { OR: ADD_ON_LEDGER_NO_OP_NOTES.map((note) => ({ payload: { path: ['note'], equals: note } })) },
+        ],
+      },
+      select: { id: true },
+    });
+    return noOp !== null;
   }
 
   private async endLegacy(transaction: Transaction, marker: RefundedAddOnMarker): Promise<AddOnRefundOutcome> {

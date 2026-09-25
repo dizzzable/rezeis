@@ -82,9 +82,11 @@ export interface ResetRuleFollowOptions {
    * `always` — the caller knows the rule changed for these subscriptions (a
    * plan edit), so a live one is pushed even when no term moved. `if-followed`
    * — only a subscription whose terms moved is pushed (the sweep, which finds
-   * only rows whose terms disagree).
+   * only rows whose terms disagree). `never` — the caller writes a push of its
+   * own in the same transaction, which reads the row whole (an add-on capture:
+   * review R4-02).
    */
-  readonly push: 'always' | 'if-followed';
+  readonly push: 'always' | 'if-followed' | 'never';
   /** «Часовой пояс Remnawave»; read once, before the first step, when absent. */
   readonly remnawaveTimeZone?: string;
   /** The instant the new rule's first reset is counted from; each step's own "now" when absent. */
@@ -154,6 +156,7 @@ export async function followSubscriptionResetRuleInTransaction(
     correlationId: options.correlationId,
   });
 
+  if (options.push === 'never') return { termsUpdated: followed.termsUpdated, syncJobIds: [] };
   const live = row.status === SubscriptionStatus.ACTIVE || row.status === SubscriptionStatus.LIMITED;
   const wanted = options.push === 'always' || followed.termsUpdated > 0;
   if (!live || row.remnawaveId === null || !wanted) return { termsUpdated: followed.termsUpdated, syncJobIds: [] };
@@ -282,6 +285,38 @@ export async function writeResetRulePushesInTransaction(
     SELECT "id" FROM "waiting"
   `);
   return rows.map((row) => row.id);
+}
+
+/** Where a walk over the waiting pushes resumes: after this row, in creation order. */
+export interface WaitingPushCursor {
+  readonly createdAt: Date;
+  readonly id: string;
+}
+
+/**
+ * The pushes of a changed reset rule still WAITING — PENDING, not superseded,
+ * cause `PLAN_STRATEGY_UPDATE` — in creation order after `after`, at most
+ * `limit` (FX5 item 3). What a crash while the edit's caller enqueued them, or
+ * a Redis outage, leaves behind: the rows are durable, but only the profile-sync
+ * sweep sent them, 100 every five minutes — hours for a plan of 10,000 outside
+ * the term model. The reset-rule sweep walks them with this, a batch a run.
+ */
+export async function selectWaitingResetRulePushes(
+  client: Pick<Prisma.TransactionClient, '$queryRaw'>,
+  after: WaitingPushCursor | null,
+  limit: number,
+): Promise<WaitingPushCursor[]> {
+  const rows = await client.$queryRaw<Array<{ readonly id: string; readonly createdAt: Date }>>(Prisma.sql`
+    SELECT j."id", j."created_at" AS "createdAt"
+      FROM "profile_sync_jobs" j
+     WHERE j."cause" = ${PLAN_STRATEGY_UPDATE_CAUSE}
+       AND j."status" = 'PENDING'
+       AND j."superseded_at" IS NULL
+       ${after === null ? Prisma.empty : Prisma.sql`AND (j."created_at", j."id") > (${after.createdAt}, ${after.id})`}
+     ORDER BY j."created_at" ASC, j."id" ASC
+     LIMIT ${limit}
+  `);
+  return rows.map((row) => ({ id: row.id, createdAt: new Date(row.createdAt) }));
 }
 
 /**

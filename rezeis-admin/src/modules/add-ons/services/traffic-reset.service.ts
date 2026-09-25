@@ -2,7 +2,7 @@ import { Injectable, Logger, Optional } from '@nestjs/common';
 import { AddOnType, Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
-import { resolvePanelUserId } from '../../profile-sync/profile-sync.processor';
+import { readPanelFailure, resolvePanelUserId } from '../../profile-sync/profile-sync.processor';
 import { storedIdentityOf } from '../../remnawave/services/panel-user-address';
 import { PanelUsersClient } from '../../remnawave/services/panel-users.client';
 
@@ -17,6 +17,39 @@ export interface TrafficResetAllowance {
   /** True when the next reset costs nothing. */
   readonly isFree: boolean;
 }
+
+/**
+ * Why the panel did not zero the counter, in the terms a PAID reset acts on
+ * (`PaymentSubscriptionMutationService`): what the operator is told, and
+ * whether a later attempt can succeed.
+ */
+export type TrafficResetFailure =
+  /** The subscription is gone. */
+  | 'SUBSCRIPTION_NOT_FOUND'
+  /** No Remnawave to ask: no client, or no address or token set. */
+  | 'PANEL_NOT_CONFIGURED'
+  /** The subscription has no profile in Remnawave: nothing to reset. */
+  | 'NO_PANEL_PROFILE'
+  /** Remnawave says there is no such profile, or the stored identity names none. */
+  | 'PROFILE_NOT_FOUND'
+  /** Remnawave did not answer, or asked to come back later: worth another attempt. */
+  | 'PANEL_UNREACHABLE'
+  /** Remnawave answered and refused. */
+  | 'PANEL_REFUSED';
+
+/** What one reset on the panel did. */
+export type TrafficResetOutcome =
+  | { readonly ok: true; readonly reason: null }
+  | {
+      readonly ok: false;
+      /** For the log, and the free claim's answer. */
+      readonly reason: string;
+      readonly failure: TrafficResetFailure;
+      /** Only `PANEL_UNREACHABLE`: the profile-sync machinery may try again. */
+      readonly retryable: boolean;
+      /** The panel's own words, when it gave any. */
+      readonly detail: string | null;
+    };
 
 /**
  * Zeroes a subscription's consumed traffic, and knows when that is free.
@@ -203,7 +236,9 @@ export class TrafficResetService {
       await this.prismaService.subscriptionTrafficReset
         .delete({ where: { id: reservation.id } })
         .catch(() => undefined);
-      return performed;
+      // The same answer as always: why the paid path classifies a failure is
+      // not the cabinet's business.
+      return { ok: false, reason: performed.reason };
     }
     this.logger.log(
       `Traffic reset performed for subscription ${input.subscriptionId} (free allowance)`,
@@ -319,7 +354,7 @@ export class TrafficResetService {
     readonly termId: string | null;
     readonly addOnId: string | null;
     readonly transactionId: string | null;
-  }): Promise<{ readonly ok: boolean; readonly reason: string | null }> {
+  }): Promise<TrafficResetOutcome> {
     const performed = await this.resetOnPanel(input.subscriptionId);
     if (!performed.ok) return performed;
 
@@ -347,9 +382,7 @@ export class TrafficResetService {
    * addressable only by the numeric id — the admin endpoint for this same action
    * selects all four and says so.
    */
-  private async resetOnPanel(
-    subscriptionId: string,
-  ): Promise<{ readonly ok: boolean; readonly reason: string | null }> {
+  private async resetOnPanel(subscriptionId: string): Promise<TrafficResetOutcome> {
     const subscription = await this.prismaService.subscription.findUnique({
       where: { id: subscriptionId },
       select: {
@@ -361,10 +394,10 @@ export class TrafficResetService {
       },
     });
     if (subscription === null) {
-      return { ok: false, reason: 'subscription not found' };
+      return failed('subscription not found', 'SUBSCRIPTION_NOT_FOUND');
     }
     if (this.panelUsers === undefined) {
-      return { ok: false, reason: 'the Remnawave integration is not configured' };
+      return failed('the Remnawave integration is not configured', 'PANEL_NOT_CONFIGURED');
     }
 
     // THE SHARED RESOLVER, not a local read of `remnawaveId`. A profile created
@@ -374,18 +407,41 @@ export class TrafficResetService {
     // left `remnawave_id` NULL for ever on this codebase once already.
     const identity = storedIdentityOf(subscription);
     if (identity === null) {
-      return { ok: false, reason: 'this subscription has no panel profile yet' };
+      return failed('this subscription has no panel profile yet', 'NO_PANEL_PROFILE');
     }
+    // Classified as the profile-sync worker classifies the same answers
+    // (`readPanelFailure`): only an unreachable or busy panel is worth another
+    // attempt. A missing profile, or a refusal, will be the same next time.
     const address = await resolvePanelUserId(this.panelUsers, identity);
     if (address.kind !== 'ok') {
-      return { ok: false, reason: 'the panel profile could not be addressed' };
+      // A refused resolve reads as a profile nobody can find.
+      const failure = address.kind === 'transient' ? 'PANEL_UNREACHABLE' : 'PROFILE_NOT_FOUND';
+      return failed('the panel profile could not be addressed', failure, address.detail);
     }
 
     const outcome = await this.panelUsers.resetTraffic(address.userId);
     if (outcome.kind !== 'ok') {
       this.logger.warn(`Traffic reset refused by the panel for subscription ${subscriptionId}`);
-      return { ok: false, reason: 'the panel refused the reset' };
+      // No address or token set is a setting nobody is about to fill in for
+      // this payment: said now, not retried every five minutes.
+      if (outcome.kind === 'unconfigured') {
+        return failed('the Remnawave integration is not configured', 'PANEL_NOT_CONFIGURED');
+      }
+      const answer = readPanelFailure(outcome);
+      return failed('the panel refused the reset', PANEL_FAILURE_OF[answer.kind], answer.detail);
     }
     return { ok: true, reason: null };
   }
+}
+
+/** What the worker's reading of a refused reset means to a paid one. */
+const PANEL_FAILURE_OF: Readonly<Record<'missing' | 'transient' | 'terminal', TrafficResetFailure>> = {
+  missing: 'PROFILE_NOT_FOUND',
+  transient: 'PANEL_UNREACHABLE',
+  terminal: 'PANEL_REFUSED',
+};
+
+/** A failed reset: retryable only when Remnawave could not be reached. */
+function failed(reason: string, failure: TrafficResetFailure, detail: string | null = null): TrafficResetOutcome {
+  return { ok: false, reason, failure, retryable: failure === 'PANEL_UNREACHABLE', detail };
 }

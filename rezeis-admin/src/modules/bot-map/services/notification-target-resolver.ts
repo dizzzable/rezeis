@@ -30,8 +30,8 @@ export function resolveTerminalRouteFor(type: string): MiniAppRoute {
   // «Помощь с подключением»: its deep link is `/dashboard?connect=help`, and
   // the dashboard is the page that opens the connection screen from it.
   if (isConnectHelpType(t)) return '/dashboard';
-  // «Докупка не применена»: support, where «мы разберёмся» happens.
-  if (t === ADD_ON_NOT_APPLIED_TYPE) return '/support';
+  // «Докупка не применена», for either reason: support, where «мы разберёмся» happens.
+  if (t === ADD_ON_NOT_APPLIED_TYPE || t === ADD_ON_NOT_APPLIED_OTHER_TYPE) return '/support';
   // An add-on's end, or its approach: the add-on page, where it is bought again.
   if (isAddOnNoticeType(t)) return '/addons';
   if (t.includes('support')) return '/support';
@@ -96,8 +96,9 @@ function isConnectHelpType(lowerCaseType: string): boolean {
 
 /**
  * A dated add-on three days before its end, or at it — the six `addon_*` types.
- * «Докупка не применена» (`addon_not_applied`) shares the prefix: it is filed
- * with them, but `resolveTerminalRouteFor` routes it before it asks this.
+ * «Докупка не применена» (`addon_not_applied`, `addon_not_applied_other`)
+ * shares the prefix: it is filed with them, but `resolveTerminalRouteFor`
+ * routes it before it asks this.
  */
 function isAddOnNoticeType(lowerCaseType: string): boolean {
   return lowerCaseType.startsWith('addon_');
@@ -109,3 +110,6 @@ function isAddOnNoticeType(lowerCaseType: string): boolean {
  * file does not import from notifications/ (see the header).
  */
 const ADD_ON_NOT_APPLIED_TYPE = 'addon_not_applied';
+
+/** «Докупка не применена» for any other reason: the catalogue's `ADD_ON_NOT_APPLIED_OTHER_NOTICE_TYPE`. */
+const ADD_ON_NOT_APPLIED_OTHER_TYPE = 'addon_not_applied_other';

@@ -31,7 +31,10 @@ import {
   PLAN_STRATEGY_UPDATE_CAUSE,
 } from '../src/modules/add-on-entitlements/services/reset-rule-follow';
 import { SubscriptionTermService } from '../src/modules/add-on-entitlements/services/subscription-term.service';
+import { AddOnEligibilityService } from '../src/modules/add-ons/services/add-on-eligibility.service';
+import { AddOnPurchaseService } from '../src/modules/payments/services/addon-purchase.service';
 import { PaymentSubscriptionMutationService } from '../src/modules/payments/services/payment-subscription-mutation.service';
+import { PricingService } from '../src/modules/plans/services/pricing.service';
 import { PlanSquadPropagationService } from '../src/modules/plans/services/plan-squad-propagation.service';
 import { PlansAdminService } from '../src/modules/plans/services/plans-admin.service';
 import { PlansAdminValidators } from '../src/modules/plans/services/plans-admin.validators';
@@ -75,6 +78,8 @@ let cutover: EntitlementCutoverService;
 let terms: SubscriptionTermService;
 let snapshots: PlanSnapshotSyncService;
 let fulfilment: PaymentSubscriptionMutationService;
+let offers: AddOnEligibilityService;
+let checkout: AddOnPurchaseService;
 const created = { users: [] as string[], plans: [] as string[], admins: [] as string[] };
 let counter = 0;
 const next = (): number => ++counter;
@@ -285,6 +290,38 @@ async function outsideSubscription(
   return row.id;
 }
 
+/** A catalogue traffic add-on for every plan, at 99 RUB. */
+async function catalogTrafficAddOn(): Promise<string> {
+  const id = `${prefix}-addon-${next()}`;
+  await prisma.addOn.create({
+    data: { id, name: id, type: 'EXTRA_TRAFFIC', value: 50, prices: { create: [{ currency: 'RUB', price: '99' }] } },
+  });
+  return id;
+}
+
+/** One traffic add-on offered, checked out and captured — as the cabinet and the payment webhook run them. */
+async function offerCheckOutCapture(owner: Owner) {
+  const addOnId = await catalogTrafficAddOn();
+  const listing = await offers.listForSubscription(owner.subscriptionId);
+  const offered = listing.addOns.find((addOn) => addOn.id === addOnId);
+  assert.ok(offered, 'the traffic add-on is offered');
+  const answer = await checkout.checkout({
+    userId: owner.userId,
+    addOnId,
+    subscriptionId: owner.subscriptionId,
+    gatewayType: 'YOOKASSA' as never,
+    contractVersion: 2,
+  });
+  const draft = await prisma.transaction.findUniqueOrThrow({ where: { paymentId: answer.paymentId } });
+  const paid = await prisma.transaction.update({ where: { id: draft.id }, data: { status: 'COMPLETED' } });
+  const captured = await fulfilment.applyCompletedTransaction(paid);
+  const entitlement = await prisma.addOnEntitlement.findFirstOrThrow({
+    where: { sourceTransactionId: draft.id },
+    include: { expiryEpoch: true },
+  });
+  return { offered, marker: draft.planSnapshot as Record<string, unknown>, captured, entitlement };
+}
+
 /** Postgres gave up waiting for a row lock (`lock_timeout`, SQLSTATE 55P03), however Prisma 7 wraps it. */
 function isLockTimeout(error: unknown): boolean {
   const text = `${error instanceof Error ? error.message : String(error)} ${JSON.stringify(error)}`;
@@ -329,6 +366,31 @@ run('a plan\'s reset rule changes mid-period (PostgreSQL)', () => {
       cutover,
       switches as never,
     );
+    offers = new AddOnEligibilityService(prisma, {} as never, switches as never);
+    checkout = new AddOnPurchaseService(
+      prisma,
+      new PricingService(),
+      {
+        createCheckout: async () => ({
+          gatewayId: 'g',
+          gatewayData: {},
+          checkoutUrl: 'https://pay.example/x',
+          providerMode: 'REDIRECT',
+        }),
+      } as never,
+      fulfilment,
+      { enqueue: async () => undefined } as never,
+      { getInternalPlatformPolicy: async () => ({ accessMode: 'PUBLIC' }) } as never,
+      { evaluate: () => null } as never,
+      { info: () => undefined, warn: () => undefined, error: () => undefined, emit: () => undefined } as never,
+      terms,
+      switches as never,
+    );
+    await prisma.paymentGateway.upsert({
+      where: { type: 'YOOKASSA' },
+      update: { isActive: true, currency: 'RUB', settings: { shopId: 's', apiKey: 'k' } },
+      create: { type: 'YOOKASSA', isActive: true, currency: 'RUB', settings: { shopId: 's', apiKey: 'k' } },
+    });
     await prisma.settings.upsert({ where: { id: 1 }, update: { addOnSettings: {} }, create: {} });
   });
 
@@ -663,6 +725,36 @@ run('a plan\'s reset rule changes mid-period (PostgreSQL)', () => {
     assert.equal(outsidePushes[0]!.supersededAt, null);
   });
 
+  it('pushes left PENDING by a crash go on the queue with the 5-minute reset-rule sweep, a batch a run, each once (FX5 item 3)', async () => {
+    const planId = await plan(TrafficLimitStrategy.MONTH);
+    const outside: string[] = [];
+    for (let index = 0; index < 5; index += 1) outside.push(await outsideSubscription(planId));
+    // The edit commits its pushes… and the process stops before enqueueing them.
+    const committed = await commitStrategyEdit(planId, TrafficLimitStrategy.DAY);
+    assert.equal(committed.syncJobIds.length, 5);
+    // Oldest of all the waiting pushes in this database, in a known order, so
+    // the walk meets them first.
+    for (const [index, id] of committed.syncJobIds.entries()) {
+      await prisma.profileSyncJob.update({
+        where: { id },
+        data: { createdAt: new Date(Date.UTC(2000, 0, 1, 0, 0, 0, index)) },
+      });
+    }
+    const queue = recordingQueue();
+    const sweep = sweeper(queue);
+
+    const runs = [];
+    for (let run = 0; run < 3; run += 1) runs.push(await sweep.enqueueWaitingResetRulePushes(2));
+
+    assert.deepEqual(runs.map((result) => result.enqueued), [2, 2, 2], 'bounded per run');
+    const ours = queue.ids.filter((id) => committed.syncJobIds.includes(id));
+    assert.deepEqual(ours, [...committed.syncJobIds], 'each once, in the order they were written');
+    assert.deepEqual(queue.ids.slice(0, 4), committed.syncJobIds.slice(0, 4), 'the walk moves on instead of re-adding the head');
+    // Still PENDING: the queue is only a nudge; the worker settles them.
+    const rows = await prisma.profileSyncJob.findMany({ where: { id: { in: [...committed.syncJobIds] } } });
+    assert.ok(rows.every((row) => row.status === 'PENDING'));
+  });
+
   it('keeps a push of that cause already waiting instead of writing a second one (R4-01)', async () => {
     const planId = await plan(TrafficLimitStrategy.MONTH);
     const outside = await outsideSubscription(planId);
@@ -893,6 +985,50 @@ run('a plan\'s reset rule changes mid-period (PostgreSQL)', () => {
       assert.equal(await activeStrategy(id), 'DAY');
       assert.equal((await strategyPushes(id)).length, 1, `pushed once: ${id}`);
     }
+  });
+
+  it('a sale while the edit\'s follow has not reached the subscriber is quoted by the rule it moves to and delivered as quoted — MONTH → DAY (R4-02)', async () => {
+    const planId = await plan(TrafficLimitStrategy.MONTH);
+    const owner = await liveSubscription(planId);
+    await commitStrategyEdit(planId, TrafficLimitStrategy.DAY);
+    assert.equal(await activeStrategy(owner.subscriptionId), 'MONTH', 'fixture: the follow has not run');
+
+    const sale = await offerCheckOutCapture(owner);
+
+    const dayReset = nextReset('DAY');
+    const promised = new Date(dayReset.getTime() + RESET_EXPIRY_MARGIN_MS).toISOString();
+    assert.equal(sale.offered.eligibility.expiresAt, promised, 'quoted by DAY, the rule it is moving to');
+    assert.equal(sale.marker['quotedResetAt'], dayReset.toISOString());
+    assert.equal(sale.entitlement.expiresAt?.toISOString(), promised, 'delivered as quoted');
+    assert.equal(sale.entitlement.expiryEpoch?.plannedEndsAt.toISOString(), dayReset.toISOString());
+    assert.equal(await activeStrategy(owner.subscriptionId), 'DAY', 'the capture followed first, in its transaction');
+    assert.equal((await strategyPushes(owner.subscriptionId)).length, 0, 'no push of the step: the capture pushes the row');
+    assert.equal(sale.captured.syncJobs.length, 1, 'its own push, for the caller to enqueue');
+
+    // The follow reaching it later finds nothing left to do.
+    const later = await followResetRules({ prisma, terms }, [owner.subscriptionId], {
+      correlationId: `plan-edit:${planId}`,
+      push: 'if-followed',
+    });
+    assert.equal(later.followed, 0);
+    const after = await prisma.addOnEntitlement.findUniqueOrThrow({ where: { id: sale.entitlement.id } });
+    assert.equal(after.expiresAt?.toISOString(), promised);
+    assert.equal(after.expiryEpochId, sale.entitlement.expiryEpochId);
+  });
+
+  it('…and DAY → MONTH: quoted to the 1st, not tonight, and delivered to the 1st, bound to a reset Remnawave runs (R4-02)', async () => {
+    const planId = await plan(TrafficLimitStrategy.DAY);
+    const owner = await liveSubscription(planId, 'DAY');
+    await commitStrategyEdit(planId, TrafficLimitStrategy.MONTH);
+
+    const sale = await offerCheckOutCapture(owner);
+
+    const monthReset = nextReset('MONTH');
+    const promised = new Date(monthReset.getTime() + RESET_EXPIRY_MARGIN_MS).toISOString();
+    assert.equal(sale.offered.eligibility.expiresAt, promised);
+    assert.equal(sale.entitlement.expiresAt?.toISOString(), promised);
+    assert.equal(sale.entitlement.expiryEpoch?.plannedEndsAt.toISOString(), monthReset.toISOString());
+    assert.equal(await activeStrategy(owner.subscriptionId), 'MONTH');
   });
 
   it('a capture after the rule changed binds the quote to the CURRENT rule: DAY quote, plan now MONTH → ends by its date, no card (R3a-02)', async () => {

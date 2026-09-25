@@ -260,6 +260,8 @@ jobs:
           test/stale-panel-identity-census-postgres.spec.ts
           test/add-on-reset-quote-postgres.spec.ts
           test/add-on-reset-rule-change-postgres.spec.ts
+          test/plan-squad-propagation-postgres.spec.ts
+          test/paid-traffic-reset-postgres.spec.ts
           test/add-on-rolling-anchor-postgres.spec.ts
           test/remnawave-reset-facts-postgres.spec.ts
           test/reset-boundary-confirmation-postgres.spec.ts

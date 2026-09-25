@@ -1,4 +1,5 @@
 import { Injectable, Logger, NotFoundException, ConflictException, Optional } from '@nestjs/common';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import {
   AddOnLifetime,
   AddOnType,
@@ -21,9 +22,14 @@ import {
   TransactionStatus,
 } from '@prisma/client';
 
-import { TrafficResetService } from '../../add-ons/services/traffic-reset.service';
+import {
+  type TrafficResetFailure,
+  type TrafficResetOutcome,
+  TrafficResetService,
+} from '../../add-ons/services/traffic-reset.service';
 import { pickBestDiscount } from '../../../common/utils/pending-discount.util';
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { shouldRunSchedules } from '../../../common/runtime/process-role.util';
 import { SystemEventsService, EVENT_TYPES } from '../../../common/services/system-events.service';
 import { readJsonObject } from '../../../common/utils/read-json-object.util';
 import { planNameMetadata, planNamesMetadata } from '../../../common/utils/plan-snapshot.util';
@@ -35,8 +41,10 @@ import {
   planResetEpoch,
   ResetStrategy,
   saleResetAnchor,
+  saleResetRule,
 } from '../../add-on-entitlements/domain/reset-cycle-policy';
 import { AddOnEntitlementService } from '../../add-on-entitlements/services/add-on-entitlement.service';
+import { followSubscriptionResetRuleInTransaction } from '../../add-on-entitlements/services/reset-rule-follow';
 import {
   isBaselineExtendable,
   resolveConfiguredEntitlementBaseline,
@@ -60,7 +68,10 @@ import {
   readLiveTermLimitBonusesInTransaction,
 } from '../../add-on-entitlements/services/term-limit-bonus.util';
 import { carryImportDomainKeys } from '../../imports/utils/import-domain-snapshot.util';
-import { ADD_ON_NOT_APPLIED_NOTICE_TYPE } from '../../notifications/catalog/default-templates.catalog';
+import {
+  ADD_ON_NOT_APPLIED_NOTICE_TYPE,
+  ADD_ON_NOT_APPLIED_OTHER_NOTICE_TYPE,
+} from '../../notifications/catalog/default-templates.catalog';
 import { UserNotificationsService } from '../../notifications/services/user-notifications.service';
 import { displayPlanName } from '../../plans/utils/plan-deletion.util';
 import { readTrialSettings } from '../../plans/utils/trial-settings.util';
@@ -119,6 +130,13 @@ import {
 } from '../utils/trial-conversion.util';
 import { autopayEndedByRefund, readProviderChargeMarker } from '../utils/refund-autopay.util';
 import { writeTransactionGatewayData } from '../utils/transaction-gateway-data.util';
+import {
+  ADD_ON_LEDGER_SOURCE,
+  type AddOnAddedNothingReason,
+  addOnNotAppliedStamp,
+  PAID_TRAFFIC_RESET_CAUSE,
+} from '../utils/add-on-not-applied.util';
+import { PROFILE_SYNC_MAX_ATTEMPTS } from '../../profile-sync/profile-sync.constants';
 import {
   describeLatePlanMigrationRenewal,
   describeLatePlanMigrationRenewals,
@@ -1639,7 +1657,7 @@ export class PaymentSubscriptionMutationService {
     // whole capture path, and widening it to carry an outcome that has no
     // subscription-limit change would make every caller handle a case that
     // does not concern them.
-    let resetTarget: { readonly subscriptionId: string; readonly addOnId: string } | null = null;
+    let resetTarget: PaidResetTarget | null = null;
     // Also set inside, told after the commit: a reset-scoped add-on the
     // capture could not deliver as quoted (see `AddOnQuoteNote`).
     let quoteNote: AddOnQuoteNote | null = null;
@@ -1672,7 +1690,30 @@ export class PaymentSubscriptionMutationService {
       // caller — a panel round trip inside a fulfilment transaction would hold
       // a write lock open across the network.
       if (marker.addOnType === AddOnType.RESET_TRAFFIC) {
-        resetTarget = { subscriptionId: subscription.id, addOnId: marker.addOnId };
+        // THE RESET IS OWED FROM HERE ON. Its TRAFFIC_RESET job is written with
+        // the payment, HELD — born superseded, so neither the profile-sync
+        // sweep nor its worker takes it while this run performs the reset
+        // right after the commit (`performPaidTrafficReset`). A run that dies
+        // before it answers leaves the job for `settlePaidTrafficResets`: a
+        // paid reset is never a log line, nor nothing at all.
+        const resetJob = await tx.profileSyncJob.create({
+          data: {
+            subscriptionId: subscription.id,
+            action: SyncAction.TRAFFIC_RESET,
+            status: SyncJobStatus.PENDING,
+            cause: PAID_TRAFFIC_RESET_CAUSE,
+            supersededAt: new Date(),
+            payload: {
+              source: PAID_TRAFFIC_RESET_CAUSE,
+              paymentId: transaction.paymentId,
+              transactionId: transaction.id,
+              addOnId: marker.addOnId,
+              held: true,
+            } as Prisma.InputJsonObject,
+          },
+          select: { id: true },
+        });
+        resetTarget = { subscriptionId: subscription.id, addOnId: marker.addOnId, jobId: resetJob.id };
         // No limit changed, so nothing to push — but a sync job is still queued
         // so the profile is re-read afterwards and the panel's own counter and
         // ours cannot silently disagree about what just happened.
@@ -1738,7 +1779,13 @@ export class PaymentSubscriptionMutationService {
       }
       if (resetQuoted) {
         quoteNote = { kind: 'NOT_APPLIED', reason: 'SUBSCRIPTION_NOT_ACTIVE' };
-        return this.recordAddOnLedgerNoOp(tx, transaction, subscription, 'RESET_QUOTE_NOT_APPLIED');
+        return this.recordAddOnLedgerNoOp(
+          tx,
+          transaction,
+          subscription,
+          'RESET_QUOTE_NOT_APPLIED',
+          'SUBSCRIPTION_NOT_ACTIVE',
+        );
       }
 
       // ── Legacy increment path ────────────────────────────────────────────
@@ -1764,12 +1811,19 @@ export class PaymentSubscriptionMutationService {
       // place; this guards the rows that already exist and any marker written
       // before that bound landed.
       let updatedSubscription: Subscription;
+      // What was added: nothing, for one of the reasons below — stamped on the
+      // payment so its refund takes nothing away (`add-on-not-applied.util.ts`).
+      let addedNothing: AddOnAddedNothingReason | null = null;
       if (!isCoherentAddOnValue(marker.addOnValue)) {
         this.logger.warn(
           `Add-on ${marker.addOnId} carries an incoherent value ${marker.addOnValue} for subscription ` +
             `${subscription.id} (payment ${transaction.paymentId}); the limit column is left untouched`,
         );
         updatedSubscription = subscription;
+        // A catalogue value that adds nothing: not applied, as on the ledger
+        // path — the operator's card, the customer's notice, no sale announced.
+        addedNothing = 'INCOHERENT_VALUE';
+        quoteNote = { kind: 'NOT_APPLIED', reason: 'INCOHERENT_VALUE' };
       } else if (marker.addOnType === AddOnType.EXTRA_TRAFFIC) {
         // A whole positive increment onto a non-negative column can never
         // produce `0`. The extra `< 1` test covers the one way it still could:
@@ -1781,6 +1835,7 @@ export class PaymentSubscriptionMutationService {
           // Unlimited — nothing to raise. Still record fulfillment so the
           // transaction is not re-processed.
           updatedSubscription = subscription;
+          addedNothing = 'UNLIMITED_BASELINE';
         } else {
           updatedSubscription = await tx.subscription.update({
             where: { id: subscription.id },
@@ -1796,6 +1851,7 @@ export class PaymentSubscriptionMutationService {
           // and must NOT turn an unlimited profile finite (the legacy `0 + N`
           // footgun). Record fulfillment without changing the limit.
           updatedSubscription = subscription;
+          addedNothing = 'UNLIMITED_BASELINE';
         } else {
           updatedSubscription = await tx.subscription.update({
             where: { id: subscription.id },
@@ -1823,6 +1879,9 @@ export class PaymentSubscriptionMutationService {
         where: { id: transaction.id },
         data: { subscriptionId: updatedSubscription.id, fulfilledAt: new Date() },
       });
+      if (addedNothing !== null) {
+        await writeTransactionGatewayData(tx, transaction.id, { merge: addOnNotAppliedStamp(addedNothing, new Date()) });
+      }
 
       return { subscription: updatedSubscription, syncJob };
     });
@@ -1832,29 +1891,47 @@ export class PaymentSubscriptionMutationService {
     // Deliberately outside it: a panel round trip inside a fulfilment
     // transaction holds a write lock open across the network, and this is the
     // most contended transaction in the system. The purchase is already
-    // recorded, so a panel that refuses leaves a paid-for reset the operator
-    // can re-drive — not a rollback of somebody's money.
+    // recorded, so a panel that refuses leaves a paid-for reset that is
+    // retried or told — not a rollback of somebody's money. Never thrown:
+    // throwing here would roll nothing back and would make the webhook retry a
+    // capture that already succeeded.
+    //
+    // Announced when it is KNOWN: performed now — the sale, below; not
+    // performable — the card and the customer's notice, below; Remnawave out
+    // of reach — neither yet: the profile-sync sweep retries its job, and
+    // `settlePaidTrafficResets` announces how that ends.
+    let saleDeferred = false;
     if (resetTarget !== null) {
-      const target: { readonly subscriptionId: string; readonly addOnId: string } = resetTarget;
-      const termId = await this.trafficResetService.currentTermId(target.subscriptionId);
-      const performed = await this.trafficResetService.perform({
-        subscriptionId: target.subscriptionId,
-        termId,
-        addOnId: target.addOnId,
-        transactionId: transaction.id,
-      });
-      if (!performed.ok) {
-        // LOGGED, NOT THROWN. The money is captured and the purchase recorded;
-        // throwing here would roll nothing back and would make the webhook
-        // retry a capture that already succeeded. An operator can re-drive the
-        // reset; a customer cannot un-pay.
-        this.logger.error(
-          `Paid traffic reset for subscription ${target.subscriptionId} was not applied: ` +
-            `${performed.reason ?? 'unknown reason'}`,
-        );
+      const attempt = await this.performPaidTrafficReset(transaction, resetTarget);
+      if (attempt.kind === 'NOT_APPLIED') {
+        quoteNote = { kind: 'NOT_APPLIED', reason: 'RESET_NOT_PERFORMED', detail: attempt.detail };
+      } else if (attempt.kind !== 'APPLIED') {
+        saleDeferred = true;
       }
     }
 
+    // Captured by the same run that recorded it, after the commit: once per
+    // payment, since a replay finds it fulfilled and never gets this far. A
+    // reset still being retried is announced by `settlePaidTrafficResets`.
+    if (!saleDeferred) {
+      await this.announceAddOnCapture(transaction, marker, result.subscription, quoteNote as AddOnQuoteNote | null);
+    }
+
+    return result;
+  }
+
+  /**
+   * What an add-on payment's capture tells: the sale, a sale with a note for
+   * the operator, or — not applied — the operator's card and the customer's
+   * notice. Once per payment: by the run that captured it, or by the settle of
+   * a paid reset whose outcome came later (`settlePaidTrafficResets`).
+   */
+  private async announceAddOnCapture(
+    transaction: Transaction,
+    marker: AddOnMarker,
+    subscription: { readonly id: string; readonly planSnapshot: unknown },
+    settledNote: AddOnQuoteNote | null,
+  ): Promise<void> {
     // `userId` is written at each emit call below, not here: pop-ups and
     // automations resolve the customer from it, and
     // `test/popup-capable-events.spec.ts` reads it at the call.
@@ -1866,18 +1943,12 @@ export class PaymentSubscriptionMutationService {
       amount: transaction.amount.toString(),
       currency: transaction.currency,
       gatewayType: transaction.gatewayType,
-      subscriptionId: result.subscription.id,
+      subscriptionId: subscription.id,
       // The plan the add-on was bought ONTO. An add-on is «+50 ГБ» to nobody
       // until the card says to what.
-      ...planNamesMetadata([result.subscription.planSnapshot]),
+      ...planNamesMetadata([subscription.planSnapshot]),
     };
-    // Captured by the same run that recorded it, after the commit: once per
-    // payment, since a replay finds it fulfilled and never gets this far. ONE
-    // `payment.completed` either way — INFO, or WARNING with the operator's
-    // note when the quote could not be delivered as sold. Automations and
-    // pop-ups match on the type and the customer, not on the severity, so
-    // both fire them exactly once.
-    const settledNote = quoteNote as AddOnQuoteNote | null;
+    const charged = Number(transaction.amount.toString()) > 0;
     if (settledNote === null) {
       this.events.info(EVENT_TYPES.PAYMENT_COMPLETED, 'PAYMENT', 'Payment completed: ADD_ON', {
         userId: transaction.userId,
@@ -1887,53 +1958,72 @@ export class PaymentSubscriptionMutationService {
       const card = describeAddOnQuoteNote(settledNote, {
         name: marker.name ?? marker.addOnId,
         gatewayType: transaction.gatewayType,
-        charged: Number(transaction.amount.toString()) > 0,
+        charged,
+        resetQuoted: withLedgerMarkerDefaults(marker).lifetime === AddOnLifetime.UNTIL_NEXT_RESET,
       });
       this.logger.warn(
-        `Add-on payment ${transaction.paymentId} for subscription ${result.subscription.id}: ${card.message} — ${card.note}`,
+        `Add-on payment ${transaction.paymentId} for subscription ${subscription.id}: ${card.message} — ${card.note}`,
       );
-      this.events.warn(EVENT_TYPES.PAYMENT_COMPLETED, 'PAYMENT', card.message, {
-        userId: transaction.userId,
-        ...completedMetadata,
-        note: card.note,
-        needsManualReview: card.needsManualReview,
-      });
-      // …and the customer, who paid and sees a completed payment, is told too.
-      if (
-        settledNote.kind === 'NOT_APPLIED' &&
-        settledNote.reason === 'SUBSCRIPTION_NOT_ACTIVE' &&
-        Number(transaction.amount.toString()) > 0
-      ) {
-        await this.tellCustomerAddOnNotApplied(transaction, marker.name ?? marker.addOnId, result.subscription.id);
+      if (settledNote.kind === 'NOT_APPLIED') {
+        // NOT A SALE (FX5 item 4). The money arrived and nothing was applied:
+        // `payment.withheld`, operator-only — the card for whoever follows
+        // payments, and nothing for the machines that read `payment.completed`
+        // as an order fulfilled: no automation rule, no pop-up, no outbound
+        // webhook, no «Платёж получен» letter, no quest, no toast in the payer's
+        // open cabinet. The trial's second conversion and the renewal of a
+        // subscription with no end date settle the same way. The money records
+        // stay (the payment, the «Мой налог» receipt, its accruals), and a
+        // refund reverses them — and, for such a payment, takes back no limit
+        // (`add-on-not-applied.util.ts`).
+        this.events.warn(EVENT_TYPES.PAYMENT_WITHHELD, 'PAYMENT', card.message, {
+          userId: transaction.userId,
+          ...completedMetadata,
+          note: card.note,
+          needsManualReview: card.needsManualReview,
+          withheldReason: ADD_ON_NOT_APPLIED_WITHHELD_REASON,
+          addOnNotAppliedReason: settledNote.reason,
+        });
+        // …and the customer, who paid and sees a completed payment, is told.
+        if (charged) {
+          await this.tellCustomerAddOnNotApplied(transaction, marker.name ?? marker.addOnId, subscription.id, settledNote.reason);
+        }
+      } else {
+        // Delivered — only without the reset to end at: a sale, with a note.
+        this.events.warn(EVENT_TYPES.PAYMENT_COMPLETED, 'PAYMENT', card.message, {
+          userId: transaction.userId,
+          ...completedMetadata,
+          note: card.note,
+          needsManualReview: card.needsManualReview,
+        });
       }
     }
-
-    return result;
   }
 
   /**
-   * ONE notice to the customer whose paid add-on could not be applied because
-   * the subscription was no longer active when the money came in (review
-   * R3a-07) — the catalogue's `addon_not_applied`, so the operator sees and
-   * edits its words in «Карта бота». Only for that reason: its words say so,
-   * and the rarer ones (a catalogue value that adds nothing, a payment that
-   * came after the add-on's own end) are the operator's card alone. Nothing is
-   * refunded by itself; the operator decides, from the card. Best-effort:
-   * the payment is recorded, and a notice that fails is logged, never thrown.
-   * Sent once per payment, as the card is: a replay finds it fulfilled and
-   * never gets here.
+   * ONE notice to the customer whose paid add-on could not be applied — from
+   * the templates catalogue, so the operator sees and edits its words in «Карта
+   * бота». The subscription no longer active (review R3a-07): `addon_not_applied`,
+   * the owner's words «…— подписка сейчас не активна». Any other reason (FX5
+   * item 5) — paid after the quoted end, no term, no end, a catalogue value that
+   * adds nothing — `addon_not_applied_other`, the same sentence without that
+   * clause. Nothing is refunded by itself; the operator decides, from the card.
+   * Best-effort: the payment is recorded, and a notice that fails is logged,
+   * never thrown. Sent once per payment, as the card is: a replay finds it
+   * fulfilled and never gets here.
    */
   private async tellCustomerAddOnNotApplied(
     transaction: Transaction,
     addOnName: string,
     subscriptionId: string,
+    reason: AddOnNotAppliedReason,
   ): Promise<void> {
     if (this.userNotifications === undefined) return;
     try {
       await this.userNotifications.create({
         userId: transaction.userId,
-        type: ADD_ON_NOT_APPLIED_NOTICE_TYPE,
-        payload: { addon: addOnName, subscriptionId, paymentId: transaction.paymentId },
+        type:
+          reason === 'SUBSCRIPTION_NOT_ACTIVE' ? ADD_ON_NOT_APPLIED_NOTICE_TYPE : ADD_ON_NOT_APPLIED_OTHER_NOTICE_TYPE,
+        payload: { addon: addOnName, subscriptionId, paymentId: transaction.paymentId, reason },
       });
     } catch (error: unknown) {
       this.logger.warn(
@@ -1942,6 +2032,360 @@ export class PaymentSubscriptionMutationService {
         }`,
       );
     }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  //  A PAID «ОБНУЛИТЬ ТРАФИК» — never a log line (`PAID_TRAFFIC_RESET_CAUSE`)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * One attempt at a paid reset, settled on its HELD job:
+   *  - performed: the job is COMPLETED and settled, and the caller announces
+   *    the sale;
+   *  - Remnawave out of reach: the job is RELEASED to the profile-sync
+   *    machinery — its sweep re-drives it, its worker performs it — and
+   *    {@link settlePaidTrafficResets} announces how that ends;
+   *  - anything that cannot work (no profile, Remnawave not configured, a
+   *    refusal, a missing profile): settled NOT APPLIED with the payment's
+   *    `addOnNotApplied` stamp, and the caller sends the operator's card and
+   *    the customer's notice.
+   * `SETTLED` when somebody settled the job first: nothing to announce. Never
+   * throws: a settle that fails leaves the job for the next sweep.
+   */
+  private async performPaidTrafficReset(transaction: Transaction, target: PaidResetTarget): Promise<PaidResetAttempt> {
+    let performed: TrafficResetOutcome;
+    try {
+      const termId = await this.trafficResetService.currentTermId(target.subscriptionId);
+      performed = await this.trafficResetService.perform({
+        subscriptionId: target.subscriptionId,
+        termId,
+        addOnId: target.addOnId,
+        transactionId: transaction.id,
+      });
+    } catch (error: unknown) {
+      // Whether Remnawave reset it is not known: the worker tries again, and a
+      // second reset only gives the customer back what they used in between.
+      performed = {
+        ok: false,
+        reason: error instanceof Error ? error.message : String(error),
+        failure: 'PANEL_UNREACHABLE',
+        retryable: true,
+        detail: null,
+      };
+    }
+    try {
+      if (performed.ok) {
+        return (await this.claimHeldPaidReset(target.jobId, 'APPLIED', null)) ? { kind: 'APPLIED' } : { kind: 'SETTLED' };
+      }
+      if (performed.retryable) {
+        await this.releaseHeldPaidReset(target.jobId, performed.reason);
+        this.logger.warn(
+          `Paid traffic reset of payment ${transaction.paymentId} not performed yet (${performed.reason}): ` +
+            'the profile-sync sweep retries it',
+        );
+        return { kind: 'RETRYING' };
+      }
+      const why = PAID_RESET_FAILURE_WHY[performed.failure];
+      const detail = performed.detail === null ? why : `${why} (${clipPanelDetail(performed.detail)})`;
+      const claimed = await this.claimHeldPaidReset(target.jobId, 'NOT_APPLIED', {
+        transactionId: transaction.id,
+        lastError: performed.reason,
+      });
+      return claimed ? { kind: 'NOT_APPLIED', detail } : { kind: 'SETTLED' };
+    } catch (error: unknown) {
+      this.logger.error(
+        `Paid traffic reset of payment ${transaction.paymentId} could not be settled: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return { kind: 'RETRYING' };
+    }
+  }
+
+  /**
+   * Settles a HELD job this run attempted, once: performed (COMPLETED), or not
+   * applied — with the payment's stamp, in the same transaction, so a refund
+   * of it takes nothing back (`AddOnRefundService`). `false` when it was not
+   * held any more or was settled already: somebody else answers for it.
+   */
+  private async claimHeldPaidReset(
+    jobId: string,
+    outcome: 'APPLIED' | 'NOT_APPLIED',
+    notApplied: { readonly transactionId: string; readonly lastError: string } | null,
+  ): Promise<boolean> {
+    const now = new Date();
+    return this.prismaService.$transaction(async (tx) => {
+      const claimed = await tx.$queryRaw<Array<{ readonly id: string }>>(Prisma.sql`
+        UPDATE "profile_sync_jobs"
+           SET "status" = ${outcome === 'APPLIED' ? SyncJobStatus.COMPLETED : SyncJobStatus.FAILED}::"SyncJobStatus",
+               "completed_at" = ${outcome === 'APPLIED' ? now : null}::timestamptz,
+               "last_error" = ${notApplied?.lastError ?? null}::text,
+               "payload" = ${settledPayloadSql(Prisma.sql`"payload"`, outcome, now)},
+               "updated_at" = ${now}
+         WHERE "id" = ${jobId}
+           AND "cause" = ${PAID_TRAFFIC_RESET_CAUSE}
+           AND "payload"->>'held' = 'true'
+           AND NOT ("payload" ? 'settledAt')
+        RETURNING "id"
+      `);
+      if (claimed.length !== 1) return false;
+      if (notApplied !== null) {
+        await writeTransactionGatewayData(tx, notApplied.transactionId, {
+          merge: addOnNotAppliedStamp('RESET_NOT_PERFORMED', now),
+        });
+      }
+      return true;
+    });
+  }
+
+  /** Hands a HELD job to the profile-sync machinery: its sweep re-drives it from now on. */
+  private async releaseHeldPaidReset(jobId: string, reason: string): Promise<void> {
+    const now = new Date();
+    await this.prismaService.$executeRaw(Prisma.sql`
+      UPDATE "profile_sync_jobs"
+         SET "superseded_at" = NULL,
+             "last_error" = ${reason}::text,
+             "payload" = ((${jsonObjectSql(Prisma.sql`"payload"`)} - 'held')
+                         || jsonb_build_object('releasedAt', ${now.toISOString()}::text)),
+             "updated_at" = ${now}
+       WHERE "id" = ${jobId}
+         AND "cause" = ${PAID_TRAFFIC_RESET_CAUSE}
+         AND "payload"->>'held' = 'true'
+         AND NOT ("payload" ? 'settledAt')
+    `);
+  }
+
+  /** Every five minutes: {@link settlePaidTrafficResets}. */
+  @Cron(CronExpression.EVERY_5_MINUTES, { name: 'paid-traffic-reset-settle' })
+  public async settlePaidTrafficResetsOnSchedule(): Promise<void> {
+    if (!shouldRunSchedules()) return;
+    try {
+      const settled = await this.settlePaidTrafficResets();
+      if (settled.attempted + settled.applied + settled.notApplied > 0) {
+        this.logger.log(
+          `Paid traffic resets: ${settled.attempted} attempted again, ${settled.applied} performed, ` +
+            `${settled.notApplied} not applied`,
+        );
+      }
+    } catch (error: unknown) {
+      this.logger.warn(
+        `Paid traffic reset settle failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  /**
+   * THE OUTCOME OF A PAID RESET, TOLD ONCE — each outcome claimed on the job
+   * row (`settledAt`) in the statement that decides it, so two workers or two
+   * ticks cannot announce one reset twice:
+   *
+   *  1. HELD for more than {@link PAID_RESET_HOLD_MS}: the run that captured
+   *     the payment died before it answered. Attempted again here, as that run
+   *     would have (`attemptAt` claims the attempt).
+   *  2. COMPLETED by the profile-sync worker: the sale, announced now, and the
+   *     reset recorded (`subscription_traffic_resets`, as a reset performed at
+   *     once records it).
+   *  3. Failed for good — TERMINAL on the last attempt, or an hour after a
+   *     TERMINAL failure whose retries were lost — or taken off by something
+   *     else (superseded): not applied. The payment is stamped, and the
+   *     operator's card «Платёж получен, но не применён» and the customer's
+   *     notice go out. The profile-sync worker sends no card of its own for
+   *     such a job (`ProfileSyncProcessor.reportFailure`).
+   *
+   * A job Remnawave keeps failing TRANSIENTLY is neither: the sweep keeps
+   * re-driving it, as it does every push, until Remnawave answers.
+   */
+  public async settlePaidTrafficResets(
+    now: Date = new Date(),
+  ): Promise<{ readonly attempted: number; readonly applied: number; readonly notApplied: number }> {
+    const counts = { attempted: 0, applied: 0, notApplied: 0 };
+
+    // 1. Held, and nobody answered for it.
+    const stranded = await this.prismaService.$queryRaw<
+      Array<{ readonly id: string; readonly subscriptionId: string; readonly payload: unknown }>
+    >(Prisma.sql`
+      UPDATE "profile_sync_jobs" AS j
+         SET "payload" = j."payload" || jsonb_build_object('attemptAt', ${now.toISOString()}::text),
+             "updated_at" = ${now}
+       WHERE j."id" IN (
+               SELECT "id" FROM "profile_sync_jobs"
+                WHERE "cause" = ${PAID_TRAFFIC_RESET_CAUSE}
+                  AND "payload"->>'held' = 'true'
+                  AND NOT ("payload" ? 'settledAt')
+                  AND "created_at" < ${new Date(now.getTime() - PAID_RESET_HOLD_MS)}
+                  AND (NOT ("payload" ? 'attemptAt')
+                       OR ("payload"->>'attemptAt')::timestamptz < ${new Date(now.getTime() - PAID_RESET_ATTEMPT_MS)})
+                ORDER BY "created_at" ASC
+                LIMIT ${PAID_RESET_SETTLE_BATCH}
+                FOR UPDATE SKIP LOCKED
+             )
+      RETURNING j."id", j."subscription_id" AS "subscriptionId", j."payload"
+    `);
+    for (const job of stranded) {
+      const payload = readJsonObject(job.payload) ?? {};
+      const transaction = await this.readPaidResetTransaction(payload);
+      const addOnId = typeof payload['addOnId'] === 'string' ? payload['addOnId'] : null;
+      if (transaction === null || addOnId === null) continue;
+      counts.attempted += 1;
+      const attempt = await this.performPaidTrafficReset(transaction, {
+        subscriptionId: job.subscriptionId,
+        addOnId,
+        jobId: job.id,
+      });
+      if (attempt.kind === 'APPLIED') {
+        await this.announcePaidReset(transaction, job.subscriptionId, null);
+      } else if (attempt.kind === 'NOT_APPLIED') {
+        await this.announcePaidReset(transaction, job.subscriptionId, {
+          kind: 'NOT_APPLIED',
+          reason: 'RESET_NOT_PERFORMED',
+          detail: attempt.detail,
+        });
+      }
+    }
+
+    // 2. Performed by the worker.
+    const applied = await this.prismaService.$transaction(async (tx) => {
+      const claimed = await tx.$queryRaw<
+        Array<{
+          readonly id: string;
+          readonly subscriptionId: string;
+          readonly completedAt: Date | null;
+          readonly payload: unknown;
+        }>
+      >(Prisma.sql`
+        UPDATE "profile_sync_jobs" AS j
+           SET "superseded_at" = COALESCE(j."superseded_at", ${now}),
+               "payload" = ${settledPayloadSql(Prisma.sql`j."payload"`, 'APPLIED', now)},
+               "updated_at" = ${now}
+         WHERE j."id" IN (
+                 SELECT "id" FROM "profile_sync_jobs"
+                  WHERE "cause" = ${PAID_TRAFFIC_RESET_CAUSE}
+                    AND "status" = 'COMPLETED'
+                    AND NOT ("payload" ? 'settledAt')
+                  ORDER BY "created_at" ASC
+                  LIMIT ${PAID_RESET_SETTLE_BATCH}
+                  FOR UPDATE SKIP LOCKED
+               )
+           AND NOT (j."payload" ? 'settledAt')
+        RETURNING j."id", j."subscription_id" AS "subscriptionId", j."completed_at" AS "completedAt", j."payload"
+      `);
+      for (const job of claimed) {
+        const payload = readJsonObject(job.payload) ?? {};
+        const term = await tx.subscriptionTerm.findFirst({
+          where: { subscriptionId: job.subscriptionId, status: SubscriptionTermStatus.ACTIVE },
+          orderBy: { createdAt: 'desc' },
+          select: { id: true },
+        });
+        // What a reset performed at once records (`TrafficResetService.perform`).
+        await tx.subscriptionTrafficReset.create({
+          data: {
+            subscriptionId: job.subscriptionId,
+            termId: term?.id ?? null,
+            addOnId: typeof payload['addOnId'] === 'string' ? payload['addOnId'] : null,
+            transactionId: typeof payload['transactionId'] === 'string' ? payload['transactionId'] : null,
+            performedAt: job.completedAt ?? now,
+          },
+        });
+      }
+      return claimed;
+    });
+    for (const job of applied) {
+      const transaction = await this.readPaidResetTransaction(readJsonObject(job.payload) ?? {});
+      if (transaction === null) continue;
+      counts.applied += 1;
+      await this.announcePaidReset(transaction, job.subscriptionId, null);
+    }
+
+    // 3. Failed for good, or taken off by something else.
+    const hourAgo = new Date(now.getTime() - PAID_RESET_LOST_RETRY_MS);
+    const failed = await this.prismaService.$transaction(async (tx) => {
+      const claimed = await tx.$queryRaw<
+        Array<{
+          readonly id: string;
+          readonly subscriptionId: string;
+          readonly failedForGood: boolean;
+          readonly lastError: string | null;
+          readonly payload: unknown;
+        }>
+      >(Prisma.sql`
+        UPDATE "profile_sync_jobs" AS j
+           SET "superseded_at" = COALESCE(j."superseded_at", ${now}),
+               "payload" = ${settledPayloadSql(Prisma.sql`j."payload"`, 'NOT_APPLIED', now)},
+               "updated_at" = ${now}
+         WHERE j."id" IN (
+                 SELECT "id" FROM "profile_sync_jobs"
+                  WHERE "cause" = ${PAID_TRAFFIC_RESET_CAUSE}
+                    AND NOT ("payload" ? 'settledAt')
+                    AND COALESCE("payload"->>'held', 'false') <> 'true'
+                    AND "status" <> 'COMPLETED'
+                    AND (
+                      ("status" = 'FAILED'
+                        AND "recovery_data"->>'classification' = 'TERMINAL'
+                        AND ("attempts" >= ${PROFILE_SYNC_MAX_ATTEMPTS} OR "updated_at" < ${hourAgo}))
+                      OR "superseded_at" IS NOT NULL
+                    )
+                  ORDER BY "created_at" ASC
+                  LIMIT ${PAID_RESET_SETTLE_BATCH}
+                  FOR UPDATE SKIP LOCKED
+               )
+           AND NOT (j."payload" ? 'settledAt')
+        RETURNING j."id", j."subscription_id" AS "subscriptionId",
+                  (j."status" = 'FAILED' AND j."recovery_data"->>'classification' = 'TERMINAL') AS "failedForGood",
+                  j."last_error" AS "lastError", j."payload"
+      `);
+      for (const job of claimed) {
+        const transactionId = readJsonObject(job.payload)?.['transactionId'];
+        if (typeof transactionId !== 'string') continue;
+        await writeTransactionGatewayData(tx, transactionId, {
+          merge: addOnNotAppliedStamp('RESET_NOT_PERFORMED', now),
+        });
+      }
+      return claimed;
+    });
+    for (const job of failed) {
+      const transaction = await this.readPaidResetTransaction(readJsonObject(job.payload) ?? {});
+      if (transaction === null) continue;
+      counts.notApplied += 1;
+      const detail = job.failedForGood
+        ? `Remnawave так и не выполнила сброс${job.lastError === null ? '' : ` (${clipPanelDetail(job.lastError)})`}`
+        : 'задачу сброса сняли до того, как Remnawave её выполнила';
+      await this.announcePaidReset(transaction, job.subscriptionId, {
+        kind: 'NOT_APPLIED',
+        reason: 'RESET_NOT_PERFORMED',
+        detail,
+      });
+    }
+
+    return counts;
+  }
+
+  /** The payment a paid reset's job names, or `null` (logged) when it is gone. */
+  private async readPaidResetTransaction(payload: Record<string, unknown>): Promise<Transaction | null> {
+    const transactionId = payload['transactionId'];
+    if (typeof transactionId !== 'string') return null;
+    const transaction = await this.prismaService.transaction.findUnique({ where: { id: transactionId } });
+    if (transaction === null) {
+      this.logger.warn(`Paid traffic reset settled for payment row ${transactionId}, which is gone: nothing announced`);
+    }
+    return transaction;
+  }
+
+  /** {@link announceAddOnCapture} for a paid reset settled after its capture. */
+  private async announcePaidReset(
+    transaction: Transaction,
+    subscriptionId: string,
+    note: AddOnQuoteNote | null,
+  ): Promise<void> {
+    const marker = readAddOnMarker(transaction);
+    if (marker === null) {
+      this.logger.warn(`Paid traffic reset of payment ${transaction.paymentId}: no add-on marker, nothing announced`);
+      return;
+    }
+    const subscription = await this.prismaService.subscription.findUnique({
+      where: { id: subscriptionId },
+      select: { id: true, planSnapshot: true },
+    });
+    await this.announceAddOnCapture(transaction, marker, subscription ?? { id: subscriptionId, planSnapshot: null }, note);
   }
 
   /**
@@ -1968,7 +2412,7 @@ export class PaymentSubscriptionMutationService {
     if (marker.lifetime === undefined || marker.sourceLineKey === undefined) return null;
     const resetQuoted = marker.lifetime === AddOnLifetime.UNTIL_NEXT_RESET;
     const notApplied = async (reason: AddOnNotAppliedReason, subscription: Subscription) => ({
-      ...(await this.recordAddOnLedgerNoOp(tx, transaction, subscription, 'RESET_QUOTE_NOT_APPLIED')),
+      ...(await this.recordAddOnLedgerNoOp(tx, transaction, subscription, 'RESET_QUOTE_NOT_APPLIED', reason)),
       quoteNote: { kind: 'NOT_APPLIED', reason } as const,
     });
     // An incoherent value cannot be turned into a ledger row at all — the
@@ -1997,18 +2441,48 @@ export class PaymentSubscriptionMutationService {
     const subscription =
       (await tx.subscription.findUnique({ where: { id: unlockedSubscription.id } })) ?? unlockedSubscription;
 
-    const term = await tx.subscriptionTerm.findFirst({
-      where: { subscriptionId: subscription.id, status: SubscriptionTermStatus.ACTIVE },
-      select: {
-        id: true,
-        endsAt: true,
-        baseTrafficLimitBytes: true,
-        baseDeviceLimit: true,
-        trafficResetStrategy: true,
-        resetAnchorAt: true,
-      },
-    });
+    const readActiveTerm = () =>
+      tx.subscriptionTerm.findFirst({
+        where: { subscriptionId: subscription.id, status: SubscriptionTermStatus.ACTIVE },
+        select: {
+          id: true,
+          planId: true,
+          startsAt: true,
+          endsAt: true,
+          baseTrafficLimitBytes: true,
+          baseDeviceLimit: true,
+          trafficResetStrategy: true,
+          resetAnchorAt: true,
+        },
+      });
+    let term = await readActiveTerm();
     if (term === null) return resetQuoted ? notApplied('NO_ACTIVE_TERM', subscription) : null;
+
+    // ── A RULE EDIT WHOSE FOLLOW HAS NOT REACHED THIS SUBSCRIBER YET ─────────
+    //
+    // The offer and the checkout quote «до сброса» by the rule the subscriber
+    // is moving to (`saleResetRule`, review R4-02). So the capture takes the
+    // follow's own step first — here, in this transaction, under the row lock
+    // it already holds: the terms take the snapshot's rule and the live «до
+    // сброса» add-ons are re-dated (P6) — and then binds the quote under that
+    // rule: the customer gets what the checkout showed. No push of the step's
+    // own: this capture's push, queued after the commit, reads the row whole.
+    if (
+      resetQuoted &&
+      saleResetRule({
+        term,
+        planSnapshot: subscription.planSnapshot,
+        profileCreatedAt: subscription.remnawaveProfileCreatedAt ?? null,
+      }).moving
+    ) {
+      await followSubscriptionResetRuleInTransaction(tx, this.subscriptionTermService, subscription.id, {
+        correlationId: `payment:${transaction.paymentId}`,
+        push: 'never',
+        remnawaveTimeZone: flags.remnawaveTimeZone,
+        now: new Date(),
+      });
+      term = (await readActiveTerm()) ?? term;
+    }
 
     const isTraffic = marker.addOnType === AddOnType.EXTRA_TRAFFIC;
 
@@ -2271,11 +2745,17 @@ export class PaymentSubscriptionMutationService {
     return { kind: 'BOUND', expiresAt: end, epochId: epoch === null ? null : epoch.id, windowless };
   }
 
+  /**
+   * Settles an add-on payment that adds NOTHING — not applied (`reason` is
+   * why), or the subscription is unlimited in what it adds — and stamps it so
+   * (`add-on-not-applied.util.ts`): a refund of it must take nothing away.
+   */
   private async recordAddOnLedgerNoOp(
     tx: Prisma.TransactionClient,
     transaction: Transaction,
     subscription: Subscription,
     note: 'UNLIMITED_NOOP' | 'RESET_QUOTE_NOT_APPLIED' = 'UNLIMITED_NOOP',
+    reason: AddOnAddedNothingReason = 'UNLIMITED_BASELINE',
   ): Promise<{ readonly subscription: Subscription; readonly syncJob: ProfileSyncJob }> {
     const syncJob = await tx.profileSyncJob.create({
       data: {
@@ -2283,7 +2763,7 @@ export class PaymentSubscriptionMutationService {
         action: subscription.remnawaveId === null ? SyncAction.CREATE : SyncAction.UPDATE,
         status: SyncJobStatus.PENDING,
         payload: {
-          source: 'ADDON_PURCHASE_LEDGER',
+          source: ADD_ON_LEDGER_SOURCE,
           paymentId: transaction.paymentId,
           note,
         } as Prisma.InputJsonObject,
@@ -2293,6 +2773,7 @@ export class PaymentSubscriptionMutationService {
       where: { id: transaction.id },
       data: { subscriptionId: subscription.id, fulfilledAt: new Date() },
     });
+    await writeTransactionGatewayData(tx, transaction.id, { merge: addOnNotAppliedStamp(reason, new Date()) });
     return { subscription, syncJob };
   }
 
@@ -3893,22 +4374,32 @@ function withLedgerMarkerDefaults(marker: AddOnMarker): AddOnMarker {
   };
 }
 
+/** `withheldReason` of the operator's card for an add-on payment that was not applied (`payment.withheld`). */
+const ADD_ON_NOT_APPLIED_WITHHELD_REASON = 'ADD_ON_NOT_APPLIED';
+
 /**
- * Why a paid reset-scoped add-on could not be delivered at all. It is never
- * turned into the permanent increment instead: the payment is recorded as
- * fulfilled, no limit moves, and the operator gets a card to refund it or
- * grant it by hand.
+ * Why a paid add-on could not be delivered at all. A reset-scoped one is
+ * never turned into the permanent increment instead: the payment is recorded
+ * as fulfilled, no limit moves, and the operator gets a card to refund it or
+ * grant it by hand. `RESET_NOT_PERFORMED` is a paid «Обнулить трафик»
+ * Remnawave did not perform (`performPaidTrafficReset`).
  */
 type AddOnNotAppliedReason =
   | 'SUBSCRIPTION_NOT_ACTIVE'
   | 'NO_ACTIVE_TERM'
   | 'INCOHERENT_VALUE'
   | 'NO_END'
-  | 'ENDED_BEFORE_CAPTURE';
+  | 'ENDED_BEFORE_CAPTURE'
+  | 'RESET_NOT_PERFORMED';
 
-/** Something about a reset-scoped add-on's capture the operator must hear about. */
+/** Something about an add-on's capture the operator must hear about. */
 type AddOnQuoteNote =
-  | { readonly kind: 'NOT_APPLIED'; readonly reason: AddOnNotAppliedReason }
+  | {
+      readonly kind: 'NOT_APPLIED';
+      readonly reason: AddOnNotAppliedReason;
+      /** What exactly went wrong, when the reason alone does not say it: why a reset was not performed. */
+      readonly detail?: string;
+    }
   /** Delivered, but with no reset window to end at: it ends with the subscription. */
   | { readonly kind: 'BOUND_WITHOUT_RESET' };
 
@@ -3918,12 +4409,69 @@ const ADD_ON_NOT_APPLIED_WHY: Readonly<Record<AddOnNotAppliedReason, string>> = 
   INCOHERENT_VALUE: 'у докупки в каталоге неверное значение',
   NO_END: 'у неё нет даты окончания: ни сброса трафика, ни конца подписки',
   ENDED_BEFORE_CAPTURE: 'оплата пришла уже после окончания её срока',
+  RESET_NOT_PERFORMED: 'сбросить трафик не удалось',
 };
+
+/** Why Remnawave did not reset a paid «Обнулить трафик», in the words the operator reads. */
+const PAID_RESET_FAILURE_WHY: Readonly<Record<TrafficResetFailure, string>> = {
+  SUBSCRIPTION_NOT_FOUND: 'подписка не найдена',
+  PANEL_NOT_CONFIGURED: 'интеграция с Remnawave не настроена',
+  NO_PANEL_PROFILE: 'у подписки нет профиля в Remnawave',
+  PROFILE_NOT_FOUND: 'Remnawave не нашла профиль подписки',
+  PANEL_UNREACHABLE: 'Remnawave не ответила',
+  PANEL_REFUSED: 'Remnawave отказала в сбросе',
+};
+
+/** The panel's own words, as the card can carry them. */
+function clipPanelDetail(detail: string): string {
+  const flat = detail.replace(/\s+/g, ' ').trim();
+  return flat.length > 200 ? `${flat.slice(0, 199)}…` : flat;
+}
+
+/** A paid reset owed to a subscription, and the job that keeps it (`PAID_TRAFFIC_RESET_CAUSE`). */
+interface PaidResetTarget {
+  readonly subscriptionId: string;
+  readonly addOnId: string;
+  readonly jobId: string;
+}
+
+/** What one attempt at a paid reset came to (`performPaidTrafficReset`). */
+type PaidResetAttempt =
+  | { readonly kind: 'APPLIED' }
+  | { readonly kind: 'RETRYING' }
+  | { readonly kind: 'SETTLED' }
+  | { readonly kind: 'NOT_APPLIED'; readonly detail: string };
+
+/** How long a paid reset's job may stay HELD before the settle takes it for a run that died. */
+const PAID_RESET_HOLD_MS = 15 * 60 * 1000;
+/** How long one settle's attempt at a held job keeps another from starting. */
+const PAID_RESET_ATTEMPT_MS = 10 * 60 * 1000;
+/** A TERMINAL failure left this long with its retries unspent had them lost: final. */
+const PAID_RESET_LOST_RETRY_MS = 60 * 60 * 1000;
+/** Jobs one pass of the settle takes. */
+const PAID_RESET_SETTLE_BATCH = 50;
+
+/** `column` as a JSON object, whatever it holds. */
+function jsonObjectSql(column: Prisma.Sql): Prisma.Sql {
+  return Prisma.sql`(CASE WHEN jsonb_typeof(${column}) = 'object' THEN ${column} ELSE '{}'::jsonb END)`;
+}
+
+/** A paid reset job's payload, settled: no longer held, and when and how it ended. */
+function settledPayloadSql(column: Prisma.Sql, outcome: 'APPLIED' | 'NOT_APPLIED', now: Date): Prisma.Sql {
+  return Prisma.sql`((${jsonObjectSql(column)} - 'held')
+    || jsonb_build_object('settledAt', ${now.toISOString()}::text, 'settledAs', ${outcome}::text))`;
+}
 
 /** The card for a note, in the words the operator reads (`📝 Заметка`). */
 function describeAddOnQuoteNote(
   note: AddOnQuoteNote,
-  input: { readonly name: string; readonly gatewayType: string; readonly charged: boolean },
+  input: {
+    readonly name: string;
+    readonly gatewayType: string;
+    readonly charged: boolean;
+    /** Sold «до сброса трафика»; a «до конца подписки» one is named without it (a catalogue value that adds nothing). */
+    readonly resetQuoted: boolean;
+  },
 ): { readonly message: string; readonly note: string; readonly needsManualReview: boolean } {
   if (note.kind === 'BOUND_WITHOUT_RESET') {
     return {
@@ -3935,10 +4483,26 @@ function describeAddOnQuoteNote(
       needsManualReview: false,
     };
   }
+  if (note.reason === 'RESET_NOT_PERFORMED') {
+    // Nothing to «выдать вручную» here but the reset itself, and no limit it
+    // could have moved.
+    return {
+      message: 'Докупка оплачена, но не применена',
+      note:
+        `Докупка «${input.name}» оплачена, но ${ADD_ON_NOT_APPLIED_WHY[note.reason]}` +
+        `${note.detail === undefined ? '' : `: ${note.detail}`}. ` +
+        (input.charged
+          ? `Верните деньги у платёжного провайдера (${input.gatewayType}) или сбросьте трафик вручную: ` +
+            'у пользователя на вкладке «Подписки» — «Быстрые действия» → «Сброс трафика» → «Сбросить».'
+          : 'Денег по ней не списано — возвращать нечего.'),
+      needsManualReview: input.charged,
+    };
+  }
   return {
     message: 'Докупка оплачена, но не применена',
     note:
-      `Докупка «${input.name}» оплачена «до сброса трафика», но ${ADD_ON_NOT_APPLIED_WHY[note.reason]}. ` +
+      `Докупка «${input.name}» оплачена${input.resetQuoted ? ' «до сброса трафика»' : ''}, ` +
+      `но ${ADD_ON_NOT_APPLIED_WHY[note.reason]}. ` +
       'Лимиты подписки не менялись. ' +
       (input.charged
         ? `Верните деньги у платёжного провайдера (${input.gatewayType}) или выдайте докупку вручную.`

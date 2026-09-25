@@ -1620,10 +1620,15 @@ describe('an add-on’s refund ends the add-on, and its card says what ended', (
   const REQUEST = { requestId: 'request-1', remoteAddress: '203.0.113.5', userAgent: 'spec' };
 
   /** The world's first payment made an add-on purchase, and an `AddOnRefundService` that answers `outcome`. */
-  function addOnWorld(outcome: { readonly note: string; readonly ended?: boolean; readonly reduceDevicesOf?: string | null }, deviceLine: string | null = null) {
+  function addOnWorld(
+    outcome: { readonly note: string; readonly ended?: boolean; readonly reduceDevicesOf?: string | null },
+    deviceLine: string | null = null,
+    gatewayType?: PaymentGatewayType,
+  ) {
     const asked: Array<{ readonly transactionId: string; readonly kind: string }> = [];
     const reduced: string[] = [];
     const w = world({
+      ...(gatewayType === undefined ? {} : { gatewayType }),
       addOnRefunds: {
         endForRefund: async (transaction: { readonly id: string }, kind: string) => {
           asked.push({ transactionId: transaction.id, kind });
@@ -1690,6 +1695,79 @@ describe('an add-on’s refund ends the add-on, and its card says what ended', (
     const card = cardOf(w);
     assert.equal(card?.metadata.needsManualReview, true);
     assert.equal(card?.metadata.note, 'Докупку «+2 устройства» панель не отключила.');
+  });
+
+  // ── An add-on settled as NOT APPLIED was never announced as a sale ────────
+  //
+  // Its capture told the operator alone (`payment.withheld`), and the customer
+  // «мы разберёмся и свяжемся с вами». So its refund is the operator's alone
+  // too, in full and in part, and so is a payment of it after the refund:
+  // integrations never see the refund of a sale they never saw (FX5a).
+  const NOT_APPLIED = { addOnNotApplied: { reason: 'SUBSCRIPTION_NOT_ACTIVE', at: '2026-09-25T10:00:00.000Z' } };
+  const NOTHING_APPLIED_NOTE = 'Докупка «+2 устройства» не была применена — отключать нечего.';
+  const ofFirst = (events: readonly RaisedEvent[]) => events.filter((event) => event.metadata.paymentId === 'payment-first');
+
+  it('«Отметить возврат» on an add-on that was not applied: told to the operator alone', async () => {
+    const { w } = addOnWorld({ note: NOTHING_APPLIED_NOTE });
+    w.first.gatewayData = { ...NOT_APPLIED };
+
+    await w.refunds.recordProviderRefund({ transactionId: 'tx-first', currentAdmin: OPERATOR, requestMetadata: REQUEST });
+    await w.reconciliation.settleAfterResponse();
+
+    const { operator, shared } = refundEvents(w);
+    assert.deepEqual(ofFirst(shared), [], 'a refund of a sale nobody was told about reached rules and integrations');
+    assert.equal(ofFirst(operator).length, 1);
+    assert.equal(ofFirst(operator)[0]?.metadata.addOnNotApplied, true);
+    assert.equal(ofFirst(operator)[0]?.metadata.conversionWithheld, undefined, 'not a trial conversion');
+    assert.equal(ofFirst(operator)[0]?.metadata.note, NOTHING_APPLIED_NOTE);
+    assert.equal(w.first.status, TransactionStatus.CANCELED, 'reversed as any refund is');
+  });
+
+  it('an add-on that added nothing to an unlimited subscription WAS a sale: its refund is announced like any', async () => {
+    const { w } = addOnWorld({ note: NOTHING_APPLIED_NOTE });
+    w.first.gatewayData = { addOnNotApplied: { reason: 'UNLIMITED_BASELINE', at: '2026-09-25T10:00:00.000Z' } };
+
+    await w.refunds.recordProviderRefund({ transactionId: 'tx-first', currentAdmin: OPERATOR, requestMetadata: REQUEST });
+    await w.reconciliation.settleAfterResponse();
+
+    const { operator, shared } = refundEvents(w);
+    assert.deepEqual(ofFirst(operator), []);
+    assert.deepEqual(ofFirst(shared).map((event) => event.type), ['payment.refunded']);
+    assert.equal(ofFirst(shared)[0]?.metadata.addOnNotApplied, undefined);
+  });
+
+  it('a partial refund of an add-on that was not applied: held for review, and told to the operator alone', async () => {
+    const { w } = addOnWorld({ note: NOTHING_APPLIED_NOTE }, null, PaymentGatewayType.YOOKASSA);
+    Object.assign(w.first, { gatewayType: PaymentGatewayType.YOOKASSA, gatewayId: 'provider-first', gatewayData: { ...NOT_APPLIED } });
+
+    await w.notify('refund-first', {
+      eventStatus: 'REFUNDED',
+      paymentId: 'provider-first',
+      rawPayload: {
+        event: 'refund.succeeded',
+        object: { id: 'refund-first-1', payment_id: 'provider-first', status: 'succeeded', amount: { value: '100.00', currency: 'RUB' } },
+      },
+    });
+
+    const { operator, shared } = refundEvents(w);
+    assert.deepEqual(ofFirst(shared), [], 'a partial refund of a sale nobody was told about reached rules and integrations');
+    assert.equal(ofFirst(operator).length, 1);
+    assert.equal(ofFirst(operator)[0]?.metadata.partial, true);
+    assert.equal(ofFirst(operator)[0]?.metadata.addOnNotApplied, true);
+    assert.equal(w.first.status, TransactionStatus.COMPLETED, 'a partial refund reverses nothing');
+  });
+
+  it('an add-on that was not applied, paid again after its refund: told to the operator alone', async () => {
+    const { w } = addOnWorld({ note: NOTHING_APPLIED_NOTE });
+    w.first.gatewayData = { ...NOT_APPLIED };
+    await w.reconciliation.reverseFulfilledPayment({ ...w.first } as never, 'CHARGEBACKED');
+
+    await w.notify('paid-again', { eventStatus: 'CONFIRMED', rawPayload: { status: 'CONFIRMED' }, paymentId: 'payment-first' });
+
+    const again = w.events.filter((event) => event.metadata.paidAfterRefund === true);
+    assert.deepEqual(again.map((event) => event.type), ['payment.withheld']);
+    assert.equal(again[0]?.metadata.addOnNotApplied, true);
+    assert.equal(again[0]?.metadata.conversionWithheld, undefined);
   });
 });
 

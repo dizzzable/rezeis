@@ -13,6 +13,7 @@ import { createHash } from 'node:crypto';
 
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { SystemEventsService, EVENT_TYPES } from '../../common/services/system-events.service';
+import { PAID_TRAFFIC_RESET_CAUSE } from '../payments/utils/add-on-not-applied.util';
 import type { PanelCommandOutcome } from '../remnawave/services/panel-command.executor';
 import { PANEL_USER_NOT_FOUND_ERROR_CODES } from '../remnawave/services/panel-routes';
 import {
@@ -419,7 +420,12 @@ export class ProfileSyncProcessor extends WorkerHost {
     // row written TERMINAL is dropped by the recovery sweep, so a disagreeing
     // alert decision would make the failure both permanent and silent.
     const isFinalAttempt = attempt >= PROFILE_SYNC_MAX_ATTEMPTS;
-    if (isFinalAttempt && outcome.classification === 'TERMINAL') {
+    // A paid «Обнулить трафик» that failed for good is told by the payment's
+    // own card, «Платёж получен, но не применён», with the customer's notice
+    // (`PaymentSubscriptionMutationService.settlePaidTrafficResets`): this one
+    // would be a second card about the same reset.
+    const toldByPayment = syncJob.action === SyncAction.TRAFFIC_RESET && syncJob.cause === PAID_TRAFFIC_RESET_CAUSE;
+    if (isFinalAttempt && outcome.classification === 'TERMINAL' && !toldByPayment) {
       const copy = syncFailedForGoodCopy(syncJob.action, attempt, errorMessage);
       this.events.error(EVENT_TYPES.SYSTEM_ERROR, 'SYSTEM', `Profile sync failed: ${errorMessage}`, {
         syncJobId: syncJob.id,

@@ -11,6 +11,7 @@ import {
   AdminAddOnUpdateDto,
 } from '../src/modules/add-ons/dto/admin-add-on.dto';
 import { PaymentSubscriptionMutationService } from '../src/modules/payments/services/payment-subscription-mutation.service';
+import { executeGatewayDataWrites } from './helpers/gateway-data-write-double';
 import { pinAddOnStagesOffForThisFile } from './helpers/rollout-flags';
 
 // Written against every stage off: the legacy increment, and a ledger case
@@ -149,6 +150,8 @@ function legacyTopUpEnv(input: {
   const subUpdates: Array<Record<string, unknown>> = [];
   const transactionWrites: Array<Record<string, unknown>> = [];
   const entitlementsCreated: Array<Record<string, unknown>> = [];
+  /** What the capture stamped on the payment (`addOnNotApplied`): a refund of it takes nothing back. */
+  const stamps: Array<Record<string, unknown>> = [];
   const staged: Record<string, unknown> = {
     id: 'sub-1',
     userId: 'user-1',
@@ -196,6 +199,13 @@ function legacyTopUpEnv(input: {
             return {};
           },
         },
+        $executeRaw: executeGatewayDataWrites({
+          currentGatewayData: () => ({}),
+          update: async (args) => {
+            stamps.push(args.data.gatewayData);
+            return {};
+          },
+        }),
       }),
   };
 
@@ -216,7 +226,8 @@ function legacyTopUpEnv(input: {
 
   const service = new PaymentSubscriptionMutationService(
     prismaService as never,
-    { info: () => undefined } as never,
+    // `warn`: a value that adds nothing is not applied, and the operator's card says so.
+    { info: () => undefined, warn: () => undefined } as never,
     entitlements as never,
     projections as never,
     // The ledger aligns the term with the subscription's expiry before reading
@@ -251,7 +262,13 @@ function legacyTopUpEnv(input: {
     },
   };
 
-  return { service, transaction, subUpdates, transactionWrites, entitlementsCreated, committed: staged };
+  /** The reason the capture stamped, or `undefined` for a capture that added something. */
+  const stampedReason = (): unknown => {
+    assert.ok(stamps.length <= 1, `stamped ${stamps.length} times`);
+    return (stamps[0]?.['addOnNotApplied'] as Record<string, unknown> | undefined)?.['reason'];
+  };
+
+  return { service, transaction, subUpdates, transactionWrites, entitlementsCreated, committed: staged, stampedReason };
 }
 
 describe('the legacy add-on increment cannot land a traffic column on zero', () => {
@@ -267,6 +284,7 @@ describe('the legacy add-on increment cannot land a traffic column on zero', () 
 
     assert.equal(env.subUpdates.length, 1, 'a coherent add-on must still be applied');
     assert.equal(env.committed['trafficLimit'], 150);
+    assert.equal(env.stampedReason(), undefined, 'applied: its refund takes it back');
   });
 
   it('refuses a negative traffic value instead of writing 0 to the column', async () => {
@@ -292,6 +310,7 @@ describe('the legacy add-on increment cannot land a traffic column on zero', () 
       env.transactionWrites.some((write) => write['fulfilledAt'] !== undefined),
       'fulfillment is still stamped so the webhook does not re-process the payment forever',
     );
+    assert.equal(env.stampedReason(), 'INCOHERENT_VALUE', 'nothing was added, so a refund must take nothing back');
   });
 
   it('refuses a fractional traffic value rather than letting it reach the column', async () => {
@@ -336,6 +355,7 @@ describe('the legacy add-on increment cannot land a traffic column on zero', () 
 
     assert.equal(env.subUpdates.length, 0);
     assert.equal(env.committed['trafficLimit'], null);
+    assert.equal(env.stampedReason(), 'UNLIMITED_BASELINE', 'a refund after the row turns finite takes nothing back');
   });
 
   it('refuses an incoherent value on the LEDGER path too, before BigInt() can throw', async () => {
@@ -388,6 +408,7 @@ describe('the legacy add-on increment cannot land a traffic column on zero', () 
 
     assert.equal(env.subUpdates.length, 0, '0 + 2 must not turn an unlimited profile finite');
     assert.equal(env.committed['deviceLimit'], 0);
+    assert.equal(env.stampedReason(), 'UNLIMITED_BASELINE');
   });
 });
 

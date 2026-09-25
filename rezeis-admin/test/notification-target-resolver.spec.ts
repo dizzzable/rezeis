@@ -40,11 +40,14 @@ describe('notification-target-resolver', () => {
 
     it('routes «Докупка не применена» to /support, not to the add-on page its prefix would pick', () => {
       assert.equal(resolveTerminalRouteFor('addon_not_applied'), '/support');
+      // …for any other reason too (FX5 item 5).
+      assert.equal(resolveTerminalRouteFor('addon_not_applied_other'), '/support');
       assert.equal(resolveTerminalRouteFor('addon_ended'), '/addons');
     });
 
     it('files «Докупка не применена» with the subscription notices, like the other add-on notices', () => {
       assert.equal(resolveNotificationCategory('addon_not_applied'), 'expires');
+      assert.equal(resolveNotificationCategory('addon_not_applied_other'), 'expires');
     });
 
     it('falls back to /dashboard for unknown types', () => {

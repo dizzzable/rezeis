@@ -5,7 +5,7 @@ import { PlanAvailability, PlanType, PointsCashbackMode } from '@prisma/client';
 
 import { CreatePlanDto } from '../src/modules/plans/dto/create-plan.dto';
 import { PlanSquadPropagationService } from '../src/modules/plans/services/plan-squad-propagation.service';
-import { PlansAdminService } from '../src/modules/plans/services/plans-admin.service';
+import { PLAN_SAVE_TRANSACTION_OPTIONS, PlansAdminService } from '../src/modules/plans/services/plans-admin.service';
 import { PlansAdminValidators } from '../src/modules/plans/services/plans-admin.validators';
 
 describe('PlansAdminService', () => {
@@ -633,6 +633,20 @@ describe('PlansAdminService', () => {
       points: [null],
     });
   });
+
+  // «Сохранить» moves every subscriber of the plan inside its transaction, in
+  // set-based statements whose cost still grows with the plan: 7,000 of them
+  // took four seconds on a loaded database, against Prisma's default five —
+  // the P2028 that rolled the save back (FX5 item 1).
+  it('saves in a transaction a big plan fits in, and that still ends inside the 30 s a request has', async () => {
+    const harness = createWriteHarness(persistedPlanRow());
+
+    await harness.service.updatePlan('plan-1', { description: 'Renamed nothing else' }, MUTATION_CONTEXT);
+
+    assert.deepStrictEqual(harness.transactionOptions(), [PLAN_SAVE_TRANSACTION_OPTIONS]);
+    assert.ok(PLAN_SAVE_TRANSACTION_OPTIONS.timeout >= 20_000, 'no more room than Prisma’s default');
+    assert.ok(PLAN_SAVE_TRANSACTION_OPTIONS.timeout + 2_000 < 30_000, 'the request is cut before the save answers');
+  });
 });
 
 const MUTATION_CONTEXT = {
@@ -719,17 +733,21 @@ function createWriteHarness(currentPlan: Record<string, unknown> | null = null):
   readonly service: PlansAdminService;
   readonly createData: () => unknown;
   readonly updateData: () => unknown;
+  /** The options each transaction was opened with. */
+  readonly transactionOptions: () => readonly unknown[];
 } {
   let createData: unknown;
   let updateData: unknown;
+  const transactionOptions: unknown[] = [];
   const prismaService = {
     plan: {
       findFirst: async () => null,
       findUnique: async () => currentPlan,
     },
     user: { findMany: async () => [] },
-    $transaction: async <T>(callback: (client: any) => Promise<T>): Promise<T> =>
-      callback({
+    $transaction: async <T>(callback: (client: any) => Promise<T>, options?: unknown): Promise<T> => {
+      transactionOptions.push(options);
+      return callback({
         plan: {
           findFirst: async () => ({ orderIndex: 0 }),
           create: async (...args: readonly unknown[]) => {
@@ -745,7 +763,8 @@ function createWriteHarness(currentPlan: Record<string, unknown> | null = null):
         subscription: { update: async () => undefined },
         // The row lock `updatePlan` takes before it writes: a live plan.
         $queryRaw: async () => [{ deletedAt: null }],
-      }),
+      });
+    },
   };
   const service = createService(prismaService, {
     getInternalSquadOptions: async () => [],
@@ -755,6 +774,7 @@ function createWriteHarness(currentPlan: Record<string, unknown> | null = null):
     service,
     createData: () => createData,
     updateData: () => updateData,
+    transactionOptions: () => transactionOptions,
   };
 }
 

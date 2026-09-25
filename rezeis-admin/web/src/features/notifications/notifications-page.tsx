@@ -102,6 +102,9 @@ const USER_NOTIFICATION_KEYS = [
   // active when the payment arrived. What happens to the money is decided by
   // the operator, never automatically.
   'addon_not_applied',
+  // The same notice for any other reason: paid after the add-on end, no term,
+  // no end, a catalogue value that adds nothing.
+  'addon_not_applied_other',
   'referral_attached',
   'referral_reward',
   'referral_qualified',

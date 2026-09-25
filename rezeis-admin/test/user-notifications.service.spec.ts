@@ -3,6 +3,7 @@ import { setImmediate } from 'node:timers';
 import { describe, it } from 'node:test';
 
 import { UserNotificationsService } from '../src/modules/notifications/services/user-notifications.service';
+import { isSubscriberMailableType } from '../src/modules/notifications/utils/notification-toggle.util';
 
 type NotificationCreateArgs = {
   readonly data: {
@@ -778,5 +779,64 @@ describe('the email leg', () => {
     await flushFanout();
 
     assert.equal(state.notifyUserCalls.length, 1);
+  });
+
+  // A paid add-on that could not be applied: an answer to the customer's own
+  // purchase, mailed though it is not a switch they own — the one reach to a
+  // customer with no Telegram and no push (FX5a). The other gates stand.
+  for (const type of ['addon_not_applied', 'addon_not_applied_other']) {
+    it(`mails «${type}» to a customer with no Telegram, under the same gates, though nobody can switch it off`, async () => {
+      const state = createState({});
+      const service = createService(state, {
+        user: { telegramId: null, isBotBlocked: false, name: 'Ann' },
+        template: { isActive: true, title: '⚠️ Докупка не применена', body: 'Оплата докупки получена, но применить её не удалось.' },
+        smtp: SMTP_ON,
+        verifiedEmail: 'ann@example.com',
+      });
+
+      await service.create({ userId: 'user-1', type, payload: { addon: 'Extra 50 GB' } });
+      await flushFanout();
+
+      assert.equal(state.emailCalls.length, 1);
+      assert.equal(state.emailCalls[0].to, 'ann@example.com');
+      assert.equal(state.emailCalls[0].subject, '⚠️ Докупка не применена');
+      assert.equal(state.notifyUserCalls.length, 0, 'fixture: no Telegram to reach');
+      assert.equal(isSubscriberMailableType(type), true);
+    });
+  }
+
+  it('mails a not-applied notice only with the operator’s switch on and to a verified address', async () => {
+    for (const setup of [
+      { smtp: { enabled: true, notifyUsers: false }, verifiedEmail: 'ann@example.com' },
+      { smtp: SMTP_ON, verifiedEmail: null },
+    ]) {
+      const state = createState({});
+      const service = createService(state, {
+        user: { telegramId: null, isBotBlocked: false, name: 'Ann' },
+        template: { isActive: true, title: '⚠️ Докупка не применена', body: 'Оплата докупки получена.' },
+        ...setup,
+      });
+
+      await service.create({ userId: 'user-1', type: 'addon_not_applied_other', payload: {} });
+      await flushFanout();
+
+      assert.deepStrictEqual(state.emailCalls, [], JSON.stringify(setup));
+    }
+  });
+
+  it('still mails nothing the customer can neither switch off nor asked for: the cashback note', async () => {
+    const state = createState({});
+    const service = createService(state, {
+      user: { telegramId: null, isBotBlocked: false, name: 'Ann' },
+      template: TEMPLATE,
+      smtp: SMTP_ON,
+      verifiedEmail: 'ann@example.com',
+    });
+
+    await service.create({ userId: 'user-1', type: 'points_cashback_credited', payload: {} });
+    await flushFanout();
+
+    assert.deepStrictEqual(state.emailCalls, []);
+    assert.equal(isSubscriberMailableType('points_cashback_credited'), false);
   });
 });

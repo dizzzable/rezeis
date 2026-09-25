@@ -98,6 +98,19 @@ export interface AdminPlanUpdateResultInterface extends AdminPlanInterface {
 export const RESET_RULE_FOLLOW_SHUTDOWN_WAIT_MS = 2_000;
 
 /**
+ * The transaction «Тарифы» → «Редактировать тариф» → «Сохранить» runs in. It
+ * moves every subscriber of the plan — the snapshot's keys, the squads and
+ * their pushes — in set-based statements, whose cost still grows with the
+ * plan: 7,000 subscribers take about a second on an idle database and four on
+ * a loaded one, against Prisma's default of 5 s, which is what rolled the
+ * save back (P2028). 25 s leaves a plan many times that size room, and — with
+ * Prisma's default 2 s to get a connection — stays inside the 30 s the panel
+ * gives a request (`request-timeout.middleware.ts`), so the operator is
+ * answered by the save rather than by a 408 over it.
+ */
+export const PLAN_SAVE_TRANSACTION_OPTIONS = { timeout: 25_000 } as const;
+
+/**
  * PlansAdminService
  * ─────────────────
  * Orchestrates plan-write operations exposed to the admin panel. Pure
@@ -357,6 +370,11 @@ export class PlansAdminService implements OnModuleDestroy {
             previousExternalSquad: currentPlan.externalSquad,
             nextInternalSquads: updatedPlan.internalSquads,
             nextExternalSquad: updatedPlan.externalSquad,
+            // A subscriber whose reset rule this save changed gets the rule's
+            // push, which carries the new squads too — after its follow, not
+            // before it (review R4-02). `?? []`: a spec's double of the
+            // snapshot sync answers a bare count.
+            pushedWithResetRule: snapshotSync.strategyChangedSubscriptionIds ?? [],
           },
         );
         // Logged after the fan-out so the audit row records what the edit
@@ -390,6 +408,7 @@ export class PlansAdminService implements OnModuleDestroy {
         });
         return { updated: updatedPlan, propagation: squadPropagation, snapshots: snapshotSync };
       },
+      PLAN_SAVE_TRANSACTION_OPTIONS,
     );
     // Outside the transaction: enqueueing is a Redis write, and no worker may
     // see a job id whose row has not committed.
