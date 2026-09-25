@@ -26,7 +26,6 @@ const BASE: AddOnPurchaseDatingInput = {
   flags: { directPurchase: true, entitlementShadow: false },
   activeTerm: { endsAt: inDays(20) },
   hasAnyTerm: true,
-  scheduledTermQueued: false,
   subscriptionExpiresAt: inDays(20),
   now: NOW,
 };
@@ -67,11 +66,13 @@ describe('whether an add-on bought now is recorded with an end', () => {
     assert.equal(dated({ activeTerm: { endsAt: inDays(5) }, subscriptionExpiresAt: null }), false);
   });
 
-  it('under a paid renewal queued after the current period, ends with the CURRENT period', () => {
-    const queued = { scheduledTermQueued: true, subscriptionExpiresAt: inDays(50) };
-    assert.equal(dated({ ...queued, activeTerm: { endsAt: inDays(20) } }), true);
-    assert.equal(dated({ ...queued, activeTerm: { endsAt: inDays(-1) } }), false, 'a period already over');
-    assert.equal(dated({ ...queued, activeTerm: { endsAt: inDays(20) }, subscriptionExpiresAt: null }), true);
+  it('under a paid renewal queued after the current period, ends with the SUBSCRIPTION, the queued term included', () => {
+    // «До конца подписки» is `Subscription.expiresAt` (review R3a-05): the
+    // current period's end no longer decides anything.
+    const queued = { activeTerm: { endsAt: inDays(20) }, subscriptionExpiresAt: inDays(50) };
+    assert.equal(dated(queued), true);
+    assert.equal(dated({ ...queued, activeTerm: { endsAt: inDays(-1) } }), true, 'the current period is over, the subscription is not');
+    assert.equal(dated({ ...queued, subscriptionExpiresAt: null }), false, 'a lifetime subscription has no end');
   });
 
   it('«until the next reset» is dated once it can be offered at all — in the model, with stage 2 on', () => {

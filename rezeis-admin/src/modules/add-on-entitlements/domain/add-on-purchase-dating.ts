@@ -20,11 +20,10 @@ import { AddOnLifetime, AddOnType } from '@prisma/client';
  *      (`entitlementShadow`) lets the purchase bring it in
  *      (`enterTermModelInTransaction`). One with terms but none ACTIVE is not
  *      entered again, and falls back;
- *   3. «until the end of the subscription» needs a finite end still ahead
- *      AFTER the purchase aligns the tail term with `expiresAt`: the ACTIVE
- *      term's own end under a queued (SCHEDULED) successor, which alignment
- *      never touches, else the subscription's expiry itself. A lifetime
- *      subscription has none, and falls back;
+ *   3. «until the end of the subscription» needs a finite end still ahead:
+ *      the subscription's expiry, a queued (SCHEDULED) renewal's term included
+ *      — the end the fulfilment binds (review R3a-05). A lifetime subscription
+ *      has none, and falls back;
  *   4. «until the next reset» needs a reset window — which the offer already
  *      requires before it lists one (`resolveAddOnLifetimeGrant` with the
  *      intake capabilities, themselves gated on stage 2) — so one the offer
@@ -44,8 +43,6 @@ export interface AddOnPurchaseDatingInput {
   readonly activeTerm: { readonly endsAt: Date | null } | null;
   /** Whether the subscription has any term at all, ACTIVE or not. */
   readonly hasAnyTerm: boolean;
-  /** Whether a paid period is queued after the ACTIVE term (a SCHEDULED term). */
-  readonly scheduledTermQueued: boolean;
   readonly subscriptionExpiresAt: Date | null;
   readonly now: Date;
 }
@@ -56,7 +53,6 @@ export function isAddOnPurchaseDated(input: AddOnPurchaseDatingInput): boolean {
   const inModel = input.activeTerm !== null || (!input.hasAnyTerm && input.flags.entitlementShadow);
   if (!inModel) return false;
   if (input.lifetime === AddOnLifetime.UNTIL_NEXT_RESET) return true;
-  const end =
-    input.activeTerm !== null && input.scheduledTermQueued ? input.activeTerm.endsAt : input.subscriptionExpiresAt;
+  const end = input.subscriptionExpiresAt;
   return end !== null && end.getTime() > input.now.getTime();
 }

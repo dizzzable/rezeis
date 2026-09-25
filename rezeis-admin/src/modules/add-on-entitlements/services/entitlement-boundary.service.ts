@@ -168,21 +168,31 @@ export class EntitlementBoundaryService {
           id: true,
           trafficResetStrategy: true,
           planSnapshot: true,
+          startsAt: true,
+          resetAnchorAt: true,
         },
       });
       if (due === null) {
         return { activated: false, termId: null, desiredRevision: null, syncJobIds: [] };
       }
 
-      // Nullable on purpose: the anchor is CLEARED when the panel instant
-      // cannot be read, and `startsAt` is not a legal stand-in for it — a
-      // window minted from the wrong moment would hand out paid traffic against
-      // the wrong cycle. A null anchor makes `ensureLiveResetEpoch` return no
-      // epoch, which is what keeps reset-scoped sales fail-closed.
+      // The profile's `createdAt` when one was read or stamped; otherwise the
+      // anchor the term was MINTED with, kept (S4-core's leftover): minting
+      // puts the profile's `createdAt` there, or the rolling anchor another term
+      // carried (P2), and writing null over it — nothing stamped, the read
+      // failed — only took a known cycle away and withheld its «до сброса»
+      // sales. `startsAt` is still no stand-in: a stored anchor EQUAL to the
+      // term's start is what v0.9.6.41's renewal minted for every strategy
+      // before rolling got its own anchor, and it is cleared as it always was.
+      // With neither, the anchor stays null and reset-scoped sales stay
+      // fail-closed.
       if (due.trafficResetStrategy === 'MONTH_ROLLING' && rollingAnchored) {
+        const read = panelAnchor?.termId === due.id ? panelAnchor.anchorAt : null;
+        const minted =
+          due.resetAnchorAt !== null && due.resetAnchorAt.getTime() !== due.startsAt.getTime() ? due.resetAnchorAt : null;
         await tx.subscriptionTerm.update({
           where: { id: due.id },
-          data: { resetAnchorAt: panelAnchor?.termId === due.id ? panelAnchor.anchorAt : null },
+          data: { resetAnchorAt: read ?? minted },
         });
       }
 

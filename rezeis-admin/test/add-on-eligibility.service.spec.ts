@@ -493,18 +493,70 @@ describe('AddOnEligibilityService.listForSubscription', () => {
     }
   });
 
-  it('withholds UNTIL_SUBSCRIPTION_END when the term is open-ended (no end date)', async () => {
+  it('withholds UNTIL_SUBSCRIPTION_END when the subscription has no end (a lifetime subscription)', async () => {
     const term: Term = { ...financeTerm, endsAt: null };
-    const { service } = build({ status: 'ACTIVE', term, catalog: [trafficAddOn], stage4Off: true });
+    const { service } = build({ status: 'ACTIVE', term, catalog: [trafficAddOn], stage4Off: true, sub: { expiresAt: null } });
     const result = await service.listForSubscription('sub-1');
     assert.equal(result.addOns.length, 0);
   });
 
-  it('withholds UNTIL_NEXT_RESET while the reset capability is DISABLED (stage 4 switched off)', async () => {
-    const nextReset: CatalogAddOn = { ...trafficAddOn, id: 'a-reset', lifetime: 'UNTIL_NEXT_RESET' };
-    const { service } = build({ status: 'ACTIVE', term: financeTerm, catalog: [nextReset], stage4Off: true });
+  it('«до конца подписки» is the subscription\'s real end: an early renewal queued runs it on (R3a-05)', async () => {
+    // The customer renewed early: the ACTIVE term ends in 20 days, the queued
+    // one — and `Subscription.expiresAt`, and «Главная» — in 50. Sold until the
+    // current period's end, the add-on read «до конца подписки 20.09» beside a
+    // subscription running to 20.10.
+    const currentPeriodEnds = new Date(Date.now() + 20 * DAY_MS);
+    const subscriptionEnds = new Date(Date.now() + 50 * DAY_MS);
+    const { service } = build({
+      status: 'ACTIVE',
+      term: { ...financeTerm, endsAt: currentPeriodEnds },
+      catalog: [trafficAddOn, deviceAddOn],
+      stage4Off: true,
+      sub: { expiresAt: subscriptionEnds },
+    });
     const result = await service.listForSubscription('sub-1');
-    assert.equal(result.addOns.length, 0);
+    for (const offered of result.addOns) {
+      assert.equal(offered.eligibility.expiresAt, subscriptionEnds.toISOString(), offered.id);
+      assert.equal(offered.eligibility.endsBound, 'subscription_end', offered.id);
+    }
+    assert.equal(result.addOns.length, 2);
+
+    // And the cap of a reset add-on is that same end: a reset past the current
+    // period, within the subscription, is not cut to the period's end.
+    const capped = build({
+      status: 'ACTIVE',
+      term: { ...financeTerm, endsAt: new Date(Date.now() + 60 * 60 * 1000) },
+      catalog: [trafficAddOn],
+      enabledMonth: true,
+      sub: { expiresAt: subscriptionEnds },
+    });
+    const reset = (await capped.service.listForSubscription('sub-1')).addOns[0]!;
+    assert.equal(reset.eligibility.endsBound, 'reset');
+    assert.equal(Date.parse(reset.eligibility.expiresAt!) - Date.parse(reset.eligibility.nextResetAt!), 30 * 60 * 1000);
+  });
+
+  it('stage 4 OFF: a traffic row stored «До следующего сброса» is SOLD «до конца подписки», not withheld (R3a-06)', async () => {
+    // 0.9.7.69's editor could store it; the editor no longer shows the value,
+    // and the switch's OFF dialog promises «до конца подписки». Withheld, the
+    // add-on vanished from sale with nothing on the page to say why.
+    const storedReset: CatalogAddOn = { ...trafficAddOn, id: 'a-reset', lifetime: 'UNTIL_NEXT_RESET' };
+    const { service } = build({ status: 'ACTIVE', term: financeTerm, catalog: [storedReset], stage4Off: true });
+    const result = await service.listForSubscription('sub-1');
+    assert.equal(result.addOns.length, 1);
+    const offered = result.addOns[0]!;
+    assert.equal(offered.lifetime, 'UNTIL_SUBSCRIPTION_END');
+    assert.equal(offered.eligibility.expiresAt, LIVE_TERM_ENDS_AT.toISOString());
+    assert.equal(offered.eligibility.endsBound, 'subscription_end');
+    assert.equal(offered.eligibility.nextResetAt, null);
+  });
+
+  it('stage 4 ON: the same stored row is sold «до сброса» (R3a-06, the other switch state)', async () => {
+    const storedReset: CatalogAddOn = { ...trafficAddOn, id: 'a-reset', lifetime: 'UNTIL_NEXT_RESET' };
+    const { service } = build({ status: 'ACTIVE', term: financeTerm, catalog: [storedReset], enabledMonth: true });
+    const offered = (await service.listForSubscription('sub-1')).addOns[0]!;
+    assert.equal(offered.lifetime, 'UNTIL_NEXT_RESET');
+    assert.equal(offered.eligibility.endsBound, 'reset');
+    assert.match(offered.eligibility.nextResetAt ?? '', /-01T00:20:00\.000Z$/);
   });
 
   it('sells traffic «до сброса» by default: nothing set on the page or in .env (production seam, since 25.09.2026)', async () => {
@@ -535,7 +587,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
   // eligibility advertises a one-time-until-reset service that the money path
   // (permanent legacy increment) would deliver forever. Uses the un-subclassed
   // base service so the production `getResetCapabilities()` runs against env.
-  it('withholds UNTIL_NEXT_RESET when reset capability is ENABLED but directPurchase is OFF (offer cannot be fulfilled)', async () => {
+  it('never offers «до сброса» when reset capability is ENABLED but directPurchase is OFF: «до конца подписки», undated', async () => {
     const nextReset: CatalogAddOn = { ...trafficAddOn, id: 'a-reset', lifetime: 'UNTIL_NEXT_RESET' };
     const { service } = build({ status: 'ACTIVE', term: financeTerm, catalog: [nextReset] });
     const prevReset = process.env.ADDON_RESET_EXPIRY_MONTH;
@@ -545,8 +597,13 @@ describe('AddOnEligibilityService.listForSubscription', () => {
     process.env.ADDON_ENTITLEMENT_DIRECT_PURCHASE = 'false';
     try {
       const result = await service.listForSubscription('sub-1');
-      assert.equal(result.addOns.length, 0, 'reset-scoped add-on is withheld when directPurchase is OFF');
-      assert.equal(result.availability, 'EMPTY');
+      // Nothing can bind a reset without the intake, so none is sold (R3a-06:
+      // the stored row no longer withholds it); the purchase is the legacy
+      // increment, and the offer says it carries no date.
+      assert.equal(result.addOns.length, 1);
+      assert.equal(result.addOns[0]!.lifetime, 'UNTIL_SUBSCRIPTION_END');
+      assert.equal(result.addOns[0]!.eligibility.nextResetAt, null);
+      assert.equal(result.addOns[0]!.eligibility.dated, false);
     } finally {
       if (prevReset === undefined) delete process.env.ADDON_RESET_EXPIRY_MONTH;
       else process.env.ADDON_RESET_EXPIRY_MONTH = prevReset;

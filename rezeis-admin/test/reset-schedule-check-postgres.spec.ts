@@ -68,8 +68,12 @@ run('the daily reset-schedule check — PostgreSQL', () => {
   }
 
   it('warns when Remnawave\'s runs land three hours off the configured zone, and clears on the right zone', async () => {
-    const sampled = await daySubscription('sampled');
+    // The run reset both DAY profiles with its one instant; whichever the check
+    // samples, it reads that instant.
+    const runA = await daySubscription('run-a');
+    const runB = await daySubscription('run-b');
     const manual = await daySubscription('manual');
+    await stampRemnawaveProfileFacts(prisma, [runA, runB], { createdAt: null, lastTrafficResetAt: RUN_AT_UTC_MINUS_3 });
     // A manual reset later in the day: any second, says nothing about the schedule.
     await stampRemnawaveProfileFacts(prisma, [manual], {
       createdAt: null,
@@ -83,7 +87,7 @@ run('the daily reset-schedule check — PostgreSQL', () => {
       {
         refreshProfileFacts: async (subscriptionId: string) => {
           reads.push(subscriptionId);
-          if (subscriptionId !== sampled) return null;
+          if (subscriptionId !== runA && subscriptionId !== runB) return null;
           const facts: RemnawaveProfileFacts = { createdAt: null, lastTrafficResetAt: RUN_AT_UTC_MINUS_3 };
           await stampRemnawaveProfileFacts(prisma, [subscriptionId], facts);
           return facts;
@@ -98,7 +102,7 @@ run('the daily reset-schedule check — PostgreSQL', () => {
 
     const verdict = await check.runCheck(NOW);
 
-    assert.ok(reads.includes(sampled), 'a live DAY profile was read');
+    assert.ok(reads.length > 0, 'live DAY profiles were read');
     assert.equal(verdict.status, 'mismatch');
     assert.equal(verdict.timeZone, 'UTC');
     assert.deepEqual(verdict.mismatches, [
@@ -148,5 +152,66 @@ run('the daily reset-schedule check — PostgreSQL', () => {
     // Outside the window: a day and a half back, and nothing after `now`.
     const later = await readResetObservations(prisma, new Date('2031-05-12T10:00:00.000Z'));
     assert.equal(later.observations.filter((row) => row.observedAt.getUTCFullYear() === 2031).length, 0);
+  });
+
+  it('leaves the panel\'s own resets out — a renewal, the operator\'s «Сбросить», «Обнулить трафик» (R3a-03)', async () => {
+    const own = { strategy: 'DAY' as const };
+    const renewed = await daySubscription('own-renewal');
+    const operator = await daySubscription('own-operator');
+    const paidReset = await daySubscription('own-paid-reset');
+    const remnawaveUi = await daySubscription('remnawave-ui');
+    // Each in the shape of a run, a second or so after a whole minute.
+    const at = {
+      renewed: new Date('2031-05-10T02:20:01.734Z'),
+      operator: new Date('2031-05-10T05:35:00.900Z'),
+      paidReset: new Date('2031-05-10T06:50:01.100Z'),
+      remnawaveUi: new Date('2031-05-10T07:20:00.450Z'),
+    };
+    for (const [subscriptionId, resetAt] of [
+      [renewed, at.renewed],
+      [operator, at.operator],
+      [paidReset, at.paidReset],
+      [remnawaveUi, at.remnawaveUi],
+    ] as const) {
+      await stampRemnawaveProfileFacts(prisma, [subscriptionId], { createdAt: null, lastTrafficResetAt: resetAt });
+    }
+    // The records the panel leaves of its own resets.
+    await prisma.profileSyncJob.create({
+      data: {
+        subscriptionId: renewed,
+        action: 'UPDATE',
+        status: 'COMPLETED',
+        payload: { source: 'PAYMENT', resetTraffic: true },
+        createdAt: new Date(at.renewed.getTime() - 1_700),
+        startedAt: new Date(at.renewed.getTime() - 1_200),
+        completedAt: new Date(at.renewed.getTime() + 600),
+      },
+    });
+    await prisma.profileSyncJob.create({
+      data: {
+        subscriptionId: operator,
+        action: 'TRAFFIC_RESET',
+        status: 'COMPLETED',
+        cause: 'OPERATOR_TRAFFIC_RESET',
+        payload: { source: 'OPERATOR_TRAFFIC_RESET' },
+        createdAt: new Date(at.operator.getTime() + 300),
+        startedAt: new Date(at.operator.getTime() + 300),
+        completedAt: new Date(at.operator.getTime() + 300),
+      },
+    });
+    await prisma.subscriptionTrafficReset.create({
+      data: { subscriptionId: paidReset, performedAt: new Date(at.paidReset.getTime() + 900) },
+    });
+
+    const { observations } = await readResetObservations(prisma, NOW);
+
+    const seen = new Set(observations.map((row) => row.observedAt.toISOString()));
+    assert.equal(seen.has(at.renewed.toISOString()), false, 'a renewal of ours says nothing about the schedule');
+    assert.equal(seen.has(at.operator.toISOString()), false, 'nor the operator\'s «Сбросить»');
+    assert.equal(seen.has(at.paidReset.toISOString()), false, 'nor a paid «Обнулить трафик»');
+    const ui = observations.find((row) => row.observedAt.toISOString() === at.remnawaveUi.toISOString());
+    assert.ok(ui !== undefined, 'a reset the panel has no record of is still read');
+    assert.equal(ui.strategy, own.strategy);
+    assert.ok((ui.strategyProfiles ?? 0) >= 4, `how many profiles carry the strategy (${ui.strategyProfiles})`);
   });
 });

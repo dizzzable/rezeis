@@ -13,7 +13,9 @@ import {
   isHeldForResetConfirmation,
   RESET_CONFIRMATION_HOLD_MS,
   RESET_CONFIRMATION_TOLERANCE_MS,
+  showsScheduledRun,
 } from '../src/modules/add-on-entitlements/services/reset-boundary-confirmation.service';
+import { SCHEDULED_RUN_SLACK_MS } from '../src/modules/add-on-entitlements/switches/reset-schedule-check';
 
 /**
  * The hold, as a rule on one row, and the two confirmations — the pieces of
@@ -99,10 +101,31 @@ describe('what confirms a reset', () => {
     assert.equal(confirmsOwnReset(new Date(PLANNED.getTime() - 5 * MINUTE - 1), PLANNED), false);
     assert.equal(confirmsOwnReset(null, PLANNED), false);
   });
+
+  it('a calendar boundary for everybody: only a RUN — one instant on two profiles, or the cron minute\'s shape (R3a-04)', () => {
+    const at = (ms: number, profiles = 1) => ({ resetAt: new Date(PLANNED.getTime() + ms), profiles });
+    // One profile reset in Remnawave's own UI twenty minutes on: somebody's reset, not the run.
+    assert.equal(showsScheduledRun([at(20 * MINUTE + 1_234)], PLANNED), false);
+    // The same instant on two profiles: the run, however late within the hour.
+    assert.equal(showsScheduledRun([at(20 * MINUTE + 1_234, 2)], PLANNED), true);
+    // A lone profile stamped in the cron minute's first seconds: the run on time.
+    assert.equal(showsScheduledRun([at(1_150)], PLANNED), true);
+    assert.equal(showsScheduledRun([at(SCHEDULED_RUN_SLACK_MS)], PLANNED), true);
+    assert.equal(showsScheduledRun([at(SCHEDULED_RUN_SLACK_MS + 1)], PLANNED), false);
+    assert.equal(showsScheduledRun([at(-1)], PLANNED), false, 'a lone reset just before the minute is nobody\'s run');
+    // Outside the batch window nothing is the run, shared or not.
+    assert.equal(showsScheduledRun([at(60 * MINUTE + 1, 5)], PLANNED), false);
+    assert.equal(showsScheduledRun([], PLANNED), false);
+  });
 });
 
 describe('term activation — the rolling anchor from the stamped profile', () => {
-  function activation(options: { readonly stamped: Date | null; readonly panelCreatedAt?: string }) {
+  function activation(options: {
+    readonly stamped: Date | null;
+    readonly panelCreatedAt?: string;
+    /** The anchor the due term was minted with (P2): the profile's `createdAt` another term carried, or none. */
+    readonly termAnchor?: Date | null;
+  }) {
     const termUpdates: unknown[] = [];
     const panelReads: unknown[] = [];
     const stamps: Prisma.Sql[] = [];
@@ -112,6 +135,8 @@ describe('term activation — the rolling anchor from the stamped profile', () =
           id: 'term-rolling',
           trafficResetStrategy: 'MONTH_ROLLING',
           planSnapshot: null,
+          startsAt: new Date('2026-07-31T08:00:00.000Z'),
+          resetAnchorAt: options.termAnchor ?? null,
         }),
         update: async (input: unknown) => {
           termUpdates.push(input);
@@ -186,6 +211,26 @@ describe('term activation — the rolling anchor from the stamped profile', () =
       ]);
       assert.equal(stamps.length, 1, 'the read is stamped for the next reader');
       assert.ok(stamps[0]!.values.some((value) => value instanceof Date && value.toISOString() === '2025-02-28T10:00:00.000Z'));
+    });
+  });
+
+  it('keeps the anchor the term was minted with when nothing is stamped and the read learns nothing', async () => {
+    // P2 minted the queued term with the rolling anchor another term carried;
+    // nulling it here took a known cycle away and withheld its «до сброса» sales.
+    await withRollingStage(async () => {
+      const minted = new Date('2025-03-15T09:30:00.000Z');
+      const { service, termUpdates, panelReads } = activation({ stamped: null, termAnchor: minted });
+      await service.activateDueScheduledTerm('sub-1', new Date('2026-07-31T08:00:00.000Z'));
+      assert.equal(panelReads.length, 1, 'Remnawave was asked, and said nothing');
+      assert.deepEqual(termUpdates, [{ where: { id: 'term-rolling' }, data: { resetAnchorAt: minted } }]);
+    });
+  });
+
+  it('leaves no anchor at all when there is none to keep: rolling «до сброса» stays fail-closed', async () => {
+    await withRollingStage(async () => {
+      const { service, termUpdates } = activation({ stamped: null, termAnchor: null });
+      await service.activateDueScheduledTerm('sub-1', new Date('2026-07-31T08:00:00.000Z'));
+      assert.deepEqual(termUpdates, [{ where: { id: 'term-rolling' }, data: { resetAnchorAt: null } }]);
     });
   });
 });

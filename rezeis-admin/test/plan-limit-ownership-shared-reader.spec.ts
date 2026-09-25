@@ -14,6 +14,7 @@ import {
   type RecordedAddOnContribution,
 } from '../src/modules/subscriptions/services/plan-inherited-limits.util';
 import { PlanSnapshotSyncService } from '../src/modules/subscriptions/services/plan-snapshot-sync.service';
+import { emulatePlanSnapshotMirror, type MirroredRow } from './helpers/plan-snapshot-mirror-double';
 import { NOT_IN_TERM_MODEL } from './helpers/term-model-hooks';
 
 /**
@@ -437,28 +438,18 @@ async function runPlanRename(
   let selectedOn: string | null = null;
   const { updated: matched } = await new PlanSnapshotSyncService().syncPlanSnapshotMetadata(
     {
+      // The mirror is ONE statement (review R3a-01): it updates the rows whose
+      // `plan_snapshot->>'<key>'` is the plan, merging the four mirrored keys
+      // in. The key comes out of its WHERE clause, the plan id and the four
+      // values out of its bindings, in the order the statement binds them.
       $queryRaw: async (query: { readonly strings?: readonly string[]; readonly values?: readonly unknown[] }) => {
         const text = (query.strings ?? []).join('?');
-        // The subscriber's row lock, taken because the rename also changes the
-        // plan's reset rule and the terms follow it (P6) — not the selection
-        // this double is about.
-        if (/FOR UPDATE/.test(text)) return [{ id: 'sub-bulk-1', status: 'ACTIVE' }];
-        const key = /plan_snapshot"?\s*->>\s*'([^']+)'/.exec(text)?.[1] ?? null;
-        selectedOn = key;
-        assert.ok(key !== null, 'the sync must still select subscribers by a plan_snapshot JSON key');
-        const wanted = (query.values ?? [])[0];
-        return storedSnapshot[key] === wanted
-          ? [{ id: 'sub-bulk-1', planSnapshot: storedSnapshot }]
-          : [];
+        selectedOn = /WHERE\s+"plan_snapshot"->>'([^']+)'/.exec(text)?.[1] ?? null;
+        const rows: MirroredRow[] = [{ id: 'sub-bulk-1', planSnapshot: { ...storedSnapshot } }];
+        const mirrored = emulatePlanSnapshotMirror(query, rows);
+        if (mirrored.length > 0) written.push(rows[0]!.planSnapshot);
+        return mirrored;
       },
-      subscription: {
-        update: async (args: { readonly data: { readonly planSnapshot: Record<string, unknown> } }) => {
-          written.push(args.data.planSnapshot);
-          return null;
-        },
-      },
-      subscriptionTerm: { findMany: async () => [] },
-      settings: { findFirst: async () => null },
     } as never,
     RENAMED_PLAN as never,
   );

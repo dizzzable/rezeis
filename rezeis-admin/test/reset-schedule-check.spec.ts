@@ -69,18 +69,81 @@ describe('judgeResetSchedule', () => {
   });
 
   it('reads Moscow in a run at 21:05 UTC', () => {
-    const verdict = judgeResetSchedule({
-      observations: [day('2026-09-24T21:05:00.009Z')],
-      timeZone: 'UTC',
-      resetScoped: true,
-      now: NOW,
-    });
+    // One run, two profiles stamped with its one instant.
+    const run = [day('2026-09-24T21:05:00.009Z'), day('2026-09-24T21:05:00.009Z')];
+    const verdict = judgeResetSchedule({ observations: run, timeZone: 'UTC', resetScoped: true, now: NOW });
     assert.equal(verdict.status, 'mismatch');
     assert.equal(verdict.mismatches[0]!.impliedUtcOffsetMinutes, 180);
     assert.equal(
-      judgeResetSchedule({ observations: [day('2026-09-24T21:05:00.009Z')], timeZone: 'Europe/Moscow', resetScoped: true, now: NOW })
-        .status,
+      judgeResetSchedule({ observations: run, timeZone: 'Europe/Moscow', resetScoped: true, now: NOW }).status,
       'ok',
+    );
+  });
+
+  // ── Review R3a-03: a lone reset in a run's shape is not a run ───────────────
+  //
+  // A renewal from the auto-renew cron (every minute, second 0) zeroes the
+  // counter a second after a whole minute — in the shape of a run for four
+  // minutes of every hour — and one such reset made the check warn about a
+  // correct zone, naming one that does not exist. The panel's own resets are
+  // left out by the reader (`reset-schedule-check-postgres.spec.ts`); here, the
+  // rule for what is left.
+
+  it('DAY: the real 00:05 run agrees, and a lone shaped reset at 02:20:01 does not turn it into a mismatch', () => {
+    const verdict = judgeResetSchedule({
+      observations: [
+        { ...day('2026-09-25T00:05:00.013Z'), strategyProfiles: 40 },
+        { ...day('2026-09-25T02:20:01.734Z'), strategyProfiles: 40 },
+      ],
+      timeZone: 'UTC',
+      resetScoped: true,
+      now: new Date('2026-09-25T04:37:00.000Z'),
+    });
+    assert.equal(verdict.status, 'ok', JSON.stringify(verdict));
+  });
+
+  it('WEEK on a Thursday: a lone shaped reset at 13:30:02 says nothing — no run in the window', () => {
+    const verdict = judgeResetSchedule({
+      observations: [{ strategy: 'WEEK', observedAt: new Date('2026-09-23T13:30:02.100Z'), createdAt: null, strategyProfiles: 12 }],
+      timeZone: 'UTC',
+      resetScoped: true,
+      now: new Date('2026-09-24T04:37:00.000Z'),
+    });
+    assert.equal(verdict.status, 'no_data', JSON.stringify(verdict));
+  });
+
+  it('MONTH_ROLLING: a reset on a day that is not the profile\'s own is no run, whatever its shape', () => {
+    const offDay: ResetObservation = {
+      strategy: 'MONTH_ROLLING',
+      observedAt: new Date('2026-09-24T16:25:00.900Z'),
+      createdAt: new Date('2026-06-10T08:00:00.000Z'),
+      strategyProfiles: 1,
+    };
+    const verdict = judgeResetSchedule({
+      observations: [offDay],
+      timeZone: 'UTC',
+      resetScoped: true,
+      now: new Date('2026-09-25T04:37:00.000Z'),
+    });
+    assert.equal(verdict.status, 'no_data', JSON.stringify(verdict));
+  });
+
+  it('a lone shaped reset is judged where no batch can exist: an install with ONE profile on the strategy', () => {
+    const lone = { ...day('2026-09-25T03:05:00.013Z'), strategyProfiles: 1 };
+    const verdict = judgeResetSchedule({ observations: [lone], timeZone: 'UTC', resetScoped: true, now: NOW });
+    assert.equal(verdict.status, 'mismatch');
+    assert.equal(verdict.mismatches[0]!.impliedUtcOffsetMinutes, -180);
+    // Two profiles on the strategy: a run would have stamped both, so one alone is no run.
+    assert.equal(
+      judgeResetSchedule({ observations: [{ ...lone, strategyProfiles: 2 }], timeZone: 'UTC', resetScoped: true, now: NOW })
+        .status,
+      'no_data',
+    );
+    // …and nothing said about the install counts as "a batch can exist".
+    assert.equal(
+      judgeResetSchedule({ observations: [day('2026-09-25T03:05:00.013Z')], timeZone: 'UTC', resetScoped: true, now: NOW })
+        .status,
+      'no_data',
     );
   });
 

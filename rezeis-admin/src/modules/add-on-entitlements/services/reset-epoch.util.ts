@@ -7,13 +7,7 @@ import {
 } from '@prisma/client';
 
 import { readStoredRemnawaveTimeZone } from '../add-on-rollout.config';
-import {
-  planResetEpoch,
-  provisionalResetAnchor,
-  ResetCapability,
-  ResetCyclePolicyError,
-  ResetStrategy,
-} from '../domain/reset-cycle-policy';
+import { planResetEpoch, provisionalResetAnchor, ResetStrategy } from '../domain/reset-cycle-policy';
 
 function isUniqueViolation(error: unknown): boolean {
   return error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';
@@ -31,37 +25,13 @@ export interface LiveResetEpoch {
   readonly plannedEndsAt: Date;
 }
 
-export interface EnsureLiveResetEpochInput {
-  readonly termId: string;
-  readonly strategy: ResetStrategy;
-  readonly anchorAt: Date | null;
-  readonly capability: ResetCapability;
-  readonly now: Date;
-  /** «Часовой пояс Remnawave» (IANA); `undefined` means UTC. */
-  readonly timeZone?: string;
-}
-
 /**
- * Find-or-create the reset epoch whose window CONTAINS `now` for a term
- * (T-008/T-016). This is the single, idempotent entry point for the reset-epoch
- * lifecycle:
- *  - first mint at term activation,
- *  - lazy mint for a term that was already ACTIVE when the reset-expiry flag
- *    was enabled (no activation event to mint it),
- *  - and cycle-advancement — each cycle's first purchase mints THAT cycle's
- *    epoch (the previous cycle's epoch simply stays with `plannedEndsAt <= now`
- *    and its bound entitlements expire via `expiresAt`).
- *
- * The window is computed purely from `planResetEpoch(strategy, anchorAt, now,
- * timeZone)` — Remnawave's own reset instants — so eligibility (which quotes
- * the same computation on the fly) and the money path (which binds to a
- * PERSISTED epoch) always agree.
- *
- * Returns `null` when there is no commercial reset window: `NO_RESET`,
- * capability not `ENABLED`, a null anchor, a zone the runtime does not know,
- * or a strategy/anchor that yields no epoch. What the caller does then is its
- * own rule; a paid reset quote never becomes a permanent increment
- * (`PaymentSubscriptionMutationService.applyAddOnViaLedger`).
+ * Find-or-create the epoch of an EXACT window on a term — the window a
+ * checkout quoted (`add-on-quote.ts`), which the capture binds to whatever the
+ * switches, the zone or the term say by then, or the first reset under a
+ * changed rule (`redateResetAddOnsInTransaction`). The window is Remnawave's
+ * own (`planResetEpoch`), computed by the caller; an epoch already recorded
+ * for the same reset is returned as it is.
  *
  * Idempotency & concurrency: the epoch table has `@@unique([termId,
  * plannedEndsAt])`. We fast-path a read of that window; on a miss we INSERT
@@ -76,52 +46,10 @@ export interface EnsureLiveResetEpochInput {
  * finds no winner for our window and is surfaced — but the transaction is
  * already healthy (rolled back to the savepoint), so the caller's `$transaction`
  * rolls back cleanly and the idempotent purchase can retry (no 25P02).
- */
-export async function ensureLiveResetEpoch(
-  tx: Prisma.TransactionClient,
-  input: EnsureLiveResetEpochInput,
-): Promise<LiveResetEpoch | null> {
-  if (input.strategy === 'NO_RESET' || input.capability !== 'ENABLED' || input.anchorAt === null) {
-    return null;
-  }
-  // A non-null but invalid anchor OR reference (NaN Date, a data anomaly) would
-  // make planResetEpoch throw and roll back the caller's transaction — degrade
-  // to the legacy path instead (matches eligibility's withhold-not-crash
-  // intent). Callers pass `new Date()` for `now`, so the reference guard is
-  // latent, but it keeps this helper total (never throws → never aborts tx).
-  if (Number.isNaN(input.anchorAt.getTime()) || Number.isNaN(input.now.getTime())) return null;
-
-  let plan: ReturnType<typeof planResetEpoch>;
-  try {
-    plan = planResetEpoch({
-      strategy: input.strategy,
-      capability: 'ENABLED',
-      anchorAt: input.anchorAt,
-      referenceAt: input.now,
-      timeZone: input.timeZone,
-    });
-  } catch (error) {
-    // An unknown «Часовой пояс Remnawave» (a value stored before its
-    // validation, or a zone this runtime's tz data lacks) has no window —
-    // the same total answer as a null anchor, never an aborted transaction.
-    if (error instanceof ResetCyclePolicyError && error.code === 'INVALID_TIME_ZONE') return null;
-    throw error;
-  }
-  if (plan === null) return null;
-
-  return bindResetEpochWindow(tx, {
-    termId: input.termId,
-    startsAt: plan.startsAt,
-    plannedEndsAt: plan.plannedEndsAt,
-  });
-}
-
-/**
- * Find-or-create the epoch of an EXACT window on a term — the window a
- * checkout quoted (`add-on-quote.ts`), which the capture binds to whatever the
- * switches, the zone or the term say by then. Idempotent on `(termId,
- * plannedEndsAt)` and race-safe the way {@link ensureLiveResetEpoch} explains;
- * an epoch already recorded for the same reset is returned as it is.
+ *
+ * (`ensureLiveResetEpoch`, which computed the window around `now` and called
+ * this, had no caller left and is gone: the capture binds the quoted window,
+ * and a changed rule its first reset.)
  */
 export async function bindResetEpochWindow(
   tx: Prisma.TransactionClient,
@@ -175,7 +103,9 @@ export async function bindResetEpochWindow(
  * a transaction they did not open (a plan edit, a plan change) and have no
  * switches snapshot to take it from. `undefined` (UTC) when unset or unreadable.
  */
-export async function readRemnawaveTimeZoneInTransaction(tx: Prisma.TransactionClient): Promise<string | undefined> {
+export async function readRemnawaveTimeZoneInTransaction(
+  tx: Pick<Prisma.TransactionClient, 'settings'>,
+): Promise<string | undefined> {
   try {
     const row = await tx.settings.findFirst({ select: { addOnSettings: true } });
     return readStoredRemnawaveTimeZone(row?.addOnSettings);
@@ -260,47 +190,63 @@ export interface RedateResetAddOnsInput {
  *  - An add-on moved earlier is bound to the new rule's epoch on its OWN term
  *    (the `(expiry_epoch_id, term_id)` key), so it reads as reset-bound, and
  *    the move is written as an event, as the tail alignment writes its moves.
+ *  - AN ADD-ON THAT KEEPS ITS DATE IS DETACHED from its old reset (review
+ *    R3a-02). Its epoch is an instant of the OLD rule, which Remnawave no
+ *    longer runs for this profile; left bound, the add-on read as ending at
+ *    that reset, was HELD past its promised date for a confirmation that never
+ *    came, and six hours later one incident told the operator Remnawave had
+ *    missed its schedule and to reset the counters by hand — handing customers
+ *    a fresh counter nobody paid for. Detached (`expiry_epoch_id` null, the
+ *    date unchanged, an event naming the epoch it left) it ends BY ITS DATE:
+ *    nothing waits for a reset, and `entitlementEndBound` names no bound for
+ *    it, so the customer is shown the plain date. The owner's rule «NO_RESET
+ *    ends it at the promised date» is exactly that. Only a reset still AHEAD
+ *    is let go: one already due was due under the rule that was in force, and
+ *    its confirmation stands as it was.
  *
  * Safe to call when the rule did not change: the first reset under the same
- * rule is never earlier than the one an add-on of the current cycle was sold
- * until, so nothing moves. Returns the ids of the add-ons it moved.
+ * rule is the one an add-on of the current cycle was sold until, so nothing
+ * moves and nothing is detached. Returns the ids of the add-ons it moved.
  */
 export async function redateResetAddOnsInTransaction(
   tx: Prisma.TransactionClient,
   input: RedateResetAddOnsInput,
 ): Promise<readonly string[]> {
-  if (input.strategy === 'NO_RESET') return [];
-  let plan: ReturnType<typeof planResetEpoch>;
-  try {
-    // The anchor matters for MONTH_ROLLING alone; calendar strategies take
-    // any date, so `now` stands in for a missing one.
-    const anchorAt = input.strategy === 'MONTH_ROLLING' ? input.anchorAt : (input.anchorAt ?? input.now);
-    if (anchorAt === null) return [];
-    plan = planResetEpoch({
-      strategy: input.strategy,
-      capability: 'ENABLED',
-      anchorAt,
-      referenceAt: input.now,
-      timeZone: input.timeZone,
-    });
-  } catch {
-    return [];
-  }
-  if (plan === null) return [];
-  const newEnd = plan.expiresAt;
-
-  const moved = await tx.addOnEntitlement.findMany({
+  const plan = firstResetUnder(input);
+  const live = await tx.addOnEntitlement.findMany({
     where: {
       subscriptionId: input.subscriptionId,
       lifetime: AddOnLifetime.UNTIL_NEXT_RESET,
       state: { in: [AddOnEntitlementState.PENDING_ACTIVATION, AddOnEntitlementState.ACTIVE] },
-      expiresAt: { gt: newEnd },
+      OR: [
+        ...(plan === null ? [] : [{ expiresAt: { gt: plan.expiresAt } }]),
+        // Bound to a reset still ahead: the ones a kept date detaches.
+        { expiryEpoch: { is: { plannedEndsAt: { gt: input.now } } } },
+      ],
     },
     orderBy: { id: 'asc' },
-    select: { id: true, state: true, version: true, termId: true, expiresAt: true, expiryEpochId: true },
+    select: {
+      id: true,
+      state: true,
+      version: true,
+      termId: true,
+      expiresAt: true,
+      expiryEpochId: true,
+      expiryEpoch: { select: { plannedEndsAt: true } },
+    },
   });
   const redated: string[] = [];
-  for (const entitlement of moved) {
+  for (const entitlement of live) {
+    const moves =
+      plan !== null && entitlement.expiresAt !== null && entitlement.expiresAt.getTime() > plan.expiresAt.getTime();
+    if (!moves) {
+      // Kept its date. Already bound to the new rule's own reset (a step run
+      // twice, a capture after the change): that binding is right as it is.
+      if (entitlement.expiryEpoch === null) continue;
+      if (plan !== null && entitlement.expiryEpoch.plannedEndsAt.getTime() === plan.plannedEndsAt.getTime()) continue;
+      await detachFromReset(tx, entitlement, input);
+      continue;
+    }
     const epoch = await bindResetEpochWindow(tx, {
       termId: entitlement.termId,
       startsAt: plan.startsAt,
@@ -308,7 +254,7 @@ export async function redateResetAddOnsInTransaction(
     });
     const claimed = await tx.addOnEntitlement.updateMany({
       where: { id: entitlement.id, state: entitlement.state, version: entitlement.version },
-      data: { expiresAt: newEnd, expiryEpochId: epoch.id, version: { increment: 1 } },
+      data: { expiresAt: plan.expiresAt, expiryEpochId: epoch.id, version: { increment: 1 } },
     });
     // A transition that won the row (the boundary sweep expiring it) owns it
     // now; there is nothing left here to move.
@@ -326,7 +272,7 @@ export async function redateResetAddOnsInTransaction(
         metadata: {
           strategy: input.strategy,
           previousExpiresAt: entitlement.expiresAt?.toISOString() ?? null,
-          expiresAt: newEnd.toISOString(),
+          expiresAt: plan.expiresAt.toISOString(),
           previousExpiryEpochId: entitlement.expiryEpochId,
           expiryEpochId: epoch.id,
         },
@@ -335,6 +281,67 @@ export async function redateResetAddOnsInTransaction(
     redated.push(entitlement.id);
   }
   return redated;
+}
+
+/**
+ * The first reset under the new rule, from `now` — `null` when there is none
+ * to end at: NO_RESET, a rolling rule without its anchor, a zone the runtime
+ * does not know.
+ */
+function firstResetUnder(input: RedateResetAddOnsInput): ReturnType<typeof planResetEpoch> {
+  if (input.strategy === 'NO_RESET') return null;
+  // The anchor matters for MONTH_ROLLING alone; calendar strategies take any
+  // date, so `now` stands in for a missing one.
+  const anchorAt = input.strategy === 'MONTH_ROLLING' ? input.anchorAt : (input.anchorAt ?? input.now);
+  if (anchorAt === null) return null;
+  try {
+    return planResetEpoch({
+      strategy: input.strategy,
+      capability: 'ENABLED',
+      anchorAt,
+      referenceAt: input.now,
+      timeZone: input.timeZone,
+    });
+  } catch {
+    return null;
+  }
+}
+
+/** A kept date, no longer a reset: the add-on ends by its date (see {@link redateResetAddOnsInTransaction}). */
+async function detachFromReset(
+  tx: Prisma.TransactionClient,
+  entitlement: {
+    readonly id: string;
+    readonly state: AddOnEntitlementState;
+    readonly version: number;
+    readonly expiresAt: Date | null;
+    readonly expiryEpochId: string | null;
+  },
+  input: RedateResetAddOnsInput,
+): Promise<void> {
+  const claimed = await tx.addOnEntitlement.updateMany({
+    where: { id: entitlement.id, state: entitlement.state, version: entitlement.version },
+    data: { expiryEpochId: null, version: { increment: 1 } },
+  });
+  if (claimed.count !== 1) return;
+  await tx.addOnEntitlementEvent.create({
+    data: {
+      entitlementId: entitlement.id,
+      fromState: entitlement.state,
+      toState: entitlement.state,
+      reason: input.reason,
+      actorType: AddOnEntitlementActorType.SYSTEM,
+      correlationId: input.correlationId,
+      commandKey: `reset-rule:v${entitlement.version + 1}`,
+      metadata: {
+        strategy: input.strategy,
+        expiresAt: entitlement.expiresAt?.toISOString() ?? null,
+        previousExpiryEpochId: entitlement.expiryEpochId,
+        expiryEpochId: null,
+        endsBy: 'DATE',
+      },
+    },
+  });
 }
 
 async function findByWindow(

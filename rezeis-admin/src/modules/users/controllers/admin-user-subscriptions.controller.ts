@@ -1622,6 +1622,8 @@ export class AdminUserSubscriptionsController {
 
     const startedAt = new Date();
     const expiresAt = new Date(startedAt.getTime() + body.durationDays * 24 * 60 * 60 * 1000);
+    // The stage switches, read BEFORE the transaction opens (review R2b-07).
+    const termFlags = await this.subscriptionTermHooks.readFlags();
 
     const subscription = await this.prismaService.$transaction(async (tx) => {
       const created = await tx.subscription.create({
@@ -1641,7 +1643,7 @@ export class AdminUserSubscriptionsController {
       // Its first term, in the same transaction, while stage 1 is on: an add-on
       // bought on it a minute later is then ledgered with an end date, not the
       // permanent increment a subscription outside the model still gets.
-      await this.subscriptionTermHooks.enterNewSubscriptionInTransaction(tx, created.id);
+      await this.subscriptionTermHooks.enterNewSubscriptionInTransaction(tx, created.id, termFlags);
       return created;
     });
 

@@ -255,15 +255,29 @@ run('the offer’s «dated» against the real fulfilment — PostgreSQL', () => 
     assert.equal(outcome.dated, true);
   });
 
-  it('a lifetime subscription whose term still carries an end: not dated — the purchase aligns the term open and falls back', async () => {
+  /**
+   * «До конца подписки» of a subscription with no end would be forever: not
+   * offered (review R3a-05 — before, the ACTIVE term's stale end still sold
+   * it); a stale checkout bought anyway is the permanent increment, undated,
+   * the purchase aligning the term open first.
+   */
+  async function notOfferedToALifetimeSubscription(owner: { readonly userId: string; readonly subscriptionId: string }) {
+    const addOnId = await catalogAddOn();
+    const listing = await withFlags({ direct: true }, () => offers.listForSubscription(owner.subscriptionId));
+    assert.equal(listing.addOns.some((addOn) => addOn.id === addOnId), false, 'not offered');
+    const transactionId = await withFlags({ direct: true }, () => buy(owner, addOnId));
+    const recorded = await prisma.addOnEntitlement.findFirst({ where: { sourceTransactionId: transactionId } });
+    assert.equal(recorded, null, 'a stale purchase: the permanent increment, nothing dated');
+  }
+
+  it('a lifetime subscription whose term still carries an end: «до конца подписки» is not offered (R3a-05)', async () => {
     const owner = await subscription();
     await enter(owner.subscriptionId);
     await prisma.subscription.update({ where: { id: owner.subscriptionId }, data: { expiresAt: null } });
-    const outcome = await withFlags({ direct: true }, () => offerThenBuy(owner));
-    assert.equal(outcome.dated, false);
+    await notOfferedToALifetimeSubscription(owner);
   });
 
-  it('a paid renewal queued after the current period: dated, to the end of the CURRENT period', async () => {
+  it('a paid renewal queued after the current period: dated, to the end of the SUBSCRIPTION, the queued term included (R3a-05)', async () => {
     const owner = await subscription();
     await enter(owner.subscriptionId);
     const active = await prisma.subscriptionTerm.findFirstOrThrow({
@@ -287,12 +301,12 @@ run('the offer’s «dated» against the real fulfilment — PostgreSQL', () => 
 
     const outcome = await withFlags({ direct: true }, () => offerThenBuy(owner));
     assert.equal(outcome.dated, true);
-    assert.equal(outcome.recordedEnd, active.endsAt!.toISOString());
+    // «Главная» shows the subscription running to the queued term's end, and
+    // «до конца подписки» says that same date.
+    assert.equal(outcome.recordedEnd, renewalEnd.toISOString());
   });
 
-  it('a queued renewal on a subscription made lifetime since: still dated, to the end of the CURRENT period', async () => {
-    // The purchase aligns the queued term open and leaves the current one: its
-    // end is what the add-on is recorded with, not the subscription's (none).
+  it('a queued renewal on a subscription made lifetime since: «до конца подписки» is not offered (R3a-05)', async () => {
     const owner = await subscription();
     await enter(owner.subscriptionId);
     const active = await prisma.subscriptionTerm.findFirstOrThrow({
@@ -313,8 +327,6 @@ run('the offer’s «dated» against the real fulfilment — PostgreSQL', () => 
     );
     await prisma.subscription.update({ where: { id: owner.subscriptionId }, data: { expiresAt: null } });
 
-    const outcome = await withFlags({ direct: true }, () => offerThenBuy(owner));
-    assert.equal(outcome.dated, true);
-    assert.equal(outcome.recordedEnd, active.endsAt!.toISOString());
+    await notOfferedToALifetimeSubscription(owner);
   });
 });

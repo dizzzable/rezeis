@@ -336,38 +336,37 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const CLOSED_WINDOW_ENDED_AT = new Date(Date.now() - 30 * DAY_MS);
 
 describe('add-on checkout can only sell a lifetime the intake can honour', () => {
-  it('refuses a reset-scoped add-on while every rollout flag is off, exactly as the offer withholds it', async () => {
+  it('sells a traffic row stored «до следующего сброса» «до конца подписки» while every rollout flag is off — never as a reset (R3a-06)', async () => {
+    // Stage 4 off: traffic is sold until the end of the subscription whatever
+    // the row says — what the switch's OFF dialog promises. The row used to be
+    // WITHHELD here, and nothing on the page could show or change the value
+    // 0.9.7.69's editor stored. Never a reset quote: the intake could not bind
+    // one to an epoch, and a reset quote is never the permanent increment.
     await withEnv(FLAGS_OFF, async () => {
       const answer = await askBoth({ lifetime: 'UNTIL_NEXT_RESET' });
 
-      assert.equal(answer.offered, false, 'the offer must withhold a lifetime the intake cannot honour');
-      assert.equal(
-        answer.bought,
-        false,
-        'a crafted checkout sold a reset-scoped add-on the intake cannot bind to an epoch. ' +
-          'It falls through to the PERMANENT legacy increment, so the customer is charged for a ' +
-          'top-up until the next reset and receives one that never expires.',
-      );
-      assert.equal(answer.refusalCode, LIFETIME_REFUSAL);
-      assert.equal(answer.draftsCreated, 0, 'nothing may be drafted for a product we cannot deliver');
-      assert.equal(answer.providerCalls, 0, 'and no invoice may be created at the provider');
+      assert.equal(answer.offered, true, 'the offer lists it until the end of the subscription');
+      assert.equal(answer.bought, true, answer.refusalMessage ?? 'checkout refused what the offer listed');
+      assert.equal(answer.marker?.lifetime, 'UNTIL_SUBSCRIPTION_END');
+      assert.equal(answer.marker?.quotedEndsBound, 'subscription_end');
+      assert.equal(answer.marker?.quotedResetAt, null, 'no reset is quoted');
     });
   });
 
-  it('refuses a reset-scoped add-on when the reset flag is on but directPurchase is off', async () => {
+  it('sells it «до конца подписки» too when the reset flag is on but directPurchase is off: nothing can bind a reset', async () => {
     // The intake half of the gate, on its own. `directPurchase` guards
     // `applyAddOnViaLedger`, which is the ONLY code that binds an entitlement to
     // a reset epoch; with it off the reset flag alone changes nothing about what
-    // the money path can deliver.
+    // the money path can deliver — so no reset is sold.
     await withEnv(
       { ADDON_RESET_EXPIRY_MONTH: 'true', ADDON_ENTITLEMENT_DIRECT_PURCHASE: 'false' },
       async () => {
         const answer = await askBoth({ lifetime: 'UNTIL_NEXT_RESET' });
 
-        assert.equal(answer.offered, false);
-        assert.equal(answer.bought, false, answer.refusalMessage ?? 'checkout sold it anyway');
-        assert.equal(answer.refusalCode, LIFETIME_REFUSAL);
-        assert.equal(answer.draftsCreated, 0);
+        assert.equal(answer.offered, true);
+        assert.equal(answer.bought, true, answer.refusalMessage ?? 'checkout refused it');
+        assert.equal(answer.marker?.lifetime, 'UNTIL_SUBSCRIPTION_END');
+        assert.equal(answer.marker?.quotedResetAt, null);
       },
     );
   });
@@ -419,16 +418,16 @@ describe('add-on checkout can only sell a lifetime the intake can honour', () =>
     );
   });
 
-  it('keeps today\'s rule on a NO_RESET plan while stage 4 is off: the row\'s «до следующего сброса» is withheld', async () => {
+  it('sells it «до конца подписки» on a NO_RESET plan while stage 4 is off as well (R3a-06)', async () => {
     await withEnv(FLAGS_OFF, async () => {
       const answer = await askBoth({
         lifetime: 'UNTIL_NEXT_RESET',
         term: { trafficResetStrategy: 'NO_RESET' },
       });
 
-      assert.equal(answer.offered, false);
-      assert.equal(answer.bought, false);
-      assert.equal(answer.refusalCode, LIFETIME_REFUSAL);
+      assert.equal(answer.offered, true);
+      assert.equal(answer.bought, true, answer.refusalMessage ?? 'checkout refused it');
+      assert.equal(answer.marker?.lifetime, 'UNTIL_SUBSCRIPTION_END');
     });
   });
 
@@ -718,8 +717,14 @@ describe('add-on checkout can only sell a lifetime the intake can honour', () =>
   it('refuses a ZERO-PRICE add-on with an unhonourable lifetime before it is granted inline', async () => {
     // A 0-price add-on skips the provider and is fulfilled inline, so a gate
     // placed after the draft would grant it before anyone could refuse.
+    // Unhonourable: «до конца подписки» on a subscription that has no end.
     await withEnv(FLAGS_OFF, async () => {
-      const answer = await askBoth({ lifetime: 'UNTIL_NEXT_RESET', amount: '0' });
+      const answer = await askBoth({
+        lifetime: 'UNTIL_SUBSCRIPTION_END',
+        amount: '0',
+        term: { endsAt: null },
+        sub: { expiresAt: null },
+      });
 
       assert.equal(answer.offered, false);
       assert.equal(answer.bought, false);

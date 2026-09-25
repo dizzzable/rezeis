@@ -11,10 +11,14 @@ import { DeviceReductionExecutionService } from './device-reduction-execution.se
 import { DeviceReductionPlanService } from './device-reduction-plan.service';
 import { EntitlementBoundaryService } from './entitlement-boundary.service';
 import { ResetBoundaryConfirmationService, resetAddOnHeldSql } from './reset-boundary-confirmation.service';
+import { followResetRules, selectResetRuleFollowCandidates } from './reset-rule-follow';
 import { SubscriptionTermService, TERM_SHORTENED_ACROSS_SCHEDULED_TERM } from './subscription-term.service';
 
 /** Max subscriptions swept for due boundaries per tick. */
 const MAX_PER_TICK = 200;
+
+/** Subscriptions whose terms the reset-rule sweep brings to their snapshot's rule per run. */
+const MAX_RESET_RULE_FOLLOWS_PER_RUN = 500;
 
 /** Max subscriptions the hourly re-drive of parked device expiries takes. */
 const MAX_PARKED_PER_RUN = 100;
@@ -112,13 +116,18 @@ function waitingForOperatorSql(autoCleanup: boolean): Prisma.Sql {
  *
  * The same class also runs the DRIFT sweep ({@link alignDriftedTerms}): a tail
  * term whose end no longer matches `subscription.expiresAt` is aligned, so
- * «Мои опции» shows the date the add-on really ends on.
+ * «Мои опции» shows the date the add-on really ends on. And the RESET-RULE
+ * sweep ({@link followChangedResetRules}): terms still naming a reset rule
+ * their subscription's snapshot no longer does — what a plan edit's follow
+ * left behind — take it now.
  */
 @Injectable()
 export class EntitlementBoundarySchedulerService {
   private readonly logger = new Logger(EntitlementBoundarySchedulerService.name);
   /** Where the drift sweep resumes; in memory, so a restart starts it over. */
   private driftCursor = '';
+  /** Where the reset-rule sweep resumes; in memory, so a restart starts it over. */
+  private resetRuleCursor = '';
 
   public constructor(
     private readonly prismaService: PrismaService,
@@ -166,6 +175,63 @@ export class EntitlementBoundarySchedulerService {
     if (examined > 0) {
       this.logger.log(`Term drift sweep: examined ${examined}, aligned ${aligned}`);
     }
+  }
+
+  /** Every five minutes: terms left on a reset rule their subscription's snapshot no longer names. */
+  @Cron(CronExpression.EVERY_5_MINUTES, { name: 'entitlement-reset-rule-sweep' })
+  public async resetRuleSweep(): Promise<void> {
+    if (!shouldRunSchedules()) return;
+    try {
+      const { examined, followed } = await this.followChangedResetRules();
+      if (examined > 0) {
+        this.logger.log(`Reset-rule sweep: examined ${examined}, followed ${followed}`);
+      }
+    } catch (err: unknown) {
+      this.logger.warn(`Reset-rule sweep failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * THE RESUMPTION OF A CHANGED RESET RULE (P6, review R3a-01). A plan edit
+   * commits the new rule into its subscribers' snapshots and then follows it
+   * subscriber by subscriber, outside its transaction (`reset-rule-follow.ts`);
+   * a restart or a failed step leaves terms that still name the old rule.
+   * They are the durable record of the work left: found here, in subscription
+   * id order from where the previous run stopped, and each followed in a short
+   * transaction of its own — the terms take the snapshot's rule, the «до
+   * сброса» add-ons end at the first reset under it (never later than
+   * promised), and a live linked profile is pushed at once. Idempotent: the
+   * edit's own pass racing this finds nothing left to move. One failing row is
+   * logged and passed over; it is tried again on the next run.
+   */
+  public async followChangedResetRules(
+    now?: Date,
+  ): Promise<{ readonly examined: number; readonly followed: number; readonly enqueued: number }> {
+    const candidates = await selectResetRuleFollowCandidates(
+      this.prismaService,
+      this.resetRuleCursor,
+      MAX_RESET_RULE_FOLLOWS_PER_RUN,
+    );
+    // Wrap around once the end is reached, so every row is visited whatever
+    // keeps failing ahead of it.
+    this.resetRuleCursor =
+      candidates.length < MAX_RESET_RULE_FOLLOWS_PER_RUN ? '' : candidates[candidates.length - 1]!;
+    const summary = await followResetRules(
+      {
+        prisma: this.prismaService,
+        terms: this.subscriptionTermService,
+        enqueue: (syncJobId) => this.profileSyncQueueService.enqueue(syncJobId),
+        logger: this.logger,
+      },
+      candidates,
+      {
+        correlationId: 'reset-rule-sweep',
+        push: 'if-followed',
+        ...(now === undefined ? {} : { now }),
+        remnawaveTimeZone: (await readAddOnRolloutFlags(this.addOnSwitches)).remnawaveTimeZone,
+      },
+    );
+    return { examined: candidates.length, followed: summary.followed, enqueued: summary.enqueued };
   }
 
   public async runDueBoundaries(

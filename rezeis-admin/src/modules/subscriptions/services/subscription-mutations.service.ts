@@ -182,6 +182,10 @@ export class SubscriptionMutationsService {
       plan.availability === PlanAvailability.TRIAL ? readTrialSettings(plan.trialSettings).maxClaims : 1;
     const now = new Date();
     const expiresAt = new Date(now.getTime() + input.durationDays * 24 * 60 * 60 * 1000);
+    // The stage switches, read BEFORE the transaction opens and handed to the
+    // term hooks inside it (review R2b-07): read in there, a cold settings
+    // cache takes a second pool connection while this one is held.
+    const termFlags = await this.subscriptionTermHooks.readFlags();
 
     const result = await this.prismaService.$transaction(async (tx) => {
       // Serialize trial claims per user. The count and create must share the
@@ -217,7 +221,7 @@ export class SubscriptionMutationsService {
       // Its first term, while stage 1 is on — the trial a customer is most
       // likely to buy an extra device for. Without it that add-on would be the
       // permanent increment a subscription outside the model still gets.
-      await this.subscriptionTermHooks.enterNewSubscriptionInTransaction(tx, subscription.id);
+      await this.subscriptionTermHooks.enterNewSubscriptionInTransaction(tx, subscription.id, termFlags);
       await tx.trialClaim.create({
         data: {
           userId: input.userId,

@@ -30,6 +30,7 @@ export const en = {
       addon_devices_ended: 'Device add-on has ended (no automatic disconnection)',
       addon_devices_auto_ends_in_3_days: 'Device add-on: 3 days before it ends (automatic disconnection)',
       addon_devices_auto_ended: 'Device add-on has ended (automatic disconnection)',
+      addon_not_applied: 'Add-on paid but not applied (subscription not active)',
       referral_attached: 'Referral attached',
       referral_reward: 'Referral reward',
       referral_qualified: 'Referral qualified',

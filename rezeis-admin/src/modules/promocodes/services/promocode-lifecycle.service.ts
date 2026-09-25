@@ -4,7 +4,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { Prisma, PromocodeRewardType } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { SystemEventsService, EVENT_TYPES } from '../../../common/services/system-events.service';
@@ -467,6 +467,13 @@ export class PromocodeLifecycleService {
     }
 
     const rewardValue = this.rewardsService.resolveActivationRewardValue(promocode);
+    // A SUBSCRIPTION action enters the subscription it creates into the term
+    // model with the stage switches — read here, BEFORE the transaction opens
+    // (review R2b-07): read inside it, a cold settings cache takes a second
+    // pool connection while this one is held.
+    const termFlags = promocode.actions.some((action) => action.type === PromocodeRewardType.SUBSCRIPTION)
+      ? await this.rewardsService.readTermFlags()
+      : undefined;
     try {
       const completed = await this.prismaService.$transaction(async (transactionClient) => {
         const quota = await this.assertActivatableUnderLock(transactionClient, promocode);
@@ -504,6 +511,7 @@ export class PromocodeLifecycleService {
             userId: input.userId,
             targetSubscriptionId: effectiveTargetId,
             action,
+            termFlags,
           });
           effectiveTargetId = application.createdSubscriptionId ?? effectiveTargetId;
           if (!application.applied) {

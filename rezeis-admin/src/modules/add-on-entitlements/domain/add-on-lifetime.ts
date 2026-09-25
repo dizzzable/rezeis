@@ -42,12 +42,13 @@ import {
  * devices always end with the subscription, and so does a traffic add-on on a
  * plan that never resets; a traffic add-on on a plan that resets ends at the
  * next reset once stage 4 («Докупка трафика до сброса») is on for the plan's
- * strategy. Until then, the catalogue value, as before.
+ * strategy, and with the subscription while it is off.
  *
  * ── The rule ──────────────────────────────────────────────────────────────
  *
- * `UNTIL_SUBSCRIPTION_END` needs a term end to expire at; an open-ended term
- * has none, so the lifetime cannot be honoured at all.
+ * `UNTIL_SUBSCRIPTION_END` ends with the subscription — `Subscription.expiresAt`,
+ * a queued renewal's term included; a lifetime subscription has no end, so
+ * the lifetime cannot be honoured at all.
  *
  * `UNTIL_NEXT_RESET` ends at Remnawave's next traffic reset (plus the half
  * hour `reset-cycle-policy.ts` explains) — or at the subscription's end, when
@@ -74,13 +75,14 @@ import {
  * meant to move independently.
  */
 export interface AddOnLifetimeBaseline {
-  /** The term window's end — `null` for an open-ended term. */
+  /** The ACTIVE term window's end — `null` for an open-ended term. No longer decides an end. */
   readonly endsAt: Date | null;
   /**
    * The subscription's own end (`Subscription.expiresAt`), `null` for a
-   * lifetime subscription: a reset-scoped add-on never outlives it. Not the
-   * term's end — with a paid period queued after the current one the
-   * subscription runs on, and so does the add-on, until its reset.
+   * lifetime subscription: what «до конца подписки» means, and what a
+   * reset-scoped add-on never outlives. Not the term's end — with a paid
+   * period queued after the current one the subscription runs on, and so does
+   * the add-on (review R3a-05).
    */
   readonly subscriptionEndsAt: Date | null;
   readonly trafficResetStrategy: TrafficLimitStrategy;
@@ -117,14 +119,17 @@ export interface AddOnLifetimeGrant {
  *    reset — with automatic cleanup, the customer's newest device deleted —
  *    and nobody sold that. A traffic reset has no lifetime at all.
  *  - Traffic, while stage 4 («Докупка трафика до сброса») is on for the
- *    plan's strategy: until the next reset. On a plan that never resets,
- *    until the end of the subscription. The catalogue value is not asked:
- *    operators no longer choose this for traffic.
- *  - Traffic with stage 4 off for the strategy: the catalogue value, exactly
- *    as before — a row still set to «до следующего сброса» stays withheld.
+ *    plan's strategy: until the next reset.
+ *  - Traffic in every other case — a plan that never resets, or stage 4 off
+ *    for the plan's strategy: until the end of the subscription.
  *
- * "On" for a plan without a reset means any of the four stage-4 flags is on
- * (they move together as the one switch unless `.env` splits them).
+ * The catalogue value is not asked, for traffic either: operators no longer
+ * choose this, and the editor shows no control for it. With stage 4 off it
+ * used to decide, so a traffic row saved as «До следующего сброса» by
+ * 0.9.7.69's editor was WITHHELD from sale while the editor told the operator
+ * it lasts «до конца подписки», which is also what the switch's OFF dialog
+ * promises — and nothing on the page could show or change the stored value
+ * (review R3a-06).
  */
 export function resolveEffectiveAddOnLifetime(input: {
   readonly type: AddOnType;
@@ -133,13 +138,10 @@ export function resolveEffectiveAddOnLifetime(input: {
   readonly capabilities: ResetCapabilityMap;
 }): AddOnLifetime {
   if (input.type !== AddOnType.EXTRA_TRAFFIC) return AddOnLifetime.UNTIL_SUBSCRIPTION_END;
-  if (input.trafficResetStrategy === TrafficLimitStrategy.NO_RESET) {
-    const stageFourOn = Object.values(input.capabilities).some((capability) => capability === 'ENABLED');
-    return stageFourOn ? AddOnLifetime.UNTIL_SUBSCRIPTION_END : input.catalogLifetime;
-  }
+  if (input.trafficResetStrategy === TrafficLimitStrategy.NO_RESET) return AddOnLifetime.UNTIL_SUBSCRIPTION_END;
   return getResetCapability(input.trafficResetStrategy, input.capabilities) === 'ENABLED'
     ? AddOnLifetime.UNTIL_NEXT_RESET
-    : input.catalogLifetime;
+    : AddOnLifetime.UNTIL_SUBSCRIPTION_END;
 }
 
 /**
@@ -166,27 +168,34 @@ export function resolveAddOnLifetimeGrant(input: {
     capabilities: input.capabilities,
   });
   if (lifetime === AddOnLifetime.UNTIL_SUBSCRIPTION_END) {
-    if (input.baseline.endsAt === null) return null; // open-ended term has no expiry date
-    // …and a term window that has ALREADY CLOSED cannot be delivered either.
+    // «До конца подписки» is the SUBSCRIPTION's end, `Subscription.expiresAt`
+    // — not the ACTIVE term's (review R3a-05). With an early renewal queued the
+    // subscription runs on through the queued term, «Главная» shows that date,
+    // and an add-on sold «до конца подписки» that stopped at the current
+    // period's end made the customer read «до конца подписки 20.09» beside a
+    // subscription running to 20.10. The capture binds the same date
+    // (`applyAddOnViaLedger`, after aligning the tail term with it).
+    const subscriptionEndsAt = input.baseline.subscriptionEndsAt;
+    if (subscriptionEndsAt === null) return null; // a lifetime subscription has no expiry date
+    // …and a subscription that has ALREADY ENDED cannot be delivered either.
     //
-    // The intake is where this bites: `applyAddOnViaLedger` requires
-    // `term.endsAt > now` before it will bind an entitlement to that window, and
-    // when it cannot it falls through to the PERMANENT legacy increment. So a
-    // term whose `endsAt` is in the past — an expired subscription still
-    // carrying its ACTIVE term, or a lapsed one being browsed — was OFFERED a
-    // bounded add-on, sold it at the bounded price, and delivered an UNBOUNDED
-    // one: a raw column increment with no entitlement row that anything could
-    // ever expire.
+    // The intake is where this bites: `applyAddOnViaLedger` requires the end
+    // to be ahead before it will bind an entitlement to it, and when it cannot
+    // it falls through to the PERMANENT legacy increment. So an end in the
+    // past — an expired subscription still carrying its ACTIVE term, or a
+    // lapsed one being browsed — was OFFERED a bounded add-on, sold it at the
+    // bounded price, and delivered an UNBOUNDED one: a raw column increment
+    // with no entitlement row that anything could ever expire.
     //
     // The test belongs HERE and nowhere else. Adding it on the offer alone
     // leaves the crafted/stale checkout selling it; adding it on the checkout
     // alone re-opens the divergence in the other direction, listing a product
     // that answers 400 at the till. Both callers pass the same `now`, so they
     // move together.
-    if (input.baseline.endsAt.getTime() <= input.now.getTime()) return null;
+    if (subscriptionEndsAt.getTime() <= input.now.getTime()) return null;
     return {
       lifetime,
-      expiresAt: input.baseline.endsAt,
+      expiresAt: subscriptionEndsAt,
       endsBound: 'subscription_end',
       resetAt: null,
       cycleStartsAt: null,
@@ -236,7 +245,12 @@ export function resolveAddOnLifetimeGrant(input: {
  * An `UNTIL_NEXT_RESET` entitlement bound to a reset epoch ends at that reset
  * when its `expiresAt` is the reset plus the margin, and at the subscription's
  * end when that cut it short (`expiresAt` earlier). Everything else with an
- * end ends with the subscription. `null` only for a row with no end at all.
+ * end ends with the subscription — except an `UNTIL_NEXT_RESET` one bound to NO
+ * reset: its reset rule changed and it kept the date it was promised
+ * (`redateResetAddOnsInTransaction` detaches it), or no window could be bound
+ * at its capture. It ends by that date, which is neither a reset nor
+ * (necessarily) the subscription's end, so no bound is named — `null`, and the
+ * cabinet shows the plain date. `null` also for a row with no end at all.
  */
 export function entitlementEndBound(row: {
   readonly lifetime: AddOnLifetime;
@@ -245,6 +259,7 @@ export function entitlementEndBound(row: {
   readonly epochPlannedEndsAt: Date | null;
 }): AddOnEndBound | null {
   if (row.expiresAt === null) return null;
-  if (row.lifetime !== AddOnLifetime.UNTIL_NEXT_RESET || row.epochPlannedEndsAt === null) return 'subscription_end';
+  if (row.lifetime !== AddOnLifetime.UNTIL_NEXT_RESET) return 'subscription_end';
+  if (row.epochPlannedEndsAt === null) return null;
   return row.expiresAt.getTime() >= row.epochPlannedEndsAt.getTime() + RESET_EXPIRY_MARGIN_MS ? 'reset' : 'subscription_end';
 }

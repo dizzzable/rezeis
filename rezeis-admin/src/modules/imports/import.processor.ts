@@ -7,6 +7,8 @@ import { Job } from 'bullmq';
 
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { EVENT_TYPES, SystemEventsService } from '../../common/services/system-events.service';
+import { followChangedResetRules } from '../add-on-entitlements/services/reset-rule-follow';
+import { SubscriptionTermService } from '../add-on-entitlements/services/subscription-term.service';
 import { PanelLinkCheckService } from '../profile-sync/panel-link-check.service';
 import { ProfileSyncQueueService } from '../profile-sync/profile-sync-queue.service';
 import { IMPORT_QUEUE, IMPORT_JOBS } from './imports.constants';
@@ -26,6 +28,12 @@ import { parseRemnashopBackup } from './utils/remnashop-backup-parser';
 import { parseBedolagaBackup } from './utils/bedolaga-backup-parser';
 import { parseStealthnetBackup } from './utils/stealthnet-backup-parser';
 import { parseThreeXuiBackup } from './utils/threexui-backup-parser';
+
+/**
+ * How many subscriptions an import's own reset-rule follow takes after it;
+ * the boundary scheduler's sweep finishes the rest (`followChangedResetRules`).
+ */
+const IMPORT_RESET_RULE_FOLLOW_LIMIT = 2_000;
 
 /**
  * BullMQ processor for import operations.
@@ -252,6 +260,32 @@ export class ImportProcessor extends WorkerHost {
       } catch (checkErr) {
         this.logger.warn(
           `Panel link check not requested after import ${importRecordId}: ${(checkErr as Error).message}`,
+        );
+      }
+
+      // A re-import can rewrite a subscription's reset rule — the donor's own
+      // on a row no plan owns (`reimportPlanSnapshot`), or Remnawave's — and
+      // the terms of such a subscription, with its «до сброса» add-ons, follow
+      // it (P6) before anything pushes it; a live linked profile is pushed at
+      // once. Each subscription in a short transaction of its own; what this
+      // leaves, the boundary scheduler's sweep finishes. Best-effort, as the
+      // steps around it: the import has committed.
+      try {
+        const followed = await followChangedResetRules(
+          {
+            prisma: this.prismaService,
+            terms: new SubscriptionTermService(),
+            enqueue: (syncJobId) => this.profileSyncQueueService.enqueue(syncJobId),
+            logger: this.logger,
+          },
+          { limit: IMPORT_RESET_RULE_FOLLOW_LIMIT, correlationId: `import:${importRecordId}`, push: 'if-followed' },
+        );
+        if (followed.followed > 0) {
+          this.logger.log(`Import ${importRecordId}: ${followed.followed} subscription(s) followed a changed reset rule`);
+        }
+      } catch (followErr) {
+        this.logger.warn(
+          `Reset-rule follow not run after import ${importRecordId}; the sweep does it: ${(followErr as Error).message}`,
         );
       }
 

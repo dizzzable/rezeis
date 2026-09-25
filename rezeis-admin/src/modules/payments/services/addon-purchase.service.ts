@@ -275,7 +275,8 @@ export class AddOnPurchaseService {
     // subscription does is aligned first, under the row lock, and read again —
     // the same move the ledger makes at fulfilment. A term that already agrees
     // costs nothing; with a renewal queued the queued term is the one aligned,
-    // and an add-on bought now still ends with the CURRENT period.
+    // and an add-on bought now «до конца подписки» ends with the subscription,
+    // the queued period included (`resolveAddOnLifetimeGrant`, review R3a-05).
     if (activeTerm !== null && activeTerm.endsAt?.getTime() !== subscription.expiresAt?.getTime()) {
       const aligned = await this.prismaService.$transaction((tx) =>
         this.subscriptionTermService.alignTailToExpiryInTransaction(tx, subscription.id, {

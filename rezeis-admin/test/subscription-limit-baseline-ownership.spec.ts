@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { SubscriptionStatus } from '@prisma/client';
+import { type Prisma, SubscriptionStatus } from '@prisma/client';
 
 import { BackupPlanClonerService } from '../src/modules/imports/services/backup-plan-cloner.service';
 import { PointsWalletService } from '../src/modules/points/services/points-wallet.service';
@@ -9,6 +9,7 @@ import { ReferralPointsExchangeService } from '../src/modules/referrals/services
 import { RemnawaveWebhookService } from '../src/modules/remnawave/services/remnawave-webhook.service';
 import { resolveInheritedPlanLimitUpdate } from '../src/modules/subscriptions/services/plan-inherited-limits.util';
 import { PlanSnapshotSyncService } from '../src/modules/subscriptions/services/plan-snapshot-sync.service';
+import { emulatePlanSnapshotMirror, type MirroredRow } from './helpers/plan-snapshot-mirror-double';
 import { NOT_IN_TERM_MODEL } from './helpers/term-model-hooks';
 
 /**
@@ -86,26 +87,16 @@ function planLimits(plan: typeof EDITED_PLAN) {
 // ═══ 1. A plan edit must not move the baseline ═════════════════════════════
 
 async function runPlanSnapshotSync(storedSnapshot: unknown): Promise<Record<string, unknown>> {
-  const written: unknown[] = [];
+  // The mirror is one statement merging keys into the stored JSON; the double
+  // applies exactly the keys that statement names (`emulatePlanSnapshotMirror`).
+  const rows: MirroredRow[] = [{ id: 'sub-1', planSnapshot: { ...(storedSnapshot as Record<string, unknown>) } }];
   const service = new PlanSnapshotSyncService();
   const { updated } = await service.syncPlanSnapshotMetadata(
-    {
-      $queryRaw: async () => [{ id: 'sub-1', planSnapshot: storedSnapshot }],
-      subscription: {
-        update: async (args: { readonly data: { readonly planSnapshot: unknown } }) => {
-          written.push(args.data.planSnapshot);
-          return null;
-        },
-      },
-      // The edit also changes the reset rule (NO_RESET → MONTH), so the sync
-      // makes the subscriber's terms follow it (P6): this one has none.
-      subscriptionTerm: { findMany: async () => [] },
-      settings: { findFirst: async () => null },
-    } as never,
+    { $queryRaw: async (query: Prisma.Sql) => emulatePlanSnapshotMirror(query, rows) } as never,
     EDITED_PLAN as never,
   );
   assert.equal(updated, 1, 'the sync must have visited the subscriber');
-  return written[0] as Record<string, unknown>;
+  return rows[0]!.planSnapshot;
 }
 
 describe('a plan edit and the subscriber limit baseline', () => {

@@ -228,11 +228,13 @@ export class PlanSquadPropagationService {
     // A plan edit that writes a subscription's squad columns IS the plan
     // giving that subscription those squads, so the snapshot must say so. It
     // is per-row because `plan_snapshot` is JSON and every row's is different:
-    // a merge cannot be expressed as one `updateMany` payload. The cost is not
-    // new — `syncPlanSnapshotMetadata` already walks the SAME population one
-    // row at a time earlier in this very transaction — and the alternative
-    // (moving the columns in one statement and the snapshots in another) is
-    // strictly more work for the same result.
+    // a merge cannot be expressed as one `updateMany` payload. The cost is one
+    // statement per subscriber inside the plan edit's transaction: measured,
+    // about 7,000 subscribers outrun its 5 s timeout (P2028) and the whole
+    // edit rolls back. `syncPlanSnapshotMetadata` no longer walks the rows —
+    // it merges its keys in ONE statement (`plan_snapshot || jsonb_build_object`),
+    // and this merge can take the same shape; until then a squad edit on such
+    // a plan fails.
     //
     // `updateMany` on a single id rather than `update`: a subscription deleted
     // between the scan above and this write makes `update` throw P2025 and

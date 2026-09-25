@@ -1,30 +1,23 @@
-import { Injectable, Optional } from '@nestjs/common';
-import {
-  Prisma,
-  PrismaClient,
-  SubscriptionStatus,
-  SyncAction,
-  SyncJobStatus,
-  TrafficLimitStrategy,
-} from '@prisma/client';
+import { Injectable } from '@nestjs/common';
+import { Prisma, PrismaClient, SubscriptionStatus } from '@prisma/client';
 
-import { readRemnawaveTimeZoneInTransaction } from '../../add-on-entitlements/services/reset-epoch.util';
-import { SubscriptionTermService } from '../../add-on-entitlements/services/subscription-term.service';
 import { TrafficLimitStrategyValue } from '../../plans/dto/traffic-limit-strategy.dto';
 
-/** Marks the push a plan's reset-rule edit queues for each live subscriber. */
-export const PLAN_STRATEGY_UPDATE_CAUSE = 'PLAN_STRATEGY_UPDATE';
+/** Marks the push a changed reset rule queues for each live subscriber (`reset-rule-follow.ts`). */
+export { PLAN_STRATEGY_UPDATE_CAUSE } from '../../add-on-entitlements/services/reset-rule-follow';
 
 export interface PlanSnapshotSyncResult {
   /** Subscriptions whose snapshot was rewritten. */
   readonly updated: number;
-  /** Of those, the ones whose reset rule the edit changed. */
+  /** Of those, the ones whose reset rule the edit changed (DELETED rows aside). */
   readonly strategyChanged: number;
   /**
-   * The pushes queued for them (PENDING rows the profile-sync sweep picks up);
-   * a caller that can enqueue after its commit may nudge them sooner.
+   * Those subscriptions, for the caller to hand to `followResetRules` once its
+   * transaction has COMMITTED: their terms and «до сброса» add-ons follow the
+   * new rule, and a live one is pushed to Remnawave — each in a short
+   * transaction of its own (`reset-rule-follow.ts`).
    */
-  readonly syncJobIds: readonly string[];
+  readonly followSubscriptionIds: readonly string[];
 }
 
 interface SnapshotSyncPlanInput {
@@ -39,22 +32,15 @@ interface SnapshotSyncPlanInput {
   readonly externalSquad: string | null;
 }
 
-type SubscriptionSnapshotRow = {
+type MirroredSubscriptionRow = {
   readonly id: string;
-  readonly planSnapshot: Prisma.JsonValue;
-  readonly status?: string;
-  readonly remnawaveId?: string | null;
+  /** The rule the snapshot named before this write; `null` when it named none. */
+  readonly previousStrategy: string | null;
+  readonly status: string;
 };
 
 @Injectable()
 export class PlanSnapshotSyncService {
-  /** Terms follow a changed reset rule: see `followResetRuleInTransaction`. Stateless. */
-  private readonly subscriptionTermService: SubscriptionTermService;
-
-  public constructor(@Optional() subscriptionTermService?: SubscriptionTermService) {
-    this.subscriptionTermService = subscriptionTermService ?? new SubscriptionTermService();
-  }
-
   /**
    * Mirrors the edited plan's DISPLAY fields into every subscriber's
    * `plan_snapshot`.
@@ -132,107 +118,84 @@ export class PlanSnapshotSyncService {
    * edit changes: its terms of this plan take the new rule
    * (`SubscriptionTermService.followResetRuleInTransaction`), its live «до
    * сброса» add-ons end at the first reset under it (never later than
-   * promised), and a push is queued for a live linked profile — a fan-out,
-   * like the squads' (`PlanSquadPropagationService`). A snapshot that names no
-   * rule of its own (an old import) changes nothing here: its rule was never
-   * the panel's to date anything by.
+   * promised), and a push goes out at once for a live linked profile — a
+   * fan-out, like the squads' (`PlanSquadPropagationService`). A snapshot that
+   * names no rule of its own (an old import) changes nothing here: its rule
+   * was never the panel's to date anything by.
+   *
+   * ── …but NOT in this transaction (R3a-01, 25.09.2026) ────────────────────
+   *
+   * That per-subscriber work used to run in here, inside the plan edit's one
+   * interactive transaction with Prisma's 5-second timeout — some 4.7 ms a
+   * subscriber, so the rule of a plan that ever had about 1,000 buyers could
+   * not be changed at all: P2028, everything rolled back. This method now
+   * writes the snapshots only, in ONE statement whatever the plan's size, and
+   * RETURNS the subscribers whose rule changed; the caller hands them to
+   * `followResetRules` (`reset-rule-follow.ts`) once it has committed — one
+   * short transaction per subscriber, each push enqueued right after its
+   * commit, and the boundary scheduler's sweep finishing whatever a crash
+   * left behind (the terms that still name the old rule say so).
    */
   public async syncPlanSnapshotMetadata(
     prismaClient: Prisma.TransactionClient | PrismaClient,
     plan: SnapshotSyncPlanInput,
-    options: {
-      /** «Часовой пояс Remnawave»; read through `prismaClient` when a rule changed and none is given. */
-      readonly remnawaveTimeZone?: string;
-      readonly now?: Date;
-    } = {},
+    options: { readonly now?: Date } = {},
   ): Promise<PlanSnapshotSyncResult> {
-    const subscriptions = await prismaClient.$queryRaw<readonly SubscriptionSnapshotRow[]>(
-      Prisma.sql`
-        SELECT "id", "plan_snapshot" AS "planSnapshot", "status"::text AS "status", "remnawave_id" AS "remnawaveId"
-        FROM "subscriptions"
-        WHERE "plan_snapshot"->>'id' = ${plan.id}
-      `,
-    );
+    // MIRRORED — display facts: `name`, `tag`, `type`. A renamed or re-tagged
+    // plan must not keep showing its old label on the cabinet card, in the
+    // bot, or on an invoice. And `trafficLimitStrategy`, which is NOT
+    // display-only: `ProfileSyncProcessor` reads it out of this JSON and pushes
+    // it to the panel. It is not one of the four the override rule compares,
+    // and the subscription editor exposes no per-subscription field for it, so
+    // the plan row stays its single owner and mirroring it cannot erase an
+    // operator's choice.
+    //
+    // FROZEN — `icon`, and the four inherited-limit keys: the `||` merge below
+    // writes the four keys above and leaves every other key as it is. Do not
+    // add them "for consistency"; both omissions are load-bearing. `icon` is
+    // frozen at purchase time: a customer's card must not change its glyph
+    // because the operator restyled the plan. `trafficLimit` / `deviceLimit` /
+    // `internalSquads` / `externalSquad` are the BASELINE for override
+    // detection — `resolveInheritedPlanLimitUpdate` decides whether an operator
+    // individually adjusted a subscription by comparing its columns against
+    // exactly these keys. Mirroring them made the snapshot track the live plan
+    // rather than what the plan gave THIS subscription, so one plan edit made
+    // every never-adjusted subscriber read as overridden and pinned their
+    // limits forever. They stay on `SnapshotSyncPlanInput` above so the call
+    // site can keep handing over a whole plan row.
+    //
+    // ONE STATEMENT, merged in the database under each row's lock: the rule
+    // each snapshot named BEFORE the write comes back from the locking read in
+    // the same statement, so it cannot be raced, and no other key of the JSON
+    // is written back from a stale copy.
+    const rows = await prismaClient.$queryRaw<MirroredSubscriptionRow[]>(Prisma.sql`
+      WITH "previous" AS (
+        SELECT "id", "plan_snapshot"->>'trafficLimitStrategy' AS "previousStrategy"
+          FROM "subscriptions"
+         WHERE "plan_snapshot"->>'id' = ${plan.id}
+           FOR UPDATE
+      )
+      UPDATE "subscriptions" AS s
+         SET "plan_snapshot" = s."plan_snapshot" || jsonb_build_object(
+               'name', ${plan.name}::text,
+               'tag', ${plan.tag}::text,
+               'type', ${plan.type}::text,
+               'trafficLimitStrategy', ${plan.trafficLimitStrategy}::text
+             ),
+             "updated_at" = ${options.now ?? new Date()}
+        FROM "previous"
+       WHERE s."id" = "previous"."id"
+      RETURNING s."id", "previous"."previousStrategy", s."status"::text AS "status"
+    `);
 
-    let updatedCount = 0;
-    let strategyChanged = 0;
-    const syncJobIds: string[] = [];
-    let timeZone: string | undefined = options.remnawaveTimeZone;
-    let timeZoneRead = timeZone !== undefined;
-    for (const subscription of subscriptions) {
-      const planSnapshot =
-        isJsonObject(subscription.planSnapshot) ? { ...subscription.planSnapshot } : {};
-      const previousStrategy = planSnapshot.trafficLimitStrategy;
-      // MIRRORED — display facts. A renamed or re-tagged plan must not keep
-      // showing its old label on the cabinet card, in the bot, or on an invoice.
-      planSnapshot.name = plan.name;
-      planSnapshot.tag = plan.tag;
-      planSnapshot.type = plan.type;
-      // Mirrored too, and NOT display-only: `ProfileSyncProcessor` reads
-      // `trafficLimitStrategy` out of this JSON and pushes it to the panel. It
-      // is not one of the four the override rule compares, and the subscription
-      // editor exposes no per-subscription field for it, so the plan row stays
-      // its single owner and mirroring it cannot erase an operator's choice.
-      planSnapshot.trafficLimitStrategy = plan.trafficLimitStrategy;
-
-      // FROZEN — `icon`, and the four inherited-limit keys. Do not add them
-      // back "for consistency"; both omissions are load-bearing.
-      //
-      // `icon` is frozen at purchase time: a customer's card must not change
-      // its glyph because the operator restyled the plan.
-      //
-      // `trafficLimit` / `deviceLimit` / `internalSquads` / `externalSquad` are
-      // frozen because they are the BASELINE for override detection —
-      // `resolveInheritedPlanLimitUpdate` decides whether an operator
-      // individually adjusted a subscription by comparing its columns against
-      // exactly these keys. Mirroring them made the snapshot track the live
-      // plan rather than what the plan gave THIS subscription, so one plan edit
-      // made every never-adjusted subscriber read as overridden and pinned
-      // their limits forever. They stay on `SnapshotSyncPlanInput` above so the
-      // call site can keep handing over a whole plan row.
-      await prismaClient.subscription.update({
-        where: {
-          id: subscription.id,
-        },
-        data: {
-          planSnapshot,
-        },
-      });
-      updatedCount += 1;
-
-      if (typeof previousStrategy !== 'string' || previousStrategy === plan.trafficLimitStrategy) continue;
-      strategyChanged += 1;
-      const tx = prismaClient as Prisma.TransactionClient;
-      if (!timeZoneRead) {
-        timeZone = await readRemnawaveTimeZoneInTransaction(tx);
-        timeZoneRead = true;
-      }
-      await this.subscriptionTermService.followResetRuleInTransaction(tx, {
-        subscriptionId: subscription.id,
-        strategy: plan.trafficLimitStrategy as TrafficLimitStrategy,
-        planId: plan.id,
-        remnawaveTimeZone: timeZone,
-        now: options.now,
-        correlationId: `plan-edit:${plan.id}`,
-      });
-      const live = subscription.status === SubscriptionStatus.ACTIVE || subscription.status === SubscriptionStatus.LIMITED;
-      if (!live || subscription.remnawaveId === null || subscription.remnawaveId === undefined) continue;
-      const job = await tx.profileSyncJob.create({
-        data: {
-          subscriptionId: subscription.id,
-          action: SyncAction.UPDATE,
-          status: SyncJobStatus.PENDING,
-          cause: PLAN_STRATEGY_UPDATE_CAUSE,
-          payload: { source: PLAN_STRATEGY_UPDATE_CAUSE, planId: plan.id } satisfies Prisma.InputJsonObject,
-        },
-        select: { id: true },
-      });
-      syncJobIds.push(job.id);
-    }
-    return { updated: updatedCount, strategyChanged, syncJobIds };
+    const followSubscriptionIds = rows
+      .filter(
+        (row) =>
+          row.status !== SubscriptionStatus.DELETED &&
+          typeof row.previousStrategy === 'string' &&
+          row.previousStrategy !== plan.trafficLimitStrategy,
+      )
+      .map((row) => row.id);
+    return { updated: rows.length, strategyChanged: followSubscriptionIds.length, followSubscriptionIds };
   }
-}
-
-function isJsonObject(value: Prisma.JsonValue): value is Prisma.JsonObject {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

@@ -9,7 +9,8 @@ import { EffectiveProjectionService } from '../src/modules/add-on-entitlements/s
 import { EntitlementBoundaryService } from '../src/modules/add-on-entitlements/services/entitlement-boundary.service';
 import { EntitlementCutoverService } from '../src/modules/add-on-entitlements/services/entitlement-cutover.service';
 import { SubscriptionTermService } from '../src/modules/add-on-entitlements/services/subscription-term.service';
-import { ensureLiveResetEpoch } from '../src/modules/add-on-entitlements/services/reset-epoch.util';
+import { planResetEpoch } from '../src/modules/add-on-entitlements/domain/reset-cycle-policy';
+import { bindResetEpochWindow } from '../src/modules/add-on-entitlements/services/reset-epoch.util';
 import { PaymentSubscriptionMutationService } from '../src/modules/payments/services/payment-subscription-mutation.service';
 import { ProfileSyncProcessor } from '../src/modules/profile-sync/profile-sync.processor';
 import { SubscriptionDeletionService } from '../src/modules/subscriptions/services/subscription-deletion.service';
@@ -1160,7 +1161,7 @@ run('add-on entitlement PostgreSQL concurrency', () => {
     assert.equal(projOff.desiredTrafficLimitBytes, 150n * gib, 'the ledger, not the column, carries the 50 GB');
   });
 
-  it('ensureLiveResetEpoch: two concurrent same-window mints converge to one epoch without aborting the transaction (M1)', async () => {
+  it('bindResetEpochWindow: two concurrent same-window mints converge to one epoch without aborting the transaction (M1)', async () => {
     const gib = 1024n * 1024n * 1024n;
     const past = new Date('2026-01-01T00:00:00.000Z');
     const now = new Date(); // both callers compute the SAME calendar-month window
@@ -1177,11 +1178,10 @@ run('add-on entitlement PostgreSQL concurrency', () => {
       },
     });
 
+    const window = planResetEpoch({ strategy: 'MONTH', capability: 'ENABLED', anchorAt: past, referenceAt: now })!;
     const call = () =>
       prisma.$transaction((tx) =>
-        ensureLiveResetEpoch(tx, {
-          termId: term.id, strategy: 'MONTH', anchorAt: past, capability: 'ENABLED', now,
-        }),
+        bindResetEpochWindow(tx, { termId: term.id, startsAt: window.startsAt, plannedEndsAt: window.plannedEndsAt }),
       );
     // Neither transaction aborts (upsert ON CONFLICT DO NOTHING, not create+catch).
     const [a, b] = await Promise.all([call(), call()]);

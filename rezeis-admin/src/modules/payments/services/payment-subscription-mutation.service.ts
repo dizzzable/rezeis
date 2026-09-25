@@ -31,9 +31,10 @@ import { type AddOnRolloutFlags, readAddOnRolloutFlags } from '../../add-on-enti
 import { type AddOnQuote, readAddOnQuote } from '../../add-on-entitlements/domain/add-on-quote';
 import { GIB_BYTES } from '../../add-on-entitlements/domain/cutover-baseline';
 import {
+  nextRemnawaveReset,
   planResetEpoch,
-  resetExpiryAt,
   ResetStrategy,
+  saleResetAnchor,
 } from '../../add-on-entitlements/domain/reset-cycle-policy';
 import { AddOnEntitlementService } from '../../add-on-entitlements/services/add-on-entitlement.service';
 import {
@@ -59,6 +60,8 @@ import {
   readLiveTermLimitBonusesInTransaction,
 } from '../../add-on-entitlements/services/term-limit-bonus.util';
 import { carryImportDomainKeys } from '../../imports/utils/import-domain-snapshot.util';
+import { ADD_ON_NOT_APPLIED_NOTICE_TYPE } from '../../notifications/catalog/default-templates.catalog';
+import { UserNotificationsService } from '../../notifications/services/user-notifications.service';
 import { displayPlanName } from '../../plans/utils/plan-deletion.util';
 import { readTrialSettings } from '../../plans/utils/trial-settings.util';
 import {
@@ -238,6 +241,12 @@ export class PaymentSubscriptionMutationService {
     @Optional() entitlementCutoverService?: EntitlementCutoverService,
     /** The stage switches; `@Optional()` only for the specs that build this by hand. */
     @Optional() private readonly addOnSwitches?: AddOnSwitchesService,
+    /**
+     * The customer's notice when a paid add-on could not be applied (review
+     * R3a-07). `NotificationsModule` is imported by `PaymentsModule`, so Nest
+     * always injects it; `@Optional()` only for the specs that build this by hand.
+     */
+    @Optional() private readonly userNotifications?: UserNotificationsService,
   ) {
     this.entitlementCutoverService =
       entitlementCutoverService ??
@@ -1889,9 +1898,50 @@ export class PaymentSubscriptionMutationService {
         note: card.note,
         needsManualReview: card.needsManualReview,
       });
+      // …and the customer, who paid and sees a completed payment, is told too.
+      if (
+        settledNote.kind === 'NOT_APPLIED' &&
+        settledNote.reason === 'SUBSCRIPTION_NOT_ACTIVE' &&
+        Number(transaction.amount.toString()) > 0
+      ) {
+        await this.tellCustomerAddOnNotApplied(transaction, marker.name ?? marker.addOnId, result.subscription.id);
+      }
     }
 
     return result;
+  }
+
+  /**
+   * ONE notice to the customer whose paid add-on could not be applied because
+   * the subscription was no longer active when the money came in (review
+   * R3a-07) — the catalogue's `addon_not_applied`, so the operator sees and
+   * edits its words in «Карта бота». Only for that reason: its words say so,
+   * and the rarer ones (a catalogue value that adds nothing, a payment that
+   * came after the add-on's own end) are the operator's card alone. Nothing is
+   * refunded by itself; the operator decides, from the card. Best-effort:
+   * the payment is recorded, and a notice that fails is logged, never thrown.
+   * Sent once per payment, as the card is: a replay finds it fulfilled and
+   * never gets here.
+   */
+  private async tellCustomerAddOnNotApplied(
+    transaction: Transaction,
+    addOnName: string,
+    subscriptionId: string,
+  ): Promise<void> {
+    if (this.userNotifications === undefined) return;
+    try {
+      await this.userNotifications.create({
+        userId: transaction.userId,
+        type: ADD_ON_NOT_APPLIED_NOTICE_TYPE,
+        payload: { addon: addOnName, subscriptionId, paymentId: transaction.paymentId },
+      });
+    } catch (error: unknown) {
+      this.logger.warn(
+        `Add-on payment ${transaction.paymentId}: the customer was not told it could not be applied: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
   }
 
   /**
@@ -1998,10 +2048,15 @@ export class PaymentSubscriptionMutationService {
     let expiryEpochId: string | null = null;
     let quoteNote: AddOnQuoteNote | null = null;
     if (marker.lifetime === AddOnLifetime.UNTIL_SUBSCRIPTION_END) {
-      if (term.endsAt === null || term.endsAt.getTime() <= now.getTime()) {
-        return null; // no usable term window → fall back to legacy
+      // «До конца подписки» is the subscription's REAL end (review R3a-05):
+      // its `expiresAt`, to which the tail term was aligned just above — with
+      // an early renewal queued, the queued term's end, not the ACTIVE one's.
+      // The offer quoted exactly that date (`resolveAddOnLifetimeGrant`).
+      const subscriptionEndsAt = subscription.expiresAt;
+      if (subscriptionEndsAt === null || subscriptionEndsAt.getTime() <= now.getTime()) {
+        return null; // no end to bind to → fall back to legacy
       }
-      expiresAt = term.endsAt;
+      expiresAt = subscriptionEndsAt;
     } else {
       // UNTIL_NEXT_RESET — traffic only (`withLedgerMarkerDefaults` sells a
       // device «до конца подписки», whatever its marker says).
@@ -2021,7 +2076,13 @@ export class PaymentSubscriptionMutationService {
       const binding = await this.bindResetQuoteInTransaction(tx, {
         termId: term.id,
         strategy: term.trafficResetStrategy as ResetStrategy,
-        anchorAt: term.resetAnchorAt,
+        // The anchor the checkout sold from (`saleResetAnchor`): the term's
+        // own, else a rolling profile's stored `createdAt`.
+        anchorAt: saleResetAnchor(
+          term.trafficResetStrategy,
+          term.resetAnchorAt,
+          subscription.remnawaveProfileCreatedAt ?? null,
+        ),
         subscriptionEndsAt: subscription.expiresAt,
         quote: marker.quote,
         timeZone: flags.remnawaveTimeZone,
@@ -2030,7 +2091,7 @@ export class PaymentSubscriptionMutationService {
       if (binding.kind === 'NOT_APPLIED') return notApplied(binding.reason, subscription);
       expiresAt = binding.expiresAt;
       expiryEpochId = binding.epochId;
-      if (binding.epochId === null) quoteNote = { kind: 'BOUND_WITHOUT_RESET' };
+      if (binding.windowless) quoteNote = { kind: 'BOUND_WITHOUT_RESET' };
     }
 
     const totalValue = isTraffic ? BigInt(marker.addOnValue) * GIB_BYTES : BigInt(marker.addOnValue);
@@ -2127,6 +2188,17 @@ export class PaymentSubscriptionMutationService {
    * Where a paid «до сброса» add-on ends — the quote's window and end, capped
    * by the subscription's end — or why it cannot be delivered at all.
    * See the note at its one call site in {@link applyAddOnViaLedger}.
+   *
+   * A RULE THAT CHANGED BETWEEN THE CHECKOUT AND THE CAPTURE (review R3a-02).
+   * A plan edit, a plan change or a zone edit in between makes the quoted
+   * reset one the term's CURRENT rule never runs: bound to it, the add-on read
+   * as ending at a reset, was held past its date for a confirmation that never
+   * came and raised the «Remnawave не сбросил трафик» incident. So such a
+   * quote is dated the way a rule change dates a live add-on (`P6`,
+   * `redateResetAddOnsInTransaction`): it ends at the first reset under the
+   * current rule when that comes before the quoted end, bound to that reset;
+   * otherwise it keeps the quoted end, bound to no reset — it ends by its
+   * date, and no card, since nothing about it went wrong.
    */
   private async bindResetQuoteInTransaction(
     tx: Prisma.TransactionClient,
@@ -2140,29 +2212,54 @@ export class PaymentSubscriptionMutationService {
       readonly now: Date;
     },
   ): Promise<
-    | { readonly kind: 'BOUND'; readonly expiresAt: Date; readonly epochId: string | null }
+    | {
+        readonly kind: 'BOUND';
+        readonly expiresAt: Date;
+        readonly epochId: string | null;
+        /** No reset window could be bound at all: the operator's «без привязки» card. */
+        readonly windowless: boolean;
+      }
     | { readonly kind: 'NOT_APPLIED'; readonly reason: AddOnNotAppliedReason }
   > {
-    let window: { readonly startsAt: Date; readonly plannedEndsAt: Date } | null = null;
-    if (input.quote !== undefined && input.quote.resetAt !== null && input.quote.cycleStartsAt !== null) {
-      window = { startsAt: input.quote.cycleStartsAt, plannedEndsAt: input.quote.resetAt };
-    } else if (input.quote === undefined && input.anchorAt !== null) {
+    const currentRule = (): ReturnType<typeof planResetEpoch> => {
+      if (input.anchorAt === null && input.strategy === 'MONTH_ROLLING') return null;
       try {
-        const plan = planResetEpoch({
+        return planResetEpoch({
           strategy: input.strategy,
           capability: 'ENABLED',
-          anchorAt: input.anchorAt,
+          anchorAt: input.anchorAt ?? input.now,
           referenceAt: input.now,
           timeZone: input.timeZone,
         });
-        window = plan === null ? null : { startsAt: plan.startsAt, plannedEndsAt: plan.plannedEndsAt };
       } catch {
-        window = null; // an anchor or a zone the policy refuses: no window
+        return null; // an anchor or a zone the policy refuses: no window
       }
+    };
+    let window: { readonly startsAt: Date; readonly plannedEndsAt: Date } | null = null;
+    let end: Date | null = null;
+    let windowless = false;
+    if (input.quote !== undefined && input.quote.resetAt !== null && input.quote.cycleStartsAt !== null) {
+      end = input.quote.expiresAt;
+      if (isResetOfRule(input.quote.resetAt, input)) {
+        window = { startsAt: input.quote.cycleStartsAt, plannedEndsAt: input.quote.resetAt };
+      } else {
+        const current = currentRule();
+        if (current !== null && current.expiresAt.getTime() < end.getTime()) {
+          window = { startsAt: current.startsAt, plannedEndsAt: current.plannedEndsAt };
+          end = current.expiresAt;
+        }
+      }
+    } else if (input.quote === undefined) {
+      const plan = input.anchorAt === null ? null : currentRule();
+      window = plan === null ? null : { startsAt: plan.startsAt, plannedEndsAt: plan.plannedEndsAt };
+      end = plan === null ? null : plan.expiresAt;
+      windowless = plan === null;
+    } else {
+      end = input.quote.expiresAt;
+      windowless = true;
     }
     const epoch = window === null ? null : await bindResetEpochWindow(tx, { termId: input.termId, ...window });
 
-    let end: Date | null = input.quote?.expiresAt ?? (epoch === null ? null : resetExpiryAt(epoch.plannedEndsAt));
     if (input.subscriptionEndsAt !== null && (end === null || input.subscriptionEndsAt.getTime() < end.getTime())) {
       end = input.subscriptionEndsAt;
     }
@@ -2171,7 +2268,7 @@ export class PaymentSubscriptionMutationService {
     // born expired would only push a raised limit to Remnawave for the sweep to
     // take back minutes later.
     if (end.getTime() <= input.now.getTime()) return { kind: 'NOT_APPLIED', reason: 'ENDED_BEFORE_CAPTURE' };
-    return { kind: 'BOUND', expiresAt: end, epochId: epoch === null ? null : epoch.id };
+    return { kind: 'BOUND', expiresAt: end, epochId: epoch === null ? null : epoch.id, windowless };
   }
 
   private async recordAddOnLedgerNoOp(
@@ -3848,6 +3945,32 @@ function describeAddOnQuoteNote(
         : 'Денег по ней не списано — возвращать нечего.'),
     needsManualReview: input.charged,
   };
+}
+
+/**
+ * Whether `resetAt` is one of the resets the term's rule runs — its strategy,
+ * its anchor (MONTH_ROLLING only), «Часовой пояс Remnawave». A quote made
+ * before the rule changed names a reset that is not (see
+ * `bindResetQuoteInTransaction`). A zone the runtime does not know cannot be
+ * checked against: the quote then stands as it was sold.
+ */
+function isResetOfRule(
+  resetAt: Date,
+  rule: { readonly strategy: ResetStrategy; readonly anchorAt: Date | null; readonly timeZone: string | undefined },
+): boolean {
+  try {
+    const next = nextRemnawaveReset(
+      {
+        strategy: rule.strategy,
+        anchorAt: rule.strategy === 'MONTH_ROLLING' ? rule.anchorAt : null,
+        timeZone: rule.timeZone,
+      },
+      new Date(resetAt.getTime() - 1),
+    );
+    return next !== null && next.getTime() === resetAt.getTime();
+  } catch {
+    return true;
+  }
 }
 
 /**

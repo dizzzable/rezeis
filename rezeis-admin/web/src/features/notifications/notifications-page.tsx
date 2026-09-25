@@ -98,6 +98,10 @@ const USER_NOTIFICATION_KEYS = [
   'addon_devices_ended',
   'addon_devices_auto_ends_in_3_days',
   'addon_devices_auto_ended',
+  // A paid add-on that could not be applied: the subscription was no longer
+  // active when the payment arrived. What happens to the money is decided by
+  // the operator, never automatically.
+  'addon_not_applied',
   'referral_attached',
   'referral_reward',
   'referral_qualified',

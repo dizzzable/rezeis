@@ -94,6 +94,8 @@ function directPurchaseEnv(input: {
     userId: 'user-1',
     status: 'ACTIVE',
     remnawaveId: 'rw-1',
+    // Where the ACTIVE term below ends: «до конца подписки» is bound to it.
+    expiresAt: new Date(Date.now() + 30 * DAY_MS),
     ...input.sub,
   };
 

@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 
 import { PlanSnapshotSyncService } from '../src/modules/subscriptions/services/plan-snapshot-sync.service';
 import { BackupPlanClonerService } from '../src/modules/imports/services/backup-plan-cloner.service';
+import { emulatePlanSnapshotMirror } from './helpers/plan-snapshot-mirror-double';
 
 /**
  * The snapshot key that decides whether a re-linked subscriber exists
@@ -150,35 +151,19 @@ const CLONE_INPUT = {
 /**
  * The rename mirror, driven for real against the rows the cloner just wrote.
  *
- * `syncPlanSnapshotMetadata` selects with `WHERE "plan_snapshot"->>'id' = $1`.
- * The double reproduces exactly that predicate — a JSON string member named
- * `id` — and nothing else, so a row the real query would miss is missed here
- * too.
+ * `syncPlanSnapshotMetadata` is ONE statement that updates the rows
+ * `WHERE "plan_snapshot"->>'id' = $1`, merging the four mirrored keys in. The
+ * double reproduces exactly that predicate — the JSON string member the
+ * statement names, read out of its text — and that merge, so a row the real
+ * statement would miss is missed here too.
  */
 async function mirrorRename(
   subscriptions: StoredSubscription[],
   plan: { readonly id: string; readonly name: string },
 ): Promise<number> {
   const client = {
-    $queryRaw: async (query: { readonly values?: readonly unknown[] }) => {
-      const planId = query.values?.[0];
-      return subscriptions
-        .filter((sub) => sub.planSnapshot['id'] === planId)
-        .map((sub) => ({ id: sub.id, planSnapshot: sub.planSnapshot }));
-    },
-    subscription: {
-      update: async ({
-        where,
-        data,
-      }: {
-        where: { id: string };
-        data: { planSnapshot: Record<string, unknown> };
-      }) => {
-        const target = subscriptions.find((sub) => sub.id === where.id)!;
-        target.planSnapshot = data.planSnapshot;
-        return {};
-      },
-    },
+    $queryRaw: async (query: { readonly strings?: readonly string[]; readonly values?: readonly unknown[] }) =>
+      emulatePlanSnapshotMirror(query, subscriptions),
   };
   const { updated } = await new PlanSnapshotSyncService().syncPlanSnapshotMetadata(client as never, {
     id: plan.id,

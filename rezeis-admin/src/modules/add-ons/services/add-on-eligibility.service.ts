@@ -423,23 +423,16 @@ export class AddOnEligibilityService {
     readonly flags: { readonly directPurchase: boolean; readonly entitlementShadow: boolean };
     readonly activeTerm: { readonly endsAt: Date | null } | null;
     readonly hasAnyTerm: boolean;
-    readonly scheduledTermQueued: boolean;
     readonly subscriptionExpiresAt: Date | null;
     readonly now: Date;
   }> {
     const base = { flags, activeTerm, subscriptionExpiresAt, now };
-    if (!flags.directPurchase) return { ...base, hasAnyTerm: activeTerm !== null, scheduledTermQueued: false };
+    if (!flags.directPurchase) return { ...base, hasAnyTerm: activeTerm !== null };
     const hasAnyTerm =
       activeTerm !== null ||
       (await this.prismaService.subscriptionTerm.findFirst({ where: { subscriptionId }, select: { id: true } })) !==
         null;
-    const scheduledTermQueued =
-      activeTerm !== null &&
-      (await this.prismaService.subscriptionTerm.findFirst({
-        where: { subscriptionId, status: SubscriptionTermStatus.SCHEDULED },
-        select: { id: true },
-      })) !== null;
-    return { ...base, hasAnyTerm, scheduledTermQueued };
+    return { ...base, hasAnyTerm };
   }
 
   /**

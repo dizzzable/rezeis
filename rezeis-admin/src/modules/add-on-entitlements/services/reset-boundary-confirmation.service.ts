@@ -8,6 +8,8 @@ import { readAddOnRolloutFlags } from '../add-on-rollout.config';
 import { entitlementEndBound } from '../domain/add-on-lifetime';
 import { DEFAULT_REMNAWAVE_TIME_ZONE, RESET_EXPIRY_MARGIN_MS, type ResetStrategy } from '../domain/reset-cycle-policy';
 import { AddOnSwitchesService } from '../switches/add-on-switches.service';
+import { SCHEDULED_RUN_SLACK_MS } from '../switches/reset-schedule-check';
+import { ownTrafficResetSql } from './own-traffic-resets';
 
 /**
  * THE LIMIT DROP FOLLOWS THE COUNTER RESET
@@ -24,11 +26,26 @@ import { AddOnSwitchesService } from '../switches/add-on-switches.service';
  * So the sweep takes such an add-on off only once its `expiresAt` has passed
  * AND Remnawave's reset is CONFIRMED:
  *  - DAY / WEEK / MONTH — Remnawave resets every profile of the strategy in
- *    one batch, so one profile that was reset within minutes of the planned
- *    instant confirms the boundary for all of them: a subscription bound to the
- *    boundary already stamped with such a reset (a `user.enabled` webhook after
- *    the reset, any later answer), or else one or two sample profiles read now
- *    (`RemnawaveProfileFactsService`, which stamps what it reads);
+ *    one batch, and stamps them all with ONE instant, the run's `now` (W7
+ *    §1.1). So the boundary is confirmed for everybody by the RUN — an instant
+ *    within the batch window that is stamped on two or more profiles of the
+ *    strategy, or one stamped within seconds after the planned instant, the
+ *    shape only the cron minute has ({@link showsScheduledRun}) — never by one
+ *    subscriber's own reset. Before (review R3a-04) any stamped reset within
+ *    the hour confirmed the boundary: one customer who renewed at 00:25 took
+ *    everyone's add-ons off although Remnawave had missed its 00:05 run, and
+ *    their counters were never zeroed. The panel's own resets (a renewal, the
+ *    operator's «Сбросить», «Обнулить трафик») are never evidence of a run
+ *    (`own-traffic-resets.ts`). What is stamped is looked at first; else one
+ *    or two sample profiles are read now (`RemnawaveProfileFactsService`,
+ *    which stamps what it reads).
+ *    A subscriber whose OWN counter was zeroed at or after the planned instant
+ *    — by the run, a renewal, anything — has nothing left to wait for, and
+ *    its own epochs close (`closeOwnResets`); that confirms nothing
+ *    for the others. It is also what an install with ONE profile on the
+ *    strategy relies on, where no instant can be shared: that profile's reset
+ *    releases its own add-on, and without one it is held until the hold runs
+ *    out, with the incident — which is then true.
  *  - MONTH_ROLLING — each profile has its own day, so each subscription
  *    confirms for itself: its own `remnawave_last_traffic_reset_at` at or after
  *    the planned reset (less {@link RESET_CONFIRMATION_TOLERANCE_MS}), read from
@@ -138,11 +155,42 @@ export function isHeldForResetConfirmation(row: HoldableEntitlement, now: Date):
   );
 }
 
-/** Does an observed reset confirm the calendar boundary at `plannedAt`? */
+/** Does an observed reset fall within the batch window of the calendar boundary at `plannedAt`? */
 export function confirmsCalendarReset(observed: Date | null, plannedAt: Date): boolean {
   if (observed === null) return false;
   const delta = observed.getTime() - plannedAt.getTime();
   return delta >= -RESET_CONFIRMATION_TOLERANCE_MS && delta <= CALENDAR_BATCH_WINDOW_MS;
+}
+
+/** One reset instant Remnawave stamped, and on how many profiles of the strategy. */
+export interface StampedReset {
+  readonly resetAt: Date;
+  /** Profiles of the strategy stamped with exactly this instant, the panel's own resets left out. */
+  readonly profiles: number;
+}
+
+/**
+ * Does what is stamped show Remnawave's SCHEDULED RUN for the calendar
+ * boundary at `plannedAt` — not one subscriber's reset? Within the batch
+ * window ({@link confirmsCalendarReset}), an instant that is either
+ *  - shared by two or more profiles of the strategy: a run stamps every
+ *    profile it resets with its one `now`, and two resets that are not one
+ *    run never share a millisecond; or
+ *  - within {@link SCHEDULED_RUN_SLACK_MS} after the planned instant: the cron
+ *    fires on the minute of Remnawave's own clock and stamps that clock, so a
+ *    run on time lands there whatever the two clocks' difference — the one
+ *    shape a lone profile can show (a run that waited behind another reset
+ *    job lands later, and is recognised by the shared instant instead).
+ * The panel's own resets are to be left out of `stamps` by the caller
+ * (`ownTrafficResetSql`): a renewal from the auto-renew cron lands a second
+ * after a whole minute too.
+ */
+export function showsScheduledRun(stamps: readonly StampedReset[], plannedAt: Date): boolean {
+  return stamps.some((stamp) => {
+    if (!confirmsCalendarReset(stamp.resetAt, plannedAt)) return false;
+    const late = stamp.resetAt.getTime() - plannedAt.getTime();
+    return stamp.profiles >= 2 || (late >= 0 && late <= SCHEDULED_RUN_SLACK_MS);
+  });
 }
 
 /** Does a subscription's own observed reset confirm its rolling boundary at `plannedAt`? */
@@ -254,9 +302,11 @@ export class ResetBoundaryConfirmationService {
   }
 
   /**
-   * DAY / WEEK / MONTH: one batch resets every profile of the strategy, so one
-   * profile reset within minutes of the planned instant confirms the boundary
-   * for all — first among what is stamped, then among the samples read now.
+   * DAY / WEEK / MONTH: one batch resets every profile of the strategy with
+   * ONE instant, so the RUN confirms the boundary for all
+   * ({@link showsScheduledRun}); a subscriber's own reset releases only its
+   * own add-on ({@link closeOwnResets}). First what is stamped, then the
+   * samples read now — whose answers are stamped, and looked at the same way.
    */
   private async confirmCalendar(
     boundary: OpenBoundary,
@@ -264,18 +314,10 @@ export class ResetBoundaryConfirmationService {
     budget: { reads: number; failedInARow: number },
   ): Promise<'confirmed' | 'held'> {
     const key = `${boundary.strategy}:${boundary.plannedAt.toISOString()}`;
-    const stamped = await this.prismaService.$queryRaw<Array<{ id: string }>>(Prisma.sql`
-      SELECT s."id"
-      FROM "subscription_reset_epochs" ep
-      JOIN "subscription_terms" t ON t."id" = ep."term_id"
-      JOIN "subscriptions" s ON s."id" = t."subscription_id"
-      WHERE t."traffic_reset_strategy"::text = ${boundary.strategy}
-        AND ep."planned_ends_at" = ${boundary.plannedAt}
-        AND s."remnawave_last_traffic_reset_at" >= ${new Date(boundary.plannedAt.getTime() - RESET_CONFIRMATION_TOLERANCE_MS)}
-        AND s."remnawave_last_traffic_reset_at" <= ${new Date(boundary.plannedAt.getTime() + CALENDAR_BATCH_WINDOW_MS)}
-      LIMIT 1
-    `);
-    if (stamped.length > 0) return this.closeConfirmed(boundary, now, null);
+    if (showsScheduledRun(await this.stampedResets(boundary), boundary.plannedAt)) {
+      return this.closeConfirmed(boundary, now, null);
+    }
+    if ((await this.closeOwnResets(boundary, now)) === 0) return 'confirmed';
 
     if (this.recentlyUnconfirmed(key, now)) return 'held';
     const samples = await this.prismaService.$queryRaw<Array<{ id: string }>>(Prisma.sql`
@@ -297,12 +339,80 @@ export class ResetBoundaryConfirmationService {
       const observed = await this.readReset(sample.id, now, budget);
       if (observed === undefined) break;
       read += 1;
-      if (confirmsCalendarReset(observed, boundary.plannedAt)) return this.closeConfirmed(boundary, now, null);
     }
-    // Asked and not confirmed: not again for a while. Not asked at all (this
-    // tick's reads spent, the panel down): the next tick asks.
-    if (read > 0) this.markUnconfirmed(key, now);
+    if (read === 0) return 'held'; // this tick's reads spent, or the panel down: the next tick asks
+    // What the reads stamped, judged as what was stamped before.
+    if (showsScheduledRun(await this.stampedResets(boundary), boundary.plannedAt)) {
+      return this.closeConfirmed(boundary, now, null);
+    }
+    if ((await this.closeOwnResets(boundary, now)) === 0) return 'confirmed';
+    // Asked and not confirmed: not again for a while.
+    this.markUnconfirmed(key, now);
     return 'held';
+  }
+
+  /**
+   * The reset instants stamped within the batch window on profiles of the
+   * boundary's strategy — the ones the panel pushes it for, by their ACTIVE
+   * term or, outside the term model, their snapshot — each with how many
+   * profiles carry it. The panel's own resets are left out
+   * (`ownTrafficResetSql`): they are no run of Remnawave's.
+   */
+  private async stampedResets(boundary: OpenBoundary): Promise<StampedReset[]> {
+    const rows = await this.prismaService.$queryRaw<Array<{ resetAt: Date; profiles: number }>>(Prisma.sql`
+      SELECT s."remnawave_last_traffic_reset_at" AS "resetAt", COUNT(*)::int AS "profiles"
+      FROM "subscriptions" s
+      WHERE s."status" <> 'DELETED'
+        AND s."remnawave_last_traffic_reset_at" >= ${new Date(boundary.plannedAt.getTime() - RESET_CONFIRMATION_TOLERANCE_MS)}
+        AND s."remnawave_last_traffic_reset_at" <= ${new Date(boundary.plannedAt.getTime() + CALENDAR_BATCH_WINDOW_MS)}
+        AND (
+          EXISTS (
+            SELECT 1
+            FROM "subscription_terms" t
+            WHERE t."subscription_id" = s."id"
+              AND t."status" = 'ACTIVE'
+              AND t."traffic_reset_strategy"::text = ${boundary.strategy}
+          )
+          OR s."plan_snapshot"->>'trafficLimitStrategy' = ${boundary.strategy}
+        )
+        AND NOT ${ownTrafficResetSql(Prisma.sql`s."id"`, Prisma.sql`s."remnawave_last_traffic_reset_at"`)}
+      GROUP BY s."remnawave_last_traffic_reset_at"
+    `);
+    return rows.map((row) => ({ resetAt: new Date(row.resetAt), profiles: Number(row.profiles) }));
+  }
+
+  /**
+   * Releases the subscribers of the boundary whose OWN counter Remnawave
+   * zeroed at or after the planned instant (less the clock tolerance) — the
+   * run, a renewal, the operator, whoever: they have nothing left to wait for.
+   * Their epochs close as confirmed; nobody else's does. Returns how many
+   * subscriptions still wait on the boundary.
+   */
+  private async closeOwnResets(boundary: OpenBoundary, now: Date): Promise<number> {
+    await this.prismaService.$executeRaw(Prisma.sql`
+      UPDATE "subscription_reset_epochs" AS ep
+         SET "closed_at" = ${now}, "close_source" = ${ResetEpochCloseSource.WEBHOOK_RECONCILIATION}::"ResetEpochCloseSource"
+        FROM "subscription_terms" AS t, "subscriptions" AS s
+       WHERE t."id" = ep."term_id"
+         AND s."id" = t."subscription_id"
+         AND t."traffic_reset_strategy"::text = ${boundary.strategy}
+         AND ep."planned_ends_at" = ${boundary.plannedAt}
+         AND ep."closed_at" IS NULL
+         AND s."remnawave_last_traffic_reset_at" >= ${new Date(boundary.plannedAt.getTime() - RESET_CONFIRMATION_TOLERANCE_MS)}
+    `);
+    const [waiting] = await this.prismaService.$queryRaw<Array<{ subscriptions: number }>>(Prisma.sql`
+      SELECT COUNT(DISTINCT e."subscription_id")::int AS "subscriptions"
+      FROM "add_on_entitlements" e
+      JOIN "subscription_reset_epochs" ep ON ep."id" = e."expiry_epoch_id"
+      JOIN "subscription_terms" t ON t."id" = ep."term_id"
+      WHERE t."traffic_reset_strategy"::text = ${boundary.strategy}
+        AND ep."planned_ends_at" = ${boundary.plannedAt}
+        AND ep."closed_at" IS NULL
+        AND e."state" = 'ACTIVE'
+        AND e."lifetime" = 'UNTIL_NEXT_RESET'
+        AND e."expires_at" >= ep."planned_ends_at" + ${msInterval(RESET_EXPIRY_MARGIN_MS)}
+    `);
+    return Number(waiting?.subscriptions ?? 0);
   }
 
   /**

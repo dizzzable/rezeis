@@ -13,6 +13,7 @@ import {
 
 import { PrismaService } from '../src/common/prisma/prisma.service';
 import { EVENT_PRESENTATION } from '../src/common/services/system-events.service';
+import { nextRemnawaveReset } from '../src/modules/add-on-entitlements/domain/reset-cycle-policy';
 import { AddOnEntitlementService } from '../src/modules/add-on-entitlements/services/add-on-entitlement.service';
 import { EffectiveProjectionService } from '../src/modules/add-on-entitlements/services/effective-projection.service';
 import { EntitlementBoundaryService } from '../src/modules/add-on-entitlements/services/entitlement-boundary.service';
@@ -22,7 +23,10 @@ import {
   ResetBoundaryConfirmationService,
 } from '../src/modules/add-on-entitlements/services/reset-boundary-confirmation.service';
 import { SubscriptionTermService } from '../src/modules/add-on-entitlements/services/subscription-term.service';
-import type { RemnawaveProfileFacts } from '../src/modules/remnawave/utils/remnawave-profile-facts.util';
+import {
+  type RemnawaveProfileFacts,
+  stampRemnawaveProfileFacts,
+} from '../src/modules/remnawave/utils/remnawave-profile-facts.util';
 import { removeDurableFixtures } from './helpers/durable-rows-cleanup';
 
 /**
@@ -217,6 +221,24 @@ async function seedHeld(fixture: HeldFixture): Promise<{ readonly subscriptionId
   return { subscriptionId: id, epochId: epoch.id };
 }
 
+/**
+ * A paid renewal's reset, as the panel records it: the UPDATE job that carried
+ * `resetTraffic`, running around the instant Remnawave stamped (`at`).
+ */
+async function renewalReset(subscriptionId: string, at: Date): Promise<void> {
+  await prisma.profileSyncJob.create({
+    data: {
+      subscriptionId,
+      action: 'UPDATE',
+      status: 'COMPLETED',
+      payload: { source: 'PAYMENT', resetTraffic: true },
+      createdAt: new Date(at.getTime() - 2_000),
+      startedAt: new Date(at.getTime() - 1_500),
+      completedAt: new Date(at.getTime() + 800),
+    },
+  });
+}
+
 async function stateOf(subscriptionId: string, line = 'reset'): Promise<AddOnEntitlementState> {
   return (await prisma.addOnEntitlement.findUniqueOrThrow({ where: { id: `${subscriptionId}-${line}` } })).state;
 }
@@ -244,7 +266,12 @@ run('an add-on «до сброса» waits for Remnawave\'s reset — PostgreSQL
       {
         refreshProfileFacts: async (subscriptionId: string) => {
           remnawave.reads.push(subscriptionId);
-          return remnawave.answers.get(subscriptionId)?.facts ?? null;
+          const facts = remnawave.answers.get(subscriptionId)?.facts ?? null;
+          // As the real service does: what a read learnt is stamped before it
+          // answers (a stamp that fails answers `null`), and the confirmation
+          // judges the samples from what is stamped.
+          if (facts !== null) await stampRemnawaveProfileFacts(prisma, [subscriptionId], facts);
+          return facts;
         },
       } as never,
       {
@@ -332,17 +359,162 @@ run('an add-on «до сброса» waits for Remnawave\'s reset — PostgreSQL
     assert.deepEqual(remnawave.reads, []);
   });
 
-  it('does not take a manual reset hours later for the batch', async () => {
+  it('does not take a manual reset hours later for the batch — it releases only its own subscriber', async () => {
     const now = new Date();
     const plannedAt = new Date(now.getTime() - 5 * HOUR);
-    const { subscriptionId } = await seedHeld({ tag: 'manual-later', strategy: 'MONTH', plannedAt });
-    remnawave.answers.set(subscriptionId, {
+    const manual = await seedHeld({ tag: 'manual-later', strategy: 'MONTH', plannedAt });
+    const untouched = await seedHeld({
+      tag: 'manual-later-other',
+      strategy: 'MONTH',
+      plannedAt,
+      lastReset: new Date(plannedAt.getTime() - 30 * 24 * HOUR),
+    });
+    remnawave.answers.set(manual.subscriptionId, {
       facts: { createdAt: null, lastTrafficResetAt: new Date(plannedAt.getTime() + 3 * HOUR) },
+    });
+    remnawave.answers.set(untouched.subscriptionId, {
+      facts: { createdAt: null, lastTrafficResetAt: new Date(plannedAt.getTime() - 30 * 24 * HOUR) },
     });
 
     await scheduler.runDueBoundaries(now);
 
-    assert.equal(await stateOf(subscriptionId), AddOnEntitlementState.ACTIVE);
+    assert.equal(await stateOf(untouched.subscriptionId), AddOnEntitlementState.ACTIVE, 'nobody zeroed its counter');
+    assert.equal((await epochOf(untouched.epochId)).closedAt, null);
+    // Its own counter was zeroed after the planned instant: nothing left to wait for.
+    assert.equal(await stateOf(manual.subscriptionId), AddOnEntitlementState.EXPIRED);
+    assert.equal((await epochOf(manual.epochId)).closeSource, 'WEBHOOK_RECONCILIATION');
+  });
+
+  it('one subscriber\'s renewal inside the hour confirms nothing for the others (R3a-04)', async () => {
+    // Remnawave missed tonight's run. One customer renewed 20 minutes after
+    // the planned instant — the panel's own reset, its answer stamped — and
+    // that used to confirm the boundary for everybody.
+    const now = new Date();
+    const plannedAt = new Date(now.getTime() - 50 * MINUTE);
+    const renewedAt = new Date(plannedAt.getTime() + 20 * MINUTE + 1_234);
+    const renewed = await seedHeld({ tag: 'r3a04-renewed', strategy: 'DAY', plannedAt, lastReset: renewedAt });
+    await renewalReset(renewed.subscriptionId, renewedAt);
+    const untouched = await seedHeld({
+      tag: 'r3a04-untouched',
+      strategy: 'DAY',
+      plannedAt,
+      lastReset: new Date(plannedAt.getTime() - 24 * HOUR),
+    });
+    remnawave.answers.set(untouched.subscriptionId, {
+      facts: { createdAt: null, lastTrafficResetAt: new Date(plannedAt.getTime() - 24 * HOUR) },
+    });
+
+    await scheduler.runDueBoundaries(now);
+
+    assert.equal(await stateOf(untouched.subscriptionId), AddOnEntitlementState.ACTIVE, 'Remnawave never reset it: still held');
+    assert.equal((await epochOf(untouched.epochId)).closedAt, null);
+    assert.equal(await stateOf(renewed.subscriptionId), AddOnEntitlementState.EXPIRED, 'its own counter was zeroed by the renewal');
+    assert.deepEqual(incidents, []);
+  });
+
+  it('a renewal of the panel\'s own in the run\'s very shape is not taken for the run (R3a-04)', async () => {
+    const now = new Date();
+    const plannedAt = new Date(now.getTime() - 45 * MINUTE);
+    // A renewal from the auto-renew cron: a second after the planned minute.
+    const shaped = new Date(plannedAt.getTime() + 1_150);
+    const ours = await seedHeld({ tag: 'shaped-ours', strategy: 'WEEK', plannedAt, lastReset: shaped });
+    await renewalReset(ours.subscriptionId, shaped);
+    const other = await seedHeld({
+      tag: 'shaped-ours-other',
+      strategy: 'WEEK',
+      plannedAt,
+      lastReset: new Date(plannedAt.getTime() - 7 * 24 * HOUR),
+    });
+    remnawave.answers.set(other.subscriptionId, {
+      facts: { createdAt: null, lastTrafficResetAt: new Date(plannedAt.getTime() - 7 * 24 * HOUR) },
+    });
+
+    await scheduler.runDueBoundaries(now);
+
+    assert.equal(await stateOf(other.subscriptionId), AddOnEntitlementState.ACTIVE, 'a reset of ours is no run of Remnawave\'s');
+  });
+
+  it('the same stamp with no reset of ours behind it IS the run: it confirms the boundary for everybody', async () => {
+    const now = new Date();
+    const plannedAt = new Date(now.getTime() - 44 * MINUTE);
+    await seedHeld({ tag: 'shaped-run', strategy: 'WEEK', plannedAt, lastReset: new Date(plannedAt.getTime() + 1_150) });
+    const other = await seedHeld({ tag: 'shaped-run-other', strategy: 'WEEK', plannedAt });
+
+    await scheduler.runDueBoundaries(now);
+
+    assert.equal(await stateOf(other.subscriptionId), AddOnEntitlementState.EXPIRED);
+    assert.deepEqual(remnawave.reads, [], 'what was stamped was enough');
+  });
+
+  it('a run that waited behind another job is recognised by the instant two profiles share (R3a-04)', async () => {
+    const now = new Date();
+    const plannedAt = new Date(now.getTime() - 55 * MINUTE);
+    // Three minutes late: not in the cron minute's shape, but one instant on two profiles.
+    const batch = new Date(plannedAt.getTime() + 3 * MINUTE + 417);
+    await seedHeld({ tag: 'late-run-a', strategy: 'MONTH', plannedAt, lastReset: batch });
+    await seedHeld({ tag: 'late-run-b', strategy: 'MONTH', plannedAt, lastReset: batch });
+    const third = await seedHeld({ tag: 'late-run-c', strategy: 'MONTH', plannedAt });
+
+    await scheduler.runDueBoundaries(now);
+
+    assert.equal(await stateOf(third.subscriptionId), AddOnEntitlementState.EXPIRED, 'the batch confirms for all');
+    assert.equal((await epochOf(third.epochId)).closeSource, 'WEBHOOK_RECONCILIATION');
+  });
+
+  it('a reset made in Remnawave\'s own UI inside the hour, on one profile, confirms nothing for the others (R3a-04)', async () => {
+    // Remnawave missed the run; twenty minutes on, somebody reset ONE profile
+    // in Remnawave's UI — no record of ours behind it, so only its shape and
+    // its company say what it is: one profile, no cron minute.
+    const now = new Date();
+    const plannedAt = new Date(now.getTime() - 40 * MINUTE);
+    const byHand = await seedHeld({
+      tag: 'ui-reset',
+      strategy: 'MONTH',
+      plannedAt,
+      lastReset: new Date(plannedAt.getTime() + 20 * MINUTE + 1_234),
+    });
+    const untouched = await seedHeld({
+      tag: 'ui-reset-other',
+      strategy: 'MONTH',
+      plannedAt,
+      lastReset: new Date(plannedAt.getTime() - 30 * 24 * HOUR),
+    });
+    remnawave.answers.set(untouched.subscriptionId, {
+      facts: { createdAt: null, lastTrafficResetAt: new Date(plannedAt.getTime() - 30 * 24 * HOUR) },
+    });
+
+    await scheduler.runDueBoundaries(now);
+
+    assert.equal(await stateOf(untouched.subscriptionId), AddOnEntitlementState.ACTIVE, 'nobody zeroed its counter: still held');
+    assert.equal((await epochOf(untouched.epochId)).closedAt, null);
+    assert.equal(await stateOf(byHand.subscriptionId), AddOnEntitlementState.EXPIRED, 'its own counter was zeroed: released alone');
+    assert.deepEqual(incidents, []);
+  });
+
+  it('a rule change that keeps the promised date lets go of the old reset: taken off at its date, no incident (R3a-02)', async () => {
+    const now = new Date();
+    // Sold until tonight's DAY reset; MONTH's first reset (the 1st, 00:20) always comes later.
+    const plannedAt = nextRemnawaveReset({ strategy: 'DAY', anchorAt: null }, now)!;
+    const { subscriptionId, epochId } = await seedHeld({ tag: 'kept-date', strategy: 'DAY', plannedAt });
+    const promised = new Date(plannedAt.getTime() + MARGIN);
+    // The plan now resets monthly: the promised date comes first, and is kept.
+    await prisma.$transaction((tx) =>
+      new SubscriptionTermService().followResetRuleInTransaction(tx, { subscriptionId, strategy: 'MONTH', now }),
+    );
+    const row = await prisma.addOnEntitlement.findUniqueOrThrow({ where: { id: `${subscriptionId}-reset` } });
+    assert.equal(row.expiresAt?.toISOString(), promised.toISOString(), 'never later than promised');
+    assert.equal(row.expiryEpochId, null);
+
+    await scheduler.runDueBoundaries(new Date(promised.getTime() + MINUTE));
+    assert.equal(await stateOf(subscriptionId), AddOnEntitlementState.EXPIRED, 'at its date, not held');
+
+    await scheduler.runDueBoundaries(new Date(promised.getTime() + RESET_CONFIRMATION_HOLD_MS + MINUTE));
+    assert.deepEqual(
+      incidents.filter((incident) => incident.metadata['plannedResetAt'] === plannedAt.toISOString()),
+      [],
+      'no «Remnawave не сбросил трафик» for a reset the new rule never schedules',
+    );
+    assert.equal((await epochOf(epochId)).closedAt, null, 'nothing ever waited on the old reset');
   });
 
   it('confirms a rolling boundary subscription by subscription, from each one\'s own reset', async () => {

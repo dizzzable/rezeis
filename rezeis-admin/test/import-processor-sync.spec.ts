@@ -169,6 +169,53 @@ describe('ImportProcessor tells the automatic panel-link check that an import fi
   });
 });
 
+/**
+ * A re-import can rewrite a subscription's reset rule (the donor's own, on a
+ * row no plan owns); its terms and «до сброса» add-ons follow it (P6) once the
+ * import has committed and before the post-import sync pushes anything. What
+ * a row's follow does is proved on PostgreSQL
+ * (`add-on-reset-rule-change-postgres.spec.ts`); here, when it runs.
+ */
+describe('ImportProcessor follows a changed reset rule after the import', () => {
+  it('looks for what is left to follow once the import has run, and before its own push', async () => {
+    const order: string[] = [];
+    const processor = buildProcessor({
+      onQueryRaw: (text) => {
+        if (/traffic_reset_strategy/.test(text)) order.push('reset rules followed');
+        return [];
+      },
+      onSubscriptionFindMany: () => {
+        order.push('post-import sync');
+        return [];
+      },
+      onProfileSyncCreate: () => ({ id: 'unused' }),
+      onEnqueue: () => undefined,
+    });
+
+    await processor.process(remnawaveJob({ syncToPanel: true }) as never);
+
+    assert.deepStrictEqual(order, ['reset rules followed', 'post-import sync']);
+  });
+
+  it('keeps the import a success when the follow fails: the sweep does it later', async () => {
+    const records: unknown[] = [];
+    const processor = buildProcessor({
+      onQueryRaw: () => {
+        throw new Error('database gone');
+      },
+      onSubscriptionFindMany: () => [],
+      onProfileSyncCreate: () => ({ id: 'unused' }),
+      onEnqueue: () => undefined,
+      onImportRecordUpdate: (data) => records.push(data),
+    });
+
+    const result = await processor.process(remnawaveJob({}) as never);
+
+    assert.equal((result as { importRecordId: string }).importRecordId, 'import-1');
+    assert.equal(records.some((data) => (data as { status?: string }).status === 'FAILED'), false);
+  });
+});
+
 // ── Harness ──────────────────────────────────────────────────────────────────
 
 interface Hooks {
@@ -180,6 +227,8 @@ interface Hooks {
   readonly onImportRecordUpdate?: (data: unknown) => void;
   readonly failImport?: boolean;
   readonly panelLinkCheck?: { requestAfterImport: (input: unknown) => Promise<boolean> };
+  /** Raw queries: the reset-rule follow's selection of what is left to follow. */
+  readonly onQueryRaw?: (text: string) => unknown[];
 }
 
 function buildProcessor(hooks: Hooks): ImportProcessor {
@@ -190,6 +239,8 @@ function buildProcessor(hooks: Hooks): ImportProcessor {
         return undefined;
       },
     },
+    $queryRaw: async (query: { readonly strings?: readonly string[] }) =>
+      hooks.onQueryRaw?.((query.strings ?? []).join('?')) ?? [],
     subscription: { findMany: async (args: { where: unknown }) => hooks.onSubscriptionFindMany(args) },
     profileSyncJob: {
       findFirst: async (args: { where: { subscriptionId: string } }) =>

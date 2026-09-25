@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client';
 
 import {
+  isRollingResetDay,
   nextRemnawaveReset,
   previousRemnawaveReset,
   REMNAWAVE_RESET_MINUTE,
@@ -8,6 +9,7 @@ import {
   resolveRemnawaveTimeZone,
   type ResetStrategy,
 } from '../domain/reset-cycle-policy';
+import { ownTrafficResetSql } from '../services/own-traffic-resets';
 
 /**
  * THE DAILY RESET-SCHEDULE CHECK — do Remnawave's real resets happen when
@@ -22,9 +24,29 @@ import {
  * cron minute on Remnawave's clock — so a scheduled reset is recognisable by
  * its shape: within {@link SCHEDULED_RUN_SLACK_MS} of a whole minute, and on a
  * minute that is the strategy's cron minute in SOME real zone (every zone's
- * offset is a multiple of 15 minutes). A manual reset — a renewal, the
- * operator's «Сбросить», a paid «Обнулить трафик» — lands on any second, and is
- * not evidence about the schedule.
+ * offset is a multiple of 15 minutes). A manual reset lands on any second.
+ *
+ * …but not always: a renewal from the auto-renew cron (every minute, at second
+ * 0) zeroes its counter a second or two after a whole minute, in the shape for
+ * four minutes of every hour, and a single such reset made the check warn
+ * about a correct zone — «так сбрасывает Remnawave в поясе UTC−02:15» — every
+ * day on an install with auto-renew (review R3a-03). So what is judged is
+ * evidence of a RUN:
+ *  - the panel's own resets are left out by the reader (`own-traffic-resets.ts`:
+ *    a renewal, the operator's «Сбросить», «Обнулить трафик»);
+ *  - a reset that AGREES with the prediction is judged as it is: it can only
+ *    ever say «ok»;
+ *  - a reset in a run's shape that does not agree is judged only as a BATCH —
+ *    its instant stamped on two or more profiles of the strategy, which one
+ *    subscriber's reset never is — wherever a batch can exist: a calendar
+ *    strategy with two or more profiles on the install
+ *    ({@link ResetObservation.strategyProfiles}). An install with ONE profile
+ *    on a strategy can show no batch; there a lone reset in the shape is
+ *    judged, the panel's own already left out;
+ *  - a rolling reset only on the profile's own day: the rolling job resets
+ *    nobody else, so a reset on any other UTC date is no run at all. Its runs
+ *    rarely share an instant (each profile has its own day), so the day is
+ *    its evidence instead of the batch.
  *
  * Per strategy, the LATEST such observation is judged against the reset the
  * configured zone predicts nearest to it: within {@link RESET_SCHEDULE_AGREEMENT_MS}
@@ -58,6 +80,12 @@ export interface ResetObservation {
   readonly observedAt: Date;
   /** The profile's `createdAt`: a rolling profile's anchor. */
   readonly createdAt: Date | null;
+  /**
+   * How many profiles on the install carry this strategy (linked, not
+   * deleted) — whether a run of it can stamp two of them at all. Unknown
+   * (absent) counts as "it can": a lone reset is then not taken for a run.
+   */
+  readonly strategyProfiles?: number;
 }
 
 /** A scheduled run at a time the configured zone does not predict. */
@@ -148,16 +176,27 @@ export function judgeResetSchedule(input: {
   let judged = 0;
   const mismatches: ResetScheduleMismatch[] = [];
   for (const strategy of SCHEDULED_STRATEGIES) {
-    // The latest observation that says something about the schedule: a
-    // scheduled run's shape, or an exact agreement. Manual resets say nothing.
-    const latest = input.observations
+    const inWindow = input.observations
       .filter((row) => row.strategy === strategy)
-      .filter((row) => row.observedAt.getTime() >= since && row.observedAt.getTime() <= input.now.getTime())
+      .filter((row) => row.observedAt.getTime() >= since && row.observedAt.getTime() <= input.now.getTime());
+    // How many profiles of the strategy carry each instant: a run stamps all it resets with one.
+    const sharing = new Map<number, number>();
+    for (const row of inWindow) {
+      sharing.set(row.observedAt.getTime(), (sharing.get(row.observedAt.getTime()) ?? 0) + 1);
+    }
+    // The latest observation that says something about the schedule: an
+    // exact agreement, or a run — see the header. Other resets say nothing.
+    const latest = inWindow
       .map((row) => ({ row, expected: nearestPredicted(row, zone) }))
       .filter(({ row, expected }) => {
-        const agrees =
-          expected !== null && Math.abs(row.observedAt.getTime() - expected.getTime()) <= RESET_SCHEDULE_AGREEMENT_MS;
-        return agrees || (expected !== null && isScheduledShape(strategy, row.observedAt));
+        if (expected === null) return false;
+        if (Math.abs(row.observedAt.getTime() - expected.getTime()) <= RESET_SCHEDULE_AGREEMENT_MS) return true;
+        if (!isScheduledShape(strategy, row.observedAt)) return false;
+        if (strategy === 'MONTH_ROLLING') {
+          return row.createdAt !== null && isRollingResetDay(row.createdAt, row.observedAt);
+        }
+        const batchPossible = row.strategyProfiles === undefined || row.strategyProfiles >= 2;
+        return !batchPossible || (sharing.get(row.observedAt.getTime()) ?? 0) >= 2;
       })
       .sort((left, right) => right.row.observedAt.getTime() - left.row.observedAt.getTime())[0];
     if (latest === undefined || latest.expected === null) continue;
@@ -186,8 +225,11 @@ const MAX_OBSERVATIONS = 2_000;
 
 /**
  * The resets Remnawave reported inside the window, with the strategy the panel
- * pushes for each subscription, and whether any live subscription resets on a
- * schedule at all.
+ * pushes for each subscription and how many profiles on the install carry
+ * that strategy, and whether any live subscription resets on a schedule at
+ * all. The panel's own resets are left out (`ownTrafficResetSql`): a renewal,
+ * the operator's «Сбросить», «Обнулить трафик» say nothing about Remnawave's
+ * schedule.
  */
 export async function readResetObservations(
   client: ResetObservationsClient,
@@ -202,15 +244,28 @@ export async function readResetObservations(
         AND s."plan_snapshot"->>'trafficLimitStrategy' = ANY(${strategies}::text[])
     ) AS "scoped"
   `);
-  const rows = await client.$queryRaw<Array<{ strategy: ScheduledStrategy; observedAt: Date; createdAt: Date | null }>>(Prisma.sql`
+  const rows = await client.$queryRaw<
+    Array<{ strategy: ScheduledStrategy; observedAt: Date; createdAt: Date | null; strategyProfiles: number }>
+  >(Prisma.sql`
+    WITH "profiles" AS (
+      SELECT p."plan_snapshot"->>'trafficLimitStrategy' AS "strategy", COUNT(*)::int AS "profiles"
+      FROM "subscriptions" p
+      WHERE p."status" <> 'DELETED'
+        AND p."remnawave_id" IS NOT NULL
+        AND p."plan_snapshot"->>'trafficLimitStrategy' = ANY(${strategies}::text[])
+      GROUP BY 1
+    )
     SELECT s."plan_snapshot"->>'trafficLimitStrategy' AS "strategy",
            s."remnawave_last_traffic_reset_at" AS "observedAt",
-           s."remnawave_profile_created_at" AS "createdAt"
+           s."remnawave_profile_created_at" AS "createdAt",
+           COALESCE(pr."profiles", 0) AS "strategyProfiles"
     FROM "subscriptions" s
+    LEFT JOIN "profiles" pr ON pr."strategy" = s."plan_snapshot"->>'trafficLimitStrategy'
     WHERE s."status" <> 'DELETED'
       AND s."remnawave_last_traffic_reset_at" >= ${new Date(now.getTime() - RESET_SCHEDULE_WINDOW_MS)}
       AND s."remnawave_last_traffic_reset_at" <= ${now}
       AND s."plan_snapshot"->>'trafficLimitStrategy' = ANY(${strategies}::text[])
+      AND NOT ${ownTrafficResetSql(Prisma.sql`s."id"`, Prisma.sql`s."remnawave_last_traffic_reset_at"`)}
     ORDER BY s."remnawave_last_traffic_reset_at" DESC
     LIMIT ${MAX_OBSERVATIONS}
   `);
@@ -220,6 +275,7 @@ export async function readResetObservations(
       strategy: row.strategy,
       observedAt: new Date(row.observedAt),
       createdAt: row.createdAt === null ? null : new Date(row.createdAt),
+      strategyProfiles: Number(row.strategyProfiles),
     })),
   };
 }

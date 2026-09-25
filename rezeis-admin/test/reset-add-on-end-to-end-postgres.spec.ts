@@ -22,7 +22,10 @@ import { AddOnPurchaseService } from '../src/modules/payments/services/addon-pur
 import { PaymentSubscriptionMutationService } from '../src/modules/payments/services/payment-subscription-mutation.service';
 import { PricingService } from '../src/modules/plans/services/pricing.service';
 import { ProfileSyncProcessor } from '../src/modules/profile-sync/profile-sync.processor';
-import type { RemnawaveProfileFacts } from '../src/modules/remnawave/utils/remnawave-profile-facts.util';
+import {
+  type RemnawaveProfileFacts,
+  stampRemnawaveProfileFacts,
+} from '../src/modules/remnawave/utils/remnawave-profile-facts.util';
 import { removeDurableFixtures } from './helpers/durable-rows-cleanup';
 
 /**
@@ -105,9 +108,12 @@ run('a traffic add-on «до сброса», bought, held and taken off — Post
       switchReader as never,
     );
     const confirmation = new ResetBoundaryConfirmationService(prisma, {
-      refreshProfileFacts: async (): Promise<RemnawaveProfileFacts> => {
+      refreshProfileFacts: async (subscriptionId: string): Promise<RemnawaveProfileFacts> => {
         remnawave.reads += 1;
-        return { createdAt: null, lastTrafficResetAt: remnawave.lastReset };
+        const facts: RemnawaveProfileFacts = { createdAt: null, lastTrafficResetAt: remnawave.lastReset };
+        // As the real service does: what a read learnt is stamped before it answers.
+        await stampRemnawaveProfileFacts(prisma, [subscriptionId], facts);
+        return facts;
       },
     } as never);
     scheduler = new EntitlementBoundarySchedulerService(

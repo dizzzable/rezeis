@@ -30,6 +30,7 @@ export const ru = {
       addon_devices_ended: 'Докупка устройств закончилась (без автоотключения)',
       addon_devices_auto_ends_in_3_days: 'Докупка устройств: 3 дня до окончания (автоотключение)',
       addon_devices_auto_ended: 'Докупка устройств закончилась (автоотключение)',
+      addon_not_applied: 'Докупка оплачена, но не применена (подписка не активна)',
       referral_attached: 'Реферал привязан',
       referral_reward: 'Реферальное вознаграждение',
       referral_qualified: 'Реферал квалифицирован',

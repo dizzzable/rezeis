@@ -159,8 +159,10 @@ const DURATION_TEMPLATES: ReadonlyArray<DefaultNotificationTemplate> = [
   {
     // A subscription with no end date is never renewed: for it the renewal
     // button goes out as «📦 Докупить трафик» → `/addons` of that subscription
-    // (`offerTrafficTopUpForLifetime`, `user-notifications.service.ts`), and
-    // «Карта бота» draws both.
+    // when it can buy something that brings traffic back (a traffic add-on or
+    // «Сброс трафика» in its offer, `notifications/utils/traffic-top-up.util.ts`),
+    // and is left out when it cannot (`offerTrafficTopUpForLifetime`,
+    // `user-notifications.service.ts`); «Карта бота» draws both.
     type: 'limited',
     title: '⚠️ Подписка ограничена',
     titleEn: '⚠️ Subscription limited',
@@ -710,9 +712,44 @@ const ADD_ON_TEMPLATES: ReadonlyArray<DefaultNotificationTemplate> = [
   },
 ];
 
+/** The type of the notice to a customer whose paid add-on could not be applied (`ADD_ON_PAYMENT_TEMPLATES`). */
+export const ADD_ON_NOT_APPLIED_NOTICE_TYPE = 'addon_not_applied';
+
+/** The payment's problem is the operator's to sort out: the customer's way to them. */
+const ADD_ON_NOT_APPLIED_BUTTONS: ReadonlyArray<DefaultNotificationTemplateButton> = [
+  { labelRu: '💬 Поддержка', labelEn: '💬 Support', kind: 'webApp', target: '/support' },
+  { labelRu: '🏠 Главное меню', labelEn: '🏠 Main menu', kind: 'callback', target: 'menu:main' },
+];
+
+/**
+ * A paid add-on «до сброса» the payment could not apply because the
+ * subscription was no longer active when the money came in (review R3a-07).
+ * The operator gets the card «Докупка оплачена, но не применена» and decides
+ * about the money — nothing is refunded by itself — and the customer, who used
+ * to be told nothing while the return page showed a completed payment, gets
+ * this one notice (`PaymentSubscriptionMutationService.applyAddOnTopUp`).
+ * `{{addon}}` is the add-on's name as it was sold. Not a switch the customer
+ * may turn off: it is about their money.
+ */
+const ADD_ON_PAYMENT_TEMPLATES: ReadonlyArray<DefaultNotificationTemplate> = [
+  {
+    type: ADD_ON_NOT_APPLIED_NOTICE_TYPE,
+    title: '⚠️ Докупка не применена',
+    titleEn: '⚠️ Add-on not applied',
+    body:
+      'Оплата докупки «{{addon}}» получена, но применить её не удалось — подписка сейчас не активна. ' +
+      'Мы разберёмся и свяжемся с вами.',
+    bodyEn:
+      'We received your payment for the add-on “{{addon}}”, but could not apply it — your subscription ' +
+      'is not active right now. We will look into it and get back to you.',
+    buttons: ADD_ON_NOT_APPLIED_BUTTONS,
+  },
+];
+
 export const DEFAULT_NOTIFICATION_TEMPLATES: ReadonlyArray<DefaultNotificationTemplate> = [
   ...DURATION_TEMPLATES,
   ...ADD_ON_TEMPLATES,
+  ...ADD_ON_PAYMENT_TEMPLATES,
   ...REFERRAL_TEMPLATES,
   ...POINTS_TEMPLATES,
   ...PARTNER_TEMPLATES,

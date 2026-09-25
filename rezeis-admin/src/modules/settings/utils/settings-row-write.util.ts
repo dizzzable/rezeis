@@ -275,7 +275,7 @@ async function readUnderLock(tx: Prisma.TransactionClient): Promise<Settings | n
  *
  * Without the savepoint the loser's unique violation would abort its whole
  * transaction (PostgreSQL 25P02) and the write it was about to make would be
- * lost with it — the same pattern `ensureLiveResetEpoch` uses for its epochs.
+ * lost with it — the same pattern `bindResetEpochWindow` uses for its epochs.
  */
 async function insertSettingsRow(
   tx: Prisma.TransactionClient,

@@ -9,6 +9,7 @@ import {
 } from '@prisma/client';
 
 import { clampDiscountPercent } from '../../../common/utils/discount.util';
+import type { AddOnRolloutFlags } from '../../add-on-entitlements/add-on-rollout.config';
 import { SubscriptionTermHooksService } from '../../add-on-entitlements/services/subscription-term-hooks.service';
 import { patchSnapshotNumeric } from '../../subscriptions/services/plan-inherited-limits.util';
 import {
@@ -37,6 +38,16 @@ export class PromocodeRewardsService {
   private readonly logger = new Logger(PromocodeRewardsService.name);
 
   public constructor(private readonly subscriptionTermHooks: SubscriptionTermHooksService) {}
+
+  /**
+   * The stage switches, for the activation to read BEFORE it opens the
+   * transaction its actions run in, and to hand back as `termFlags` (review
+   * R2b-07): a SUBSCRIPTION action enters the new subscription into the term
+   * model with them.
+   */
+  public readTermFlags(): Promise<AddOnRolloutFlags> {
+    return this.subscriptionTermHooks.readFlags();
+  }
 
   /**
    * Applies the resolved reward to the matching aggregate. Returns `true`
@@ -91,6 +102,8 @@ export class PromocodeRewardsService {
     readonly userId: string;
     readonly targetSubscriptionId: string | null;
     readonly action: PromocodeActionInput;
+    /** The switches the caller read before its transaction ({@link readTermFlags}). */
+    readonly termFlags?: AddOnRolloutFlags;
   }): Promise<{
     readonly applied: boolean;
     readonly rewardValue: number;
@@ -157,6 +170,7 @@ export class PromocodeRewardsService {
           userId: input.userId,
           targetSubscriptionId: input.targetSubscriptionId,
           plan: action.plan,
+          termFlags: input.termFlags,
         });
       default:
         return { applied: false, rewardValue: 0 };
@@ -540,6 +554,7 @@ export class PromocodeRewardsService {
     readonly userId: string;
     readonly targetSubscriptionId: string | null;
     readonly plan: PromocodePlanSnapshotInterface | null;
+    readonly termFlags?: AddOnRolloutFlags;
   }): Promise<{
     readonly applied: boolean;
     readonly rewardValue: number;
@@ -666,6 +681,7 @@ export class PromocodeRewardsService {
     await this.subscriptionTermHooks.enterNewSubscriptionInTransaction(
       input.transactionClient,
       createdSubscription.id,
+      input.termFlags,
     );
     const syncJobId = await this.enqueueSubscriptionSync({
       transactionClient: input.transactionClient,

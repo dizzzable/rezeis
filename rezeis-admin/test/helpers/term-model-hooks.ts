@@ -1,4 +1,5 @@
 import type { PrismaService } from '../../src/common/prisma/prisma.service';
+import { resolveAddOnRolloutFlags } from '../../src/modules/add-on-entitlements/add-on-rollout.config';
 import { EffectiveProjectionService } from '../../src/modules/add-on-entitlements/services/effective-projection.service';
 import { EntitlementCutoverService } from '../../src/modules/add-on-entitlements/services/entitlement-cutover.service';
 import { SubscriptionTermHooksService } from '../../src/modules/add-on-entitlements/services/subscription-term-hooks.service';
@@ -15,12 +16,16 @@ import { SubscriptionTermService } from '../../src/modules/add-on-entitlements/s
  * PostgreSQL instead — this stub cannot fail the way the real one can.
  */
 export const NOT_IN_TERM_MODEL = {
+  // What a caller reads before its transaction opens and hands to
+  // `enterNewSubscriptionInTransaction` (review R2b-07): stage 1 off.
+  readFlags: async () => resolveAddOnRolloutFlags({ durableAccounting: false }, {}),
   enterNewSubscriptionInTransaction: async () => null,
   followExpiryInTransaction: async () => ({ outcome: 'NOT_IN_MODEL' as const }),
   rotateForPlanChangeInTransaction: async () => ({ outcome: 'NO_ACTIVE_TERM' as const }),
   grantLimitBonusInTransaction: async () => ({ outcome: 'NOT_IN_MODEL' as const }),
 } satisfies Pick<
   SubscriptionTermHooksService,
+  | 'readFlags'
   | 'enterNewSubscriptionInTransaction'
   | 'followExpiryInTransaction'
   | 'rotateForPlanChangeInTransaction'

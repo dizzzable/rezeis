@@ -157,6 +157,8 @@ function legacyTopUpEnv(input: {
     planSnapshot: {},
     trafficLimit: input.trafficLimit,
     deviceLimit: input.deviceLimit,
+    // Where the ACTIVE term below ends: «до конца подписки» is bound to it.
+    expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
   };
 
   const prismaService = {
