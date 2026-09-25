@@ -9,7 +9,7 @@
 import { useEffect, useMemo, useRef, useState, type JSX } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Eye, EyeOff, Pencil, Plus, Search, Trash2 } from 'lucide-react'
+import { Eye, EyeOff, Pencil, Plus, RotateCcw, Search, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
 
 import { EmojiPicker } from '@/features/broadcast/emoji-picker'
@@ -50,7 +50,7 @@ import {
   botConfigApi,
 } from './bot-config-api'
 import { botTextKeyMode } from './bot-text-key-mode'
-import { botTextMaxChars, botTextOverLimit, telegramCharCount } from './bot-text-limits'
+import { botTextAlsoMessage, botTextMaxChars, botTextOverLimit, telegramCharCount } from './bot-text-limits'
 
 export function BotTextsTab(): JSX.Element {
   const { t } = useTranslation()
@@ -228,14 +228,17 @@ interface LengthLimit {
   readonly max: number
   /** Whether the count is Telegram's (code points) rather than the field's own. */
   readonly telegram: boolean
+  /** The bot also sends this key as an ordinary message: the limit is its pop-up's. */
+  readonly alsoMessage: boolean
   readonly over: { readonly max: number; readonly count: number } | null
   readonly overEn: { readonly max: number; readonly count: number } | null
   readonly blocksSave: boolean
 }
 
 /**
- * The length limit of `key`'s values. «Меню обновилось» (`menu.updated`) is a
- * toast Telegram takes at no more than 200 characters (`bot-text-limits.ts`):
+ * The length limit of `key`'s values. Every text the bot shows as the answer
+ * to a pressed button — a toast or an alert, «Меню обновилось» among them — is
+ * one Telegram takes at no more than 200 characters (`bot-text-limits.ts`):
  * past it the text is not saved, and the field says why.
  */
 function lengthLimitFor(key: string, value: string, valueEn: string): LengthLimit {
@@ -245,21 +248,28 @@ function lengthLimitFor(key: string, value: string, valueEn: string): LengthLimi
   return {
     max: telegramMax ?? TEXT_MAX_CHARS,
     telegram: telegramMax !== undefined,
+    alsoMessage: botTextAlsoMessage(key),
     over,
     overEn,
     blocksSave: over !== null || overEn !== null,
   }
 }
 
-/** The count under a field, and — past a limit Telegram sets — why it will not be saved. */
+/**
+ * The count under a field, and — past a limit Telegram sets — why it will not
+ * be saved. `explain`: for a text the bot also sends as a message, say before
+ * anything is typed why it is held to the pop-up's limit (once per dialog).
+ */
 function LengthCounter({
   value,
   limit,
   over,
+  explain = false,
 }: {
   readonly value: string
   readonly limit: LengthLimit
   readonly over: { readonly max: number; readonly count: number } | null
+  readonly explain?: boolean
 }): JSX.Element {
   const { t } = useTranslation()
   return (
@@ -267,9 +277,15 @@ function LengthCounter({
       <p className="text-xs text-muted-foreground">
         {limit.telegram ? telegramCharCount(value) : value.length}/{limit.max}
       </p>
+      {explain && limit.telegram && limit.alsoMessage && (
+        <p className="text-xs text-muted-foreground">{t('botFlow.screenTexts.alsoPopupHint', { max: limit.max })}</p>
+      )}
       {over !== null && (
         <p role="alert" className="text-xs text-destructive">
-          {t('botFlow.screenTexts.tooLong', { max: over.max, count: over.count })}
+          {t(limit.alsoMessage ? 'botFlow.screenTexts.tooLongAlsoMessage' : 'botFlow.screenTexts.tooLong', {
+            max: over.max,
+            count: over.count,
+          })}
         </p>
       )}
     </>
@@ -361,11 +377,16 @@ function TextEditDialog({ text, open, onOpenChange }: TextEditDialogProps): JSX.
       toast.error(getErrorMessage(error, t('botConfigPage.texts.toasts.updateFailed'))),
   })
 
+  // A default text is not deleted for good: the panel writes it again at its
+  // next start, and the bot speaks its built-in text for the key meanwhile —
+  // the same default. So the button and the toast call it a reset.
+  const isDefault = text?.isDefault === true
+
   const deleteMutation = useMutation({
     mutationFn: (id: string) => botConfigApi.deleteText(id),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: BOT_CONFIG_KEYS.texts })
-      toast.success(t('botConfigPage.texts.toasts.deleted'))
+      toast.success(t(isDefault ? 'botConfigPage.texts.toasts.resetToDefault' : 'botConfigPage.texts.toasts.deleted'))
       onOpenChange(false)
     },
     onError: () => toast.error(t('botConfigPage.texts.toasts.deleteFailed')),
@@ -419,7 +440,7 @@ function TextEditDialog({ text, open, onOpenChange }: TextEditDialogProps): JSX.
                 className="font-mono text-sm pr-10"
               />
             </EmojiFieldOverlay>
-            <LengthCounter value={value} limit={limit} over={limit.over} />
+            <LengthCounter value={value} limit={limit} over={limit.over} explain />
             {field.showsCopyPreview && <RenderedCopyPreview value={value} />}
           </div>
 
@@ -488,14 +509,21 @@ function TextEditDialog({ text, open, onOpenChange }: TextEditDialogProps): JSX.
           </div>
         </div>
 
+        {isDefault && (
+          <p className="text-xs text-muted-foreground">{t('botConfigPage.texts.resetToDefaultHint')}</p>
+        )}
         <DialogFooter className="flex-col gap-2 sm:flex-row sm:justify-between">
           <Button
             variant="destructive"
             onClick={() => text !== null && deleteMutation.mutate(text.id)}
             disabled={text === null || deleteMutation.isPending}
           >
-            <Trash2 className="mr-1 h-4 w-4" aria-hidden />
-            {t('botConfigPage.texts.delete')}
+            {isDefault ? (
+              <RotateCcw className="mr-1 h-4 w-4" aria-hidden />
+            ) : (
+              <Trash2 className="mr-1 h-4 w-4" aria-hidden />
+            )}
+            {t(isDefault ? 'botConfigPage.texts.resetToDefault' : 'botConfigPage.texts.delete')}
           </Button>
           <div className="flex gap-2">
             <Button variant="outline" onClick={() => onOpenChange(false)}>
@@ -651,7 +679,7 @@ function TextCreateDialog({ open, onOpenChange }: TextCreateDialogProps): JSX.El
                 className="font-mono text-sm pr-10"
               />
             </EmojiFieldOverlay>
-            <LengthCounter value={value} limit={limit} over={limit.over} />
+            <LengthCounter value={value} limit={limit} over={limit.over} explain />
             {field.showsCopyPreview && <RenderedCopyPreview value={value} />}
           </div>
 

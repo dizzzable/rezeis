@@ -35,6 +35,7 @@ import { BotBannerService, type BotBannerView } from '../services/bot-banner.ser
 import { BotButtonsService } from '../services/bot-buttons.service';
 import { BotEmojisService } from '../services/bot-emojis.service';
 import { BotTextsService } from '../services/bot-texts.service';
+import { DEFAULT_TEXT_KEYS } from '../services/internal-bot-config.service';
 import { ReiwaCacheInvalidatorService } from '../services/reiwa-cache-invalidator.service';
 
 /**
@@ -169,10 +170,17 @@ export class AdminBotConfigController {
 
   // ── Texts ──────────────────────────────────────────────────────────────────
 
+  /**
+   * `isDefault`: one of the panel's default texts, which the seed writes again
+   * at the next start whenever it is missing (`DEFAULT_TEXT_KEYS`). Deleting
+   * one resets it to the default rather than removing it, and «Тексты» names
+   * the button that way (FX5b, 25.09.2026).
+   */
   @Get('texts')
   @ApiOperation({ summary: 'List all bot copy entries' })
-  public listTexts() {
-    return this.botTextsService.listForAdmin();
+  public async listTexts() {
+    const rows = await this.botTextsService.listForAdmin();
+    return rows.map((row) => ({ ...row, isDefault: DEFAULT_TEXT_KEYS.has(row.key) }));
   }
 
   @Post('texts')

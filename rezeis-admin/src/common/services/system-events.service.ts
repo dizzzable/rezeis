@@ -1005,7 +1005,12 @@ export class SystemEventsService {
     // when the emitter didn't include them, so EVERY event card shows a clear
     // "👤 Пользователь" block (payments, referrals, partner, promocode, …).
     // Centralised here so individual emit sites stay lean. Best-effort.
-    const enriched = await this.enrichAdminIdentity(await this.enrichUserIdentity(event));
+    //
+    // A copy the cabinet did not save gets its size and the page to shrink it
+    // on — words only this panel has (`withConfigCopyNotSavedWords`).
+    const enriched = withConfigCopyNotSavedWords(
+      await this.enrichAdminIdentity(await this.enrichUserIdentity(event)),
+    );
 
     const reportEvent = this.toErrorReportEvent(enriched);
     const errorEvent = isErrorEvent(reportEvent);
@@ -3560,6 +3565,107 @@ export interface EventHeaderVariant {
   readonly when: (metadata: Readonly<Record<string, unknown>>) => boolean;
 }
 
+/**
+ * reiwa's report of a copy it did NOT save: the setting the panel served is
+ * over the cap of the copy kept in the cabinet's Redis (reiwa
+ * `config-versions/last-known-good.ts`), so a restart during a panel outage
+ * would serve an older one. Raised as a warning of `reiwa.error`, with
+ * `group` (`public-config`, `bot-config`, `connect-page`), `bytes`,
+ * `maxBytes`, the cabinet's own `why`, and `configVersion` — never `version`,
+ * which is reiwa's build (its error reporter spreads the build info last).
+ */
+const CONFIG_COPY_NOT_SAVED_EVENT = 'reiwa.config.copy_not_saved';
+
+/** What the card says about one kind of copy: what it is, what a restart would serve, where to shrink it. */
+interface ConfigCopyWords {
+  /** «Оформление кабинета весит 5,3 МБ — …» when the report carries no `why`. */
+  readonly why: (size: string | null, cap: string | null) => string;
+  /** What to shrink, on which page of this panel — which the cabinet cannot name. */
+  readonly shrink: string;
+}
+
+/** «5,3 МБ», as the cabinet writes its own `why`; `null` for anything that is not a size. */
+function copyMegabytes(bytes: unknown): string | null {
+  return typeof bytes === 'number' && Number.isFinite(bytes) && bytes >= 0
+    ? `${(bytes / (1024 * 1024)).toFixed(1).replace('.', ',')} МБ`
+    : null;
+}
+
+/** «весит 5,3 МБ — больше предела 4,0 МБ», or as much of it as the report says. */
+function overTheCap(verb: string, size: string | null, cap: string | null): string {
+  const weight = size === null ? '' : ` ${verb} ${size} —`;
+  return `${weight} больше предела${cap === null ? '' : ` ${cap}`}`;
+}
+
+const CONFIG_COPY_WORDS: Readonly<Record<string, ConfigCopyWords>> = {
+  'public-config': {
+    why: (size, cap) =>
+      `Оформление кабинета${overTheCap('весит', size, cap)} для его копии в Redis кабинета, поэтому копия ` +
+      'не обновлена. Клиенты видят новое оформление, но если кабинет перезапустится, пока панель недоступна, ' +
+      'он покажет прежнюю копию (или стандартное оформление, если копии нет).',
+    shrink:
+      'Уменьшите оформление: на странице «WEB Reiwa» замените картинки, загруженные прямо в поля (логотип, фон, ' +
+      'текстуры), файлами поменьше и уберите лишние иконки в «Настройки панели» → «Кастомизация» → «Библиотека ' +
+      'иконок». Когда сохранённое оформление уложится в предел, кабинет обновит копию сам.',
+  },
+  'bot-config': {
+    why: (size, cap) =>
+      `Настройки бота${overTheCap('весят', size, cap)} для их копии в Redis кабинета, поэтому копия не ` +
+      'обновлена. Бот работает с новыми настройками, но если он перезапустится, пока панель недоступна, то ' +
+      'возьмёт прежнюю копию с прежними кнопками, текстами и экранами, а если копии нет — стандартные.',
+    shrink:
+      'Уменьшите настройки бота: в «Карта бота» уберите экраны, которые больше не нужны, и сократите длинные ' +
+      'тексты — на экранах и во вкладке «Тексты», а на странице «Эмодзи-паки» уберите паки, которыми бот не ' +
+      'пользуется. Когда сохранённые настройки уложатся в предел, бот обновит копию сам.',
+  },
+  'connect-page': {
+    why: (size, cap) =>
+      `Экран подключения${overTheCap('весит', size, cap)} для его копии в Redis кабинета, поэтому копия не ` +
+      'обновлена. Клиенты видят новый экран, но если кабинет перезапустится, пока панель недоступна, он покажет ' +
+      'прежнюю копию экрана.',
+    shrink:
+      'Уменьшите экран подключения: «Страница подписки» → вкладка «Экран в кабинете» → «Библиотека иконок» — ' +
+      'уберите иконки, которые не нужны, и замените тяжёлые SVG более простыми. Когда сохранённый экран ' +
+      'уложится в предел, кабинет обновит копию сам.',
+  },
+};
+
+/** A report whose `group` this panel does not know, or that names none. */
+const ANY_CONFIG_COPY_WORDS: ConfigCopyWords = {
+  why: (size, cap) =>
+    `Настройки кабинета${overTheCap('весят', size, cap)} для их копии в Redis кабинета, поэтому копия не ` +
+    'обновлена. Сейчас всё работает с новыми настройками; прежняя копия понадобится, только если кабинет ' +
+    'перезапустится, пока панель недоступна.',
+  shrink:
+    'Уменьшите то, что сохраняли в панели последним. Когда настройки уложатся в предел, кабинет обновит копию сам.',
+};
+
+/**
+ * The card's words for a copy the cabinet did not save (FX5b, 25.09.2026):
+ * «Что проверить дальше» says the size, from `bytes` / `maxBytes`, and where
+ * in this panel to shrink it; «Почему это важно» keeps the cabinet's `why`,
+ * or says the kind and the size itself when the report carries none. Every
+ * other event comes back as it is.
+ */
+export function withConfigCopyNotSavedWords<T extends Pick<SystemEventPayload, 'type' | 'metadata'>>(event: T): T {
+  const meta = event.metadata ?? {};
+  if (event.type !== EVENT_TYPES.REIWA_ERROR || meta['event'] !== CONFIG_COPY_NOT_SAVED_EVENT) return event;
+  const group = meta['group'];
+  const words =
+    typeof group === 'string' && Object.prototype.hasOwnProperty.call(CONFIG_COPY_WORDS, group)
+      ? CONFIG_COPY_WORDS[group]
+      : undefined;
+  const { why, shrink } = words ?? ANY_CONFIG_COPY_WORDS;
+  const size = copyMegabytes(meta['bytes']);
+  const cap = copyMegabytes(meta['maxBytes']);
+  const theirs = typeof meta['why'] === 'string' && meta['why'].trim().length > 0 ? meta['why'] : null;
+  const weight = size !== null && cap !== null ? `Копия весит ${size} при пределе ${cap}. ` : '';
+  return {
+    ...event,
+    metadata: { ...meta, why: theirs ?? why(size, cap), nextSteps: `${weight}${shrink}` },
+  };
+}
+
 /** One variant per `metadata.reason` value — only the producer named in the table sets it. */
 function variantsByReason(
   headers: Readonly<Record<string, { readonly emoji: string; readonly title: string }>>,
@@ -3920,13 +4026,28 @@ export const EVENT_PRESENTATION: Record<string, EventPresentation> = {
         when: (metadata) =>
           metadata['event'] === 'reiwa.config.degraded_defaults_used' && Array.isArray(metadata['fields']),
       },
-      {
-        // The saved appearance is over the cap of the copy the cabinet keeps in
-        // its Redis: a restart during a panel outage serves an older one. The
-        // size is in `why`.
+      // A saved setting over the cap of the copy the cabinet keeps in its
+      // Redis: a restart during a panel outage serves an older one. One event
+      // for every copy, told apart by `group` (FX5b: the bot config and the
+      // connect page report it too); what to shrink and the size are the
+      // card's words (`withConfigCopyNotSavedWords`).
+      ...(
+        [
+          ['public-config', 'Кабинет не сохранил копию оформления'],
+          ['bot-config', 'Бот не сохранил копию настроек бота'],
+          ['connect-page', 'Кабинет не сохранил копию экрана подключения'],
+        ] as const
+      ).map(([group, title]) => ({
         emoji: '💾',
-        title: 'Кабинет не сохранил копию оформления',
-        when: (metadata) => metadata['event'] === 'reiwa.config.copy_not_saved',
+        title,
+        when: (metadata: Readonly<Record<string, unknown>>) =>
+          metadata['event'] === CONFIG_COPY_NOT_SAVED_EVENT && metadata['group'] === group,
+      })),
+      {
+        // Any other group, or none — a report this panel cannot place.
+        emoji: '💾',
+        title: 'Кабинет не сохранил копию настроек',
+        when: (metadata) => metadata['event'] === CONFIG_COPY_NOT_SAVED_EVENT,
       },
     ],
   },

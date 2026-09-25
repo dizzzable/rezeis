@@ -241,3 +241,99 @@ describe('BotTextsService — menu.updated fits a Telegram toast', () => {
     assert.equal(rows.find((r) => r.key === 'menu.choose_action')?.value, TOO_LONG);
   });
 });
+
+/**
+ * EVERY text reiwa shows as the answer to a pressed button — a toast or an
+ * alert, Telegram's `answerCallbackQuery`, 0-200 code points — not only
+ * «Меню обновилось» (FX5b, 25.09.2026; the keys are the ones FX5c found in
+ * the bot's call sites). Spelled out HERE, with whether each is also sent as a
+ * message, so a key dropped from the panel's list fails this file.
+ */
+const BUTTON_ANSWER_KEYS: ReadonlyArray<readonly [string, boolean]> = [
+  ['menu.updated', false],
+  ['access_mode.restricted', true],
+  ['access_mode.reg_blocked_new', true],
+  ['access_mode.invited_no_code', true],
+  ['channel.not_subscribed', true],
+  ['channel.verified', false],
+  ['quests.channel.retry', true],
+  ['quests.channel.link_first', true],
+  ['quests.channel.not_subscribed', false],
+  ['quests.channel.verified', false],
+];
+
+describe('BotTextsService — every text shown as a button answer fits a Telegram pop-up', () => {
+  const TOO_LONG = 'М'.repeat(201);
+  const FITS = '🔥'.repeat(200); // 400 UTF-16 units, 200 code points
+  const refusal = (err: unknown): boolean =>
+    err instanceof Error && /не больше 200 символов, а здесь 201/.test(err.message);
+
+  for (const [key] of BUTTON_ANSWER_KEYS) {
+    it(`${key}: refused over 200 characters on create, update, upsert and in English; 200 fit`, async () => {
+      const { prisma, rows } = makePrisma();
+      const service = new BotTextsService(prisma);
+
+      await assert.rejects(() => service.create({ key, value: TOO_LONG }), refusal);
+      await assert.rejects(() => service.create({ key, value: 'коротко', valueEn: TOO_LONG }), refusal);
+      const row = await service.create({ key, value: FITS, valueEn: FITS });
+      await assert.rejects(() => service.update({ id: row.id, value: TOO_LONG }), refusal);
+      await assert.rejects(() => service.update({ id: row.id, valueEn: TOO_LONG }), refusal);
+      await assert.rejects(() => service.upsert({ key, value: TOO_LONG }), refusal);
+
+      assert.deepEqual(
+        rows.map((r) => [r.key, r.value]),
+        [
+          [key, FITS],
+          [`${key}@en`, FITS],
+        ],
+      );
+    });
+  }
+
+  it('an English text beside an older Russian one over the limit is saved: only a value that changes is judged', async () => {
+    const { prisma, rows } = makePrisma();
+    const service = new BotTextsService(prisma);
+    // Saved before the key had a limit; the bot cuts it when it shows it.
+    rows.push({
+      id: 'legacy',
+      key: 'access_mode.restricted',
+      value: 'Р'.repeat(250),
+      visible: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    await service.update({ id: 'legacy', valueEn: 'The service is unavailable.' });
+    assert.equal(rows.find((r) => r.key === 'access_mode.restricted@en')?.value, 'The service is unavailable.');
+
+    // The Russian text itself, once it changes, is judged as always.
+    await assert.rejects(
+      () => service.update({ id: 'legacy', value: 'Р'.repeat(240) }),
+      (err: unknown) => err instanceof Error && /не больше 200 символов, а здесь 240/.test(err.message),
+    );
+  });
+
+  it('a row renamed onto such a key brings its value under the limit', async () => {
+    const { prisma, rows } = makePrisma();
+    const service = new BotTextsService(prisma);
+    const row = await service.create({ key: 'channel.required', value: TOO_LONG });
+
+    await assert.rejects(() => service.update({ id: row.id, key: 'channel.verified' }), refusal);
+    assert.equal(rows[0]?.key, 'channel.required');
+  });
+
+  it('says why a text that is ALSO a message is held to a pop-up’s 200', async () => {
+    const { prisma } = makePrisma();
+    const service = new BotTextsService(prisma);
+
+    for (const [key, alsoMessage] of BUTTON_ANSWER_KEYS) {
+      await assert.rejects(
+        () => service.create({ key, value: TOO_LONG }),
+        (err: unknown) =>
+          err instanceof Error &&
+          err.message.includes(`«${key}»`) &&
+          /обычным сообщением/.test(err.message) === alsoMessage,
+      );
+    }
+  });
+});

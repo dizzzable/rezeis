@@ -25,7 +25,12 @@ import { EmojiPicker } from '@/features/broadcast/emoji-picker'
 import { insertAtCaret } from '@/features/bot-map/utils/insert-at-caret'
 import { EmojiFieldOverlay } from '@/features/custom-emoji/emoji-field-overlay'
 import { botTextKeyMode } from '@/features/bot-config/bot-text-key-mode'
-import { botTextMaxChars, botTextOverLimit, telegramCharCount } from '@/features/bot-config/bot-text-limits'
+import {
+  botTextAlsoMessage,
+  botTextMaxChars,
+  botTextOverLimit,
+  telegramCharCount,
+} from '@/features/bot-config/bot-text-limits'
 import { getErrorMessage } from '@/lib/http-errors'
 import {
   BOT_CONFIG_KEYS,
@@ -101,15 +106,23 @@ interface SystemScreenTextsProps {
  * Under a field whose key Telegram takes only up to a length of its own: the
  * count as Telegram counts it and, past the limit, why it will not be saved.
  * Nothing for any other key.
+ *
+ * `alsoMessage`: the bot also sends this key as an ordinary message, so the
+ * reason says the limit is the pop-up's; `explain` says so before anything is
+ * typed (once per key — under its Russian field).
  */
 export function TextLengthNote({
   maxChars,
   value,
   over,
+  alsoMessage = false,
+  explain = false,
 }: {
   readonly maxChars: number | undefined
   readonly value: string
   readonly over: { readonly max: number; readonly count: number } | null
+  readonly alsoMessage?: boolean
+  readonly explain?: boolean
 }) {
   const { t } = useTranslation()
   if (maxChars === undefined) return null
@@ -118,9 +131,17 @@ export function TextLengthNote({
       <p className="text-[10px] text-muted-foreground" data-testid="text-length-count">
         {telegramCharCount(value)}/{maxChars}
       </p>
+      {explain && alsoMessage && (
+        <p className="text-[10px] leading-snug text-muted-foreground">
+          {t('botFlow.screenTexts.alsoPopupHint', { max: maxChars })}
+        </p>
+      )}
       {over !== null && (
         <p role="alert" className="text-[10px] leading-snug text-destructive">
-          {t('botFlow.screenTexts.tooLong', { max: over.max, count: over.count })}
+          {t(alsoMessage ? 'botFlow.screenTexts.tooLongAlsoMessage' : 'botFlow.screenTexts.tooLong', {
+            max: over.max,
+            count: over.count,
+          })}
         </p>
       )}
     </div>
@@ -285,9 +306,11 @@ export function TextKeyEditor({ textKey, captionKey, layout = 'text' }: TextKeyE
   }
 
   const dirty = rowValue !== value || rowValueEn !== (enOpen ? valueEn : '')
-  // A text Telegram takes only up to a length of its own («Меню обновилось»:
-  // a toast, 200 characters) is not saved past it — said under the field.
+  // A text Telegram takes only up to a length of its own (every answer to a
+  // pressed button — a toast or an alert, 200 characters) is not saved past
+  // it — said under the field.
   const maxChars = botTextMaxChars(textKey)
+  const alsoMessage = botTextAlsoMessage(textKey)
   const ruOver = botTextOverLimit(textKey, value)
   const enOver = enOpen ? botTextOverLimit(textKey, valueEn) : null
   const canSave = value.trim().length > 0 && dirty && !mutation.isPending && ruOver === null && enOver === null
@@ -379,7 +402,7 @@ export function TextKeyEditor({ textKey, captionKey, layout = 'text' }: TextKeyE
             className="w-full resize-y rounded-md border bg-background px-2 py-1.5 text-[11px] focus:outline-none focus:ring-1 focus:ring-ring"
           />
         </EmojiFieldOverlay>
-        <TextLengthNote maxChars={maxChars} value={value} over={ruOver} />
+        <TextLengthNote maxChars={maxChars} value={value} over={ruOver} alsoMessage={alsoMessage} explain />
       </div>
 
       <button
@@ -408,7 +431,7 @@ export function TextKeyEditor({ textKey, captionKey, layout = 'text' }: TextKeyE
               className="w-full resize-y rounded-md border bg-background px-2 py-1.5 text-[11px] focus:outline-none focus:ring-1 focus:ring-ring"
             />
           </EmojiFieldOverlay>
-          <TextLengthNote maxChars={maxChars} value={valueEn} over={enOver} />
+          <TextLengthNote maxChars={maxChars} value={valueEn} over={enOver} alsoMessage={alsoMessage} />
         </div>
       )}
 

@@ -102,6 +102,12 @@ export const botTextSchema = z.object({
   visible: z.boolean(),
   /** English sibling value (`<key>@en` row); null when no EN override. */
   valueEn: z.string().nullable().optional(),
+  /**
+   * One of the panel's default texts: the panel writes it again at its next
+   * start whenever it is missing, so deleting it resets it to the default.
+   * Absent from a panel older than 25.09.2026 — read as not a default.
+   */
+  isDefault: z.boolean().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 })

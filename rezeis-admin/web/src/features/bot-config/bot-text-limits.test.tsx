@@ -17,7 +17,13 @@ import { renderWithProviders } from '@/test/test-utils'
 import { TextKeyEditor } from '@/features/bot-flow/components/SystemScreenTexts'
 
 import { BotTextsTab } from './bot-texts-tab'
-import { botTextMaxChars, botTextOverLimit, telegramCharCount } from './bot-text-limits'
+import {
+  BUTTON_ANSWER_TEXTS,
+  botTextAlsoMessage,
+  botTextMaxChars,
+  botTextOverLimit,
+  telegramCharCount,
+} from './bot-text-limits'
 
 beforeAll(async () => {
   // The words live in the bundle the «Карта бота» route loads.
@@ -114,5 +120,100 @@ describe('the «Тексты» tab: editing menu.updated', () => {
     fireEvent.change(field, { target: { value: 'Меню обновилось!' } })
     expect(within(dialog).queryByRole('alert')).toBeNull()
     expect(save).toBeEnabled()
+  })
+})
+
+/**
+ * EVERY text reiwa shows as the answer to a pressed button, not only
+ * «Меню обновилось» (FX5b, 25.09.2026 — the keys FX5c found in the bot's call
+ * sites). Spelled out HERE, with whether reiwa also sends the key as an
+ * ordinary message: a key dropped from the list fails this table.
+ */
+const BUTTON_ANSWER_KEYS: ReadonlyArray<readonly [string, boolean]> = [
+  ['menu.updated', false],
+  ['access_mode.restricted', true],
+  ['access_mode.reg_blocked_new', true],
+  ['access_mode.invited_no_code', true],
+  ['channel.not_subscribed', true],
+  ['channel.verified', false],
+  ['quests.channel.retry', true],
+  ['quests.channel.link_first', true],
+  ['quests.channel.not_subscribed', false],
+  ['quests.channel.verified', false],
+]
+
+/** The words under a field over 200 — the pop-up-only sentence or the also-a-message one. */
+function tooLongWords(alsoMessage: boolean, count: number): string {
+  const key = alsoMessage ? 'botFlow.screenTexts.tooLongAlsoMessage' : 'botFlow.screenTexts.tooLong'
+  const text = i18n.t(key, { max: 200, count })
+  expect(text).not.toContain('botFlow.screenTexts')
+  expect(text).toContain(String(count))
+  return text
+}
+
+/** The hint a text that is also a message carries, whatever its length. */
+function alsoPopupHint(): string {
+  const text = i18n.t('botFlow.screenTexts.alsoPopupHint', { max: 200 })
+  expect(text).not.toContain('botFlow.screenTexts')
+  expect(text).toContain('200')
+  return text
+}
+
+describe('every text shown as a button answer', () => {
+  it('is held to 200 characters, and the panel knows which of them are also messages', () => {
+    for (const [key, alsoMessage] of BUTTON_ANSWER_KEYS) {
+      expect(botTextMaxChars(key), key).toBe(200)
+      expect(botTextAlsoMessage(key), key).toBe(alsoMessage)
+      expect(botTextOverLimit(key, '🔥'.repeat(200)), key).toBeNull()
+      expect(botTextOverLimit(key, 'М'.repeat(201)), key).toEqual({ max: 200, count: 201 })
+    }
+    expect(BUTTON_ANSWER_TEXTS.map((entry) => [entry.key, entry.alsoMessage])).toEqual(BUTTON_ANSWER_KEYS)
+    expect(botTextAlsoMessage('menu.choose_action')).toBe(false)
+  })
+
+  it('«Карта бота»: a text that is also a message says why it is held to 200, and is not saved past it', async () => {
+    mockTexts('channel.not_subscribed', 'Вы ещё не подписаны')
+    renderWithProviders(<TextKeyEditor textKey="channel.not_subscribed" />)
+    const field = await screen.findByDisplayValue('Вы ещё не подписаны')
+    const save = screen.getByRole('button', { name: i18n.t('botFlow.screenTexts.save') })
+
+    // Said before anything is typed: a message alone could be far longer.
+    expect(screen.getByText(alsoPopupHint())).toBeInTheDocument()
+    expect(screen.getByTestId('text-length-count')).toHaveTextContent('19/200')
+
+    fireEvent.change(field, { target: { value: 'М'.repeat(201) } })
+
+    expect(screen.getByRole('alert')).toHaveTextContent(tooLongWords(true, 201))
+    expect(save).toBeDisabled()
+  })
+
+  it('«Карта бота»: a pop-up alone gets the count and the pop-up sentence, no message hint', async () => {
+    mockTexts('quests.channel.verified', 'Подписка подтверждена')
+    renderWithProviders(<TextKeyEditor textKey="quests.channel.verified" />)
+    const field = await screen.findByDisplayValue('Подписка подтверждена')
+
+    expect(screen.queryByText(alsoPopupHint())).toBeNull()
+    fireEvent.change(field, { target: { value: 'М'.repeat(201) } })
+
+    expect(screen.getByRole('alert')).toHaveTextContent(tooLongWords(false, 201))
+    expect(screen.getByTestId('text-length-count')).toHaveTextContent('201/200')
+    expect(screen.getByRole('button', { name: i18n.t('botFlow.screenTexts.save') })).toBeDisabled()
+  })
+
+  it('the «Тексты» tab: the same count, hint and refusal for a text that is also a message', async () => {
+    mockTexts('access_mode.restricted', 'Сервис временно недоступен')
+    renderWithProviders(<BotTextsTab />)
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: 'Edit' }))
+    const dialog = await screen.findByRole('dialog')
+    const field = within(dialog).getByDisplayValue('Сервис временно недоступен')
+    const save = within(dialog).getByRole('button', { name: i18n.t('botConfigPage.texts.save') })
+
+    expect(within(dialog).getByText(alsoPopupHint())).toBeInTheDocument()
+    fireEvent.change(field, { target: { value: 'М'.repeat(201) } })
+
+    expect(within(dialog).getByRole('alert')).toHaveTextContent(tooLongWords(true, 201))
+    expect(within(dialog).getByText('201/200')).toBeInTheDocument()
+    expect(save).toBeDisabled()
   })
 })

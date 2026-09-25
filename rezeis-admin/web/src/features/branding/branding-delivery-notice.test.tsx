@@ -14,6 +14,9 @@
  *   - after a save the page asks again over ~40 s, and stops;
  *   - every label and reason the card can print resolves in both languages.
  */
+import { existsSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
+
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { act, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -23,9 +26,13 @@ import { i18n, i18nReady, loadFeatureBundle } from '@/i18n/i18n'
 import { renderWithProviders } from '@/test/test-utils'
 
 import {
+  BRANDING_DELIVERY_ENTRY_REASONS,
   BRANDING_DELIVERY_FIELD_LABELS,
   BRANDING_DELIVERY_REASONS,
   DELIVERY_RECHECKS_AFTER_SAVE_MS,
+  brandingDeliveryEntryIdOf,
+  brandingDeliveryEntryOf,
+  brandingDeliveryEntryReasonText,
   brandingDeliveryFieldOf,
   brandingDeliveryReasonText,
   brandingFormFieldOf,
@@ -34,6 +41,17 @@ import {
 import { BrandingDeliveryNotice } from './branding-delivery-notice'
 
 const VERSION = 'b'.repeat(32)
+
+/** The cabinet's guard, in the sibling checkout (`../reiwa` next to this repo). */
+const REIWA_PORT = join(
+  __dirname,
+  ...Array<string>(6).fill('..'),
+  'reiwa',
+  'src',
+  'application',
+  'ports',
+  'public-config-persistence.port.ts',
+)
 
 function answer(rejected: unknown) {
   return { data: { report: { version: VERSION, reportedAt: '2026-09-24T20:00:00.000Z', rejected } } }
@@ -201,5 +219,116 @@ describe('the card', () => {
       await vi.advanceTimersByTimeAsync(120_000)
     })
     expect(get).toHaveBeenCalledTimes(1 + DELIVERY_RECHECKS_AFTER_SAVE_MS.length)
+  })
+})
+
+/**
+ * The cabinet takes five fields entry by entry and reports a refused entry by
+ * its OWN path (reiwa `PUBLIC_CONFIG_KEYED_FIELDS`, `delivery-report.ts`):
+ * `branding.planCardStyles.<planId>`, `branding.iconDecor.<key>`,
+ * `customIcons[i]`, `branding.cardEffectsByIndex[i]`, `branding.navItems[i]`.
+ * The card names that entry — the plan, the icon, the item — and says why in
+ * words about it, not in the whole field's («…одной из тарифных карточек…»).
+ */
+describe('a refused entry is named, not only its field', () => {
+  it('reads the entry out of the path — a plan id may hold a dot or a bracket', () => {
+    expect(brandingDeliveryEntryOf('branding.planCardStyles.plan-basic')).toEqual({ kind: 'plan', planId: 'plan-basic' })
+    expect(brandingDeliveryEntryOf('branding.planCardStyles.pl.an[1]')).toEqual({ kind: 'plan', planId: 'pl.an[1]' })
+    expect(brandingDeliveryEntryOf('branding.iconDecor.buy')).toEqual({ kind: 'icon', iconKey: 'buy' })
+    expect(brandingDeliveryEntryOf('customIcons[2]')).toEqual({ kind: 'customIcon', position: 3 })
+    expect(brandingDeliveryEntryOf('branding.cardEffectsByIndex[0]')).toEqual({ kind: 'cardSlot', position: 1 })
+    expect(brandingDeliveryEntryOf('branding.navItems[4]')).toEqual({ kind: 'navItem', position: 5 })
+    for (const whole of [
+      'branding.planCardStyles',
+      'branding.planCardStyles.',
+      'branding.primary',
+      'branding.themeVariants.subscriptionCardText',
+      'customIcons',
+      'defaultCurrency',
+    ]) {
+      expect(brandingDeliveryEntryOf(whole), whole).toBeNull()
+    }
+  })
+
+  it('reads the id a reported value names, even cut short', () => {
+    expect(brandingDeliveryEntryIdOf('{"id":"plans","visible":true}')).toBe('plans')
+    expect(brandingDeliveryEntryIdOf('{"id":"my-icon","svg":"<svg viewBox=\\"0 0 24 24\\"…')).toBe('my-icon')
+    expect(brandingDeliveryEntryIdOf('{"svg":"<g id=\\"x\\"/>"}')).toBeNull()
+    expect(brandingDeliveryEntryIdOf('42')).toBeNull()
+  })
+
+  it('words an entry’s reason about the entry, and any other reason as the field does', () => {
+    for (const reason of BRANDING_DELIVERY_ENTRY_REASONS) {
+      expect(brandingDeliveryEntryReasonText(reason).key).toBe(`brandingPage.deliveryNotice.entryReasons.${reason}`)
+    }
+    expect(brandingDeliveryEntryReasonText('out-of-range[0..1]')).toEqual(brandingDeliveryReasonText('out-of-range[0..1]'))
+  })
+
+  it('names the plan by its name, and a plan no longer in the list by its id', async () => {
+    const get = vi.spyOn(api, 'get').mockImplementation(async (path: string) => {
+      if (path === '/admin/plans') return { data: [{ id: 'plan-basic', name: 'Basic' }] }
+      return answer([
+        { path: 'branding.planCardStyles.plan-basic', reason: 'not-a-valid-plan-card-style-map', value: '{"gradient":1}' },
+        { path: 'branding.planCardStyles.plan-gone', reason: 'not-a-valid-plan-card-style-map', value: '{"gradient":1}' },
+      ])
+    })
+    renderNotice(null)
+
+    const fields = await screen.findAllByTestId('branding-delivery-field')
+    expect(await within(fields[0]!).findByText('Tariff cards — plan “Basic”')).toBeInTheDocument()
+    expect(within(fields[1]!).getByText('Tariff cards — plan with id plan-gone (not in the plan list)')).toBeInTheDocument()
+    const entryWords = i18n.t('brandingPage.deliveryNotice.entryReasons.not-a-valid-plan-card-style-map')
+    expect(within(fields[0]!).getByText(entryWords)).toBeInTheDocument()
+    expect(within(fields[0]!).queryByText(i18n.t('brandingPage.deliveryNotice.reasons.not-a-valid-plan-card-style-map'))).toBeNull()
+    expect(get).toHaveBeenCalledWith('/admin/plans', expect.anything())
+  })
+
+  it('names the icon, the custom icon, the card and the menu item — and asks for no plans', async () => {
+    const get = vi.spyOn(api, 'get').mockResolvedValue(
+      answer([
+        { path: 'branding.iconDecor.buy', reason: 'not-a-valid-icon-decor-map', value: '{"glyph":7}' },
+        { path: 'customIcons[1]', reason: 'not-a-valid-custom-icon', value: '{"id":"star-2","svg":"<svg…' },
+        { path: 'branding.cardEffectsByIndex[0]', reason: 'not-a-valid-card-effect-slot', value: '{"mode":"x"}' },
+        { path: 'branding.navItems[2]', reason: 'duplicate-destination-id', value: '{"id":"plans","visible":true}' },
+      ]),
+    )
+    renderNotice(null)
+
+    const fields = await screen.findAllByTestId('branding-delivery-field')
+    expect(within(fields[0]!).getByText('Dashboard icons — the “Buy” icon')).toBeInTheDocument()
+    expect(within(fields[1]!).getByText('Icon library — icon “star-2”')).toBeInTheDocument()
+    expect(within(fields[2]!).getByText('Background by card position — card no. 1')).toBeInTheDocument()
+    expect(within(fields[3]!).getByText('Cabinet navigation — item 3, “Plans”')).toBeInTheDocument()
+    expect(
+      within(fields[3]!).getByText(i18n.t('brandingPage.deliveryNotice.entryReasons.duplicate-destination-id')),
+    ).toBeInTheDocument()
+    // No plan entry, no plan list: the page asks only for the report.
+    expect(get.mock.calls.map(([path]) => path)).toEqual(['/admin/settings/branding/delivery'])
+  })
+
+  it.skipIf(!existsSync(REIWA_PORT))('reads the entry of every field the cabinet takes entry by entry', () => {
+    // reiwa's list, from the sibling checkout when it is there (CI has none).
+    const declared = /export const PUBLIC_CONFIG_KEYED_FIELDS: readonly string\[\] = \[([\s\S]*?)\];/.exec(
+      readFileSync(REIWA_PORT, 'utf8'),
+    )
+    const fields = [...(declared?.[1] ?? '').matchAll(/"([^"]+)"/g)].map((match) => match[1] ?? '')
+    expect(fields.length, 'PUBLIC_CONFIG_KEYED_FIELDS moved in reiwa — point this test at it').toBeGreaterThan(0)
+    for (const field of fields) {
+      const entry = brandingDeliveryEntryOf(`${field}.key`) ?? brandingDeliveryEntryOf(`${field}[0]`)
+      expect(entry, `${field}: a refused entry of it would be named as the whole field`).not.toBeNull()
+    }
+  })
+
+  it.each(['en', 'ru'])('has every word it can print in %s', async (language) => {
+    await i18n.changeLanguage(language)
+    await loadFeatureBundle('branding')
+    const says = (key: string, values: Record<string, unknown> = {}): void => {
+      expect(i18n.t(key, values), `${key} does not resolve`).not.toBe(key)
+    }
+    for (const reason of BRANDING_DELIVERY_ENTRY_REASONS) says(`brandingPage.deliveryNotice.entryReasons.${reason}`)
+    for (const key of ['plan', 'planById', 'icon', 'customIcon', 'customIconAt', 'cardSlot', 'navItem', 'navItemAt']) {
+      says(`brandingPage.deliveryNotice.entries.${key}`, { name: 'n', id: 'i', position: 1 })
+    }
+    await i18n.changeLanguage('en')
   })
 })

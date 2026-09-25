@@ -2379,10 +2379,12 @@ export class RemnawaveApiService {
           url: path,
         });
         // `apps` is added here, beside what the panel sent, for the dashboard's
-        // client-apps ring: `byApp` sits at the top level on 2.7.x and inside
-        // every platform from 2.8 on, and `withHwidApps` reads both without
-        // ever counting a device twice. Nothing Remnawave sent is reshaped —
-        // the fraud detector reads `byPlatform` verbatim, through its own call.
+        // client-apps ring: every supported Remnawave (3.x) nests `byApp`
+        // inside each `byPlatform` entry, and `withHwidApps` sums those lists
+        // across platforms. The top-level `byApp` of 2.7.x is not read — 2.x
+        // is refused (`LegacyPanelRefusal`). Nothing Remnawave sent is
+        // reshaped — the fraud detector reads `byPlatform` verbatim, through
+        // its own call.
         return withHwidApps(
           response.response ?? (response as unknown as RemnawaveHwidStatsInterface),
         );

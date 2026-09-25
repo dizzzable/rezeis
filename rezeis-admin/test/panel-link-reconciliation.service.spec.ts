@@ -191,6 +191,15 @@ interface PrismaHarness {
    * an identity.
    */
   readonly queries: string[];
+  /**
+   * Every statement sent OUTSIDE a transaction through `$executeRaw` — the
+   * profile-facts stamp — with the ids it named, its values, and what each of
+   * those rows held in `remnawave_id` at that moment (so "after the link" is a
+   * fact of the table, not of call order).
+   */
+  readonly stamps: Array<{ ids: string[]; values: unknown[]; linkAtStamp: unknown[] }>;
+  /** Set to make the next root `$executeRaw` fail. */
+  failStamp: boolean;
 }
 
 /**
@@ -213,6 +222,7 @@ function prismaHarness(
   const rawLocks: unknown[] = [];
   const rawQueries: unknown[] = [];
   const queries: string[] = [];
+  const stamps: PrismaHarness['stamps'] = [];
 
   const subscription = {
     // ORDERED THE WAY THE CALLER ASKED, and by `id` when it did not ask — which
@@ -310,6 +320,19 @@ function prismaHarness(
 
   const client = {
     subscription,
+    // The profile-facts stamp (`stampRemnawaveProfileFacts`): its ids are the
+    // one array among the statement's values.
+    $executeRaw: async (query: unknown) => {
+      if (harness.failStamp) throw new Error('stamp refused');
+      const values = ((query as { values?: unknown[] }).values ?? []).slice();
+      const ids = (values.find((value): value is string[] => Array.isArray(value)) ?? []).slice();
+      stamps.push({
+        ids,
+        values,
+        linkAtStamp: ids.map((id) => table.find((row) => row['id'] === id)?.['remnawaveId']),
+      });
+      return ids.length;
+    },
     // The walk's pages are raw SQL (a regular expression has no Prisma
     // spelling); the mirror in `helpers/panel-link-walk-fake.ts` answers them
     // from the same table, and refuses a statement that lost the one spelling
@@ -335,7 +358,18 @@ function prismaHarness(
     },
   };
 
-  return { client, table, writes, transactions, rawLocks, rawQueries, queries };
+  const harness: PrismaHarness = {
+    client,
+    table,
+    writes,
+    transactions,
+    rawLocks,
+    rawQueries,
+    queries,
+    stamps,
+    failStamp: false,
+  };
+  return harness;
 }
 
 /**
@@ -2164,5 +2198,134 @@ describe('PanelLinkReconciliationService — stored identity spelling', () => {
     // second resolve through the username, which is the landing this sweep
     // refuses to make.
     assert.deepEqual(panel.profileCalls, [5150]);
+  });
+});
+
+describe('PanelLinkReconciliationService — the name a CREATE recorded', () => {
+  // `ProfileSyncProcessor.handleCreate` records the name its POST will use
+  // (`remnawavePendingUsername` / `remnawavePendingOwnerId`) so a retry can
+  // find the profile an earlier attempt made. Every other link writer — the
+  // CREATE's own link, the comparison, «Привязать профиль» — clears the pair
+  // when it links: a linked row has no CREATE outstanding. The walk left it.
+  const PENDING = { remnawavePendingUsername: 'rz_alice_sub_2', remnawavePendingOwnerId: 'user-1' };
+
+  it('clears the pending name and owner when it links, like every other link writer', async () => {
+    const prisma = prismaHarness([subscriptionRow(PENDING)]);
+
+    const report = await service(prisma, panelHarness({})).reconcile({ dryRun: false });
+
+    assert.equal(report.linked, 1);
+    assert.equal(prisma.table[0]['remnawaveId'], '5150');
+    assert.equal(prisma.table[0]['remnawavePendingUsername'], null, 'nothing is left for a CREATE to look for');
+    assert.equal(prisma.table[0]['remnawavePendingOwnerId'], null);
+  });
+
+  it('control: a link it does not write — lost race, collision, dry run — leaves the pending pair alone', async () => {
+    // Only the link clears the pair: a row this walk did not link may still
+    // have its CREATE outstanding, and that CREATE needs the name.
+    const lost = prismaHarness([subscriptionRow(PENDING)]);
+    const racing = panelHarness({
+      profile: () => {
+        lost.table[0]['remnawaveId'] = 'rem-created-concurrently';
+        return { kind: 'ok', user: { description: 'reiwa_id: user-1', username: 'rz_alice_sub' } };
+      },
+    });
+    const lostReport = await service(lost, racing).reconcile({ dryRun: false });
+    assert.equal(lostReport.unrepaired[0]?.outcome, 'raceLost');
+    assert.equal(lost.table[0]['remnawavePendingUsername'], 'rz_alice_sub_2');
+
+    const taken = prismaHarness([subscriptionRow(PENDING)], () => [{ conflictId: 'sub-holder', conflictUserId: 'user-9' }]);
+    const takenReport = await service(taken, panelHarness({})).reconcile({ dryRun: false });
+    assert.equal(takenReport.unrepaired[0]?.outcome, 'conflict');
+    assert.equal(taken.table[0]['remnawavePendingUsername'], 'rz_alice_sub_2');
+
+    const preview = prismaHarness([subscriptionRow(PENDING)]);
+    const previewReport = await service(preview, panelHarness({})).reconcile({ dryRun: true });
+    assert.equal(previewReport.repaired[0]?.outcome, 'wouldLink');
+    assert.equal(preview.table[0]['remnawavePendingUsername'], 'rz_alice_sub_2');
+    assert.equal(preview.table[0]['remnawavePendingOwnerId'], 'user-1');
+  });
+});
+
+describe('PanelLinkReconciliationService — the facts of the profile it read', () => {
+  // The walk reads a FULL Remnawave user (`getUserById`) for every row it
+  // proves. Like every other full read (profile sync, webhooks, ↻, the
+  // importers) it stamps the profile's `createdAt` and `lastTrafficResetAt`
+  // through `stampRemnawaveProfileFacts`, whose one statement keeps the rules
+  // (never null over a value, the reset only forward — proven on PostgreSQL in
+  // `panel-link-check-postgres.spec.ts`). Here: WHICH rows, and WHEN.
+  const CREATED_AT = new Date('2025-03-20T09:15:00.000Z');
+  const LAST_RESET = new Date('2026-09-25T00:10:00.123Z');
+  const withFacts = (description = 'reiwa_id: user-1') => () => ({
+    kind: 'ok',
+    user: {
+      description,
+      username: 'rz_alice_sub',
+      createdAt: CREATED_AT.toISOString(),
+      lastTrafficResetAt: LAST_RESET.toISOString(),
+    },
+  });
+  const carries = (values: unknown[], date: Date) =>
+    values.some((value) => value instanceof Date && value.getTime() === date.getTime());
+
+  it('stamps both facts onto the row it links — after the link, never under its lock', async () => {
+    const prisma = prismaHarness([subscriptionRow()]);
+
+    const report = await service(prisma, panelHarness({ profile: withFacts() })).reconcile({ dryRun: false });
+
+    assert.equal(report.linked, 1);
+    assert.equal(prisma.stamps.length, 1, 'one stamp for the one profile read');
+    const [stamp] = prisma.stamps;
+    assert.deepEqual(stamp?.ids, ['sub-fits']);
+    assert.ok(carries(stamp?.values ?? [], CREATED_AT), 'the profile createdAt');
+    assert.ok(carries(stamp?.values ?? [], LAST_RESET), 'the profile last traffic reset');
+    assert.deepEqual(stamp?.linkAtStamp, ['5150'], 'the row already links the profile when it is stamped');
+    assert.equal(prisma.rawLocks.length, 1, 'only the advisory lock ran inside the link transaction');
+  });
+
+  it('stamps whoever links a profile it could not link: a full read is stamped onto the profile\'s own row', async () => {
+    // Another customer's row holds profile 5150; the walk refuses the link
+    // (`conflict`) and the profile it read is that row's.
+    const table = [
+      subscriptionRow(),
+      subscriptionRow({ id: 'sub-holder', userId: 'user-9', remnawaveId: '5150', remnawavePanelId: 5150 }),
+    ];
+    const prisma = prismaHarness(table, (query) => holdersFromSql(table, query, 'sub-fits', 5150));
+
+    const report = await service(prisma, panelHarness({ profile: withFacts() })).reconcile({ dryRun: false });
+
+    assert.equal(report.unrepaired.find((row) => row.subscriptionId === 'sub-fits')?.outcome, 'conflict');
+    assert.deepEqual(
+      prisma.stamps.map((stamp) => stamp.ids),
+      [['sub-holder']],
+      'the holder, and never the row the profile is not linked to',
+    );
+  });
+
+  it('a dry run stamps nothing, and a read without either fact costs no statement', async () => {
+    // A row that already links the profile read — the one a real run stamps.
+    const table = [
+      subscriptionRow(),
+      subscriptionRow({ id: 'sub-holder', userId: 'user-9', remnawaveId: '5150', remnawavePanelId: 5150 }),
+    ];
+    const preview = prismaHarness(table);
+    const previewReport = await service(preview, panelHarness({ profile: withFacts() })).reconcile({ dryRun: true });
+    assert.equal(previewReport.unrepaired.find((row) => row.subscriptionId === 'sub-fits')?.outcome, 'conflict');
+    assert.deepEqual(preview.stamps, [], 'a dry run writes nothing at all');
+
+    const bare = prismaHarness([subscriptionRow()]);
+    const report = await service(bare, panelHarness({})).reconcile({ dryRun: false });
+    assert.equal(report.linked, 1);
+    assert.deepEqual(bare.stamps, []);
+  });
+
+  it('a stamp that fails costs the stamp, not the link', async () => {
+    const prisma = prismaHarness([subscriptionRow()]);
+    prisma.failStamp = true;
+
+    const report = await service(prisma, panelHarness({ profile: withFacts() })).reconcile({ dryRun: false });
+
+    assert.equal(report.linked, 1);
+    assert.equal(prisma.table[0]['remnawaveId'], '5150');
   });
 });

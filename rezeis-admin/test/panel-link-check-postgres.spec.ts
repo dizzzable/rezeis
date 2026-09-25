@@ -71,9 +71,28 @@ class MemoryCache {
 /** Remnawave, answering only for the profiles registered with it. */
 class PanelDouble {
   private readonly byShortUuid = new Map<string, number>();
-  private readonly byId = new Map<number, { username: string; description: string; subscriptionUrl: string }>();
+  private readonly byId = new Map<
+    number,
+    {
+      username: string;
+      description: string;
+      subscriptionUrl: string;
+      createdAt: string;
+      lastTrafficResetAt: string | null;
+    }
+  >();
 
-  add(panelId: number, input: { shortUuid: string; owner: string; subscriptionId?: string }): void {
+  add(
+    panelId: number,
+    input: {
+      shortUuid: string;
+      owner: string;
+      subscriptionId?: string;
+      /** The profile's own two facts, as Remnawave answers them. */
+      createdAt?: string;
+      lastTrafficResetAt?: string | null;
+    },
+  ): void {
     this.byShortUuid.set(input.shortUuid, panelId);
     this.byId.set(panelId, {
       username: `rz_pg_${panelId}`,
@@ -81,6 +100,8 @@ class PanelDouble {
         `name: pg\nreiwa_id: ${input.owner}` +
         (input.subscriptionId === undefined ? '' : `\nsubscription_id: ${input.subscriptionId}`),
       subscriptionUrl: `https://sub.example.test/${input.shortUuid}`,
+      createdAt: input.createdAt ?? '2026-09-01T00:00:00.000Z',
+      lastTrafficResetAt: input.lastTrafficResetAt ?? null,
     });
   }
 
@@ -118,8 +139,8 @@ class PanelDouble {
         telegramId: null,
         email: null,
         expireAt: '2099-12-31T00:00:00.000Z',
-        createdAt: '2026-09-01T00:00:00.000Z',
-        lastTrafficResetAt: null,
+        createdAt: profile.createdAt,
+        lastTrafficResetAt: profile.lastTrafficResetAt,
         trafficLimitBytes: 0,
         hwidDeviceLimit: 0,
         trafficLimitStrategy: null,
@@ -493,5 +514,129 @@ run('the automatic panel-link check on PostgreSQL', () => {
     assert.equal(run.job.status, SyncJobStatus.COMPLETED);
     assert.deepEqual(run.others, []);
     assert.deepEqual(run.patched, []);
+  });
+
+  // ── FX5b: the walk's link clears the pending name; what the check reads, it stamps ──
+  //
+  // The walk and the comparison are driven one at a time here: in a whole pass
+  // the comparison also reads every profile the walk just linked, and would
+  // hide which of the two stamped it.
+
+  const UUID = '330f2b38-1f1e-4f6a-9f2b-0a1b2c3d4e5f';
+  const iso = (value: Date | null) => value?.toISOString() ?? null;
+
+  it('FX5b-1: the walk clears the name a CREATE recorded when it links the row', async () => {
+    const userId = await newUser(fx);
+    const panelId = PANEL_BASE + fx.next();
+    const panel = new PanelDouble();
+    panel.add(panelId, { shortUuid: `PEND${panelId}`, owner: userId });
+    const lost = await subscription(userId, `${fx.prefix}-pend-lost`, {
+      remnawaveId: UUID,
+      configUrl: `https://sub.example.test/PEND${panelId}`,
+      remnawavePendingUsername: `rz_pg_${panelId}_2`,
+      remnawavePendingOwnerId: userId,
+    });
+    const { walk } = checkService(panel, new MemoryCache());
+
+    const report = await walk.reconcile({ dryRun: false, startAfterId: `${fx.prefix}-pend-`, limit: 5 });
+
+    assert.ok(report.repaired.some((row) => row.subscriptionId === lost && row.outcome === 'linked'));
+    const row = await prisma.subscription.findUniqueOrThrow({ where: { id: lost } });
+    assert.equal(row.remnawaveId, String(panelId));
+    assert.equal(row.remnawavePendingUsername, null, 'nothing is left for a CREATE to look for');
+    assert.equal(row.remnawavePendingOwnerId, null);
+  });
+
+  it('FX5b-7: the walk stamps the profile it read onto the row it links — never null over a value, the reset only forward', async () => {
+    const userId = await newUser(fx);
+    const [a, b, c] = [PANEL_BASE + fx.next(), PANEL_BASE + fx.next(), PANEL_BASE + fx.next()];
+    const panel = new PanelDouble();
+    panel.add(a, { shortUuid: `WFA${a}`, owner: userId, createdAt: '2025-03-20T09:15:00.000Z', lastTrafficResetAt: '2026-09-25T00:10:00.000Z' });
+    // Its reset is OLDER than the one the row already holds.
+    panel.add(b, { shortUuid: `WFB${b}`, owner: userId, createdAt: '2025-04-01T00:00:00.000Z', lastTrafficResetAt: '2026-09-01T00:00:00.000Z' });
+    // It has never been reset: that says nothing about the reset the row holds.
+    panel.add(c, { shortUuid: `WFC${c}`, owner: userId, createdAt: '2025-05-05T05:05:00.000Z', lastTrafficResetAt: null });
+    const row = (suffix: string, panelId: number, data: Record<string, unknown> = {}) =>
+      subscription(userId, `${fx.prefix}-wfacts-${suffix}`, {
+        remnawaveId: UUID,
+        configUrl: `https://sub.example.test/WF${suffix.toUpperCase()}${panelId}`,
+        ...data,
+      });
+    const idA = await row('a', a);
+    const idB = await row('b', b, { remnawaveLastTrafficResetAt: new Date('2026-09-20T00:00:00.000Z') });
+    const idC = await row('c', c, { remnawaveLastTrafficResetAt: new Date('2026-09-10T00:00:00.000Z') });
+    const { walk } = checkService(panel, new MemoryCache());
+
+    const report = await walk.reconcile({ dryRun: false, startAfterId: `${fx.prefix}-wfacts-`, limit: 3 });
+
+    assert.equal(report.linked, 3);
+    const read = async (id: string) => {
+      const stored = await prisma.subscription.findUniqueOrThrow({ where: { id } });
+      return [iso(stored.remnawaveProfileCreatedAt), iso(stored.remnawaveLastTrafficResetAt)];
+    };
+    assert.deepEqual(await read(idA), ['2025-03-20T09:15:00.000Z', '2026-09-25T00:10:00.000Z']);
+    assert.deepEqual(await read(idB), ['2025-04-01T00:00:00.000Z', '2026-09-20T00:00:00.000Z'], 'the reset only moves forward');
+    assert.deepEqual(await read(idC), ['2025-05-05T05:05:00.000Z', '2026-09-10T00:00:00.000Z'], 'never null over a value');
+  });
+
+  it('FX5b-7 control: a dry run of the walk stamps nothing — not even the row that already links the profile', async () => {
+    const userId = await newUser(fx);
+    const other = await newUser(fx);
+    const panelId = PANEL_BASE + fx.next();
+    const panel = new PanelDouble();
+    panel.add(panelId, { shortUuid: `WDRY${panelId}`, owner: userId, createdAt: '2025-03-20T09:15:00.000Z' });
+    const id = await subscription(userId, `${fx.prefix}-wdry-a`, {
+      remnawaveId: UUID,
+      configUrl: `https://sub.example.test/WDRY${panelId}`,
+    });
+    // Another customer's row already on that profile: a real run would stamp it.
+    const holder = await subscription(other, `${fx.prefix}-wdry-holder`, { remnawaveId: String(panelId), remnawavePanelId: panelId });
+    const { walk } = checkService(panel, new MemoryCache());
+
+    const report = await walk.reconcile({ dryRun: true, startAfterId: `${fx.prefix}-wdry-`, limit: 1 });
+
+    assert.equal(report.unrepaired.find((row) => row.subscriptionId === id)?.outcome, 'conflict');
+    for (const row of [id, holder]) {
+      const stored = await prisma.subscription.findUniqueOrThrow({ where: { id: row } });
+      assert.equal(stored.remnawaveProfileCreatedAt, null, `${row} was stamped by a dry run`);
+    }
+  });
+
+  it('FX5b-7: the comparison stamps every profile it read onto the live rows that link it, by either identifier', async () => {
+    const one = await newUser(fx);
+    const two = await newUser(fx);
+    const [p1, p2, p3, p4] = [PANEL_BASE + fx.next(), PANEL_BASE + fx.next(), PANEL_BASE + fx.next(), PANEL_BASE + fx.next()];
+    const panel = new PanelDouble();
+    panel.add(p1, { shortUuid: `CFA${p1}`, owner: one, createdAt: '2025-01-01T01:00:00.000Z', lastTrafficResetAt: '2026-09-24T00:00:00.000Z' });
+    panel.add(p2, { shortUuid: `CFB${p2}`, owner: two, createdAt: '2025-02-02T02:00:00.000Z', lastTrafficResetAt: '2026-09-01T00:00:00.000Z' });
+    panel.add(p3, { shortUuid: `CFC${p3}`, owner: two, createdAt: '2025-03-03T03:00:00.000Z', lastTrafficResetAt: '2026-09-03T00:00:00.000Z' });
+    panel.add(p4, { shortUuid: `CFD${p4}`, owner: one, createdAt: '2025-04-04T04:00:00.000Z', lastTrafficResetAt: '2026-09-04T00:00:00.000Z' });
+    const linked = await subscription(one, `${fx.prefix}-cfacts-linked`, { remnawaveId: String(p1), remnawavePanelId: p1 });
+    // Linked by the numeric panel id beside a 2.x uuid, with a LATER reset than p2's.
+    const byPanelId = await subscription(two, `${fx.prefix}-cfacts-by-panel-id`, {
+      remnawaveId: UUID,
+      remnawavePanelId: p2,
+      remnawaveLastTrafficResetAt: new Date('2026-09-15T00:00:00.000Z'),
+    });
+    const deleted = await subscription(two, `${fx.prefix}-cfacts-deleted`, {
+      status: SubscriptionStatus.DELETED,
+      remnawaveId: String(p3),
+      remnawavePanelId: p3,
+    });
+    // The comparison's own link: `one` has this one row without a link and p4 as the one extra profile.
+    const autoLinked = await subscription(one, `${fx.prefix}-cfacts-auto`);
+    const { comparison } = checkService(panel, new MemoryCache());
+
+    const outcome = await comparison.compare();
+
+    assert.equal(outcome.kind, 'ok');
+    const read = async (id: string) => {
+      const stored = await prisma.subscription.findUniqueOrThrow({ where: { id } });
+      return [stored.remnawaveId, iso(stored.remnawaveProfileCreatedAt), iso(stored.remnawaveLastTrafficResetAt)];
+    };
+    assert.deepEqual(await read(linked), [String(p1), '2025-01-01T01:00:00.000Z', '2026-09-24T00:00:00.000Z']);
+    assert.deepEqual(await read(byPanelId), [UUID, '2025-02-02T02:00:00.000Z', '2026-09-15T00:00:00.000Z'], 'the reset only moves forward');
+    assert.deepEqual(await read(deleted), [String(p3), null, null], 'a DELETED row is left alone');
+    assert.deepEqual(await read(autoLinked), [String(p4), '2025-04-04T04:00:00.000Z', '2026-09-04T00:00:00.000Z']);
   });
 });

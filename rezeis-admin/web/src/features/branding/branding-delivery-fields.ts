@@ -96,6 +96,80 @@ export function brandingFormFieldOf(field: string): string | null {
   return field.startsWith(BRANDING_PREFIX) ? field.slice(BRANDING_PREFIX.length) : null
 }
 
+/**
+ * One entry of a field the cabinet takes entry by entry (reiwa
+ * `PUBLIC_CONFIG_KEYED_FIELDS`, 25.09.2026): a refused entry keeps its own
+ * previous value, everything else in the field goes live, and the report names
+ * the entry by its own path — `branding.planCardStyles.<planId>`,
+ * `branding.iconDecor.<key>`, `customIcons[i]`, `branding.cardEffectsByIndex[i]`,
+ * `branding.navItems[i]`. The notice names that entry — the plan, the icon, the
+ * item — not only the field it is in. `position` counts from 1.
+ */
+export type BrandingDeliveryEntry =
+  | { readonly kind: 'plan'; readonly planId: string }
+  | { readonly kind: 'icon'; readonly iconKey: string }
+  | { readonly kind: 'customIcon'; readonly position: number }
+  | { readonly kind: 'cardSlot'; readonly position: number }
+  | { readonly kind: 'navItem'; readonly position: number }
+
+const PLAN_STYLE_PREFIX = 'branding.planCardStyles.'
+const ICON_DECOR_PREFIX = 'branding.iconDecor.'
+const LIST_ENTRY = /^(customIcons|branding\.cardEffectsByIndex|branding\.navItems)\[(\d+)\]/
+
+/**
+ * The entry `path` names, or `null` when it names a whole field. A map entry's
+ * key is the REST of the path: a plan id is the panel's to choose and may hold
+ * a `.` or a `[`, so it is never split further.
+ */
+export function brandingDeliveryEntryOf(path: string): BrandingDeliveryEntry | null {
+  if (path.startsWith(PLAN_STYLE_PREFIX)) {
+    const planId = path.slice(PLAN_STYLE_PREFIX.length)
+    return planId === '' ? null : { kind: 'plan', planId }
+  }
+  if (path.startsWith(ICON_DECOR_PREFIX)) {
+    const iconKey = path.slice(ICON_DECOR_PREFIX.length)
+    return iconKey === '' ? null : { kind: 'icon', iconKey }
+  }
+  const listed = LIST_ENTRY.exec(path)
+  if (listed === null) return null
+  const position = Number(listed[2]) + 1
+  if (listed[1] === 'customIcons') return { kind: 'customIcon', position }
+  if (listed[1] === 'branding.cardEffectsByIndex') return { kind: 'cardSlot', position }
+  return { kind: 'navItem', position }
+}
+
+/**
+ * The `id` a reported value names — a custom icon's, a menu item's — or `null`.
+ * The value is the entry as JSON, cut at 120 characters, so it is searched for
+ * the key rather than parsed; a quoted `"id"` inside a string is escaped there
+ * and never matches.
+ */
+export function brandingDeliveryEntryIdOf(value: string): string | null {
+  const match = /"id"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(value)
+  if (match === null) return null
+  try {
+    return JSON.parse(`"${match[1] ?? ''}"`) as string
+  } catch {
+    return match[1] ?? null
+  }
+}
+
+/**
+ * The reasons a refused ENTRY carries — the field's own codes, worded for the
+ * one entry the notice now names («оформление этой карточки…», not «…одной из
+ * тарифных карточек…»).
+ */
+export const BRANDING_DELIVERY_ENTRY_REASONS: readonly string[] = [
+  'not-a-valid-plan-card-style-map',
+  'not-a-valid-icon-decor-map',
+  'not-a-valid-custom-icon',
+  'not-a-valid-card-effect-slot',
+  'not-a-valid-nav-item',
+  'duplicate-destination-id',
+]
+
+const ENTRY_REASONS = new Set(BRANDING_DELIVERY_ENTRY_REASONS)
+
 /** How the notice words a reason: an i18n key, and what it interpolates. */
 export interface BrandingDeliveryReasonText {
   readonly key: string
@@ -159,6 +233,13 @@ export function brandingDeliveryReasonText(reason: string): BrandingDeliveryReas
   return KNOWN_REASONS.has(reason)
     ? { key: `brandingPage.deliveryNotice.reasons.${reason}` }
     : { key: 'brandingPage.deliveryNotice.reasons.unknown' }
+}
+
+/** The words for a reason on a refused entry: the entry's own where it has some, else the field's. */
+export function brandingDeliveryEntryReasonText(reason: string): BrandingDeliveryReasonText {
+  return ENTRY_REASONS.has(reason)
+    ? { key: `brandingPage.deliveryNotice.entryReasons.${reason}` }
+    : brandingDeliveryReasonText(reason)
 }
 
 export const BRANDING_DELIVERY_QUERY_KEY = ['admin', 'branding', 'delivery'] as const

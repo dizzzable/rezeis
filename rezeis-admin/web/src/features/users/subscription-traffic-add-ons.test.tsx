@@ -153,8 +153,11 @@ describe('the line itself', () => {
     expect(trafficAddOnLine(share, 'Europe/Moscow', 'en', t)).toBe(
       'of which add-ons: +50 GB until 01.10 03:20, +10 GB until 20.10 12:00, +0.5 GB with no end (Moscow Time)',
     )
-    // A zone this line has no name for: its offset, never a bare hour.
-    expect(trafficAddOnLine(share, 'Asia/Kolkata', 'ru', t)).toContain('(UTC+05:30)')
+    // A zone this line has no name for: its offset, never a bare hour — and
+    // written as the bot's notice and the cabinet write it («UTC+5:30»; it
+    // was «UTC+05:30» here until 25.09.2026).
+    expect(trafficAddOnLine(share, 'Asia/Kolkata', 'ru', t)).toMatch(/ \(UTC\+5:30\)$/u)
+    expect(trafficAddOnLine(share, 'America/Sao_Paulo', 'ru', t)).toMatch(/ \(UTC-3\)$/u)
     // A zone the browser does not know: UTC, named as such.
     expect(trafficAddOnLine(share, 'Mars/Olympus_Mons', 'en', t)).toContain('until 01.10 00:20')
   })

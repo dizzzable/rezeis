@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { BotText, Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { CALLBACK_ANSWER_MAX_CHARS, callbackAnswerTextOf } from '../utils/callback-answer-texts.util';
 
 interface CreateTextInput {
   readonly key: string;
@@ -40,15 +41,15 @@ const TEXT_KEY_REGEX = /^[a-z0-9._-]+$/i;
 const EN_KEY_SUFFIX = '@en';
 
 /**
- * Texts Telegram takes only up to a length of its own, below the DTO's 8000.
- * «Меню обновилось» (`menu.updated`) is the toast reiwa answers an old button
- * with (`answerCallbackQuery`: 0-200 characters). A longer one used to make the
- * answer fail and the old button got no menu; reiwa now cuts it, and the panel
- * refuses to save it (review R2a-08). Counted as Telegram counts: code points.
+ * Texts Telegram takes only up to a length of its own, below the DTO's 8000:
+ * every text reiwa shows as the answer to a pressed button — a toast or an
+ * alert, `answerCallbackQuery`, 0-200 characters (`callback-answer-texts.util.ts`
+ * lists them and says where reiwa shows each). «Меню обновилось» was the first
+ * (review R2a-08): a longer one made the answer fail and the old button got no
+ * menu. reiwa now cuts such a text, and the panel refuses to save it (FX5b:
+ * every such key, not only that one). Counted as Telegram counts: code points.
  * The SPA says the same under the field (`web/.../bot-text-limits.ts`).
  */
-const TELEGRAM_MAX_CHARS_BY_KEY: ReadonlyMap<string, number> = new Map([['menu.updated', 200]]);
-
 function codePointCount(text: string): number {
   let count = 0;
   for (const _codePoint of text) count += 1;
@@ -57,12 +58,15 @@ function codePointCount(text: string): number {
 
 /** Refuse a value of `key` longer than Telegram takes it; the operator reads the reason. */
 function assertTelegramLength(key: string, value: string | null | undefined): void {
-  const max = TELEGRAM_MAX_CHARS_BY_KEY.get(key.trim().toLowerCase());
-  if (max === undefined || typeof value !== 'string') return;
+  const answer = callbackAnswerTextOf(key);
+  if (answer === undefined || typeof value !== 'string') return;
+  const max = CALLBACK_ANSWER_MAX_CHARS;
   const count = codePointCount(value);
   if (count > max) {
     throw new BadRequestException(
-      `Текст «${key}» Telegram показывает всплывающим сообщением и берёт не больше ${max} символов, а здесь ${count}. Сократите текст.`,
+      answer.alsoMessage
+        ? `Текст «${key}» бот показывает и обычным сообщением, и всплывающим — при нажатии кнопки, а всплывающее сообщение Telegram берёт не больше ${max} символов, а здесь ${count}. Сократите текст.`
+        : `Текст «${key}» Telegram показывает всплывающим сообщением и берёт не больше ${max} символов, а здесь ${count}. Сократите текст.`,
     );
   }
 }
@@ -137,8 +141,13 @@ export class BotTextsService {
       throw new BadRequestException('key must be alphanumeric (._- allowed)');
     }
     const baseKey = input.key ?? existing.key;
-    // A renamed row brings its value to a key with a limit of its own.
-    assertTelegramLength(baseKey, input.value ?? existing.value);
+    // A renamed row brings its value to a key with a limit of its own. A value
+    // that does not change, on a key that does not change, is not judged again:
+    // a text saved before its key had a limit must not keep its English — an
+    // operator's, or the seed's — from being saved beside it.
+    if (input.value !== undefined || input.key !== undefined) {
+      assertTelegramLength(baseKey, input.value ?? existing.value);
+    }
     assertTelegramLength(baseKey, input.valueEn);
     const data: Prisma.BotTextUpdateInput = {};
     if (input.key !== undefined) data.key = input.key;

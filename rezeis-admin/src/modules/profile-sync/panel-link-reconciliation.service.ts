@@ -4,7 +4,12 @@ import { Prisma, SubscriptionStatus } from '@prisma/client';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { panelShortUuidFromConfigUrl } from '../remnawave/services/panel-user-address';
 import { PanelUsersClient } from '../remnawave/services/panel-users.client';
+import {
+  readRemnawaveProfileFacts,
+  type RemnawaveProfileFacts,
+} from '../remnawave/utils/remnawave-profile-facts.util';
 import { readProfileOwnerMarkers, readProfileSubscriptionMarkers } from './panel-owner-marker';
+import { stampLinkedProfileFacts } from './panel-profile-comparison.service';
 import { assertPanelProfileOwnership, readPanelFailure } from './profile-sync.processor';
 
 /** How many rows one database page carries. Bounds memory, not panel load. */
@@ -965,7 +970,34 @@ export class PanelLinkReconciliationService {
   }
 
   /**
-   * One row: resolve it on the panel, prove it is ours, then link it.
+   * One row ({@link proveRow}), then the facts of the profile its check read.
+   *
+   * The full read of the profile carries its `createdAt` and
+   * `lastTrafficResetAt`; like every other full read, a real run stamps them
+   * onto the rows that link that profile (`stampLinkedProfileFacts`) — the row
+   * this walk just linked, or the holder it found. AFTER the verdict, so after
+   * `writeLink`'s transaction has committed and let go of the profile advisory
+   * lock. A dry run writes nothing. A failure costs the stamp, not the row.
+   */
+  private async reconcileRow(row: BrokenLinkRow, dryRun: boolean): Promise<RowVerdict> {
+    const read = new Map<number, RemnawaveProfileFacts>();
+    const verdict = await this.proveRow(row, dryRun, read);
+    if (!dryRun && read.size > 0) {
+      try {
+        await stampLinkedProfileFacts(this.prismaService, read);
+      } catch (error: unknown) {
+        this.logger.warn(
+          `Panel link check: the createdAt and last traffic reset of the profile read for subscription ` +
+            `${row.id} were not stamped: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    return verdict;
+  }
+
+  /**
+   * One row: resolve it on the panel, prove it is ours, then link it. The
+   * profile it reads in full is recorded in `read`, by its numeric id.
    *
    * EXACTLY ONE RESOLVE, and the two routes are ordered, not raced:
    *
@@ -983,7 +1015,11 @@ export class PanelLinkReconciliationService {
    * population it is precisely the string the panel cannot answer to, and for
    * the other one there is none.
    */
-  private async reconcileRow(row: BrokenLinkRow, dryRun: boolean): Promise<RowVerdict> {
+  private async proveRow(
+    row: BrokenLinkRow,
+    dryRun: boolean,
+    read: Map<number, RemnawaveProfileFacts>,
+  ): Promise<RowVerdict> {
     const stored = row.remnawaveId;
     const panelUsername = row.remnawavePanelUsername ?? '';
     const shortUuid = panelShortUuidFromConfigUrl(row.configUrl ?? null);
@@ -1118,6 +1154,7 @@ export class PanelLinkReconciliationService {
           );
     }
     const profile = outcome.data.response;
+    read.set(resolved.id, readRemnawaveProfileFacts(profile));
 
     try {
       // "A profile answers to this name" is not "this profile is mine". The
@@ -1395,7 +1432,15 @@ export class PanelLinkReconciliationService {
 
       const written = await tx.subscription.updateMany({
         where: { id: row.id, remnawaveId: row.remnawaveId },
-        data: { remnawaveId, remnawavePanelId: panelId },
+        data: {
+          remnawaveId,
+          remnawavePanelId: panelId,
+          // Linked: nothing is left for a CREATE to look for under the name its
+          // last attempt recorded — cleared as the CREATE's own link, the
+          // comparison and «Привязать профиль» clear it.
+          remnawavePendingUsername: null,
+          remnawavePendingOwnerId: null,
+        },
       });
       if (written.count === 0) {
         return {

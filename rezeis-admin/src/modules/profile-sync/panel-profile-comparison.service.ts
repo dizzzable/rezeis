@@ -9,6 +9,11 @@ import {
   type RemnawavePanelUser,
 } from '../remnawave/services/remnawave-api.service';
 import {
+  readRemnawaveProfileFacts,
+  type RemnawaveProfileFacts,
+  stampRemnawaveProfileFacts,
+} from '../remnawave/utils/remnawave-profile-facts.util';
+import {
   readProfileOwnerMarker,
   readProfileSubscriptionMarkers,
   subscriptionMarkerAllows,
@@ -232,6 +237,110 @@ function describeExtraProfile(
 }
 
 /**
+ * The profile a live row links: its `remnawave_id` when that is a decimal, else
+ * its `remnawave_panel_id` (the number kept beside a 2.x uuid). ONE profile per
+ * row — a row whose two columns name two different profiles is that of its
+ * `remnawave_id`, the one pushes address — so one pass never stamps it twice.
+ */
+function linkedPanelIdOf(row: {
+  readonly remnawaveId: string | null;
+  readonly remnawavePanelId: number | null;
+}): number | null {
+  if (row.remnawaveId !== null && isNumericPanelIdentity(row.remnawaveId)) {
+    const parsed = Number(row.remnawaveId);
+    return Number.isSafeInteger(parsed) ? parsed : null;
+  }
+  return row.remnawavePanelId;
+}
+
+/**
+ * Whether stamping `read` would move either column of `row` — the two rules of
+ * `stampRemnawaveProfileFacts` asked in advance, so a row that already holds
+ * what its profile says costs no statement. The statement still enforces both.
+ */
+function factsWouldMove(
+  row: {
+    readonly remnawaveProfileCreatedAt: Date | null;
+    readonly remnawaveLastTrafficResetAt: Date | null;
+  },
+  read: RemnawaveProfileFacts,
+): boolean {
+  const createdAt = row.remnawaveProfileCreatedAt ?? null;
+  const lastReset = row.remnawaveLastTrafficResetAt ?? null;
+  // `createdAt` follows the profile: any other value moves.
+  if (read.createdAt !== null && (createdAt === null || createdAt.getTime() !== read.createdAt.getTime())) {
+    return true;
+  }
+  // The reset only moves forward, and an answer without one says nothing.
+  return (
+    read.lastTrafficResetAt !== null &&
+    (lastReset === null || lastReset.getTime() < read.lastTrafficResetAt.getTime())
+  );
+}
+
+/**
+ * THE TWO REMNAWAVE FACTS OF EVERY PROFILE THE LINK CHECK READ, onto the live
+ * rows that link it (FX5b, 25.09.2026).
+ *
+ * The walk reads a full user for each row it proves, the comparison reads every
+ * user, and until now neither kept what they said. Like every other full read —
+ * profile sync, the webhooks, ↻, the importers — they stamp the profile's
+ * `createdAt` and `lastTrafficResetAt` through `stampRemnawaveProfileFacts`,
+ * whose one statement keeps both rules: never null over a value, the reset only
+ * forward. Nothing else of the row is written. A DELETED row is left alone.
+ *
+ * CALLED OUTSIDE EVERY LINK TRANSACTION — after the link has committed and let
+ * go of the profile advisory lock, so a row just linked is stamped too, and the
+ * stamp never holds that lock.
+ *
+ * ONE STATEMENT PER PROFILE WHOSE ROWS WOULD MOVE. The rows are read first, one
+ * `IN` read per {@link COMPARISON_BATCH} profiles, and a profile whose rows
+ * already hold what it says costs nothing: the comparison reads every profile
+ * once a day, and a statement per subscription a day would be the price
+ * otherwise. Answers how many rows moved.
+ */
+export async function stampLinkedProfileFacts(
+  prisma: PrismaService,
+  read: ReadonlyMap<number, RemnawaveProfileFacts>,
+): Promise<number> {
+  const told = [...read.entries()]
+    .filter(([, facts]) => facts.createdAt !== null || facts.lastTrafficResetAt !== null)
+    .map(([panelId]) => panelId);
+  let moved = 0;
+  for (const batch of chunks(told, COMPARISON_BATCH)) {
+    const rows = await prisma.subscription.findMany({
+      where: {
+        status: { not: SubscriptionStatus.DELETED },
+        OR: [
+          { remnawaveId: { in: batch.map((panelId) => String(panelId)) } },
+          { remnawavePanelId: { in: batch } },
+        ],
+      },
+      select: {
+        id: true,
+        remnawaveId: true,
+        remnawavePanelId: true,
+        remnawaveProfileCreatedAt: true,
+        remnawaveLastTrafficResetAt: true,
+      },
+    });
+    const due = new Map<number, { readonly facts: RemnawaveProfileFacts; readonly ids: string[] }>();
+    for (const row of rows) {
+      const panelId = linkedPanelIdOf(row);
+      const facts = panelId === null ? undefined : read.get(panelId);
+      if (panelId === null || facts === undefined || !factsWouldMove(row, facts)) continue;
+      const entry = due.get(panelId) ?? { facts, ids: [] };
+      entry.ids.push(row.id);
+      due.set(panelId, entry);
+    }
+    for (const { facts, ids } of due.values()) {
+      moved += await stampRemnawaveProfileFacts(prisma, ids, facts);
+    }
+  }
+  return moved;
+}
+
+/**
  * PanelProfileComparisonService
  * ─────────────────────────────
  * The per-customer comparison (owner's decision, 24.09.2026): every Remnawave
@@ -448,6 +557,27 @@ export class PanelProfileComparisonService {
           };
         }),
       }));
+
+    // ── 6. What each profile says about itself, onto the rows linking it ───
+    //
+    // Every profile read, whether or not it names an owner: the two facts are
+    // the profile's. After the links above committed (a row this run linked
+    // is stamped too), outside every lock, and a list read only in part is
+    // stamped as far as it goes. A failure costs the stamp, never the
+    // comparison.
+    const profileFacts = new Map<number, RemnawaveProfileFacts>();
+    for (const user of users) {
+      const panelId = panelIdOf(user);
+      if (panelId !== null) profileFacts.set(panelId, readRemnawaveProfileFacts(user));
+    }
+    try {
+      await stampLinkedProfileFacts(this.prismaService, profileFacts);
+    } catch (error: unknown) {
+      this.logger.warn(
+        "Remnawave profile comparison: the profiles' createdAt and last traffic reset were not stamped: " +
+          (error instanceof Error ? error.message : String(error)),
+      );
+    }
 
     if (links.length > 0) {
       this.logger.log(

@@ -56,11 +56,29 @@ function usableZone(zone: string | null | undefined): string {
   return zoneOffsetLabel(zone, new Date()) === null ? 'UTC' : zone
 }
 
-/** «по Москве» / "Moscow Time"; «по UTC» / "UTC"; otherwise the offset, «UTC+05:00». */
+/**
+ * `UTC`, `UTC+5`, `UTC+5:30`, `UTC-3` — the zone's offset at `at`, written as
+ * the bot's notices and the cabinet write it (an ASCII minus, the hours
+ * without a leading zero, minutes only when there are some), so one moment
+ * reads the same to the operator and to the customer. Pinned against both by
+ * `zone-phrase-ru.parity.test.ts`. The time-zone picker keeps its own
+ * `UTC+05:00` (`zoneOffsetLabel`).
+ */
+function zoneOffset(zone: string, at: Date): string {
+  const label = zoneOffsetLabel(zone, at)
+  if (label === null) return 'UTC'
+  const match = /^UTC([+-])(\d{2}):(\d{2})$/u.exec(label)
+  if (match === null) return label
+  // A zero offset is UTC's clock, whatever the zone is called.
+  if (match[2] === '00' && match[3] === '00') return 'UTC'
+  return `UTC${match[1]}${Number(match[2])}${match[3] === '00' ? '' : `:${match[3]}`}`
+}
+
+/** «по Москве» / "Moscow Time"; «по UTC» / "UTC"; otherwise the offset, «UTC+5». */
 function zonePhrase(zone: string, at: Date, language: string): string {
-  const offset = zoneOffsetLabel(zone, at) ?? 'UTC'
+  const offset = zoneOffset(zone, at)
   const ru = language.startsWith('ru')
-  if (offset === 'UTC' || offset === 'UTC+00:00') return ru ? 'по UTC' : 'UTC'
+  if (offset === 'UTC') return ru ? 'по UTC' : 'UTC'
   if (ru) return ZONE_PHRASE_RU[zone] ?? offset
   const name = new Intl.DateTimeFormat('en-GB', { timeZone: zone, timeZoneName: 'shortGeneric' })
     .formatToParts(at)

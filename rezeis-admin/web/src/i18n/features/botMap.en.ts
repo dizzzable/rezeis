@@ -193,6 +193,10 @@ export const en = {
       saveFailed: 'Failed to save text',
       tooLong:
         'Will not be saved: Telegram shows this text as a pop-up and takes at most {{max}} characters; this one has {{count}}. Shorten it.',
+      tooLongAlsoMessage:
+        'Will not be saved: the bot also shows this text as a pop-up, which Telegram takes at most {{max}} characters; this one has {{count}}. Shorten it.',
+      alsoPopupHint:
+        'The bot shows this text both as a message and as a pop-up when a button is pressed. Telegram takes a pop-up of at most {{max}} characters, so this text is held to {{max}} too.',
       captions: {
         shareButton: 'The «Share» button in the bot',
         sharePrompt: '«Share» from the bot — the text under the bot link (Telegram puts the link there itself)',
@@ -410,6 +414,14 @@ export const en = {
             addressOnly: 'This takes a whole address starting with https://; a cabinet page opens from a "Mini App" button',
           },
         },
+      },
+    },
+    texts: {
+      resetToDefault: 'Restore the default text',
+      resetToDefaultHint:
+        'This is one of the bot’s default texts. The button below resets it — Russian and English alike: the bot shows the default text at once, and after a panel restart it is back in this list. Your version is not kept.',
+      toasts: {
+        resetToDefault: 'Text restored to the default',
       },
     },
   },

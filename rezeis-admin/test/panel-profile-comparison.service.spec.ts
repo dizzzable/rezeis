@@ -51,6 +51,10 @@ interface Harness {
   readonly locks: string[];
   /** Runs inside the transaction, after the lock and before the probe. */
   beforeProbe: (() => void) | null;
+  /** Every profile-facts stamp sent outside a transaction: the ids it named and its values. */
+  readonly stamps: Array<{ ids: string[]; values: unknown[] }>;
+  /** Set to make every stamp fail. */
+  failStamp: boolean;
 }
 
 function harness(input: {
@@ -72,6 +76,8 @@ function harness(input: {
     writes,
     locks,
     beforeProbe: null,
+    stamps: [],
+    failStamp: false,
   };
   const subscription = {
     findMany: async (args: { where: Record<string, unknown>; select?: Record<string, boolean> }) =>
@@ -99,6 +105,15 @@ function harness(input: {
       return [...newest.entries()].map(([userId, deletedAt]) => ({ userId, deletedAt }));
     },
     subscription,
+    // The profile-facts stamp (`stampRemnawaveProfileFacts`): its ids are the
+    // one array among the statement's values.
+    $executeRaw: async (query: { values?: unknown[] }) => {
+      if (state.failStamp) throw new Error('stamp refused');
+      const values = (query.values ?? []).slice();
+      const ids = (values.find((value): value is string[] => Array.isArray(value)) ?? []).slice();
+      state.stamps.push({ ids, values });
+      return ids.length;
+    },
     profileSyncJob: {
       findMany: async (args: { where: Record<string, unknown>; select?: Record<string, boolean> }) =>
         jobs.filter((row) => matches(row, args.where)).map((row) => pick(row, args.select)),
@@ -642,5 +657,98 @@ describe('PanelProfileComparisonService — reading Remnawave', () => {
     });
     assert.equal(result.profilesRead, 1);
     assert.equal(result.readOutcome, 'complete');
+  });
+});
+
+describe('PanelProfileComparisonService — the facts of every profile it read', () => {
+  // The comparison reads EVERY Remnawave user in full. Like every other full
+  // read it stamps each profile's `createdAt` and `lastTrafficResetAt` onto the
+  // live rows that link it, through `stampRemnawaveProfileFacts` (the rules
+  // themselves are proven on PostgreSQL in `panel-link-check-postgres.spec.ts`).
+  const CREATED = '2025-03-20T09:15:00.000Z';
+  const RESET = '2026-09-25T00:10:00.123Z';
+  const facts = { createdAt: CREATED, lastTrafficResetAt: RESET };
+  const unstamped = { remnawaveProfileCreatedAt: null, remnawaveLastTrafficResetAt: null };
+  const stampedIds = (prisma: Harness) => prisma.stamps.map((stamp) => [...stamp.ids].sort()).sort();
+
+  it('stamps the rows that link each profile — its own customers\', another owner\'s, one it just linked, one linked by panel id', async () => {
+    const prisma = harness({
+      users: ['user-1', 'user-2'],
+      subscriptions: [
+        // Linked by the decimal `remnawave_id` alone, as a row from before the
+        // numeric column was recorded is.
+        subscription('sub-linked', { remnawaveId: '4700', remnawavePanelId: null, ...unstamped }),
+        subscription('sub-a', unstamped),
+        subscription('sub-by-panel-id', {
+          userId: 'user-2',
+          remnawaveId: '330f2b38-1f1e-4f6a-9f2b-0a1b2c3d4e5f',
+          remnawavePanelId: 4703,
+          ...unstamped,
+        }),
+        subscription('sub-deleted', { status: SubscriptionStatus.DELETED, remnawaveId: '4702', ...unstamped }),
+      ],
+    });
+
+    const result = await compareOk(prisma, [
+      profile(4700, 'reiwa_id: user-1', facts),
+      profile(4711, 'reiwa_id: user-1', facts),
+      profile(4702, null, facts),
+      profile(4703, null, facts),
+      profile(4704, 'reiwa_id: user-9', facts),
+    ]);
+
+    assert.equal(result.autoLinked, 1, 'sub-a took 4711');
+    assert.deepEqual(stampedIds(prisma), [['sub-a'], ['sub-by-panel-id'], ['sub-linked']]);
+    for (const stamp of prisma.stamps) {
+      assert.ok(stamp.values.some((value) => value instanceof Date && value.toISOString() === CREATED));
+      assert.ok(stamp.values.some((value) => value instanceof Date && value.toISOString() === RESET));
+    }
+  });
+
+  it('a row whose facts would not move costs no statement; an older reset, or another createdAt, does', async () => {
+    const prisma = harness({
+      users: ['user-1'],
+      subscriptions: [
+        subscription('sub-same', {
+          remnawaveId: '4700',
+          remnawavePanelId: 4700,
+          remnawaveProfileCreatedAt: new Date(CREATED),
+          // Later than the profile says: the reset only moves forward.
+          remnawaveLastTrafficResetAt: new Date('2026-09-26T00:00:00.000Z'),
+        }),
+        subscription('sub-older-reset', {
+          remnawaveId: '4701',
+          remnawavePanelId: 4701,
+          remnawaveProfileCreatedAt: new Date(CREATED),
+          remnawaveLastTrafficResetAt: new Date('2026-08-25T00:00:00.000Z'),
+        }),
+        subscription('sub-other-created', {
+          remnawaveId: '4705',
+          remnawavePanelId: 4705,
+          remnawaveProfileCreatedAt: new Date('2024-01-01T00:00:00.000Z'),
+          remnawaveLastTrafficResetAt: new Date(RESET),
+        }),
+        subscription('sub-profile-without-facts', { remnawaveId: '4706', remnawavePanelId: 4706, ...unstamped }),
+      ],
+    });
+
+    await compareOk(prisma, [
+      profile(4700, 'reiwa_id: user-1', facts),
+      profile(4701, 'reiwa_id: user-1', facts),
+      profile(4705, 'reiwa_id: user-1', facts),
+      profile(4706, 'reiwa_id: user-1', { createdAt: '', lastTrafficResetAt: null }),
+    ]);
+
+    assert.deepEqual(stampedIds(prisma), [['sub-older-reset'], ['sub-other-created']]);
+  });
+
+  it('a stamp that fails costs the stamp, not the comparison or its link', async () => {
+    const prisma = harness({ subscriptions: [subscription('sub-a', unstamped)] });
+    prisma.failStamp = true;
+
+    const result = await compareOk(prisma, [profile(4711, 'reiwa_id: user-1', facts)]);
+
+    assert.equal(result.autoLinked, 1);
+    assert.equal(prisma.subscriptions[0]['remnawaveId'], '4711');
   });
 });

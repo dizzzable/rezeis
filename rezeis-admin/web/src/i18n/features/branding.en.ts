@@ -674,6 +674,29 @@ export const en = {
         tooManyEntries: 'too many entries: at most {{max}}',
         unknown: 'the cabinet did not accept this value',
       },
+      entries: {
+        plan: 'plan “{{name}}”',
+        planById: 'plan with id {{id}} (not in the plan list)',
+        icon: 'the “{{name}}” icon',
+        customIcon: 'icon “{{id}}”',
+        customIconAt: 'icon no. {{position}}',
+        cardSlot: 'card no. {{position}}',
+        navItem: 'item {{position}}, “{{name}}”',
+        navItemAt: 'item {{position}}',
+      },
+      entryReasons: {
+        'not-a-valid-plan-card-style-map':
+          'the look of this card is set wrongly: it keeps its previous look, or the default one if it had none',
+        'not-a-valid-icon-decor-map':
+          'the look of this icon is set wrongly: it keeps its previous look, or the default one if it had none',
+        'not-a-valid-custom-icon':
+          'the icon is incomplete: the cabinet keeps its previous version, or goes without it if there was none',
+        'not-a-valid-card-effect-slot':
+          'the background of this card is incomplete: it keeps its previous one, or the same as every card if it had none',
+        'not-a-valid-nav-item':
+          'the cabinet does not know this section: the item stays as it was, or is left out of the menu if it is new',
+        'duplicate-destination-id': 'this section is already higher up in the navigation: it is not shown twice',
+      },
     },
   },
 } as const

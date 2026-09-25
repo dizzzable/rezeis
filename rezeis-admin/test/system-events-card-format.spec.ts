@@ -1878,6 +1878,69 @@ describe('the cabinet’s settings-delivery warnings on a «reiwa.error» card',
     assert.ok(card.includes('5.3 MB'), card);
   });
 
+  // FX5b item 6 (25.09.2026): the bot config and the connect page report a
+  // copy too big for the cabinet's Redis as well — the same event, told apart
+  // by `group`. The card names the kind, the size from `bytes` / `maxBytes`
+  // (so a report without `why` still says it), and the page to shrink it on.
+  // `version` is reiwa's build (its error reporter spreads the build info
+  // last); the unsaved config version travels as `configVersion`.
+  const copyNotSaved = (group: string | undefined, extra: Record<string, unknown> = {}) => ({
+    event: 'reiwa.config.copy_not_saved',
+    ...(group === undefined ? {} : { group }),
+    configVersion: 'c0ffee',
+    version: '0.9.7.53',
+    bytes: 5_557_452,
+    maxBytes: 4_194_304,
+    ...extra,
+  });
+  const whatToDo = (card: string): string => {
+    const lines = card.split('\n');
+    const at = lines.findIndex((line) => line.includes('Что проверить дальше'));
+    return at === -1 ? '' : (lines[at + 1] ?? '');
+  };
+
+  for (const [group, source, title, page] of [
+    ['public-config', 'api', 'Кабинет не сохранил копию оформления', '«WEB Reiwa»'],
+    ['bot-config', 'bot', 'Бот не сохранил копию настроек бота', '«Карта бота»'],
+    ['connect-page', 'api', 'Кабинет не сохранил копию экрана подключения', '«Экран в кабинете»'],
+  ] as const) {
+    it(`${group}: «${title}», with the size and the page to shrink it on`, async () => {
+      const { service, getLastText } = buildService();
+      service.warn(
+        'reiwa.error',
+        'SYSTEM',
+        `[reiwa:${source}] copy not saved`,
+        copyNotSaved(group, { source, why: 'Слово кабинета о причине.' }),
+      );
+      await flush();
+      const card = getLastText()!;
+      assert.equal(headerOf(card), `💾 <b>Событие: ${title}</b>`);
+      assert.ok(card.includes('Слово кабинета о причине.'), 'the cabinet’s own why is kept');
+      const next = whatToDo(card);
+      assert.ok(next.includes('5,3 МБ') && next.includes('4,0 МБ'), next);
+      assert.ok(next.includes(page), next);
+    });
+  }
+
+  it('says what and how big from the numbers when the report carries no why', async () => {
+    const { service, getLastText } = buildService();
+    service.warn('reiwa.error', 'SYSTEM', '[reiwa:api] copy not saved', copyNotSaved('connect-page', { maxBytes: 2_097_152 }));
+    await flush();
+    const card = getLastText()!;
+    assert.match(card, /Экран подключения весит 5,3 МБ — больше предела 2,0 МБ/);
+  });
+
+  it('an unknown group, and a report without one (an older cabinet), get «Кабинет не сохранил копию настроек»', async () => {
+    for (const group of ['landing', undefined]) {
+      const { service, getLastText } = buildService();
+      service.warn('reiwa.error', 'SYSTEM', '[reiwa:api] copy not saved', copyNotSaved(group));
+      await flush();
+      const card = getLastText()!;
+      assert.equal(headerOf(card), '💾 <b>Событие: Кабинет не сохранил копию настроек</b>', String(group));
+      assert.ok(whatToDo(card).includes('5,3 МБ'), card);
+    }
+  });
+
   it('keeps «Ошибка в reiwa» for everything else of that type — the whole payload refused, a crash', async () => {
     // ANTI-VACUITY: the variants take only what they are for.
     for (const metadata of [

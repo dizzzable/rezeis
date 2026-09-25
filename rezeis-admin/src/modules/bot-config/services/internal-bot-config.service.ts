@@ -256,6 +256,20 @@ export class InternalBotConfigService implements OnApplicationBootstrap {
    * Upserts the canonical reiwa-side i18n keys (mini-profile labels) so
    * operators can edit them in the admin "Тексты" panel out of the box.
    * Idempotent: existing rows are skipped.
+   *
+   * THE ENGLISH SIBLING GOES THROUGH THE EDITOR'S OWN WRITE (FX5b, 25.09.2026).
+   * It used to be `create({ key: '<key>@en' })` — a key `BotTextsService`
+   * refuses (`@` is reserved for exactly these siblings), so every English
+   * seed threw, was logged as «Failed to seed bot text» and never landed, on
+   * any install. It is written the way «Тексты» and «Карта бота» save an
+   * English text: with a new row, in the same `create` (base and sibling in
+   * one transaction); beside a row that exists, as the `update` of that row
+   * with `valueEn`, which upserts the sibling with the row's own visibility.
+   *
+   * Only what is absent is written, the Russian seed's rule: an English text
+   * an operator saved is never touched. There is no record of a deletion, so
+   * an English text an operator removed comes back on the next boot — as a
+   * removed Russian row always has.
    */
   private async seedDefaultTexts(): Promise<void> {
     for (const seed of DEFAULT_TEXTS) {
@@ -269,22 +283,23 @@ export class InternalBotConfigService implements OnApplicationBootstrap {
             key: seed.key,
             value: seed.value,
             visible: true,
+            valueEn: seed.valueEn ?? null,
           });
+          continue;
         }
-        // The English sibling, when the seed carries one. OUTSIDE the Russian
-        // row's guard, and that placement is the whole point: every existing
-        // installation already has the Russian rows, so a `continue` above this
-        // block means the English ones are never created anywhere except on a
-        // virgin database. The comment here used to say exactly that while the
+        // The English sibling of a row that is already there. OUTSIDE the
+        // Russian row's guard, and that placement is the whole point: every
+        // existing installation already has the Russian rows, so an English
+        // seed inside the branch above is never written anywhere except on a
+        // virgin database. The comment here once said exactly that while the
         // code sat inside the branch it describes skipping.
         if (seed.valueEn !== undefined) {
-          const enKey = `${seed.key}${EN_KEY_SUFFIX}`;
           const existingEn = await this.prismaService.botText.findUnique({
-            where: { key: enKey },
+            where: { key: `${seed.key}${EN_KEY_SUFFIX}` },
             select: { id: true },
           });
           if (existingEn === null) {
-            await this.botTextsService.create({ key: enKey, value: seed.valueEn, visible: true });
+            await this.botTextsService.update({ id: existing.id, valueEn: seed.valueEn });
           }
         }
       } catch (err: unknown) {
@@ -939,9 +954,9 @@ const DEFAULT_TEXTS: readonly DefaultTextSeed[] = [
   // Seeded so they appear in the texts editor at all; reiwa re-registers them
   // with Telegram on cache invalidation, so an edit lands without a restart.
   { key: 'commands.start.description',      value: 'Главное меню' , valueEn: 'Main menu' },
-  { key: 'commands.help.description',       value: 'Справка и поддержка' , valueEn: 'Help and support' },
+  { key: 'commands.help.description',       value: 'Справка и поддержка' , valueEn: 'Help & support' },
   { key: 'commands.lang.description',       value: 'Сменить язык' , valueEn: 'Change language' },
-  { key: 'commands.rules.description',      value: 'Правила сервиса' , valueEn: 'Service terms' },
+  { key: 'commands.rules.description',      value: 'Правила сервиса' , valueEn: 'Service rules' },
   { key: 'commands.paysupport.description', value: 'Помощь с оплатой' , valueEn: 'Payment help' },
   // Generic fallbacks shared across the bot
   { key: 'common.not_available',       value: 'Н/Д' , valueEn: 'N/A' },
@@ -953,25 +968,25 @@ const DEFAULT_TEXTS: readonly DefaultTextSeed[] = [
     value:
       '🛠 Сервис временно недоступен — ведутся технические работы. Существующие подключения VPN продолжают работать. Попробуйте позже.',
     valueEn:
-      '🛠 The service is temporarily unavailable — maintenance is under way. Existing VPN connections keep working. Please try again later.'
+      '🛠 Service is temporarily unavailable — maintenance is in progress. Existing VPN connections keep working. Please try again later.'
   },
   {
     key: 'access_mode.reg_blocked_new',
     value: '🚫 Регистрация в сервисе временно отключена. Свяжитесь с поддержкой, если у вас уже есть аккаунт.',
     valueEn:
-      '🚫 Registration is temporarily switched off. Contact support if you already have an account.'
+      '🚫 Registration is currently disabled. Contact support if you already have an account.'
   },
   {
     key: 'access_mode.invited_no_code',
     value: '✉️ Сейчас регистрация только по приглашению. Откройте бота по invite-ссылке от друга или партнёра.',
     valueEn:
-      '✉️ Registration is invite-only right now. Open the bot through an invite link from a friend or a partner.'
+      '✉️ Registration is currently invite-only. Open the bot via an invite link from a friend or partner.'
   },
   {
     key: 'access_mode.purchase_blocked',
     value: '🛒 Покупка временно недоступна. Действующие подписки можно продлевать как обычно.',
     valueEn:
-      '🛒 Purchases are temporarily unavailable. Existing subscriptions can be renewed as usual.'
+      '🛒 New purchases are temporarily unavailable. Existing subscriptions can be renewed as usual.'
   },
   // Channel-subscription gate (used by /start + the "I subscribed" button
   // when the operator requires a channel subscription). Editable copy.
@@ -980,15 +995,15 @@ const DEFAULT_TEXTS: readonly DefaultTextSeed[] = [
     value:
       'Для доступа к боту подпишитесь на наш канал, затем нажмите «Я подписался».',
     valueEn:
-      'To use the bot, subscribe to our channel, then tap "I have subscribed".'
+      'To use the bot, subscribe to our channel, then tap "I subscribed".'
   },
-  { key: 'channel.join_button', value: '📢 Перейти в канал' , valueEn: '📢 Open the channel' },
-  { key: 'channel.check_button', value: '✅ Я подписался' , valueEn: '✅ I have subscribed' },
+  { key: 'channel.join_button', value: '📢 Перейти в канал' , valueEn: '📢 Open channel' },
+  { key: 'channel.check_button', value: '✅ Я подписался' , valueEn: '✅ I subscribed' },
   {
     key: 'channel.not_subscribed',
     value: '❌ Вы ещё не подписаны на канал. Подпишитесь и попробуйте снова.',
     valueEn:
-      '❌ You are not subscribed to the channel yet. Subscribe and try again.'
+      '❌ You are not subscribed yet. Subscribe and try again.'
   },
   { key: 'channel.verified', value: '✅ Подписка подтверждена!' , valueEn: '✅ Subscription confirmed!' },
   // The toast over the main menu when a customer presses a button the bot no
@@ -1004,14 +1019,14 @@ const DEFAULT_TEXTS: readonly DefaultTextSeed[] = [
     value:
       'Приглашайте друзей по своей ссылке — за каждого, кто оформит подписку, вы получаете баллы. Баллы можно обменять в кабинете.',
     valueEn:
-      'Invite friends with your link — you earn points for everyone who takes out a subscription. Points can be exchanged in your dashboard.'
+      'Invite friends with your link — for every one who subscribes you earn points. Exchange points in the cabinet.'
   },
   { key: 'referral.hub.stat_invited', value: '👥 Приглашено: {{count}}' , valueEn: '👥 Invited: {{count}}' },
   { key: 'referral.hub.stat_qualified', value: '✅ Оформили подписку: {{count}}' , valueEn: '✅ Subscribed: {{count}}' },
   { key: 'referral.hub.stat_pending', value: '⏳ В ожидании: {{count}}' , valueEn: '⏳ Pending: {{count}}' },
   { key: 'referral.hub.stat_points', value: '⭐ Баллов: {{count}}' , valueEn: '⭐ Points: {{count}}' },
   { key: 'referral.hub.link_label', value: '🔗 Ваша реферальная ссылка:' , valueEn: '🔗 Your referral link:' },
-  { key: 'referral.hub.open_cabinet', value: '👤 Профиль в кабинете' , valueEn: '👤 Dashboard profile' },
+  { key: 'referral.hub.open_cabinet', value: '👤 Профиль в кабинете' , valueEn: '👤 Open in cabinet' },
   { key: 'referral.hub.open_exchange', value: '💱 Обменять баллы' , valueEn: '💱 Exchange points' },
   { key: 'partner.hub.title', value: '🤝 Партнёрская программа' , valueEn: '🤝 Partner program' },
   {
@@ -1019,13 +1034,22 @@ const DEFAULT_TEXTS: readonly DefaultTextSeed[] = [
     value:
       'Вы участник партнёрской программы. Получайте вознаграждение за приглашённых пользователей. Вывод средств — в кабинете.',
     valueEn:
-      'You are in the partner program. Earn rewards for the users you refer. Withdrawals are handled in your dashboard.'
+      'You are a partner. Earn rewards for the users you bring in. Withdrawals are handled in the cabinet.'
   },
   { key: 'partner.hub.stat_balance', value: '💰 Баланс: {{amount}}' , valueEn: '💰 Balance: {{amount}}' },
-  { key: 'partner.hub.stat_earned', value: '📈 Всего заработано: {{amount}}' , valueEn: '📈 Earned in total: {{amount}}' },
+  { key: 'partner.hub.stat_earned', value: '📈 Всего заработано: {{amount}}' , valueEn: '📈 Total earned: {{amount}}' },
   { key: 'partner.hub.stat_referred', value: '👥 Рефералов: {{count}}' , valueEn: '👥 Referrals: {{count}}' },
   { key: 'partner.hub.open_cabinet', value: '🤝 Партнёрский кабинет' },
 ];
+
+/**
+ * The keys the seed writes again at the next start whenever they are missing
+ * ({@link DEFAULT_TEXTS}). Deleting such a row in «Тексты» therefore RESETS it
+ * to the default — the bot speaks its built-in text for the key meanwhile —
+ * and the list says so (`AdminBotConfigController.listTexts`, `isDefault`).
+ * The banner row is not among them: it is written only on an empty keyboard.
+ */
+export const DEFAULT_TEXT_KEYS: ReadonlySet<string> = new Set(DEFAULT_TEXTS.map((seed) => seed.key));
 
 type FlowWithScreens = BotFlow & {
   readonly screens: readonly (BotFlowScreen & {
