@@ -61,7 +61,27 @@ describe('request timeout route policy', () => {
     assert.equal(resolveRequestTimeoutMs('/api/admin/plans/cmf1plan/migrations/cmf2run?problemsCursor=abc'), 30_000);
     assert.equal(resolveRequestTimeoutMs('/api/admin/plans/cmf1plan/subscriptions?limit=50'), 30_000);
     assert.equal(resolveRequestTimeoutMs('/api/admin/plans/cmf1plan/migrations/preview-extra'), 30_000);
-    assert.equal(resolveRequestTimeoutMs('/api/admin/plans/cmf1plan'), 30_000);
+  });
+
+  it('gives the plan save — and archive and unarchive, which run the same save — the long timeout (R5-03)', () => {
+    // PATCH /admin/plans/:planId moves every subscriber of the plan inside a
+    // transaction of up to 25 s, after asking Remnawave for its squads. At 30 s
+    // the app answered 408 while the save committed.
+    assert.equal(resolveRequestTimeoutMs('/api/admin/plans/cmf1plan'), 120_000);
+    assert.equal(resolveRequestTimeoutMs('/api/admin/plans/cmf1plan?x=1'), 120_000);
+    assert.equal(resolveRequestTimeoutMs('/api/admin/plans/cmf1plan/archive'), 120_000);
+    assert.equal(resolveRequestTimeoutMs('/api/admin/plans/cmf1plan/unarchive'), 120_000);
+  });
+
+  it('keeps every other plan route at the default', () => {
+    assert.equal(resolveRequestTimeoutMs('/api/admin/plans'), 30_000);
+    assert.equal(resolveRequestTimeoutMs('/api/admin/plans/reorder'), 30_000);
+    assert.equal(resolveRequestTimeoutMs('/api/admin/plans/unknown-squads'), 30_000);
+    assert.equal(resolveRequestTimeoutMs('/api/admin/plans/options/internal-squads'), 30_000);
+    assert.equal(resolveRequestTimeoutMs('/api/admin/plans/cmf1plan/move'), 30_000);
+    assert.equal(resolveRequestTimeoutMs('/api/admin/plans/cmf1plan/references'), 30_000);
+    assert.equal(resolveRequestTimeoutMs('/api/admin/plans/cmf1plan/squad-propagation'), 30_000);
+    assert.equal(resolveRequestTimeoutMs('/api/admin/plans/cmf1plan/archive-extra'), 30_000);
   });
 
   it('gives a manual rule run the long timeout, because the operator waits for every action', () => {

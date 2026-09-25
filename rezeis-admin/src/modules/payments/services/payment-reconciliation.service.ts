@@ -8,6 +8,7 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import {
+  AddOnType,
   PaymentGatewayType,
   PaymentWebhookEvent,
   Prisma,
@@ -934,10 +935,14 @@ export class PaymentReconciliationService implements OnModuleDestroy {
         : NO_AUTOPAY;
       const autopayNote = describeAutopayOutcome(autopay);
       // A withheld payment's refund is the operator's alone, in part as in
-      // full — see `reverseFulfilledPayment`. So is a not-applied add-on's.
+      // full — see `reverseFulfilledPayment`. So is a not-applied add-on's,
+      // and a paid «Обнулить трафик» whose sale was not told (review R5-09):
+      // the partial refund keeps the reset, which is performed and sold
+      // afterwards, but this refund belongs to no sale anybody heard of yet.
       const withheld = isWithheldConversion(commit.gatewayData);
       const addOnNotApplied = wasAddOnNotApplied(commit.gatewayData);
-      const operatorOnly = withheld || addOnNotApplied;
+      const addOnSaleNotAnnounced = await this.paidResetSaleNotAnnounced(transaction);
+      const operatorOnly = withheld || addOnNotApplied || addOnSaleNotAnnounced;
       this.systemEvents.warn(
         operatorOnly ? EVENT_TYPES.PAYMENT_WITHHELD_REFUNDED : EVENT_TYPES.PAYMENT_REFUND_PARTIAL,
         'PAYMENT',
@@ -962,6 +967,7 @@ export class PaymentReconciliationService implements OnModuleDestroy {
           needsManualReview: true,
           ...(withheld ? { conversionWithheld: true } : {}),
           ...(addOnNotApplied ? { addOnNotApplied: true } : {}),
+          ...(addOnSaleNotAnnounced ? { addOnSaleNotAnnounced: true } : {}),
           ...(autopayNote === null ? {} : autopayMetadata(autopay, autopayNote)),
         },
       );
@@ -1415,7 +1421,15 @@ export class PaymentReconciliationService implements OnModuleDestroy {
     // was told «мы разберёмся и свяжемся с вами», so the operator tells them.
     const withheld = isWithheldConversion(transaction.gatewayData);
     const addOnNotApplied = wasAddOnNotApplied(transaction.gatewayData);
-    const operatorOnly = withheld || addOnNotApplied;
+    // A paid «Обнулить трафик» whose sale was never told — not performed yet,
+    // closed by this refund, in flight, or performed and not yet told (R5-01):
+    // the same rule. Read HERE, after the CANCELED above, from what its job
+    // decided to tell: a telling decided before that write is a sale this
+    // refund answers for in public, and none can be decided after it (review
+    // R5-07). Read at the refund's first step instead, a capture that told
+    // its sale in between left a public sale with an operator-only refund.
+    const addOnSaleNotAnnounced = await this.paidResetSaleNotAnnounced(transaction);
+    const operatorOnly = withheld || addOnNotApplied || addOnSaleNotAnnounced;
     // The card's «📝 Заметка», before what became of the autopay: what ended
     // of the add-on, what becomes of its extra devices, then the days an
     // upgrade converted this payment's money into, which stay with the
@@ -1459,6 +1473,7 @@ export class PaymentReconciliationService implements OnModuleDestroy {
           needsManualReview: revocation.needsManualReview,
           ...(withheld ? { conversionWithheld: true } : {}),
           ...(addOnNotApplied ? { addOnNotApplied: true } : {}),
+          ...(addOnSaleNotAnnounced ? { addOnSaleNotAnnounced: true } : {}),
           ...(addOn === null
             ? {}
             : { addOnType: addOn.addOnType, addOnValue: addOn.addOnValue, addOnEnded: addOn.ended }),
@@ -1514,6 +1529,18 @@ export class PaymentReconciliationService implements OnModuleDestroy {
     if (this.addOnRefunds === undefined) return null;
     const kind = /chargeback/i.test(providerStatus ?? '') ? 'CHARGEBACK' : 'REFUND';
     return this.addOnRefunds.endForRefund(transaction, kind);
+  }
+
+  /**
+   * Whether the payment is a paid «Обнулить трафик» whose sale was not told
+   * (`AddOnRefundService.wasPaidResetSaleTold`): its refund, in full or in
+   * part, is then the operator's alone, as a not-applied add-on's is. Never
+   * throws.
+   */
+  private async paidResetSaleNotAnnounced(transaction: Transaction): Promise<boolean> {
+    if (this.addOnRefunds === undefined) return false;
+    if (readRefundedAddOnMarker(transaction.planSnapshot)?.addOnType !== AddOnType.RESET_TRAFFIC) return false;
+    return !(await this.addOnRefunds.wasPaidResetSaleTold(transaction.id));
   }
 
   /**

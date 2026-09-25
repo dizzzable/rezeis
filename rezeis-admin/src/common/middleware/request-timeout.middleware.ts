@@ -11,6 +11,7 @@ import { Request, Response, NextFunction } from 'express';
  *     /admin/faq/uploads) - 120s
  *   - Backup download (/admin/backup/download/...) - 120s
  *   - Plan migration start, preview and retry (/admin/plans/:id/migrations...) - 120s
+ *   - Plan save, archive and unarchive (/admin/plans/:id, .../archive, .../unarchive) - 120s
  *   - Running an automation rule by hand (/admin/automations/rules/:id/run) - 120s
  *   - «Вернуть бессрочность» (/admin/subscriptions/lifetime-restore) - 120s
  *
@@ -50,6 +51,22 @@ const LONG_TIMEOUT_PATTERNS = [
   // never be previewed at all. The run's status, `current` and the subscription
   // list stay at the default — they are short reads the dialog polls.
   /\/admin\/plans\/[^/?]+\/migrations(?:\/preview|\/[^/?]+\/retry)?(?:[?]|$)/,
+  // «ТАРИФЫ» → «РЕДАКТИРОВАТЬ ТАРИФ» → «СОХРАНИТЬ» (PATCH /admin/plans/:planId),
+  // and every other door into the very same save (`PlansAdminService.
+  // updatePlan`): the card's «Переключить активность тарифа» (the same PATCH),
+  // «Архивировать тариф» and «Восстановить тариф» (POST …/:planId/archive,
+  // …/:planId/unarchive). The save moves every subscriber of the plan inside
+  // its transaction — the snapshot's keys, the squads, their pushes — which
+  // may take up to 25 s on a big plan (`PLAN_SAVE_TRANSACTION_OPTIONS`), after
+  // the validation has asked Remnawave for its squads and before the pushes
+  // are queued. At the 30 s default the app answered 408 while the save went
+  // on and committed, and the operator read «не сохранилось» (review R5-03).
+  // The page sends these four with the same 120 s (`PLAN_SAVE_TIMEOUT_MS`,
+  // `web/src/features/plans/plans-api.ts`), not its client-wide 30 s. The GET
+  // and the DELETE of the same path share the widening, which costs them
+  // nothing; the literal routes beside it (`reorder`, `unknown-squads`) and
+  // `…/move` do not.
+  /\/admin\/plans\/(?!(?:reorder|unknown-squads)(?:[?]|$))[^/?]+(?:\/(?:un)?archive)?(?:[?]|$)/,
   // RUNNING A RULE BY HAND. The run is synchronous — «Запустить сейчас» waits
   // for every action's result — and one rule can outlast thirty seconds on its
   // own: an audience action resolves a cohort and raises a hint for up to five

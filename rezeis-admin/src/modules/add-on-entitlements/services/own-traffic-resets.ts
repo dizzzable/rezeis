@@ -22,7 +22,15 @@ import { Prisma } from '@prisma/client';
  *
  * Each of those rows brackets the instant Remnawave stamped — its `now` while
  * it served the panel's request — so a stamped reset inside one of them is
- * the panel's own. The bracket is widened by {@link OWN_RESET_CLOCK_SKEW_MS}:
+ * the panel's own. ONLY A RESET THAT HAPPENED (review R5-05): a job counts
+ * only over the attempt that performed it, from its last start to its
+ * completion. `completed_at` is written when a job is performed (COMPLETED)
+ * and never otherwise, and a NULL one matches nothing: a job that never ran —
+ * a paid reset still held or being retried, one that failed for good, one
+ * closed by a refund, a job a merge retired as COMPLETED — reset nothing. Its
+ * bracket used to run to its last `updated_at`, and from its creation, so a
+ * retried job's covered the whole outage and hid Remnawave's genuine run on
+ * that subscriber. The bracket is widened by {@link OWN_RESET_CLOCK_SKEW_MS}:
  * the panel's clock and Remnawave's are not one clock. A reset somebody makes
  * in Remnawave's own UI leaves no such row; those are what the readers' other
  * rule is for (a scheduled run stamps MANY profiles with one instant per
@@ -51,8 +59,8 @@ export function ownTrafficResetSql(subscriptionId: Prisma.Sql, resetAt: Prisma.S
            j."action" = 'TRAFFIC_RESET'
            OR (j."action" = 'UPDATE' AND j."payload"->>'resetTraffic' = 'true')
          )
-         AND ${resetAt} >= j."created_at" - ${skew}
-         AND ${resetAt} <= COALESCE(j."completed_at", j."updated_at") + ${skew}
+         AND ${resetAt} >= COALESCE(j."started_at", j."created_at") - ${skew}
+         AND ${resetAt} <= j."completed_at" + ${skew}
     )
     OR EXISTS (
       SELECT 1

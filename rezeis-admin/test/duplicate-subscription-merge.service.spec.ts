@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 
 import { SubscriptionStatus } from '@prisma/client';
 
+import { PAID_TRAFFIC_RESET_CAUSE } from '../src/modules/payments/utils/add-on-not-applied.util';
 import { AdminDuplicateSubscriptionMergeController } from '../src/modules/profile-sync/duplicate-subscription-merge.controller';
 import { DuplicateSubscriptionMergeService } from '../src/modules/profile-sync/duplicate-subscription-merge.service';
 import { PanelLinkReconciliationService } from '../src/modules/profile-sync/panel-link-reconciliation.service';
@@ -1117,6 +1118,38 @@ describe('DuplicateSubscriptionMergeService — reattachment', () => {
       null,
       'a COMPLETED job is history and is left alone',
     );
+  });
+
+  it('moves a paid «Обнулить трафик»’s job to the survivor with its payment, as it is, and defuses the rest (R5-04)', async () => {
+    const prisma = prismaHarness({
+      subscription: [survivorRow(), duplicateRow()],
+      transaction: [{ id: 'txn-reset', subscriptionId: 'sub-new-duplicate' }],
+      profileSyncJob: [
+        {
+          id: 'job-reset',
+          subscriptionId: 'sub-new-duplicate',
+          status: 'PENDING',
+          supersededAt: null,
+          cause: PAID_TRAFFIC_RESET_CAUSE,
+        },
+        { id: 'job-push', subscriptionId: 'sub-new-duplicate', status: 'PENDING', supersededAt: null, cause: null },
+      ],
+    });
+
+    const report = await service(prisma, panelHarness()).merge({ dryRun: false, pairs: CANONICAL_PAIR });
+
+    assert.equal(report.merged, 1, report.rows[0].reason ?? '');
+    const [reset, push] = prisma.tables.profileSyncJob;
+    assert.deepEqual(
+      [reset?.['subscriptionId'], reset?.['cause'], reset?.['status'], reset?.['supersededAt']],
+      ['sub-old-survivor', PAID_TRAFFIC_RESET_CAUSE, 'PENDING', null],
+      'left on the retired row, or rewritten there, it was paid for and never performed nor told',
+    );
+    assert.equal(prisma.tables.transaction[0]?.['subscriptionId'], 'sub-old-survivor');
+    assert.equal(push?.['subscriptionId'], 'sub-new-duplicate', 'the duplicate’s own queue stays with it');
+    assert.equal(push?.['cause'], 'SUPERSEDED_BY_DUPLICATE_MERGE');
+    assert.notEqual(push?.['supersededAt'], null);
+    assert.equal(report.rows[0].supersededSyncJobs, 1);
   });
 
   it('leaves the current-subscription pointer alone when it does not name the duplicate', async () => {
@@ -2280,9 +2313,10 @@ describe('DuplicateSubscriptionMergeService — conditions that change under the
     const prisma = prismaHarness({ subscription: [survivorRow(), duplicateRow()] });
     // Injected after the sync-job supersede — the last write a merge makes — so
     // the pre-flight check and the in-transaction guard have both already run
-    // and passed. Only a question asked AFTER the statements can see it.
+    // and passed. Only a question asked AFTER the statements can see it. (The
+    // write just before it moves a paid reset's jobs with their payment, R5-04.)
     prisma.afterWrite = (write) => {
-      if (write.model !== 'profileSyncJob') return;
+      if (write.model !== 'profileSyncJob' || write.data['cause'] !== 'SUPERSEDED_BY_DUPLICATE_MERGE') return;
       prisma.commitExternally(() => {
         prisma.tables.addOnEntitlement.push({
           id: 'ent-mid-flight',

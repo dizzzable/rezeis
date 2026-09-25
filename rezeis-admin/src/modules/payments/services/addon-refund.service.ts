@@ -27,6 +27,8 @@ import { writeTransactionGatewayData } from '../utils/transaction-gateway-data.u
 import {
   ADD_ON_LEDGER_NO_OP_NOTES,
   ADD_ON_LEDGER_SOURCE,
+  PAID_TRAFFIC_RESET_CAUSE,
+  paidResetSettledPayloadSql,
   readAddOnNotApplied,
 } from '../utils/add-on-not-applied.util';
 
@@ -202,9 +204,15 @@ export class AddOnRefundService {
     } catch (error: unknown) {
       this.logger.error(`Could not end the add-on of refunded transaction ${transaction.id}: ${describeError(error)}`);
       if (known === null) return null;
+      const name = describeAddOn(known.type, known.value);
       return {
         ended: false,
-        note: `Докупку «${describeAddOn(known.type, known.value)}» панель не отключила: ${MANUAL_LIMIT_HINT[known.type]}`,
+        // A reset nobody could read may be performed or not: never «уже
+        // выполнен» for one never seen performed (review R5-08).
+        note:
+          known.type === AddOnType.RESET_TRAFFIC
+            ? `Сброс трафика по докупке «${name}»: ${MANUAL_LIMIT_HINT[AddOnType.RESET_TRAFFIC]}`
+            : `Докупку «${name}» панель не отключила: ${MANUAL_LIMIT_HINT[known.type]}`,
         audit: { addOnRefundFailed: true },
         syncJobIds: [],
         reduceDevicesOf: null,
@@ -485,6 +493,123 @@ export class AddOnRefundService {
     return noOp !== null;
   }
 
+  /**
+   * The full refund of a paid «Обнулить трафик» (R5-01). A reset performed
+   * cannot be taken back. One not performed yet is CLOSED here, in one
+   * statement against the claim of whoever would perform it — the capture's
+   * run, or the profile-sync worker, both of which claim it the same way — so
+   * exactly one of the two wins, and nothing performs it once the money is
+   * back. The card says what this transaction read: performed, closed by the
+   * refund (not performed, and it will not be), or being performed right now
+   * (performed or not: the operator looks at the subscriber's traffic, and the
+   * card asks for review).
+   *
+   * Who hears of the refund is not decided here: the reversal reads whether
+   * the sale was told only after the payment turns CANCELED
+   * ({@link wasPaidResetSaleTold}, review R5-07).
+   */
+  private async endPaidTrafficReset(
+    transaction: Transaction,
+    name: string,
+    base: Omit<AddOnRefundOutcome, 'ended' | 'note' | 'audit'>,
+  ): Promise<AddOnRefundOutcome> {
+    const now = new Date();
+    const performedNote = `Сброс трафика по докупке «${name}» уже выполнен — отменить его нельзя.`;
+    const closedNote = `Сброс трафика по докупке «${name}» не был выполнен и уже не будет — его отменил возврат.`;
+    return this.prismaService.$transaction(async (tx) => {
+      const closed = await tx.$queryRaw<Array<{ readonly id: string }>>(Prisma.sql`
+        UPDATE "profile_sync_jobs"
+           SET "superseded_at" = COALESCE("superseded_at", ${now}),
+               "last_error" = 'closed by the refund before the reset',
+               "payload" = ${paidResetSettledPayloadSql(Prisma.sql`"payload"`, 'CLOSED', now)}
+                           || jsonb_build_object('closedByRefundAt', ${now.toISOString()}::text),
+               "updated_at" = ${now}
+         WHERE "cause" = ${PAID_TRAFFIC_RESET_CAUSE}
+           AND "payload"->>'transactionId' = ${transaction.id}
+           AND NOT ("payload" ? 'settledAt')
+           AND "status" IN ('PENDING', 'FAILED')
+        RETURNING "id"
+      `);
+      if (closed.length > 0) {
+        return { ...base, ended: true, note: closedNote, audit: { addOnRefundResetClosed: true } };
+      }
+      const [job] = await tx.$queryRaw<Array<{ readonly status: string; readonly payload: unknown }>>(Prisma.sql`
+        SELECT "status"::text AS "status", "payload"
+          FROM "profile_sync_jobs"
+         WHERE "cause" = ${PAID_TRAFFIC_RESET_CAUSE}
+           AND "payload"->>'transactionId' = ${transaction.id}
+         ORDER BY "created_at" DESC
+         LIMIT 1
+         FOR SHARE
+      `);
+      if (job === undefined) {
+        // Paid before this release: performed at the capture, or not at all —
+        // its record says which. Its sale was told at the capture either way.
+        const performed = await tx.subscriptionTrafficReset.count({ where: { transactionId: transaction.id } });
+        return performed > 0
+          ? { ...base, ended: true, note: performedNote, audit: {} }
+          : {
+              ...base,
+              ended: true,
+              note: `Сброс трафика по докупке «${name}» не был выполнен — отменять нечего.`,
+              audit: {},
+            };
+      }
+      if (asRecord(job.payload)['settledAs'] === 'CLOSED') {
+        return { ...base, ended: true, note: closedNote, audit: {} };
+      }
+      if (job.status === SyncJobStatus.COMPLETED) {
+        return { ...base, ended: true, note: performedNote, audit: {} };
+      }
+      if (job.status === SyncJobStatus.RUNNING) {
+        return {
+          ...base,
+          ended: false,
+          note:
+            `Сброс трафика по докупке «${name}» выполняется прямо сейчас: выполнен он или нет, ` +
+            'проверьте трафик подписчика в Remnawave.',
+          audit: { addOnRefundResetInFlight: true },
+        };
+      }
+      return {
+        ...base,
+        ended: true,
+        note: `Сброс трафика по докупке «${name}» не был выполнен — отменять нечего.`,
+        audit: {},
+      };
+    });
+  }
+
+  /**
+   * Whether the sale of a paid «Обнулить трафик» was told (`payment.completed`):
+   * its job's decision (`announcedAs`), which the telling records before the
+   * sale goes out and only while the payment is COMPLETED
+   * (`PaymentSubscriptionMutationService.decidePaidResetTelling`). Read by the
+   * reversal AFTER the payment turns CANCELED, so no telling can be decided
+   * after it (review R5-07). A payment from before this release has no job:
+   * its sale was told at the capture. `false` when it cannot be read: the
+   * refund of a sale nobody may have been told of is the operator's alone
+   * (review R5-08).
+   */
+  public async wasPaidResetSaleTold(transactionId: string): Promise<boolean> {
+    try {
+      const [job] = await this.prismaService.$queryRaw<Array<{ readonly announcedAs: string | null }>>(Prisma.sql`
+        SELECT "payload"->>'announcedAs' AS "announcedAs"
+          FROM "profile_sync_jobs"
+         WHERE "cause" = ${PAID_TRAFFIC_RESET_CAUSE}
+           AND "payload"->>'transactionId' = ${transactionId}
+         ORDER BY "created_at" DESC
+         LIMIT 1
+      `);
+      return job === undefined || job.announcedAs === 'SALE';
+    } catch (error: unknown) {
+      this.logger.warn(
+        `Whether the sale of the paid reset of transaction ${transactionId} was told could not be read: ${describeError(error)}`,
+      );
+      return false;
+    }
+  }
+
   private async endLegacy(transaction: Transaction, marker: RefundedAddOnMarker): Promise<AddOnRefundOutcome> {
     const name = describeAddOn(marker.addOnType, marker.addOnValue);
     const base = {
@@ -494,10 +619,10 @@ export class AddOnRefundService {
       addOnType: marker.addOnType,
       addOnValue: marker.addOnValue,
     };
-    // A reset is an action, not a grant: the traffic is already back and
-    // nothing of it can be taken off.
+    // A reset is an action, not a grant: once performed, nothing of it can be
+    // taken off — and one not performed yet is closed by the refund (R5-01).
     if (marker.addOnType === AddOnType.RESET_TRAFFIC) {
-      return { ...base, ended: true, note: `Сброс трафика по докупке «${name}» уже выполнен — отменить его нельзя.`, audit: {} };
+      return this.endPaidTrafficReset(transaction, name, base);
     }
     // The purchase refused an incoherent value and added nothing (`isCoherentAddOnValue`).
     if (marker.addOnValue < 1) {
@@ -755,13 +880,16 @@ export class AddOnRefundService {
   }
 }
 
-/** Where an operator changes a limit by hand, in the words the panel shows. */
+/**
+ * Where an operator changes a limit by hand, in the words the panel shows —
+ * or, for a reset whose state the refund could not read, what to look at.
+ */
 const MANUAL_LIMIT_HINT: Readonly<Record<AddOnType, string>> = {
   [AddOnType.EXTRA_TRAFFIC]:
     'уменьшите «Лимит трафика (GB)» вручную: «Пользователи» → клиент → вкладка «Подписки» → «Быстрые действия» → «Сохранить».',
   [AddOnType.EXTRA_DEVICES]:
     'уменьшите «Лимит устройств» вручную: «Пользователи» → клиент → вкладка «Подписки» → «Быстрые действия» → «Сохранить».',
-  [AddOnType.RESET_TRAFFIC]: 'сброс трафика уже выполнен, отменить его нельзя.',
+  [AddOnType.RESET_TRAFFIC]: 'проверить, выполнен ли он, не удалось — проверьте трафик подписчика в Remnawave.',
 };
 
 /**

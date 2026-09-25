@@ -228,6 +228,43 @@ export async function reorderPlans(orderedIds: readonly string[]): Promise<reado
   return expectArray<Plan>(response.data)
 }
 
+// ── The plan save ───────────────────────────────────────────────────────────
+
+/**
+ * The timeout of the four requests that run the plan save on the server
+ * (`PlansAdminService.updatePlan`), in place of the client-wide 30 s: the same
+ * 120 s the server's request-timeout middleware gives their routes (review
+ * R5-03). They are «Обновить тариф» in the plan editor and the card's «Переключить
+ * активность тарифа» (both `PATCH /admin/plans/:planId`), «Архивировать тариф»
+ * and «Восстановить тариф» (`POST …/archive`, `…/unarchive`). The save moves
+ * every subscriber of the plan in one transaction, after asking Remnawave for
+ * its squads; a save the page gave up on at 30 s went on and COMMITTED, and the
+ * page said it had failed. Every other plans request keeps the client-wide one.
+ */
+export const PLAN_SAVE_TIMEOUT_MS = 120_000
+
+/**
+ * `PATCH /admin/plans/:planId`: the editor's «Обновить тариф» with the form, or the
+ * card's switch with `{ isActive }`. Answers the saved plan and what its squad
+ * propagation queued.
+ */
+export async function updatePlan(planId: string, changes: object): Promise<PlanUpdateResult> {
+  const response = await api.patch<PlanUpdateResult>(`/admin/plans/${planId}`, changes, {
+    timeout: PLAN_SAVE_TIMEOUT_MS,
+  })
+  return response.data
+}
+
+/** `POST /admin/plans/:planId/archive`: «Архивировать тариф». */
+export async function archivePlan(planId: string): Promise<void> {
+  await api.post(`/admin/plans/${planId}/archive`, undefined, { timeout: PLAN_SAVE_TIMEOUT_MS })
+}
+
+/** `POST /admin/plans/:planId/unarchive`: «Восстановить тариф». */
+export async function unarchivePlan(planId: string): Promise<void> {
+  await api.post(`/admin/plans/${planId}/unarchive`, undefined, { timeout: PLAN_SAVE_TIMEOUT_MS })
+}
+
 // ── Deletion ────────────────────────────────────────────────────────────────
 
 /**

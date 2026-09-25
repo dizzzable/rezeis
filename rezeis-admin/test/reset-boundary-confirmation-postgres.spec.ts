@@ -23,6 +23,7 @@ import {
   ResetBoundaryConfirmationService,
 } from '../src/modules/add-on-entitlements/services/reset-boundary-confirmation.service';
 import { SubscriptionTermService } from '../src/modules/add-on-entitlements/services/subscription-term.service';
+import { PAID_TRAFFIC_RESET_CAUSE } from '../src/modules/payments/utils/add-on-not-applied.util';
 import {
   type RemnawaveProfileFacts,
   stampRemnawaveProfileFacts,
@@ -236,6 +237,42 @@ async function renewalReset(subscriptionId: string, at: Date): Promise<void> {
       createdAt: new Date(at.getTime() - 2_000),
       startedAt: new Date(at.getTime() - 1_500),
       completedAt: new Date(at.getTime() + 800),
+    },
+  });
+}
+
+/**
+ * A TRAFFIC_RESET job of the panel's on the subscription, in the state a case
+ * sets: a paid «Обнулить трафик»'s (`PAID_TRAFFIC_RESET`) unless `cause` says
+ * otherwise. `completedAt` only for one that was performed.
+ */
+async function resetJob(
+  subscriptionId: string,
+  state: {
+    readonly status: 'PENDING' | 'FAILED' | 'COMPLETED';
+    readonly createdAt: Date;
+    readonly startedAt: Date | null;
+    readonly completedAt?: Date;
+    readonly updatedAt: Date;
+    readonly attempts: number;
+    readonly supersededAt?: Date;
+    readonly cause?: string;
+  },
+): Promise<void> {
+  const cause = state.cause ?? PAID_TRAFFIC_RESET_CAUSE;
+  await prisma.profileSyncJob.create({
+    data: {
+      subscriptionId,
+      action: 'TRAFFIC_RESET',
+      cause,
+      status: state.status,
+      attempts: state.attempts,
+      createdAt: state.createdAt,
+      startedAt: state.startedAt,
+      completedAt: state.completedAt ?? null,
+      updatedAt: state.updatedAt,
+      supersededAt: state.supersededAt ?? null,
+      payload: { source: cause },
     },
   });
 }
@@ -460,6 +497,94 @@ run('an add-on «до сброса» waits for Remnawave\'s reset — PostgreSQL
 
     assert.equal(await stateOf(third.subscriptionId), AddOnEntitlementState.EXPIRED, 'the batch confirms for all');
     assert.equal((await epochOf(third.epochId)).closeSource, 'WEBHOOK_RECONCILIATION');
+  });
+
+  it('a paid reset still being retried when Remnawave ran, or one that failed for good, reset nothing: the run on those profiles confirms the boundary (R5-05)', async () => {
+    // Remnawave ran three minutes late and stamped two profiles with one
+    // instant. On each, a paid «Обнулить трафик» was owed across the run: one
+    // still being retried (touched just now), one failed for good. Neither
+    // was ever performed, and neither may pass the run off as the panel's.
+    const now = new Date();
+    const plannedAt = new Date(now.getTime() - 55 * MINUTE);
+    const batch = new Date(plannedAt.getTime() + 3 * MINUTE + 731);
+    const retried = await seedHeld({ tag: 'r505-retried', strategy: 'MONTH', plannedAt, lastReset: batch });
+    const failed = await seedHeld({ tag: 'r505-failed', strategy: 'MONTH', plannedAt, lastReset: batch });
+    const third = await seedHeld({ tag: 'r505-third', strategy: 'MONTH', plannedAt });
+    const ownedSince = new Date(plannedAt.getTime() - 10 * MINUTE);
+    await resetJob(retried.subscriptionId, {
+      status: 'PENDING',
+      createdAt: ownedSince,
+      startedAt: new Date(batch.getTime() - 1_000),
+      updatedAt: now,
+      attempts: 2,
+    });
+    await resetJob(failed.subscriptionId, {
+      status: 'FAILED',
+      createdAt: ownedSince,
+      startedAt: new Date(batch.getTime() + 2_000),
+      updatedAt: new Date(batch.getTime() + 3_000),
+      attempts: 5,
+      supersededAt: new Date(batch.getTime() + 60_000),
+    });
+
+    await scheduler.runDueBoundaries(now);
+
+    assert.equal(await stateOf(third.subscriptionId), AddOnEntitlementState.EXPIRED, 'the run confirms for all');
+    assert.equal((await epochOf(third.epochId)).closeSource, 'WEBHOOK_RECONCILIATION');
+  });
+
+  it('a paid reset retried through the run and performed after it counts over the attempt that performed it, not the outage (R5-05)', async () => {
+    // Owed since before the run, performed twenty minutes after it; the
+    // profile still shows the run's instant (read before the late reset).
+    const now = new Date();
+    const plannedAt = new Date(now.getTime() - 55 * MINUTE);
+    const batch = new Date(plannedAt.getTime() + 4 * MINUTE + 219);
+    const late = await seedHeld({ tag: 'r505-late', strategy: 'DAY', plannedAt, lastReset: batch });
+    await seedHeld({ tag: 'r505-late-b', strategy: 'DAY', plannedAt, lastReset: batch });
+    const third = await seedHeld({ tag: 'r505-late-c', strategy: 'DAY', plannedAt });
+    const performedAt = new Date(batch.getTime() + 20 * MINUTE);
+    await resetJob(late.subscriptionId, {
+      status: 'COMPLETED',
+      createdAt: new Date(plannedAt.getTime() - 10 * MINUTE),
+      startedAt: new Date(performedAt.getTime() - 900),
+      completedAt: performedAt,
+      updatedAt: performedAt,
+      attempts: 3,
+      supersededAt: performedAt,
+    });
+
+    await scheduler.runDueBoundaries(now);
+
+    assert.equal(await stateOf(third.subscriptionId), AddOnEntitlementState.EXPIRED, 'the run confirms for all');
+  });
+
+  it('a reset of the panel’s recorded without a start is still the panel’s own, from its creation (R5-05)', async () => {
+    // A record of a reset of ours with no start (`started_at` NULL): it
+    // brackets from its creation, the reset is ours, and the one other
+    // profile stamped beside it makes no run.
+    const now = new Date();
+    const plannedAt = new Date(now.getTime() - 50 * MINUTE);
+    const batch = new Date(plannedAt.getTime() + 3 * MINUTE + 613);
+    const ours = await seedHeld({ tag: 'r505-nostart', strategy: 'WEEK', plannedAt, lastReset: batch });
+    await seedHeld({ tag: 'r505-nostart-b', strategy: 'WEEK', plannedAt, lastReset: new Date(batch.getTime() + 4) });
+    const untouched = await seedHeld({ tag: 'r505-nostart-c', strategy: 'WEEK', plannedAt });
+    await resetJob(ours.subscriptionId, {
+      status: 'COMPLETED',
+      cause: 'OPERATOR_TRAFFIC_RESET',
+      createdAt: new Date(batch.getTime() - 2_000),
+      startedAt: null,
+      completedAt: new Date(batch.getTime() + 1_000),
+      updatedAt: new Date(batch.getTime() + 1_000),
+      attempts: 1,
+      supersededAt: new Date(batch.getTime() + 1_000),
+    });
+    remnawave.answers.set(untouched.subscriptionId, {
+      facts: { createdAt: null, lastTrafficResetAt: new Date(plannedAt.getTime() - 7 * 24 * HOUR) },
+    });
+
+    await scheduler.runDueBoundaries(now);
+
+    assert.equal(await stateOf(untouched.subscriptionId), AddOnEntitlementState.ACTIVE, 'one profile of Remnawave’s makes no run');
   });
 
   it('a run that waited, seen on one LIMITED and one other profile milliseconds apart, confirms the boundary for everybody (R4-03)', async () => {

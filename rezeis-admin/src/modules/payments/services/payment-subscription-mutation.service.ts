@@ -134,7 +134,13 @@ import {
   ADD_ON_LEDGER_SOURCE,
   type AddOnAddedNothingReason,
   addOnNotAppliedStamp,
+  isPaymentStillPaid,
+  jsonObjectSql,
   PAID_TRAFFIC_RESET_CAUSE,
+  paidResetSettledPayloadSql,
+  type PaidResetAnnouncement,
+  type PaidResetOutcome,
+  paymentStillPaidSql,
 } from '../utils/add-on-not-applied.util';
 import { PROFILE_SYNC_MAX_ATTEMPTS } from '../../profile-sync/profile-sync.constants';
 import {
@@ -1896,26 +1902,18 @@ export class PaymentSubscriptionMutationService {
     // throwing here would roll nothing back and would make the webhook retry a
     // capture that already succeeded.
     //
-    // Announced when it is KNOWN: performed now — the sale, below; not
-    // performable — the card and the customer's notice, below; Remnawave out
-    // of reach — neither yet: the profile-sync sweep retries its job, and
-    // `settlePaidTrafficResets` announces how that ends.
-    let saleDeferred = false;
+    // Told when it is KNOWN, by its job (`tellPaidReset`): performed now — the
+    // sale; not performable — the card and the customer's notice; Remnawave
+    // out of reach — neither yet: the profile-sync sweep retries its job, and
+    // `settlePaidTrafficResets` tells how that ends.
     if (resetTarget !== null) {
-      const attempt = await this.performPaidTrafficReset(transaction, resetTarget);
-      if (attempt.kind === 'NOT_APPLIED') {
-        quoteNote = { kind: 'NOT_APPLIED', reason: 'RESET_NOT_PERFORMED', detail: attempt.detail };
-      } else if (attempt.kind !== 'APPLIED') {
-        saleDeferred = true;
-      }
+      await this.performAndTellPaidTrafficReset(transaction, resetTarget);
+      return result;
     }
 
     // Captured by the same run that recorded it, after the commit: once per
-    // payment, since a replay finds it fulfilled and never gets this far. A
-    // reset still being retried is announced by `settlePaidTrafficResets`.
-    if (!saleDeferred) {
-      await this.announceAddOnCapture(transaction, marker, result.subscription, quoteNote as AddOnQuoteNote | null);
-    }
+    // payment, since a replay finds it fulfilled and never gets this far.
+    await this.announceAddOnCapture(transaction, marker, result.subscription, quoteNote as AddOnQuoteNote | null);
 
     return result;
   }
@@ -2039,20 +2037,56 @@ export class PaymentSubscriptionMutationService {
   // ═══════════════════════════════════════════════════════════════════════════
 
   /**
-   * One attempt at a paid reset, settled on its HELD job:
-   *  - performed: the job is COMPLETED and settled, and the caller announces
-   *    the sale;
+   * The capture's own attempt at its paid reset, and the telling of how it
+   * went: the sale, or the operator's card with the customer's notice. A reset
+   * Remnawave could not be reached for is told later, by
+   * {@link settlePaidTrafficResets}, when the profile-sync machinery has
+   * performed it or given up.
+   */
+  private async performAndTellPaidTrafficReset(transaction: Transaction, target: PaidResetTarget): Promise<void> {
+    const attempt = await this.performPaidTrafficReset(transaction, target);
+    const job: PaidResetJob = {
+      id: target.jobId,
+      subscriptionId: target.subscriptionId,
+      payload: { transactionId: transaction.id },
+    };
+    if (attempt.kind === 'APPLIED') {
+      await this.tellPaidReset(job, null, new Date());
+    } else if (attempt.kind === 'NOT_APPLIED') {
+      await this.tellPaidReset(job, { kind: 'NOT_APPLIED', reason: 'RESET_NOT_PERFORMED', detail: attempt.detail }, new Date());
+    }
+  }
+
+  /**
+   * One attempt at a paid reset, on its HELD job:
+   *  - CLAIMED first: the job goes RUNNING in one statement that also asks
+   *    whether the payment is still paid. A full refund closes the job with
+   *    the same kind of statement, so exactly one of the two wins (R5-01); a
+   *    payment found refunded here closes the job, and nothing is performed;
+   *  - performed: the job is COMPLETED and settled, and the caller tells the
+   *    sale;
    *  - Remnawave out of reach: the job is RELEASED to the profile-sync
    *    machinery — its sweep re-drives it, its worker performs it — and
-   *    {@link settlePaidTrafficResets} announces how that ends;
+   *    {@link settlePaidTrafficResets} tells how that ends;
    *  - anything that cannot work (no profile, Remnawave not configured, a
    *    refusal, a missing profile): settled NOT APPLIED with the payment's
-   *    `addOnNotApplied` stamp, and the caller sends the operator's card and
-   *    the customer's notice.
-   * `SETTLED` when somebody settled the job first: nothing to announce. Never
-   * throws: a settle that fails leaves the job for the next sweep.
+   *    `addOnNotApplied` stamp, and the caller tells the operator and the
+   *    customer — or CLOSED, with nothing to tell, if the payment was refunded
+   *    meanwhile.
+   * `SETTLED` when this run has nothing to tell. Never throws: a settle that
+   * fails leaves the job for the next sweep.
    */
   private async performPaidTrafficReset(transaction: Transaction, target: PaidResetTarget): Promise<PaidResetAttempt> {
+    try {
+      if (!(await this.claimPaidResetAttempt(target.jobId, transaction.id))) return { kind: 'SETTLED' };
+    } catch (error: unknown) {
+      this.logger.error(
+        `Paid traffic reset of payment ${transaction.paymentId} could not be claimed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return { kind: 'RETRYING' };
+    }
     let performed: TrafficResetOutcome;
     try {
       const termId = await this.trafficResetService.currentTermId(target.subscriptionId);
@@ -2075,7 +2109,8 @@ export class PaymentSubscriptionMutationService {
     }
     try {
       if (performed.ok) {
-        return (await this.claimHeldPaidReset(target.jobId, 'APPLIED', null)) ? { kind: 'APPLIED' } : { kind: 'SETTLED' };
+        const settled = await this.settleHeldPaidReset(target.jobId, transaction.id, { outcome: 'APPLIED' });
+        return settled === 'APPLIED' ? { kind: 'APPLIED' } : { kind: 'SETTLED' };
       }
       if (performed.retryable) {
         await this.releaseHeldPaidReset(target.jobId, performed.reason);
@@ -2087,11 +2122,12 @@ export class PaymentSubscriptionMutationService {
       }
       const why = PAID_RESET_FAILURE_WHY[performed.failure];
       const detail = performed.detail === null ? why : `${why} (${clipPanelDetail(performed.detail)})`;
-      const claimed = await this.claimHeldPaidReset(target.jobId, 'NOT_APPLIED', {
-        transactionId: transaction.id,
+      const settled = await this.settleHeldPaidReset(target.jobId, transaction.id, {
+        outcome: 'NOT_APPLIED',
+        detail,
         lastError: performed.reason,
       });
-      return claimed ? { kind: 'NOT_APPLIED', detail } : { kind: 'SETTLED' };
+      return settled === 'NOT_APPLIED' ? { kind: 'NOT_APPLIED', detail } : { kind: 'SETTLED' };
     } catch (error: unknown) {
       this.logger.error(
         `Paid traffic reset of payment ${transaction.paymentId} could not be settled: ${
@@ -2103,24 +2139,83 @@ export class PaymentSubscriptionMutationService {
   }
 
   /**
-   * Settles a HELD job this run attempted, once: performed (COMPLETED), or not
-   * applied — with the payment's stamp, in the same transaction, so a refund
-   * of it takes nothing back (`AddOnRefundService`). `false` when it was not
-   * held any more or was settled already: somebody else answers for it.
+   * The claim on performing a HELD job: RUNNING, while it is held, unsettled
+   * and its payment still paid — in ONE statement, against the full refund's
+   * own claim on closing it (`AddOnRefundService`), so the two cannot both
+   * win. Not claimed because the payment was refunded: the job is CLOSED here,
+   * so nothing performs it later. `false` when this run may not perform it.
    */
-  private async claimHeldPaidReset(
-    jobId: string,
-    outcome: 'APPLIED' | 'NOT_APPLIED',
-    notApplied: { readonly transactionId: string; readonly lastError: string } | null,
-  ): Promise<boolean> {
+  private async claimPaidResetAttempt(jobId: string, transactionId: string): Promise<boolean> {
     const now = new Date();
     return this.prismaService.$transaction(async (tx) => {
+      const claimed = await tx.$queryRaw<Array<{ readonly id: string }>>(Prisma.sql`
+        UPDATE "profile_sync_jobs" AS j
+           SET "status" = 'RUNNING'::"SyncJobStatus",
+               "started_at" = ${now},
+               "updated_at" = ${now}
+          FROM "transactions" AS t
+         WHERE j."id" = ${jobId}
+           AND j."cause" = ${PAID_TRAFFIC_RESET_CAUSE}
+           AND j."payload"->>'held' = 'true'
+           AND NOT (j."payload" ? 'settledAt')
+           AND j."status" IN ('PENDING', 'RUNNING')
+           AND t."id" = ${transactionId}
+           AND ${paymentStillPaidSql(Prisma.sql`t`)}
+        RETURNING j."id"
+      `);
+      if (claimed.length === 1) return true;
+      await tx.$executeRaw(Prisma.sql`
+        UPDATE "profile_sync_jobs" AS j
+           SET "payload" = ${paidResetSettledPayloadSql(Prisma.sql`j."payload"`, 'CLOSED', now)},
+               "last_error" = 'the payment was refunded before the reset',
+               "updated_at" = ${now}
+          FROM "transactions" AS t
+         WHERE j."id" = ${jobId}
+           AND j."cause" = ${PAID_TRAFFIC_RESET_CAUSE}
+           AND j."payload"->>'held' = 'true'
+           AND NOT (j."payload" ? 'settledAt')
+           AND t."id" = ${transactionId}
+           AND NOT ${paymentStillPaidSql(Prisma.sql`t`)}
+      `);
+      return false;
+    });
+  }
+
+  /**
+   * Settles a HELD job this run attempted, once: performed (COMPLETED), or not
+   * applied — with the payment's stamp, in the same transaction, so a refund
+   * of it takes nothing back (`AddOnRefundService`) — or, the payment refunded
+   * meanwhile, CLOSED with nothing to tell and no stamp. `null` when it was not
+   * held any more or was settled already: somebody else answers for it.
+   */
+  private async settleHeldPaidReset(
+    jobId: string,
+    transactionId: string,
+    settle:
+      | { readonly outcome: 'APPLIED' }
+      | { readonly outcome: 'NOT_APPLIED'; readonly detail: string; readonly lastError: string },
+  ): Promise<PaidResetOutcome | null> {
+    const now = new Date();
+    return this.prismaService.$transaction(async (tx) => {
+      let outcome: PaidResetOutcome = settle.outcome;
+      if (settle.outcome === 'NOT_APPLIED') {
+        const payment = await tx.transaction.findUnique({
+          where: { id: transactionId },
+          select: { status: true },
+        });
+        if (payment === null || !isPaymentStillPaid(payment)) outcome = 'CLOSED';
+      }
       const claimed = await tx.$queryRaw<Array<{ readonly id: string }>>(Prisma.sql`
         UPDATE "profile_sync_jobs"
            SET "status" = ${outcome === 'APPLIED' ? SyncJobStatus.COMPLETED : SyncJobStatus.FAILED}::"SyncJobStatus",
                "completed_at" = ${outcome === 'APPLIED' ? now : null}::timestamptz,
-               "last_error" = ${notApplied?.lastError ?? null}::text,
-               "payload" = ${settledPayloadSql(Prisma.sql`"payload"`, outcome, now)},
+               "last_error" = ${settle.outcome === 'NOT_APPLIED' ? settle.lastError : null}::text,
+               "payload" = ${paidResetSettledPayloadSql(
+                 Prisma.sql`"payload"`,
+                 outcome,
+                 now,
+                 outcome === 'NOT_APPLIED' && settle.outcome === 'NOT_APPLIED' ? settle.detail : null,
+               )},
                "updated_at" = ${now}
          WHERE "id" = ${jobId}
            AND "cause" = ${PAID_TRAFFIC_RESET_CAUSE}
@@ -2128,13 +2223,13 @@ export class PaymentSubscriptionMutationService {
            AND NOT ("payload" ? 'settledAt')
         RETURNING "id"
       `);
-      if (claimed.length !== 1) return false;
-      if (notApplied !== null) {
-        await writeTransactionGatewayData(tx, notApplied.transactionId, {
+      if (claimed.length !== 1) return null;
+      if (outcome === 'NOT_APPLIED') {
+        await writeTransactionGatewayData(tx, transactionId, {
           merge: addOnNotAppliedStamp('RESET_NOT_PERFORMED', now),
         });
       }
-      return true;
+      return outcome;
     });
   }
 
@@ -2144,6 +2239,7 @@ export class PaymentSubscriptionMutationService {
     await this.prismaService.$executeRaw(Prisma.sql`
       UPDATE "profile_sync_jobs"
          SET "superseded_at" = NULL,
+             "status" = 'PENDING'::"SyncJobStatus",
              "last_error" = ${reason}::text,
              "payload" = ((${jsonObjectSql(Prisma.sql`"payload"`)} - 'held')
                          || jsonb_build_object('releasedAt', ${now.toISOString()}::text)),
@@ -2161,10 +2257,10 @@ export class PaymentSubscriptionMutationService {
     if (!shouldRunSchedules()) return;
     try {
       const settled = await this.settlePaidTrafficResets();
-      if (settled.attempted + settled.applied + settled.notApplied > 0) {
+      if (settled.retold + settled.attempted + settled.applied + settled.notApplied > 0) {
         this.logger.log(
-          `Paid traffic resets: ${settled.attempted} attempted again, ${settled.applied} performed, ` +
-            `${settled.notApplied} not applied`,
+          `Paid traffic resets: ${settled.retold} told again, ${settled.attempted} attempted again, ` +
+            `${settled.applied} performed, ${settled.notApplied} not applied`,
         );
       }
     } catch (error: unknown) {
@@ -2175,16 +2271,20 @@ export class PaymentSubscriptionMutationService {
   }
 
   /**
-   * THE OUTCOME OF A PAID RESET, TOLD ONCE — each outcome claimed on the job
-   * row (`settledAt`) in the statement that decides it, so two workers or two
-   * ticks cannot announce one reset twice:
+   * THE OUTCOME OF A PAID RESET, TOLD ONCE. Each job is settled on its own row,
+   * under its own lock, and told on its own; a job that fails to settle or to
+   * be told takes nothing else down with it (R5-02):
    *
+   *  0. Settled, and its telling lost — the run that settled it failed or
+   *     stopped before it had told it (`announcedAt` is written only after the
+   *     telling): told again, once its claim (`announceClaimAt`) is
+   *     {@link PAID_RESET_ANNOUNCE_RETRY_MS} old.
    *  1. HELD for more than {@link PAID_RESET_HOLD_MS}: the run that captured
    *     the payment died before it answered. Attempted again here, as that run
    *     would have (`attemptAt` claims the attempt).
-   *  2. COMPLETED by the profile-sync worker: the sale, announced now, and the
-   *     reset recorded (`subscription_traffic_resets`, as a reset performed at
-   *     once records it).
+   *  2. COMPLETED by the profile-sync worker: the reset recorded
+   *     (`subscription_traffic_resets`, as a reset performed at once records
+   *     it), and the sale told.
    *  3. Failed for good — TERMINAL on the last attempt, or an hour after a
    *     TERMINAL failure whose retries were lost — or taken off by something
    *     else (superseded): not applied. The payment is stamped, and the
@@ -2192,18 +2292,41 @@ export class PaymentSubscriptionMutationService {
    *     notice go out. The profile-sync worker sends no card of its own for
    *     such a job (`ProfileSyncProcessor.reportFailure`).
    *
-   * A job Remnawave keeps failing TRANSIENTLY is neither: the sweep keeps
-   * re-driving it, as it does every push, until Remnawave answers.
+   * A payment refunded in full is told nothing, whatever became of its reset
+   * (R5-01): no sale for a refunded payment, and no «Верните деньги» for money
+   * already returned. A job Remnawave keeps failing TRANSIENTLY is none of the
+   * above: the sweep keeps re-driving it, as it does every push.
    */
-  public async settlePaidTrafficResets(
-    now: Date = new Date(),
-  ): Promise<{ readonly attempted: number; readonly applied: number; readonly notApplied: number }> {
-    const counts = { attempted: 0, applied: 0, notApplied: 0 };
+  public async settlePaidTrafficResets(now: Date = new Date()): Promise<{
+    readonly retold: number;
+    readonly attempted: number;
+    readonly applied: number;
+    readonly notApplied: number;
+  }> {
+    const counts = { retold: 0, attempted: 0, applied: 0, notApplied: 0 };
+
+    // 0. Settled, and not told. (A CLOSED job is settled told: it has nothing
+    // to tell.) Whether its telling is still under way is its claim's to say.
+    const untold = await this.prismaService.$queryRaw<PaidResetJob[]>(Prisma.sql`
+      SELECT "id", "subscription_id" AS "subscriptionId", "payload"
+        FROM "profile_sync_jobs"
+       WHERE "cause" = ${PAID_TRAFFIC_RESET_CAUSE}
+         AND "payload" ? 'settledAt'
+         AND NOT ("payload" ? 'announcedAt')
+       ORDER BY "created_at" ASC
+       LIMIT ${PAID_RESET_SETTLE_BATCH}
+    `);
+    for (const job of untold) {
+      try {
+        if (!(await this.claimPaidResetTelling(job.id, now))) continue;
+        if ((await this.tellPaidReset(job, settledNoteOf(job.payload), now)) !== null) counts.retold += 1;
+      } catch (error: unknown) {
+        this.logger.error(`Paid traffic reset job ${job.id} could not be told again: ${describeSettleError(error)}`);
+      }
+    }
 
     // 1. Held, and nobody answered for it.
-    const stranded = await this.prismaService.$queryRaw<
-      Array<{ readonly id: string; readonly subscriptionId: string; readonly payload: unknown }>
-    >(Prisma.sql`
+    const stranded = await this.prismaService.$queryRaw<PaidResetJob[]>(Prisma.sql`
       UPDATE "profile_sync_jobs" AS j
          SET "payload" = j."payload" || jsonb_build_object('attemptAt', ${now.toISOString()}::text),
              "updated_at" = ${now}
@@ -2222,141 +2345,278 @@ export class PaymentSubscriptionMutationService {
       RETURNING j."id", j."subscription_id" AS "subscriptionId", j."payload"
     `);
     for (const job of stranded) {
-      const payload = readJsonObject(job.payload) ?? {};
-      const transaction = await this.readPaidResetTransaction(payload);
-      const addOnId = typeof payload['addOnId'] === 'string' ? payload['addOnId'] : null;
-      if (transaction === null || addOnId === null) continue;
-      counts.attempted += 1;
-      const attempt = await this.performPaidTrafficReset(transaction, {
-        subscriptionId: job.subscriptionId,
-        addOnId,
-        jobId: job.id,
-      });
-      if (attempt.kind === 'APPLIED') {
-        await this.announcePaidReset(transaction, job.subscriptionId, null);
-      } else if (attempt.kind === 'NOT_APPLIED') {
-        await this.announcePaidReset(transaction, job.subscriptionId, {
-          kind: 'NOT_APPLIED',
-          reason: 'RESET_NOT_PERFORMED',
-          detail: attempt.detail,
+      try {
+        const payload = readJsonObject(job.payload) ?? {};
+        const transaction = await this.readPaidResetTransaction(payload);
+        const addOnId = typeof payload['addOnId'] === 'string' ? payload['addOnId'] : null;
+        if (transaction === null || addOnId === null) continue;
+        counts.attempted += 1;
+        await this.performAndTellPaidTrafficReset(transaction, {
+          subscriptionId: job.subscriptionId,
+          addOnId,
+          jobId: job.id,
         });
+      } catch (error: unknown) {
+        this.logger.error(`Paid traffic reset job ${job.id} could not be attempted again: ${describeSettleError(error)}`);
       }
     }
 
     // 2. Performed by the worker.
-    const applied = await this.prismaService.$transaction(async (tx) => {
-      const claimed = await tx.$queryRaw<
-        Array<{
-          readonly id: string;
-          readonly subscriptionId: string;
-          readonly completedAt: Date | null;
-          readonly payload: unknown;
-        }>
-      >(Prisma.sql`
-        UPDATE "profile_sync_jobs" AS j
-           SET "superseded_at" = COALESCE(j."superseded_at", ${now}),
-               "payload" = ${settledPayloadSql(Prisma.sql`j."payload"`, 'APPLIED', now)},
-               "updated_at" = ${now}
-         WHERE j."id" IN (
-                 SELECT "id" FROM "profile_sync_jobs"
-                  WHERE "cause" = ${PAID_TRAFFIC_RESET_CAUSE}
-                    AND "status" = 'COMPLETED'
-                    AND NOT ("payload" ? 'settledAt')
-                  ORDER BY "created_at" ASC
-                  LIMIT ${PAID_RESET_SETTLE_BATCH}
-                  FOR UPDATE SKIP LOCKED
-               )
-           AND NOT (j."payload" ? 'settledAt')
-        RETURNING j."id", j."subscription_id" AS "subscriptionId", j."completed_at" AS "completedAt", j."payload"
-      `);
-      for (const job of claimed) {
-        const payload = readJsonObject(job.payload) ?? {};
-        const term = await tx.subscriptionTerm.findFirst({
-          where: { subscriptionId: job.subscriptionId, status: SubscriptionTermStatus.ACTIVE },
-          orderBy: { createdAt: 'desc' },
-          select: { id: true },
-        });
-        // What a reset performed at once records (`TrafficResetService.perform`).
-        await tx.subscriptionTrafficReset.create({
-          data: {
-            subscriptionId: job.subscriptionId,
-            termId: term?.id ?? null,
-            addOnId: typeof payload['addOnId'] === 'string' ? payload['addOnId'] : null,
-            transactionId: typeof payload['transactionId'] === 'string' ? payload['transactionId'] : null,
-            performedAt: job.completedAt ?? now,
-          },
-        });
+    const performed = await this.prismaService.$queryRaw<Array<{ readonly id: string }>>(Prisma.sql`
+      SELECT "id" FROM "profile_sync_jobs"
+       WHERE "cause" = ${PAID_TRAFFIC_RESET_CAUSE}
+         AND "status" = 'COMPLETED'
+         AND NOT ("payload" ? 'settledAt')
+       ORDER BY "created_at" ASC
+       LIMIT ${PAID_RESET_SETTLE_BATCH}
+    `);
+    for (const candidate of performed) {
+      try {
+        const job = await this.settlePerformedPaidReset(candidate.id, now);
+        if (job === null) continue;
+        counts.applied += 1;
+        await this.tellPaidReset(job, null, now);
+      } catch (error: unknown) {
+        this.logger.error(`Paid traffic reset job ${candidate.id} could not be settled: ${describeSettleError(error)}`);
       }
-      return claimed;
-    });
-    for (const job of applied) {
-      const transaction = await this.readPaidResetTransaction(readJsonObject(job.payload) ?? {});
-      if (transaction === null) continue;
-      counts.applied += 1;
-      await this.announcePaidReset(transaction, job.subscriptionId, null);
     }
 
     // 3. Failed for good, or taken off by something else.
     const hourAgo = new Date(now.getTime() - PAID_RESET_LOST_RETRY_MS);
-    const failed = await this.prismaService.$transaction(async (tx) => {
-      const claimed = await tx.$queryRaw<
-        Array<{
-          readonly id: string;
-          readonly subscriptionId: string;
-          readonly failedForGood: boolean;
-          readonly lastError: string | null;
-          readonly payload: unknown;
-        }>
-      >(Prisma.sql`
-        UPDATE "profile_sync_jobs" AS j
-           SET "superseded_at" = COALESCE(j."superseded_at", ${now}),
-               "payload" = ${settledPayloadSql(Prisma.sql`j."payload"`, 'NOT_APPLIED', now)},
-               "updated_at" = ${now}
-         WHERE j."id" IN (
-                 SELECT "id" FROM "profile_sync_jobs"
-                  WHERE "cause" = ${PAID_TRAFFIC_RESET_CAUSE}
-                    AND NOT ("payload" ? 'settledAt')
-                    AND COALESCE("payload"->>'held', 'false') <> 'true'
-                    AND "status" <> 'COMPLETED'
-                    AND (
-                      ("status" = 'FAILED'
-                        AND "recovery_data"->>'classification' = 'TERMINAL'
-                        AND ("attempts" >= ${PROFILE_SYNC_MAX_ATTEMPTS} OR "updated_at" < ${hourAgo}))
-                      OR "superseded_at" IS NOT NULL
-                    )
-                  ORDER BY "created_at" ASC
-                  LIMIT ${PAID_RESET_SETTLE_BATCH}
-                  FOR UPDATE SKIP LOCKED
-               )
-           AND NOT (j."payload" ? 'settledAt')
-        RETURNING j."id", j."subscription_id" AS "subscriptionId",
-                  (j."status" = 'FAILED' AND j."recovery_data"->>'classification' = 'TERMINAL') AS "failedForGood",
-                  j."last_error" AS "lastError", j."payload"
-      `);
-      for (const job of claimed) {
-        const transactionId = readJsonObject(job.payload)?.['transactionId'];
-        if (typeof transactionId !== 'string') continue;
-        await writeTransactionGatewayData(tx, transactionId, {
-          merge: addOnNotAppliedStamp('RESET_NOT_PERFORMED', now),
-        });
+    const failed = await this.prismaService.$queryRaw<Array<{ readonly id: string }>>(Prisma.sql`
+      SELECT "id" FROM "profile_sync_jobs"
+       WHERE ${unperformedPaidResetSql(hourAgo)}
+       ORDER BY "created_at" ASC
+       LIMIT ${PAID_RESET_SETTLE_BATCH}
+    `);
+    for (const candidate of failed) {
+      try {
+        const settled = await this.settleUnperformedPaidReset(candidate.id, now, hourAgo);
+        if (settled === null) continue;
+        counts.notApplied += 1;
+        await this.tellPaidReset(settled.job, { kind: 'NOT_APPLIED', reason: 'RESET_NOT_PERFORMED', detail: settled.detail }, now);
+      } catch (error: unknown) {
+        this.logger.error(`Paid traffic reset job ${candidate.id} could not be settled: ${describeSettleError(error)}`);
       }
-      return claimed;
-    });
-    for (const job of failed) {
-      const transaction = await this.readPaidResetTransaction(readJsonObject(job.payload) ?? {});
-      if (transaction === null) continue;
-      counts.notApplied += 1;
-      const detail = job.failedForGood
-        ? `Remnawave так и не выполнила сброс${job.lastError === null ? '' : ` (${clipPanelDetail(job.lastError)})`}`
-        : 'задачу сброса сняли до того, как Remnawave её выполнила';
-      await this.announcePaidReset(transaction, job.subscriptionId, {
-        kind: 'NOT_APPLIED',
-        reason: 'RESET_NOT_PERFORMED',
-        detail,
-      });
     }
 
     return counts;
+  }
+
+  /**
+   * Settles one job the worker performed, under its row lock: the reset
+   * recorded, the job settled APPLIED — and superseded, so it never stands for
+   * the subscription's sync state. `null` when another settle has it, or had it.
+   */
+  private async settlePerformedPaidReset(jobId: string, now: Date): Promise<PaidResetJob | null> {
+    return this.prismaService.$transaction(async (tx) => {
+      const [job] = await tx.$queryRaw<Array<PaidResetJob & { readonly completedAt: Date | null }>>(Prisma.sql`
+        SELECT "id", "subscription_id" AS "subscriptionId", "completed_at" AS "completedAt", "payload"
+          FROM "profile_sync_jobs"
+         WHERE "id" = ${jobId}
+           AND "cause" = ${PAID_TRAFFIC_RESET_CAUSE}
+           AND "status" = 'COMPLETED'
+           AND NOT ("payload" ? 'settledAt')
+         FOR UPDATE SKIP LOCKED
+      `);
+      if (job === undefined) return null;
+      const payload = readJsonObject(job.payload) ?? {};
+      const term = await tx.subscriptionTerm.findFirst({
+        where: { subscriptionId: job.subscriptionId, status: SubscriptionTermStatus.ACTIVE },
+        orderBy: { createdAt: 'desc' },
+        select: { id: true },
+      });
+      // What a reset performed at once records (`TrafficResetService.perform`).
+      await tx.subscriptionTrafficReset.create({
+        data: {
+          subscriptionId: job.subscriptionId,
+          termId: term?.id ?? null,
+          addOnId: typeof payload['addOnId'] === 'string' ? payload['addOnId'] : null,
+          transactionId: typeof payload['transactionId'] === 'string' ? payload['transactionId'] : null,
+          performedAt: job.completedAt ?? now,
+        },
+      });
+      await tx.$executeRaw(Prisma.sql`
+        UPDATE "profile_sync_jobs"
+           SET "superseded_at" = COALESCE("superseded_at", ${now}),
+               "payload" = ${paidResetSettledPayloadSql(Prisma.sql`"payload"`, 'APPLIED', now)},
+               "updated_at" = ${now}
+         WHERE "id" = ${jobId}
+      `);
+      return job;
+    });
+  }
+
+  /**
+   * Settles one job that was never performed and will not be, under its row
+   * lock: NOT APPLIED, the payment stamped, with the words of the operator's
+   * card — or, the payment refunded, CLOSED with nothing to tell. `null` when
+   * another settle has it, it no longer qualifies, or there is nothing to tell.
+   */
+  private async settleUnperformedPaidReset(
+    jobId: string,
+    now: Date,
+    hourAgo: Date,
+  ): Promise<{ readonly job: PaidResetJob; readonly detail: string } | null> {
+    return this.prismaService.$transaction(async (tx) => {
+      const [job] = await tx.$queryRaw<
+        Array<
+          PaidResetJob & {
+            readonly failedForGood: boolean;
+            readonly lastError: string | null;
+            readonly stillPaid: boolean | null;
+            readonly transactionId: string | null;
+          }
+        >
+      >(Prisma.sql`
+        SELECT j."id", j."subscription_id" AS "subscriptionId", j."payload", j."last_error" AS "lastError",
+               (j."status" = 'FAILED' AND j."recovery_data"->>'classification' = 'TERMINAL') AS "failedForGood",
+               ${paymentStillPaidSql(Prisma.sql`t`)} AS "stillPaid",
+               t."id" AS "transactionId"
+          FROM "profile_sync_jobs" AS j
+          LEFT JOIN "transactions" AS t ON t."id" = j."payload"->>'transactionId'
+         WHERE j."id" = ${jobId}
+           AND ${unperformedPaidResetSql(hourAgo, Prisma.sql`j.`)}
+         FOR UPDATE OF j SKIP LOCKED
+      `);
+      if (job === undefined) return null;
+      const outcome: PaidResetOutcome = job.stillPaid === true && job.transactionId !== null ? 'NOT_APPLIED' : 'CLOSED';
+      const detail = job.failedForGood
+        ? `Remnawave так и не выполнила сброс${job.lastError === null ? '' : ` (${clipPanelDetail(job.lastError)})`}`
+        : 'задачу сброса сняли до того, как Remnawave её выполнила';
+      await tx.$executeRaw(Prisma.sql`
+        UPDATE "profile_sync_jobs"
+           SET "superseded_at" = COALESCE("superseded_at", ${now}),
+               "payload" = ${paidResetSettledPayloadSql(Prisma.sql`"payload"`, outcome, now, outcome === 'NOT_APPLIED' ? detail : null)},
+               "updated_at" = ${now}
+         WHERE "id" = ${jobId}
+      `);
+      if (outcome === 'CLOSED' || job.transactionId === null) return null;
+      await writeTransactionGatewayData(tx, job.transactionId, {
+        merge: addOnNotAppliedStamp('RESET_NOT_PERFORMED', now),
+      });
+      return { job, detail };
+    });
+  }
+
+  /**
+   * The claim on telling a settled job again (`announceClaimAt`), once its
+   * last claim is {@link PAID_RESET_ANNOUNCE_RETRY_MS} old: a telling under
+   * way — the run that settled it, another settle — is not doubled.
+   */
+  private async claimPaidResetTelling(jobId: string, now: Date): Promise<boolean> {
+    const claimed = await this.prismaService.$queryRaw<Array<{ readonly id: string }>>(Prisma.sql`
+      UPDATE "profile_sync_jobs"
+         SET "payload" = "payload" || jsonb_build_object('announceClaimAt', ${now.toISOString()}::text),
+             "updated_at" = ${now}
+       WHERE "id" = ${jobId}
+         AND NOT ("payload" ? 'announcedAt')
+         AND ("payload"->>'announceClaimAt')::timestamptz < ${new Date(now.getTime() - PAID_RESET_ANNOUNCE_RETRY_MS)}
+      RETURNING "id"
+    `);
+    return claimed.length === 1;
+  }
+
+  /**
+   * Tells what a settled paid reset came to — the sale (`note` null), or the
+   * operator's card with the customer's notice — at least once:
+   *  1. DECIDED before anything goes out ({@link decidePaidResetTelling}):
+   *     what the job tells (`announcedAs`) is recorded only while the payment
+   *     is COMPLETED, holding its row, which a full refund's CANCELED write
+   *     needs too. A telling decided first is a sale the refund then answers
+   *     for in public; a refund first leaves nothing to tell (review R5-07).
+   *     A decision an earlier run recorded stands: this run tells it again;
+   *  2. told;
+   *  3. recorded as told (`announcedAt`), only once it has been: a telling
+   *     that failed is told by the next settle (R5-02).
+   * Never throws: `null` when it could not be told this time.
+   */
+  private async tellPaidReset(
+    job: PaidResetJob,
+    note: AddOnQuoteNote | null,
+    now: Date,
+  ): Promise<PaidResetAnnouncement | null> {
+    try {
+      const transaction = await this.readPaidResetTransaction(readJsonObject(job.payload) ?? {});
+      const told = await this.decidePaidResetTelling(
+        job.id,
+        transaction?.id ?? null,
+        note === null ? 'SALE' : 'NOT_APPLIED',
+        now,
+      );
+      if (told === 'NONE') return told;
+      if (transaction !== null) await this.announcePaidReset(transaction, job.subscriptionId, note);
+      await this.prismaService.$executeRaw(Prisma.sql`
+        UPDATE "profile_sync_jobs"
+           SET "payload" = ${jsonObjectSql(Prisma.sql`"payload"`)}
+                           || jsonb_build_object('announcedAt', ${now.toISOString()}::text),
+               "updated_at" = ${now}
+         WHERE "id" = ${job.id}
+           AND NOT ("payload" ? 'announcedAt')
+      `);
+      return told;
+    } catch (error: unknown) {
+      this.logger.error(
+        `Paid traffic reset job ${job.id} could not be told this time — the next settle tells it: ${describeSettleError(error)}`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * What a paid reset's job tells (`announcedAs`), decided once, before
+   * anything goes out: `tell` — the sale or the not-applied card — recorded
+   * only while the payment is COMPLETED, under a share lock on its row. A full
+   * refund's CANCELED write takes that row too, so the two queue: the refund
+   * reads a decision taken before it, and a decision taken after it sees the
+   * payment CANCELED (review R5-07). A decision an earlier run recorded stands.
+   * Nothing to tell — the payment refunded or gone — is recorded as told
+   * (`NONE`, with `announcedAt`).
+   */
+  private async decidePaidResetTelling(
+    jobId: string,
+    transactionId: string | null,
+    tell: 'SALE' | 'NOT_APPLIED',
+    now: Date,
+  ): Promise<PaidResetAnnouncement> {
+    return this.prismaService.$transaction(async (tx) => {
+      const [payment] =
+        transactionId === null
+          ? []
+          : await tx.$queryRaw<Array<{ readonly status: string }>>(Prisma.sql`
+              SELECT "status"::text AS "status"
+                FROM "transactions"
+               WHERE "id" = ${transactionId}
+                 FOR SHARE
+            `);
+      if (payment !== undefined && isPaymentStillPaid(payment)) {
+        const decided = await tx.$queryRaw<Array<{ readonly id: string }>>(Prisma.sql`
+          UPDATE "profile_sync_jobs"
+             SET "payload" = ${jsonObjectSql(Prisma.sql`"payload"`)} || jsonb_build_object('announcedAs', ${tell}::text),
+                 "updated_at" = ${now}
+           WHERE "id" = ${jobId}
+             AND NOT ("payload" ? 'announcedAs')
+          RETURNING "id"
+        `);
+        if (decided.length === 1) return tell;
+      }
+      const [job] = await tx.$queryRaw<Array<{ readonly announcedAs: string | null }>>(Prisma.sql`
+        SELECT "payload"->>'announcedAs' AS "announcedAs"
+          FROM "profile_sync_jobs"
+         WHERE "id" = ${jobId}
+           FOR UPDATE
+      `);
+      if (job?.announcedAs === 'SALE' || job?.announcedAs === 'NOT_APPLIED') return job.announcedAs;
+      await tx.$executeRaw(Prisma.sql`
+        UPDATE "profile_sync_jobs"
+           SET "payload" = ${jsonObjectSql(Prisma.sql`"payload"`)}
+                           || jsonb_build_object('announcedAs', 'NONE', 'announcedAt', ${now.toISOString()}::text),
+               "updated_at" = ${now}
+         WHERE "id" = ${jobId}
+           AND NOT ("payload" ? 'announcedAs')
+      `);
+      return 'NONE';
+    });
   }
 
   /** The payment a paid reset's job names, or `null` (logged) when it is gone. */
@@ -2370,7 +2630,7 @@ export class PaymentSubscriptionMutationService {
     return transaction;
   }
 
-  /** {@link announceAddOnCapture} for a paid reset settled after its capture. */
+  /** {@link announceAddOnCapture} for a paid reset. */
   private async announcePaidReset(
     transaction: Transaction,
     subscriptionId: string,
@@ -4435,12 +4695,24 @@ interface PaidResetTarget {
   readonly jobId: string;
 }
 
-/** What one attempt at a paid reset came to (`performPaidTrafficReset`). */
+/**
+ * What one attempt at a paid reset came to (`performPaidTrafficReset`):
+ * performed, retried by the profile-sync machinery, not performable (with
+ * why), or settled by somebody else — closed by a refund, among others — with
+ * nothing for this run to tell.
+ */
 type PaidResetAttempt =
   | { readonly kind: 'APPLIED' }
   | { readonly kind: 'RETRYING' }
   | { readonly kind: 'SETTLED' }
   | { readonly kind: 'NOT_APPLIED'; readonly detail: string };
+
+/** A paid reset's job, as the settle reads it. */
+interface PaidResetJob {
+  readonly id: string;
+  readonly subscriptionId: string;
+  readonly payload: unknown;
+}
 
 /** How long a paid reset's job may stay HELD before the settle takes it for a run that died. */
 const PAID_RESET_HOLD_MS = 15 * 60 * 1000;
@@ -4448,18 +4720,48 @@ const PAID_RESET_HOLD_MS = 15 * 60 * 1000;
 const PAID_RESET_ATTEMPT_MS = 10 * 60 * 1000;
 /** A TERMINAL failure left this long with its retries unspent had them lost: final. */
 const PAID_RESET_LOST_RETRY_MS = 60 * 60 * 1000;
+/**
+ * How old a settled job's claim on telling it must be before the settle tells
+ * it again: the run that settled it tells it at once, and one whose telling
+ * failed (a dropped connection, the process stopping) left it untold (R5-02).
+ */
+const PAID_RESET_ANNOUNCE_RETRY_MS = 60 * 1000;
 /** Jobs one pass of the settle takes. */
 const PAID_RESET_SETTLE_BATCH = 50;
 
-/** `column` as a JSON object, whatever it holds. */
-function jsonObjectSql(column: Prisma.Sql): Prisma.Sql {
-  return Prisma.sql`(CASE WHEN jsonb_typeof(${column}) = 'object' THEN ${column} ELSE '{}'::jsonb END)`;
+/**
+ * A paid reset's job that was never performed and will not be: failed for
+ * good — TERMINAL on the last attempt, or an hour after a TERMINAL failure
+ * whose retries were lost — or taken off by something else (superseded), not
+ * held and not settled. `alias` prefixes each column (`j.`), or nothing.
+ */
+function unperformedPaidResetSql(hourAgo: Date, alias: Prisma.Sql = Prisma.empty): Prisma.Sql {
+  return Prisma.sql`${alias}"cause" = ${PAID_TRAFFIC_RESET_CAUSE}
+    AND NOT (${alias}"payload" ? 'settledAt')
+    AND COALESCE(${alias}"payload"->>'held', 'false') <> 'true'
+    AND ${alias}"status" <> 'COMPLETED'
+    AND (
+      (${alias}"status" = 'FAILED'
+        AND ${alias}"recovery_data"->>'classification' = 'TERMINAL'
+        AND (${alias}"attempts" >= ${PROFILE_SYNC_MAX_ATTEMPTS} OR ${alias}"updated_at" < ${hourAgo}))
+      OR ${alias}"superseded_at" IS NOT NULL
+    )`;
 }
 
-/** A paid reset job's payload, settled: no longer held, and when and how it ended. */
-function settledPayloadSql(column: Prisma.Sql, outcome: 'APPLIED' | 'NOT_APPLIED', now: Date): Prisma.Sql {
-  return Prisma.sql`((${jsonObjectSql(column)} - 'held')
-    || jsonb_build_object('settledAt', ${now.toISOString()}::text, 'settledAs', ${outcome}::text))`;
+/** What a settled paid reset tells: the sale, or — not applied — the card, with the words it was settled with. */
+function settledNoteOf(payload: unknown): AddOnQuoteNote | null {
+  const settled = readJsonObject(payload) ?? {};
+  if (settled['settledAs'] !== 'NOT_APPLIED') return null;
+  const detail = settled['settledDetail'];
+  return {
+    kind: 'NOT_APPLIED',
+    reason: 'RESET_NOT_PERFORMED',
+    ...(typeof detail === 'string' ? { detail } : {}),
+  };
+}
+
+function describeSettleError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /** The card for a note, in the words the operator reads (`📝 Заметка`). */

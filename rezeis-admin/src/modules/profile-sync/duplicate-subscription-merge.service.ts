@@ -9,6 +9,7 @@ import {
   type DiscardedDurableRows,
   type DurableRowsOnSubscription,
 } from '../add-on-entitlements/services/cutover-disposal.util';
+import { PAID_TRAFFIC_RESET_CAUSE } from '../payments/utils/add-on-not-applied.util';
 import { panelShortUuidFromConfigUrl } from '../remnawave/services/panel-user-address';
 import { PanelUsersClient } from '../remnawave/services/panel-users.client';
 import { PanelLinkReconciliationService } from './panel-link-reconciliation.service';
@@ -1435,6 +1436,23 @@ export class DuplicateSubscriptionMergeService {
         // job the less urgent; it is still refused rather than tolerated,
         // because "a worker is mid-flight against a profile that just changed
         // hands" is not a state this service is willing to create knowingly.
+        //
+        // ONE EXCEPTION, AND IT MOVES: a paid «Обнулить трафик»'s job
+        // (`PAID_TRAFFIC_RESET_CAUSE`) follows its payment, which moved to the
+        // survivor above (`transactions`) — and the survivor now holds the very
+        // profile the customer paid to reset. It moves as it is: its cause, its
+        // status, its hold. One still owed is then found by the capture's run,
+        // the profile-sync worker and the settle as it would have been, and is
+        // performed once and told once; one already settled is the payment's
+        // history, and goes with it. Rewritten below, a job still owed left the
+        // settle's sight (a new cause) — paid for, never performed, nobody told
+        // — and, COMPLETED, it would have been announced as a sale that never
+        // happened (R5-04). Merely spared, a released one would have stayed
+        // live on the retired row, and step 5 refuses that.
+        await tx.profileSyncJob.updateMany({
+          where: { subscriptionId: duplicate.id, cause: PAID_TRAFFIC_RESET_CAUSE },
+          data: { subscriptionId: survivor.id },
+        });
         const superseded = await tx.profileSyncJob.updateMany({
           where: {
             subscriptionId: duplicate.id,

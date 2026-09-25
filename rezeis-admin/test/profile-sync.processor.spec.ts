@@ -13,6 +13,7 @@ import {
   TrafficLimitStrategy,
 } from '@prisma/client';
 
+import { PAID_TRAFFIC_RESET_CAUSE } from '../src/modules/payments/utils/add-on-not-applied.util';
 import { PROFILE_SYNC_MAX_ATTEMPTS } from '../src/modules/profile-sync/profile-sync.constants';
 import {
   clampPanelUsername,
@@ -3870,6 +3871,9 @@ describe('ProfileSyncProcessor — a failure before the claim is still a failure
     readonly attempts?: number;
     readonly jobAgeMs?: number;
     readonly anchorMissing?: boolean;
+    /** The job's action and cause, as the recovery re-read answers them. */
+    readonly action?: SyncAction;
+    readonly cause?: string | null;
   }) {
     const writes: Array<{ where: unknown; data: Record<string, unknown> }> = [];
     const errorEvents: unknown[] = [];
@@ -3884,18 +3888,22 @@ describe('ProfileSyncProcessor — a failure before the claim is still a failure
             // second is the recovery re-read, which deliberately projects only
             // columns that predate every migration in flight.
             if (lookups === 1) throw options.error;
+            // `cause` too (R5-06): it dates from migration 20260712130000,
+            // long before any migration in flight.
             assert.deepEqual((input as { select: unknown }).select, {
               createdAt: true,
               attempts: true,
               action: true,
               subscriptionId: true,
+              cause: true,
             });
             if (options.anchorMissing === true) return null;
             return {
               createdAt: new Date(Date.now() - (options.jobAgeMs ?? 0)),
               attempts: options.attempts ?? 0,
-              action: SyncAction.CREATE,
+              action: options.action ?? SyncAction.CREATE,
               subscriptionId: 'subscription-1',
+              cause: options.cause ?? null,
             };
           },
           updateMany: async (input: unknown) => {
@@ -3968,6 +3976,38 @@ describe('ProfileSyncProcessor — a failure before the claim is still a failure
     await assert.rejects(attempt.run());
 
     assert.deepEqual(attempt.writes[0]!.data.recoveryData, { classification: 'TERMINAL' });
+    assert.equal(attempt.errorEvents.length, 1);
+  });
+
+  // A paid «Обнулить трафик» that fails for good is told by the payment's own
+  // card, «Платёж получен, но не применён» (`settlePaidTrafficResets`): the
+  // generic one here would be the second card about one reset (R5-06).
+  it('sends no card of its own for a paid reset that fails for good before the claim: the payment tells it', async () => {
+    const attempt = runPreClaimFailure({
+      error: schemaDrift(),
+      attempts: PROFILE_SYNC_MAX_ATTEMPTS - 1,
+      jobAgeMs: SCHEMA_DRIFT_GRACE_MS + 60_000,
+      action: SyncAction.TRAFFIC_RESET,
+      cause: PAID_TRAFFIC_RESET_CAUSE,
+    });
+
+    await assert.rejects(attempt.run());
+
+    assert.deepEqual(attempt.writes[0]!.data.recoveryData, { classification: 'TERMINAL' }, 'fixture: final and terminal');
+    assert.deepEqual(attempt.errorEvents, []);
+  });
+
+  it('still pages the operator for any other TRAFFIC_RESET that fails for good before the claim', async () => {
+    const attempt = runPreClaimFailure({
+      error: schemaDrift(),
+      attempts: PROFILE_SYNC_MAX_ATTEMPTS - 1,
+      jobAgeMs: SCHEMA_DRIFT_GRACE_MS + 60_000,
+      action: SyncAction.TRAFFIC_RESET,
+      cause: null,
+    });
+
+    await assert.rejects(attempt.run());
+
     assert.equal(attempt.errorEvents.length, 1);
   });
 

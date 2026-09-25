@@ -13,7 +13,11 @@ import { createHash } from 'node:crypto';
 
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { SystemEventsService, EVENT_TYPES } from '../../common/services/system-events.service';
-import { PAID_TRAFFIC_RESET_CAUSE } from '../payments/utils/add-on-not-applied.util';
+import {
+  PAID_TRAFFIC_RESET_CAUSE,
+  paidResetSettledPayloadSql,
+  paymentStillPaidSql,
+} from '../payments/utils/add-on-not-applied.util';
 import type { PanelCommandOutcome } from '../remnawave/services/panel-command.executor';
 import { PANEL_USER_NOT_FOUND_ERROR_CODES } from '../remnawave/services/panel-routes';
 import {
@@ -263,7 +267,9 @@ export class ProfileSyncProcessor extends WorkerHost {
     try {
       const anchor = await this.prismaService.profileSyncJob.findUnique({
         where: { id: syncJobId },
-        select: { createdAt: true, attempts: true, action: true, subscriptionId: true },
+        // `cause` dates from migration 20260712130000, shipped long before any
+        // migration in flight, so the projection's rule holds.
+        select: { createdAt: true, attempts: true, action: true, subscriptionId: true, cause: true },
       });
       if (anchor === null) return;
       const classification = classifyRecovery(error, anchor.createdAt);
@@ -285,8 +291,11 @@ export class ProfileSyncProcessor extends WorkerHost {
       // Same rule as `reportFailure`: only a genuine, final, non-transient
       // failure is worth waking somebody for. A TRANSIENT row is picked up by
       // the FAILED pass of `sweepAndRecover`, which re-enqueues with `force` and
-      // therefore gets past BullMQ's retained-job deduplication.
-      if (attempt >= PROFILE_SYNC_MAX_ATTEMPTS && classification === 'TERMINAL') {
+      // therefore gets past BullMQ's retained-job deduplication. And the same
+      // exception: a paid reset is told by the payment's own card (R5-06).
+      const toldByPayment =
+        anchor.action === SyncAction.TRAFFIC_RESET && anchor.cause === PAID_TRAFFIC_RESET_CAUSE;
+      if (attempt >= PROFILE_SYNC_MAX_ATTEMPTS && classification === 'TERMINAL' && !toldByPayment) {
         const copy = syncFailedForGoodCopy(anchor.action, attempt, errorMessage);
         const userId = await this.ownerOfForCard(anchor.subscriptionId);
         this.events.error(
@@ -2553,6 +2562,31 @@ export class ProfileSyncProcessor extends WorkerHost {
     );
   }
 
+  /**
+   * Closes a paid reset's job when its payment is no longer paid — refunded in
+   * full — in one statement that asks both: `true` when it closed it. Closed
+   * as the settle closes one (`settledAs: 'CLOSED'`, told nothing), and
+   * superseded, so nothing takes it again.
+   */
+  private async closePaidResetOfRefundedPayment(syncJobId: string): Promise<boolean> {
+    const now = new Date();
+    const closed = await this.prismaService.$queryRaw<Array<{ readonly id: string }>>(Prisma.sql`
+      UPDATE "profile_sync_jobs" AS j
+         SET "superseded_at" = ${now},
+             "last_error" = 'the payment was refunded before the reset',
+             "payload" = ${paidResetSettledPayloadSql(Prisma.sql`j."payload"`, 'CLOSED', now)},
+             "updated_at" = ${now}
+        FROM "transactions" AS t
+       WHERE j."id" = ${syncJobId}
+         AND j."cause" = ${PAID_TRAFFIC_RESET_CAUSE}
+         AND NOT (j."payload" ? 'settledAt')
+         AND t."id" = j."payload"->>'transactionId'
+         AND NOT ${paymentStillPaidSql(Prisma.sql`t`)}
+      RETURNING j."id"
+    `);
+    return closed.length > 0;
+  }
+
   private async handleTrafficReset(syncJob: SyncJobRecord): Promise<void> {
     const subscription = syncJob.subscription;
     const identity = panelIdentityOf(subscription);
@@ -2568,6 +2602,15 @@ export class ProfileSyncProcessor extends WorkerHost {
         address,
         `Resetting traffic for Remnawave profile '${subscription.remnawaveId}'`,
       );
+    }
+    // A PAID reset whose payment went back in full is not performed: right
+    // before the call, the job is closed instead when its payment is no longer
+    // paid (R5-01). A refund that came before this worker's claim closed the
+    // job itself, and the claim never took it; one that came after is caught
+    // here. Closed means superseded, so the completion below writes nothing.
+    if (syncJob.cause === PAID_TRAFFIC_RESET_CAUSE && (await this.closePaidResetOfRefundedPayment(syncJob.id))) {
+      this.logger.log(`Paid traffic reset job ${syncJob.id}: its payment was refunded — closed, not performed`);
+      return;
     }
     const reset = await this.panelUsers.resetTraffic(address.userId);
     if (reset.kind !== 'ok') {

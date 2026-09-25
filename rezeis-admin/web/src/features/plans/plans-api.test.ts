@@ -1,6 +1,21 @@
-import { describe, expect, it } from 'vitest'
+import type { AxiosResponse } from 'axios'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { plansListOptions, plansQueryKeys, readPlanReferences, type Plan } from './plans-api'
+import { api } from '@/lib/api'
+
+import {
+  archivePlan,
+  deletePlan,
+  fetchPlans,
+  PLAN_SAVE_TIMEOUT_MS,
+  plansListOptions,
+  plansQueryKeys,
+  readPlanReferences,
+  reorderPlans,
+  unarchivePlan,
+  updatePlan,
+  type Plan,
+} from './plans-api'
 
 const ACTIVE_PLAN: Plan = {
   id: '1',
@@ -134,5 +149,52 @@ describe('plansListOptions select filter', () => {
   it('keeps only inactive plans when active=false', () => {
     const select = plansListOptions({ active: false }).select
     expect(select!(SAMPLE)).toEqual([INACTIVE_PLAN, ARCHIVED_PLAN])
+  })
+})
+
+// The four requests that run the plan save wait the 120 s the server gives
+// them, not the client-wide 30 (review R5-03): a save the page gave up on at
+// 30 s went on and committed, and the page said it had failed.
+describe('the plan save waits as long as the server does', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  const ok = (data: unknown): AxiosResponse => ({ data, status: 200, statusText: 'OK', headers: {}, config: {} as never })
+  const timeoutOf = (config: unknown): unknown => (config as { timeout?: unknown } | undefined)?.timeout
+
+  it('gives «Обновить тариф», the active switch, archive and unarchive 120 seconds', async () => {
+    expect(PLAN_SAVE_TIMEOUT_MS).toBe(120_000)
+    const patch = vi.spyOn(api, 'patch').mockResolvedValue(ok({ ...ACTIVE_PLAN, squadPropagation: null }))
+    const post = vi.spyOn(api, 'post').mockResolvedValue(ok({}))
+
+    await updatePlan('1', { name: 'Active', trafficLimit: 50 })
+    await updatePlan('1', { isActive: false })
+    await archivePlan('1')
+    await unarchivePlan('1')
+
+    expect(patch.mock.calls.map(([url, body, config]) => [url, body, timeoutOf(config)])).toEqual([
+      ['/admin/plans/1', { name: 'Active', trafficLimit: 50 }, 120_000],
+      ['/admin/plans/1', { isActive: false }, 120_000],
+    ])
+    expect(post.mock.calls.map(([url, body, config]) => [url, body, timeoutOf(config)])).toEqual([
+      ['/admin/plans/1/archive', undefined, 120_000],
+      ['/admin/plans/1/unarchive', undefined, 120_000],
+    ])
+  })
+
+  it('leaves every other plans request at the client-wide timeout', async () => {
+    const patch = vi.spyOn(api, 'patch').mockResolvedValue(ok([ACTIVE_PLAN]))
+    const remove = vi.spyOn(api, 'delete').mockResolvedValue(ok({ deleted: true, removed: true }))
+    const get = vi.spyOn(api, 'get').mockResolvedValue(ok([ACTIVE_PLAN]))
+
+    await reorderPlans(['1'])
+    await deletePlan('1')
+    await fetchPlans()
+
+    // The reorder is a PATCH under /admin/plans too, and the server keeps it at 30 s.
+    expect(patch.mock.calls.map(([url, , config]) => [url, timeoutOf(config)])).toEqual([['/admin/plans/reorder', undefined]])
+    expect(remove.mock.calls.map(([url, config]) => [url, timeoutOf(config)])).toEqual([['/admin/plans/1', undefined]])
+    expect(get.mock.calls.map(([url, config]) => [url, timeoutOf(config)])).toEqual([['/admin/plans', undefined]])
   })
 })

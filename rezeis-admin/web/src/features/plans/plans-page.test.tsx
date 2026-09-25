@@ -28,7 +28,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '@/lib/api'
 import { renderWithProviders } from '@/test/test-utils'
 import PlansPage from './plans-page'
-import type { Plan } from './plans-api'
+import { PLAN_SAVE_TIMEOUT_MS, type Plan } from './plans-api'
 
 vi.mock('@/lib/api', () => ({
   api: {
@@ -111,7 +111,7 @@ describe('PlansPage plan-write refusals', () => {
       expect(toast.error).toHaveBeenCalledWith('Plans cannot be archived during a billing run')
     })
     // Which mutation's `onError` this went through, stated rather than assumed.
-    expect(api.post).toHaveBeenCalledWith('/admin/plans/plan-1/archive')
+    expect(api.post).toHaveBeenCalledWith('/admin/plans/plan-1/archive', undefined, { timeout: PLAN_SAVE_TIMEOUT_MS })
     expect(toast.error).not.toHaveBeenCalledWith('Failed to archive plan')
   })
 
@@ -129,10 +129,87 @@ describe('PlansPage plan-write refusals', () => {
     await waitFor(() => {
       expect(toast.error).toHaveBeenCalledWith('Failed to archive plan')
     })
-    expect(api.post).toHaveBeenCalledWith('/admin/plans/plan-1/archive')
+    expect(api.post).toHaveBeenCalledWith('/admin/plans/plan-1/archive', undefined, { timeout: PLAN_SAVE_TIMEOUT_MS })
     expect(toast.error).not.toHaveBeenCalledWith('Network Error')
   })
 })
+
+// The four requests that run the plan save wait the server's 120 s, not the
+// client-wide 30 (review R5-03): at 30 s the page said the save had failed
+// while it went on and committed. Pinned where each is sent — the editor, the
+// card's switch, its archive and unarchive buttons.
+describe('PlansPage: the plan save waits as long as the server does', () => {
+  const WAIT = { timeout: PLAN_SAVE_TIMEOUT_MS }
+
+  function listing(plan: Plan): void {
+    vi.mocked(api.get).mockImplementation((async (path: string) => {
+      if (path === '/admin/plans') return { data: [plan] }
+      return { data: [] }
+    }) as never)
+  }
+
+  beforeEach(() => {
+    vi.mocked(api.patch).mockResolvedValue({ data: { ...savablePlan(), squadPropagation: null } } as never)
+    vi.mocked(api.post).mockResolvedValue({ data: {} } as never)
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.clearAllMocks()
+  })
+
+  it('«Обновить тариф» in the editor', async () => {
+    const user = userEvent.setup()
+    listing(savablePlan())
+    renderWithProviders(<PlansPage />)
+
+    await user.click(await screen.findByRole('button', { name: 'Edit plan' }))
+    const dialog = await screen.findByRole('dialog')
+    await user.click(within(dialog).getByRole('button', { name: 'Update plan' }))
+
+    await waitFor(() => {
+      expect(api.patch).toHaveBeenCalledWith('/admin/plans/plan-1', expect.objectContaining({ name: 'Premium' }), WAIT)
+    })
+  })
+
+  it('the card’s active switch', async () => {
+    const user = userEvent.setup()
+    listing(listedPlan())
+    renderWithProviders(<PlansPage />)
+
+    await user.click(await screen.findByRole('switch', { name: 'Toggle plan active state' }))
+
+    await waitFor(() => {
+      expect(api.patch).toHaveBeenCalledWith('/admin/plans/plan-1', { isActive: false }, WAIT)
+    })
+  })
+
+  it('archive, and unarchive', async () => {
+    const user = userEvent.setup()
+    listing(listedPlan())
+    renderWithProviders(<PlansPage />)
+    await user.click(await screen.findByRole('button', { name: 'Archive plan' }))
+    await waitFor(() => {
+      expect(api.post).toHaveBeenCalledWith('/admin/plans/plan-1/archive', undefined, WAIT)
+    })
+    cleanup()
+
+    listing({ ...listedPlan(), isActive: false, isArchived: true })
+    renderWithProviders(<PlansPage />)
+    await user.click(await screen.findByRole('button', { name: 'Unarchive plan' }))
+    await waitFor(() => {
+      expect(api.post).toHaveBeenCalledWith('/admin/plans/plan-1/unarchive', undefined, WAIT)
+    })
+  })
+})
+
+/** A plan the editor can save as it is: one duration with a price. */
+function savablePlan(): Plan {
+  return {
+    ...listedPlan(),
+    durations: [{ id: 'duration-1', days: 30, isActive: true, prices: [{ id: 'price-1', currency: 'RUB', price: '299' }] }],
+  }
+}
 
 function listedPlan(): Plan {
   return {

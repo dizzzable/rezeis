@@ -19,6 +19,8 @@
  * 'ADDON_PURCHASE_LEDGER'` with one of {@link ADD_ON_LEDGER_NO_OP_NOTES}.
  */
 
+import { Prisma } from '@prisma/client';
+
 /** The `gatewayData` key: `{ reason, at }`. */
 export const ADD_ON_NOT_APPLIED_KEY = 'addOnNotApplied';
 
@@ -51,8 +53,73 @@ export type AddOnAddedNothingReason =
  * announced once, and the operator's card and the customer's notice go once.
  * The profile-sync worker leaves such a job's final failure to that card
  * (`ProfileSyncProcessor.reportFailure`).
+ *
+ * A FULL refund that comes first closes the job instead (R5-01): nothing
+ * performs it after that, and nothing about it is told — the refund's own card
+ * says what became of the reset (`AddOnRefundService`).
  */
 export const PAID_TRAFFIC_RESET_CAUSE = 'PAID_TRAFFIC_RESET';
+
+/**
+ * How a paid reset's job ended (`payload.settledAs`):
+ *  - `APPLIED`: Remnawave zeroed the counter;
+ *  - `NOT_APPLIED`: it did not, and cannot — the payment is stamped
+ *    `RESET_NOT_PERFORMED`, and the operator and the customer are told;
+ *  - `CLOSED`: it did not, and will not, because the payment was refunded
+ *    first. Nothing is told: the refund's card says it.
+ */
+export type PaidResetOutcome = 'APPLIED' | 'NOT_APPLIED' | 'CLOSED';
+
+/**
+ * What the settle told of it (`payload.announcedAs`): the sale, the operator's
+ * card with the customer's notice, or nothing — the payment was refunded, or
+ * the job was closed.
+ */
+export type PaidResetAnnouncement = 'SALE' | 'NOT_APPLIED' | 'NONE';
+
+/** `column` as a JSON object, whatever it holds. */
+export function jsonObjectSql(column: Prisma.Sql): Prisma.Sql {
+  return Prisma.sql`(CASE WHEN jsonb_typeof(${column}) = 'object' THEN ${column} ELSE '{}'::jsonb END)`;
+}
+
+/**
+ * A paid reset job's payload, settled: no longer held, when and how it ended,
+ * why (`settledDetail`, the words of the operator's card), and the claim on
+ * telling it (`announceClaimAt`). The telling is recorded apart
+ * (`announcedAt`) once it is done, so a telling that failed is done again by
+ * the next settle. A CLOSED job tells nothing, and is told as it closes.
+ */
+export function paidResetSettledPayloadSql(
+  column: Prisma.Sql,
+  outcome: PaidResetOutcome,
+  now: Date,
+  detail: string | null = null,
+): Prisma.Sql {
+  const at = now.toISOString();
+  const told =
+    outcome === 'CLOSED'
+      ? Prisma.sql` || jsonb_build_object('announcedAt', ${at}::text, 'announcedAs', 'NONE')`
+      : Prisma.empty;
+  const why = detail === null ? Prisma.empty : Prisma.sql` || jsonb_build_object('settledDetail', ${detail}::text)`;
+  return Prisma.sql`(((${jsonObjectSql(column)} - 'held')
+    || jsonb_build_object('settledAt', ${at}::text, 'settledAs', ${outcome}::text, 'announceClaimAt', ${at}::text))${told}${why})`;
+}
+
+/**
+ * Whether the payment — the `transactions` row under `alias` — is still a paid
+ * sale: COMPLETED. A full refund makes it CANCELED, in the one statement that
+ * stamps its `refundReversedAt` (`PaymentReconciliationService.
+ * reverseFulfilledPayment`); a partial one leaves it COMPLETED — paid, as it
+ * leaves an add-on or a lifetime paid for elsewhere.
+ */
+export function paymentStillPaidSql(alias: Prisma.Sql): Prisma.Sql {
+  return Prisma.sql`(${alias}."status" = 'COMPLETED')`;
+}
+
+/** {@link paymentStillPaidSql}, for a payment already read. */
+export function isPaymentStillPaid(payment: { readonly status: string }): boolean {
+  return payment.status === 'COMPLETED';
+}
 
 /** `payload.source` of the push a ledger capture leaves. */
 export const ADD_ON_LEDGER_SOURCE = 'ADDON_PURCHASE_LEDGER';

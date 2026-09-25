@@ -34,13 +34,15 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { FadeIn } from '@/lib/motion'
 import { PlanForm, type PlanFormData } from './plan-form'
 import {
+  archivePlan,
   deletePlan,
   plansQueryKeys,
   reorderPlans,
+  unarchivePlan,
+  updatePlan,
   usePlanSquadPropagation,
   usePlans,
   type Plan,
-  type PlanUpdateResult,
 } from './plans-api'
 import { isPlanAlreadyGone, planDeleteOutcomeOfError } from './plan-delete'
 import { PlanDeleteDialog } from './plan-delete-dialog'
@@ -109,14 +111,16 @@ export default function PlansPage() {
     onError: (err) => toast.error(refusalMessage(err, t('plansPage.createFailed'))),
   })
 
+  // The four requests that run the plan save — this one, the switch, archive
+  // and unarchive — wait the server's 120 s, not the client-wide 30
+  // (`PLAN_SAVE_TIMEOUT_MS`).
   const updateMutation = useMutation({
-    mutationFn: ({ id, data }: { id: string; data: PlanFormData }) =>
-      api.patch<PlanUpdateResult>(`/admin/plans/${id}`, data),
-    onSuccess: (response, variables) => {
+    mutationFn: ({ id, data }: { id: string; data: PlanFormData }) => updatePlan(id, data),
+    onSuccess: (saved, variables) => {
       queryClient.invalidateQueries({ queryKey: plansQueryKeys.all })
       setEditingPlan(null)
       toast.success(t('plansPage.updated'))
-      const propagation = response.data?.squadPropagation
+      const propagation = saved?.squadPropagation
       if (propagation && propagation.syncJobsCreated > 0) {
         toast.info(
           t('plansPage.squadPropagation.queued', { count: propagation.syncJobsCreated }),
@@ -142,7 +146,7 @@ export default function PlansPage() {
   })
 
   const archiveMutation = useMutation({
-    mutationFn: (id: string) => api.post(`/admin/plans/${id}/archive`),
+    mutationFn: (id: string) => archivePlan(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: plansQueryKeys.all })
       toast.success(t('plansPage.archived'))
@@ -151,7 +155,7 @@ export default function PlansPage() {
   })
 
   const unarchiveMutation = useMutation({
-    mutationFn: (id: string) => api.post(`/admin/plans/${id}/unarchive`),
+    mutationFn: (id: string) => unarchivePlan(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: plansQueryKeys.all })
       toast.success(t('plansPage.unarchived'))
@@ -182,8 +186,7 @@ export default function PlansPage() {
   })
 
   const toggleActiveMutation = useMutation({
-    mutationFn: ({ id, isActive }: { id: string; isActive: boolean }) =>
-      api.patch(`/admin/plans/${id}`, { isActive }),
+    mutationFn: ({ id, isActive }: { id: string; isActive: boolean }) => updatePlan(id, { isActive }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: plansQueryKeys.all }),
     onError: (err) => toast.error(refusalMessage(err, t('plansPage.toggleActiveFailed'))),
   })
