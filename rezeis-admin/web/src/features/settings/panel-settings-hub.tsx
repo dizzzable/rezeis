@@ -69,7 +69,9 @@ const SecurityTab = lazy(
   withFeatureBundle('twoFactor', () => import('@/features/two-factor/two-factor-page')),
 )
 const AuthProvidersTab = lazy(() => import('./auth-providers-tab'))
-const BrandingTab = lazy(() => import('./panel-branding-tab'))
+// With the `appearance` bundle: the hint under the panel's own app icon lives
+// there, not in the eager dictionary.
+const BrandingTab = lazy(withFeatureBundle('appearance', () => import('./panel-branding-tab')))
 const IconsTab = lazy(() => import('./panel-icons-tab'))
 const BackupTab = lazy(() => import('@/features/backup/backup-page'))
 const ConfigPortabilityTab = lazy(() => import('@/features/config-portability/config-portability-page'))

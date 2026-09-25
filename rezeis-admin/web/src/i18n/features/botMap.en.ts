@@ -191,6 +191,8 @@ export const en = {
       save: 'Save',
       saved: 'Text saved',
       saveFailed: 'Failed to save text',
+      tooLong:
+        'Will not be saved: Telegram shows this text as a pop-up and takes at most {{max}} characters; this one has {{count}}. Shorten it.',
       captions: {
         shareButton: 'The «Share» button in the bot',
         sharePrompt: '«Share» from the bot — the text under the bot link (Telegram puts the link there itself)',

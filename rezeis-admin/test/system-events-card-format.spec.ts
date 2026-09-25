@@ -1842,3 +1842,52 @@ describe('the «Причина» line on the cards that do render metadata', () 
     assert.ok(b.getLastText()!.includes('📌 Причина: nobody_mapped_this'), b.getLastText()!);
   });
 });
+
+describe('the cabinet’s settings-delivery warnings on a «reiwa.error» card', () => {
+  // reiwa reports them as warnings of `reiwa.error`, marked by `metadata.event`
+  // (`infrastructure/public-config/rejection-notifier.ts`). The per-field one
+  // is the operator's own save taken without some fields — «Ошибка в reiwa»
+  // over it read as the cabinet failing.
+  const FIELDS = [{ key: 'branding.primary', reason: 'not-hex-color', found: '"red"' }];
+
+  it('titles the per-field event «Кабинет не принял часть оформления»', async () => {
+    const { service, getLastText } = buildService();
+    service.warn('reiwa.error', 'SYSTEM', '[reiwa:api] Public config applied without 1 field', {
+      source: 'upstream',
+      event: 'reiwa.config.degraded_defaults_used',
+      key: 'branding.primary',
+      reason: 'not-hex-color',
+      fields: FIELDS,
+    });
+    await flush();
+    assert.equal(headerOf(getLastText()!), '🎨 <b>Событие: Кабинет не принял часть оформления</b>');
+  });
+
+  it('titles a copy not saved for its size «Кабинет не сохранил копию оформления», and says the size', async () => {
+    const { service, getLastText } = buildService();
+    service.warn('reiwa.error', 'SYSTEM', '[reiwa:api] Public config copy not saved', {
+      event: 'reiwa.config.copy_not_saved',
+      group: 'public-config',
+      bytes: 5_557_452,
+      maxBytes: 4_194_304,
+      why: 'Оформление весит 5.3 MB — больше предела 4.0 MB для копии в Redis кабинета.',
+    });
+    await flush();
+    const card = getLastText()!;
+    assert.equal(headerOf(card), '💾 <b>Событие: Кабинет не сохранил копию оформления</b>');
+    assert.ok(card.includes('5.3 MB'), card);
+  });
+
+  it('keeps «Ошибка в reiwa» for everything else of that type — the whole payload refused, a crash', async () => {
+    // ANTI-VACUITY: the variants take only what they are for.
+    for (const metadata of [
+      { event: 'reiwa.config.degraded_defaults_used', key: 'branding', reason: 'shape' },
+      { source: 'bot', errorName: 'TypeError' },
+    ]) {
+      const { service, getLastText } = buildService();
+      service.warn('reiwa.error', 'SYSTEM', '[reiwa:api] something', metadata);
+      await flush();
+      assert.equal(headerOf(getLastText()!), '🚨 <b>Событие: Ошибка в reiwa</b>');
+    }
+  });
+});

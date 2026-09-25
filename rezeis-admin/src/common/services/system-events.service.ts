@@ -3897,7 +3897,33 @@ export const EVENT_PRESENTATION: Record<string, EventPresentation> = {
   // registered in two lists out of three.
   'import.failed': { emoji: '🚨', title: 'Импорт не удался' },
   'client.error': { emoji: '🖥', title: 'Ошибка в админ-панели' },
-  'reiwa.error': { emoji: '🚨', title: 'Ошибка в reiwa' },
+  'reiwa.error': {
+    emoji: '🚨',
+    title: 'Ошибка в reiwa',
+    // The cabinet reports two settings-delivery situations as warnings of this
+    // type, each marked by `metadata.event` (reiwa
+    // `infrastructure/public-config/rejection-notifier.ts`). Neither is an error
+    // of reiwa's: the operator's own save is what the card is about.
+    variants: [
+      {
+        // Per-field fallback: the saved appearance is live except these fields,
+        // which keep their previous value (`fields` lists them; the whole-payload
+        // refusal of the same code carries no `fields` and keeps the title).
+        emoji: '🎨',
+        title: 'Кабинет не принял часть оформления',
+        when: (metadata) =>
+          metadata['event'] === 'reiwa.config.degraded_defaults_used' && Array.isArray(metadata['fields']),
+      },
+      {
+        // The saved appearance is over the cap of the copy the cabinet keeps in
+        // its Redis: a restart during a panel outage serves an older one. The
+        // size is in `why`.
+        emoji: '💾',
+        title: 'Кабинет не сохранил копию оформления',
+        when: (metadata) => metadata['event'] === 'reiwa.config.copy_not_saved',
+      },
+    ],
+  },
   // No message: its sentence is `Reiwa relay did not deliver <route>
   // (<status>)`, and the route and the status are both in the details block.
   'reiwa.relay_undelivered': {

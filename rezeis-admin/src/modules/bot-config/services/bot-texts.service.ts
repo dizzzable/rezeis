@@ -39,6 +39,34 @@ const TEXT_KEY_REGEX = /^[a-z0-9._-]+$/i;
  */
 const EN_KEY_SUFFIX = '@en';
 
+/**
+ * Texts Telegram takes only up to a length of its own, below the DTO's 8000.
+ * «Меню обновилось» (`menu.updated`) is the toast reiwa answers an old button
+ * with (`answerCallbackQuery`: 0-200 characters). A longer one used to make the
+ * answer fail and the old button got no menu; reiwa now cuts it, and the panel
+ * refuses to save it (review R2a-08). Counted as Telegram counts: code points.
+ * The SPA says the same under the field (`web/.../bot-text-limits.ts`).
+ */
+const TELEGRAM_MAX_CHARS_BY_KEY: ReadonlyMap<string, number> = new Map([['menu.updated', 200]]);
+
+function codePointCount(text: string): number {
+  let count = 0;
+  for (const _codePoint of text) count += 1;
+  return count;
+}
+
+/** Refuse a value of `key` longer than Telegram takes it; the operator reads the reason. */
+function assertTelegramLength(key: string, value: string | null | undefined): void {
+  const max = TELEGRAM_MAX_CHARS_BY_KEY.get(key.trim().toLowerCase());
+  if (max === undefined || typeof value !== 'string') return;
+  const count = codePointCount(value);
+  if (count > max) {
+    throw new BadRequestException(
+      `Текст «${key}» Telegram показывает всплывающим сообщением и берёт не больше ${max} символов, а здесь ${count}. Сократите текст.`,
+    );
+  }
+}
+
 /** Trim an EN value; empty string → `null` (means "no EN override"). */
 function normalizeEnValue(value: string | null | undefined): string | null {
   if (typeof value !== 'string') return null;
@@ -76,6 +104,8 @@ export class BotTextsService {
     if (!TEXT_KEY_REGEX.test(input.key)) {
       throw new BadRequestException('key must be alphanumeric (._- allowed)');
     }
+    assertTelegramLength(input.key, input.value);
+    assertTelegramLength(input.key, input.valueEn);
     const existing = await this.prismaService.botText.findUnique({ where: { key: input.key } });
     if (existing !== null) {
       throw new BadRequestException(`Text with key "${input.key}" already exists`);
@@ -107,6 +137,9 @@ export class BotTextsService {
       throw new BadRequestException('key must be alphanumeric (._- allowed)');
     }
     const baseKey = input.key ?? existing.key;
+    // A renamed row brings its value to a key with a limit of its own.
+    assertTelegramLength(baseKey, input.value ?? existing.value);
+    assertTelegramLength(baseKey, input.valueEn);
     const data: Prisma.BotTextUpdateInput = {};
     if (input.key !== undefined) data.key = input.key;
     if (input.value !== undefined) data.value = input.value;
@@ -148,6 +181,7 @@ export class BotTextsService {
     if (!TEXT_KEY_REGEX.test(input.key)) {
       throw new BadRequestException('key must be alphanumeric (._- allowed)');
     }
+    assertTelegramLength(input.key, input.value);
     return this.prismaService.botText.upsert({
       where: { key: input.key },
       create: {

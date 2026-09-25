@@ -191,3 +191,53 @@ describe('BotTextsService — English siblings', () => {
     await assert.rejects(() => service.create({ key: 'a.b@en', value: 'x' }));
   });
 })
+
+/**
+ * «Меню обновилось» (`menu.updated`) is a toast: Telegram's
+ * `answerCallbackQuery` takes 0-200 characters, counted as code points. A
+ * longer one made the answer fail in reiwa and the old button got no menu
+ * (review R2a-08); the panel refuses to save it, and says why.
+ */
+describe('BotTextsService — menu.updated fits a Telegram toast', () => {
+  const TOO_LONG = 'М'.repeat(201);
+  const refusal = (err: unknown): boolean =>
+    err instanceof Error && /не больше 200 символов, а здесь 201/.test(err.message);
+
+  it('refuses a Russian or an English value over 200 characters on create, and writes nothing', async () => {
+    const { prisma, rows } = makePrisma();
+    const service = new BotTextsService(prisma);
+
+    await assert.rejects(() => service.create({ key: 'menu.updated', value: TOO_LONG }), refusal);
+    await assert.rejects(
+      () => service.create({ key: 'menu.updated', value: 'Меню обновилось', valueEn: TOO_LONG }),
+      refusal,
+    );
+    assert.equal(rows.length, 0);
+  });
+
+  it('refuses it on update and on upsert, and keeps what was there', async () => {
+    const { prisma, rows } = makePrisma();
+    const service = new BotTextsService(prisma);
+    const row = await service.create({ key: 'menu.updated', value: 'Меню обновилось' });
+
+    await assert.rejects(() => service.update({ id: row.id, value: TOO_LONG }), refusal);
+    await assert.rejects(() => service.update({ id: row.id, valueEn: TOO_LONG }), refusal);
+    await assert.rejects(() => service.upsert({ key: 'menu.updated', value: TOO_LONG }), refusal);
+    assert.deepEqual(
+      rows.map((r) => [r.key, r.value]),
+      [['menu.updated', 'Меню обновилось']],
+    );
+  });
+
+  it('counts as Telegram does: 200 emoji of two UTF-16 units each fit; any other key keeps the 8000', async () => {
+    const { prisma, rows } = makePrisma();
+    const service = new BotTextsService(prisma);
+    const twoHundred = '🔥'.repeat(200); // 400 UTF-16 units, 200 code points
+
+    await service.create({ key: 'menu.updated', value: twoHundred });
+    await service.create({ key: 'menu.choose_action', value: TOO_LONG });
+
+    assert.equal(rows.find((r) => r.key === 'menu.updated')?.value, twoHundred);
+    assert.equal(rows.find((r) => r.key === 'menu.choose_action')?.value, TOO_LONG);
+  });
+});

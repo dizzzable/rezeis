@@ -2,7 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+
 import { api } from '@/lib/api'
+import { i18n, loadFeatureBundle } from '@/i18n/i18n'
 import { renderWithProviders } from '@/test/test-utils'
 import PanelBrandingTab from './panel-branding-tab'
 
@@ -298,5 +302,38 @@ describe('PanelBrandingTab — Remnawave profile naming', () => {
     await waitFor(() =>
       expect(screen.queryByRole('alert', { name: 'Nothing was saved' })).not.toBeInTheDocument(),
     )
+  })
+})
+
+/**
+ * The same hint «WEB Reiwa» gives under the cabinet's app icon, under the
+ * panel's own (CD2a §9.3, owner-approved): an installed app does not change
+ * its icon at once — iPhone keeps it until the app is added to the Home Screen
+ * again, Android re-checks at most once a day. The words are in the lazy
+ * `appearance` bundle, which the settings hub loads with this tab; the eager
+ * dictionary is budgeted.
+ */
+describe('PanelBrandingTab — the panel’s own app icon', () => {
+  afterEach(() => {
+    cleanup()
+    vi.restoreAllMocks()
+  })
+
+  it('says under the icon why an installed app keeps the old one — in words, not a key', async () => {
+    await loadFeatureBundle('appearance')
+    serve(VALID)
+    renderWithProviders(<PanelBrandingTab />)
+
+    const hint = await screen.findByTestId('admin-pwa-icon-installed-hint')
+    const words = i18n.t('panelBrandingTab.pwaIcon.installedHint')
+    expect(words).not.toBe('panelBrandingTab.pwaIcon.installedHint')
+    expect(words).toMatch(/iPhone/)
+    expect(words).toMatch(/Android/)
+    expect(hint).toHaveTextContent(words)
+  })
+
+  it('is loaded with the tab: the settings hub opens it with the `appearance` bundle', () => {
+    const hub = readFileSync(resolve(process.cwd(), 'src/features/settings/panel-settings-hub.tsx'), 'utf8')
+    expect(hub).toMatch(/const BrandingTab = lazy\(withFeatureBundle\('appearance', \(\) => import\('\.\/panel-branding-tab'\)\)\)/)
   })
 })

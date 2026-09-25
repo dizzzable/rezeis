@@ -415,6 +415,12 @@ function PanelBrandingForm({ branding }: PanelBrandingFormProps) {
                     ) : null}
                   </div>
                   <p className="text-[11px] text-muted-foreground">{t('panelBrandingTab.pwaIcon.note')}</p>
+                  {/* What an operator who changed the icon asks next — why the
+                      installed app still shows the old one. The words live in
+                      the lazy `appearance` bundle the hub loads for this tab. */}
+                  <p className="text-[11px] text-muted-foreground" data-testid="admin-pwa-icon-installed-hint">
+                    {t('panelBrandingTab.pwaIcon.installedHint')}
+                  </p>
                 </div>
               </div>
             </div>

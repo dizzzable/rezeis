@@ -25,6 +25,7 @@ import { EmojiPicker } from '@/features/broadcast/emoji-picker'
 import { insertAtCaret } from '@/features/bot-map/utils/insert-at-caret'
 import { EmojiFieldOverlay } from '@/features/custom-emoji/emoji-field-overlay'
 import { botTextKeyMode } from '@/features/bot-config/bot-text-key-mode'
+import { botTextMaxChars, botTextOverLimit, telegramCharCount } from '@/features/bot-config/bot-text-limits'
 import { getErrorMessage } from '@/lib/http-errors'
 import {
   BOT_CONFIG_KEYS,
@@ -94,6 +95,36 @@ const KEY_CAPTIONS: Readonly<Record<string, string>> = {
 
 interface SystemScreenTextsProps {
   readonly screenName: string
+}
+
+/**
+ * Under a field whose key Telegram takes only up to a length of its own: the
+ * count as Telegram counts it and, past the limit, why it will not be saved.
+ * Nothing for any other key.
+ */
+export function TextLengthNote({
+  maxChars,
+  value,
+  over,
+}: {
+  readonly maxChars: number | undefined
+  readonly value: string
+  readonly over: { readonly max: number; readonly count: number } | null
+}) {
+  const { t } = useTranslation()
+  if (maxChars === undefined) return null
+  return (
+    <div className="space-y-0.5">
+      <p className="text-[10px] text-muted-foreground" data-testid="text-length-count">
+        {telegramCharCount(value)}/{maxChars}
+      </p>
+      {over !== null && (
+        <p role="alert" className="text-[10px] leading-snug text-destructive">
+          {t('botFlow.screenTexts.tooLong', { max: over.max, count: over.count })}
+        </p>
+      )}
+    </div>
+  )
 }
 
 export function SystemScreenTexts({ screenName }: SystemScreenTextsProps) {
@@ -254,7 +285,12 @@ export function TextKeyEditor({ textKey, captionKey, layout = 'text' }: TextKeyE
   }
 
   const dirty = rowValue !== value || rowValueEn !== (enOpen ? valueEn : '')
-  const canSave = value.trim().length > 0 && dirty && !mutation.isPending
+  // A text Telegram takes only up to a length of its own («Меню обновилось»:
+  // a toast, 200 characters) is not saved past it — said under the field.
+  const maxChars = botTextMaxChars(textKey)
+  const ruOver = botTextOverLimit(textKey, value)
+  const enOver = enOpen ? botTextOverLimit(textKey, valueEn) : null
+  const canSave = value.trim().length > 0 && dirty && !mutation.isPending && ruOver === null && enOver === null
 
   if (layout === 'buttonLabel') {
     return (
@@ -343,6 +379,7 @@ export function TextKeyEditor({ textKey, captionKey, layout = 'text' }: TextKeyE
             className="w-full resize-y rounded-md border bg-background px-2 py-1.5 text-[11px] focus:outline-none focus:ring-1 focus:ring-ring"
           />
         </EmojiFieldOverlay>
+        <TextLengthNote maxChars={maxChars} value={value} over={ruOver} />
       </div>
 
       <button
@@ -371,6 +408,7 @@ export function TextKeyEditor({ textKey, captionKey, layout = 'text' }: TextKeyE
               className="w-full resize-y rounded-md border bg-background px-2 py-1.5 text-[11px] focus:outline-none focus:ring-1 focus:ring-ring"
             />
           </EmojiFieldOverlay>
+          <TextLengthNote maxChars={maxChars} value={valueEn} over={enOver} />
         </div>
       )}
 

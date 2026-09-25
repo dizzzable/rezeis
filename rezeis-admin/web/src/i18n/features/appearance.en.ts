@@ -548,4 +548,15 @@ export const en = {
       previewHint: 'Applied to page sections on load',
     },
   },
+  /**
+   * Merged into the core `panelBrandingTab.pwaIcon` block (deep merge): the
+   * settings hub loads this bundle for its «Branding» tab too, where the
+   * panel's own app icon is set.
+   */
+  panelBrandingTab: {
+    pwaIcon: {
+      installedHint:
+        'An installed panel app does not pick up a new icon at once. iPhone stores the icon once, when the app is added to the Home Screen, so to see the new one the app has to be removed from the Home Screen and added again. On Android the icon updates by itself within a day: Chrome re-checks it at launch at most once a day.',
+    },
+  },
 } as const

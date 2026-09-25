@@ -16,6 +16,7 @@ import {
   type ConfigVersionKey,
 } from '../src/modules/bot-config/config-versions/config-versions.constants';
 import type { ConfigVersionsService } from '../src/modules/bot-config/config-versions/config-versions.service';
+import { ConfigDeliveryState as RealConfigDeliveryState } from '../src/modules/bot-config/config-versions/config-delivery-state';
 import type { UndeliveredRecord } from '../src/modules/notifications/undelivered-record';
 
 /**
@@ -302,5 +303,87 @@ describe('the check, two minutes after the save', () => {
     } as never);
     assert.deepEqual(outcome, { findings: 1 });
     assert.equal((records[0] as UndeliveredRecord).metadata['relayStatus'], 'not-applied');
+  });
+});
+
+/**
+ * A cabinet that has been down for more than an hour (review R2a-03).
+ *
+ * Reports expire after an hour, so the check found no process reporting the
+ * group and fell back to the old-cabinet card: «…его версия старше панели… Он
+ * подхватит изменение сам в течение 5 минут. Обновите кабинет…» — both claims
+ * wrong for a cabinet that is simply down. The spec's own fake state keeps
+ * reports forever, which is why this path was never exercised; here the REAL
+ * state runs over a store with a clock and real expiry.
+ */
+describe('a cabinet down for over an hour (review R2a-03)', () => {
+  /** `RawCacheService` with a clock and real TTL semantics. */
+  function ttlStore(clock: { now: number }) {
+    const map = new Map<string, { raw: string; expiresAt: number | null }>();
+    return {
+      async get<T>(key: string): Promise<T | null> {
+        const hit = map.get(key);
+        if (hit === undefined) return null;
+        if (hit.expiresAt !== null && clock.now >= hit.expiresAt) {
+          map.delete(key);
+          return null;
+        }
+        return JSON.parse(hit.raw) as T;
+      },
+      async set(key: string, value: unknown, ttlSeconds?: number): Promise<void> {
+        map.set(key, { raw: JSON.stringify(value), expiresAt: ttlSeconds ? clock.now + ttlSeconds * 1000 : null });
+      },
+    };
+  }
+
+  async function checkAfterDowntime(downForMs: number) {
+    const clock = { now: SAVED_AT - downForMs };
+    const state = new RealConfigDeliveryState(ttlStore(clock) as never);
+    // This release's cabinet polled normally…
+    await state.recordReport('api', { held: { publicConfig: OLD }, reportedAt: clock.now });
+    await state.recordReport('bot', { held: { botConfig: OLD }, reportedAt: clock.now });
+    // …then went down. The operator saves the bot texts; the relay cannot reach it.
+    clock.now = SAVED_AT;
+    await state.markSave('botConfig', SAVED_AT);
+    clock.now = SAVED_AT + 20_000;
+    await state.recordHintOutcome('reiwa.bot.invalidate', { delivered: false, status: 'unreachable', at: clock.now });
+
+    const records: UndeliveredRecord[] = [];
+    const versions = { current: async () => ({ botConfig: NEW }) } as unknown as ConfigVersionsService;
+    const service = new ConfigDeliveryCheckService(versions, state, { add: async () => ({}) } as never, (record) => {
+      records.push(record);
+    });
+    clock.now = CHECK_AT;
+    const findings = await service.check(job('reiwa.bot.invalidate', ['botConfig']), CHECK_AT);
+    return { findings, records };
+  }
+
+  it('says the cabinet is not answering and what to check — not that it is old, not "5 minutes"', async () => {
+    const { findings, records } = await checkAfterDowntime(61 * 60_000);
+
+    // Anchor: the report did expire, so this is the path the review found.
+    assert.deepEqual(findings, [{ cause: 'hint-lost', group: 'botConfig', hintStatus: 'unreachable' }]);
+    assert.equal(records.length, 1);
+    const why = String((records[0] as UndeliveredRecord).metadata['why']);
+    assert.match(why, /не запущен или не отвечает/);
+    assert.match(why, /docker compose ps/);
+    assert.match(why, /REZEIS_HOST/);
+    assert.match(why, /как только снова заработает/);
+    assert.doesNotMatch(why, /старше/);
+    assert.doesNotMatch(why, /Обновите кабинет/);
+    assert.doesNotMatch(why, /5 минут/);
+  });
+
+  it('within the hour the same downtime is the «no check-in» card, as before', async () => {
+    const { findings, records } = await checkAfterDowntime(30 * 60_000);
+    assert.equal(findings.length, 1);
+    assert.equal(findings[0]?.cause, 'silent');
+    assert.equal((records[0] as UndeliveredRecord).metadata['relayStatus'], 'no-check-in');
+  });
+
+  it('keeps one card per cause per window: the same signature on every save', async () => {
+    const first = await checkAfterDowntime(61 * 60_000);
+    const second = await checkAfterDowntime(90 * 60_000);
+    assert.equal(first.records[0]?.signature, second.records[0]?.signature);
   });
 });

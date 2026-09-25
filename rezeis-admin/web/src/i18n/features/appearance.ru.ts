@@ -548,4 +548,15 @@ export const ru = {
       previewHint: 'Применяется к секциям при загрузке',
     },
   },
+  /**
+   * Merged into the core `panelBrandingTab.pwaIcon` block (deep merge): the
+   * settings hub loads this bundle for its «Бренд» tab too, where the panel's
+   * own app icon is set.
+   */
+  panelBrandingTab: {
+    pwaIcon: {
+      installedHint:
+        'Уже установленное приложение панели меняет значок не сразу. На iPhone значок запоминается один раз — когда его добавляют на экран «Домой», — поэтому, чтобы увидеть новый, приложение нужно удалить с экрана «Домой» и добавить заново. На Android значок обновится сам в течение суток: Chrome сверяет его при запуске не чаще раза в день.',
+    },
+  },
 } as const

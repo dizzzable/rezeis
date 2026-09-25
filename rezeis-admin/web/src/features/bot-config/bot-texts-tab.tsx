@@ -50,6 +50,7 @@ import {
   botConfigApi,
 } from './bot-config-api'
 import { botTextKeyMode } from './bot-text-key-mode'
+import { botTextMaxChars, botTextOverLimit, telegramCharCount } from './bot-text-limits'
 
 export function BotTextsTab(): JSX.Element {
   const { t } = useTranslation()
@@ -219,6 +220,62 @@ function fieldModeFor(key: string): {
   return { mode, liveStrip: mode !== 'text', showsCopyPreview: mode === 'text' }
 }
 
+/** The general limit every text has: what the server's DTO takes. */
+const TEXT_MAX_CHARS = 8000
+
+interface LengthLimit {
+  /** The limit of this key: Telegram's own where it sets one, else the general one. */
+  readonly max: number
+  /** Whether the count is Telegram's (code points) rather than the field's own. */
+  readonly telegram: boolean
+  readonly over: { readonly max: number; readonly count: number } | null
+  readonly overEn: { readonly max: number; readonly count: number } | null
+  readonly blocksSave: boolean
+}
+
+/**
+ * The length limit of `key`'s values. «Меню обновилось» (`menu.updated`) is a
+ * toast Telegram takes at no more than 200 characters (`bot-text-limits.ts`):
+ * past it the text is not saved, and the field says why.
+ */
+function lengthLimitFor(key: string, value: string, valueEn: string): LengthLimit {
+  const telegramMax = botTextMaxChars(key)
+  const over = botTextOverLimit(key, value)
+  const overEn = botTextOverLimit(key, valueEn)
+  return {
+    max: telegramMax ?? TEXT_MAX_CHARS,
+    telegram: telegramMax !== undefined,
+    over,
+    overEn,
+    blocksSave: over !== null || overEn !== null,
+  }
+}
+
+/** The count under a field, and — past a limit Telegram sets — why it will not be saved. */
+function LengthCounter({
+  value,
+  limit,
+  over,
+}: {
+  readonly value: string
+  readonly limit: LengthLimit
+  readonly over: { readonly max: number; readonly count: number } | null
+}): JSX.Element {
+  const { t } = useTranslation()
+  return (
+    <>
+      <p className="text-xs text-muted-foreground">
+        {limit.telegram ? telegramCharCount(value) : value.length}/{limit.max}
+      </p>
+      {over !== null && (
+        <p role="alert" className="text-xs text-destructive">
+          {t('botFlow.screenTexts.tooLong', { max: over.max, count: over.count })}
+        </p>
+      )}
+    </>
+  )
+}
+
 interface TextEditDialogProps {
   readonly text: BotText | null
   readonly open: boolean
@@ -239,6 +296,8 @@ function TextEditDialog({ text, open, onOpenChange }: TextEditDialogProps): JSX.
   // RU and EN are two values of ONE key, so they feed the same renderer and are
   // drawn the same way.
   const field = fieldModeFor(text?.key ?? '')
+  // …and share its length limit, where Telegram sets one of its own.
+  const limit = lengthLimitFor(text?.key ?? '', value, enEnabled ? valueEn : '')
 
   function insertAtCaret(emoji: string): void {
     const el = textareaRef.current
@@ -360,9 +419,7 @@ function TextEditDialog({ text, open, onOpenChange }: TextEditDialogProps): JSX.
                 className="font-mono text-sm pr-10"
               />
             </EmojiFieldOverlay>
-            <p className="text-xs text-muted-foreground">
-              {value.length}/8000
-            </p>
+            <LengthCounter value={value} limit={limit} over={limit.over} />
             {field.showsCopyPreview && <RenderedCopyPreview value={value} />}
           </div>
 
@@ -412,7 +469,7 @@ function TextEditDialog({ text, open, onOpenChange }: TextEditDialogProps): JSX.
                     className="font-mono text-sm pr-10"
                   />
                 </EmojiFieldOverlay>
-                <p className="text-xs text-muted-foreground">{valueEn.length}/8000</p>
+                <LengthCounter value={valueEn} limit={limit} over={limit.overEn} />
                 {field.showsCopyPreview && <RenderedCopyPreview value={valueEn} />}
               </div>
             )}
@@ -444,7 +501,7 @@ function TextEditDialog({ text, open, onOpenChange }: TextEditDialogProps): JSX.
             <Button variant="outline" onClick={() => onOpenChange(false)}>
               {t('botConfigPage.texts.cancel')}
             </Button>
-            <Button onClick={submit} disabled={updateMutation.isPending}>
+            <Button onClick={submit} disabled={updateMutation.isPending || limit.blocksSave}>
               {t('botConfigPage.texts.save')}
             </Button>
           </div>
@@ -474,6 +531,7 @@ function TextCreateDialog({ open, onOpenChange }: TextCreateDialogProps): JSX.El
   // Follows the key field as it is typed: the row does not exist yet, so the key
   // above is the only thing that says which renderer this copy will feed.
   const field = fieldModeFor(key)
+  const limit = lengthLimitFor(key, value, enEnabled ? valueEn : '')
 
   function insertAtCaret(emoji: string): void {
     const el = textareaRef.current
@@ -593,7 +651,7 @@ function TextCreateDialog({ open, onOpenChange }: TextCreateDialogProps): JSX.El
                 className="font-mono text-sm pr-10"
               />
             </EmojiFieldOverlay>
-            <p className="text-xs text-muted-foreground">{value.length}/8000</p>
+            <LengthCounter value={value} limit={limit} over={limit.over} />
             {field.showsCopyPreview && <RenderedCopyPreview value={value} />}
           </div>
 
@@ -643,7 +701,7 @@ function TextCreateDialog({ open, onOpenChange }: TextCreateDialogProps): JSX.El
                     className="font-mono text-sm pr-10"
                   />
                 </EmojiFieldOverlay>
-                <p className="text-xs text-muted-foreground">{valueEn.length}/8000</p>
+                <LengthCounter value={valueEn} limit={limit} over={limit.overEn} />
                 {field.showsCopyPreview && <RenderedCopyPreview value={valueEn} />}
               </div>
             )}
@@ -661,7 +719,7 @@ function TextCreateDialog({ open, onOpenChange }: TextCreateDialogProps): JSX.El
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             {t('botConfigPage.texts.cancel')}
           </Button>
-          <Button onClick={submit} disabled={!canSubmit || createMutation.isPending}>
+          <Button onClick={submit} disabled={!canSubmit || createMutation.isPending || limit.blocksSave}>
             {t('botConfigPage.texts.create')}
           </Button>
         </DialogFooter>

@@ -36,9 +36,13 @@ import { ConfigVersionsService } from './config-versions.service';
  *    re-read that keeps failing).
  *  - `silent` — a process that reports this group has not polled for a while,
  *    and the hint did not get through either: nothing says the change arrived.
- *  - `hint-lost` — no process reports this group (a cabinet older than the
- *    version poll), and the hint did not get through: the old signal, kept for
- *    that cabinet.
+ *  - `hint-lost` — no process reports this group, and the hint did not get
+ *    through. Either the cabinet has not polled for over an hour — its reports
+ *    expire (`CONFIG_DELIVERY_STATE_TTL_SECONDS`) — or it never did (older
+ *    than the version poll). The hint failing says the same in both cases: the
+ *    cabinet is not answering. So the card says that, and not that the cabinet
+ *    is old — which, for one that is simply down, was wrong twice over: "update
+ *    it" and "it picks the change up in 5 minutes" (review R2a-03).
  */
 export type ConfigDeliveryFinding =
   | {
@@ -304,11 +308,15 @@ export function buildConfigDeliveryRecords(
         reason: 'config_not_delivered',
         relayEvent: data.event,
         relayStatus: status,
+        // No report at all, or one expired: the cabinet has not polled for over
+        // an hour, and the hint did not reach it either — it is not answering.
         why:
-          `Сигнал об изменении (${titlesOf(lost.map((f) => f.group))}) не доставлен в кабинет, а ` +
-          'кабинет не сообщает, какие настройки держит: его версия старше панели. Он подхватит ' +
-          'изменение сам в течение 5 минут. Обновите кабинет до версии, выпущенной вместе с этой ' +
-          'панелью, — тогда панель будет видеть, что изменение дошло.',
+          `Сигнал об изменении (${titlesOf(lost.map((f) => f.group))}) не доставлен, и кабинет ` +
+          'давно не сверяется с панелью: похоже, сайт кабинета (reiwa) или бот (reiwa-bot) не ' +
+          'запущен или не отвечает. Проверьте в папке кабинета: docker compose ps — оба контейнера ' +
+          'должны работать, docker compose logs reiwa и reiwa-bot — нет ли ошибок; в .env кабинета — ' +
+          'адрес панели REZEIS_HOST и токен REZEIS_TOKEN, в .env панели — адрес кабинета REIWA_URL. ' +
+          'Изменение кабинет подхватит сам, как только снова заработает.',
         configGroups: [...new Set(lost.map((f) => f.group))],
       },
       signature: JSON.stringify(['config-delivery', 'hint-lost', data.event, status]),
