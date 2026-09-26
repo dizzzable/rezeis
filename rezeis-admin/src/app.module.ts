@@ -83,6 +83,7 @@ import { RbacModule } from './modules/rbac/rbac.module';
 import { LandingConfigModule } from './modules/landing-config/landing-config.module';
 import { RealtimeModule } from './modules/realtime/realtime.module';
 import { ReferralsModule } from './modules/referrals/referrals.module';
+import { ReiwaPeersModule } from './modules/reiwa-peers/reiwa-peers.module';
 import { SettingsModule } from './modules/settings/settings.module';
 import { SubpageConfigModule } from './modules/subpage-config/subpage-config.module';
 import { SubscriptionsModule } from './modules/subscriptions/subscriptions.module';
@@ -211,6 +212,9 @@ import { WebhooksModule } from './modules/webhooks/webhooks.module';
     RbacModule,
     RealtimeModule,
     ReferralsModule,
+    // Global: what the panel knows about the connected Reiwa cabinet, asked by
+    // the add-on gates, the settings poll, the heartbeat and the update checker.
+    ReiwaPeersModule,
     PlansModule,
     SubscriptionsModule,
     SupportTicketsModule,

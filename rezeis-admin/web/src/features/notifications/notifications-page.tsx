@@ -240,7 +240,7 @@ const EVENT_TYPE_CATALOG: Readonly<Record<string, readonly string[]>> = {
     'import.completed', 'import.failed', 'import.plan_assigned', 'import.sync_enqueued',
     'plan.retired_removed',
     'automation.telegram_notify', 'automation.custom', 'client.error', 'reiwa.error',
-    'reiwa.relay_undelivered', 'telegram.direct_undelivered',
+    'reiwa.relay_undelivered', 'reiwa.cabinet_behind', 'telegram.direct_undelivered',
   ],
 }
 

@@ -31,6 +31,7 @@ import { AddOnRefundService } from '../src/modules/payments/services/addon-refun
 import { PaymentSubscriptionMutationService } from '../src/modules/payments/services/payment-subscription-mutation.service';
 import { PricingService } from '../src/modules/plans/services/pricing.service';
 import { removeDurableFixtures } from './helpers/durable-rows-cleanup';
+import { CabinetView } from '../src/modules/reiwa-peers/cabinet-capabilities';
 
 /**
  * «ДО СБРОСА» ON THE MONEY PATH, against PostgreSQL, through the real
@@ -166,6 +167,7 @@ async function checkOut(owner: Owner, addOnId: string): Promise<Transaction> {
     addOnId,
     subscriptionId: owner.subscriptionId,
     gatewayType: 'YOOKASSA' as never,
+    audience: CabinetView.all(),
     contractVersion: 2,
   });
   return prisma.transaction.findUniqueOrThrow({ where: { paymentId: answer.paymentId } });

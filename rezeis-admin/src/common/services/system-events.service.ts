@@ -440,6 +440,16 @@ export const EVENT_TYPES = {
    */
   REIWA_RELAY_UNDELIVERED: 'reiwa.relay_undelivered',
   /**
+   * «🧩 Кабинет старше панели»: the connected Reiwa cabinet — its site-and-API
+   * process or its bot — has lacked a capability this panel expects for ten
+   * minutes (`ReiwaCabinetBehindService`). Once per surface and cabinet
+   * version; WARNING. Its `note` lists, in Russian, what does not work until
+   * the cabinet is updated — the sales withheld first. Metadata:
+   * `{ cabinetSurface, cabinetVersion, panelVersion, missingCapabilities,
+   * behindSince, note }`.
+   */
+  REIWA_CABINET_BEHIND: 'reiwa.cabinet_behind',
+  /**
    * The panel's OWN Telegram send did not get through and nothing further is
    * coming. Distinct from `reiwa.relay_undelivered` on purpose: they name two
    * different broken things with two different remedies. The relay one means
@@ -4063,6 +4073,10 @@ export const EVENT_PRESENTATION: Record<string, EventPresentation> = {
       config_not_delivered: { emoji: '🧭', title: 'Изменение настроек не дошло до кабинета' },
     }),
   },
+  // No message: its sentence is the English log line. Which cabinet, which
+  // panel and what does not work until the update are the producer's Russian
+  // `note` (`ReiwaCabinetBehindService`).
+  'reiwa.cabinet_behind': { emoji: '🧩', title: 'Кабинет старше панели' },
   // The message carries what the operator does about it («Telegram отклонил
   // токен бота — проверьте…»), which no metadata key renders.
   'telegram.direct_undelivered': {

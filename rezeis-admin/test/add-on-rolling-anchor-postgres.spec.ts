@@ -27,6 +27,7 @@ import { AddOnPurchaseService } from '../src/modules/payments/services/addon-pur
 import { PaymentSubscriptionMutationService } from '../src/modules/payments/services/payment-subscription-mutation.service';
 import { PricingService } from '../src/modules/plans/services/pricing.service';
 import { removeDurableFixtures } from './helpers/durable-rows-cleanup';
+import { CabinetView } from '../src/modules/reiwa-peers/cabinet-capabilities';
 
 /**
  * P2, THE TERM SIDE — MONTH_ROLLING COUNTS FROM THE PROFILE (stage 4,
@@ -196,6 +197,7 @@ async function checkOut(owner: Owner, addOnId: string): Promise<Transaction> {
     addOnId,
     subscriptionId: owner.subscriptionId,
     gatewayType: 'YOOKASSA' as never,
+    audience: CabinetView.all(),
     contractVersion: 2,
   });
   return prisma.transaction.findUniqueOrThrow({ where: { paymentId: answer.paymentId } });

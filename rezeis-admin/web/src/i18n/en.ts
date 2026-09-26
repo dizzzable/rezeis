@@ -27,6 +27,7 @@ export const en = {
       current: 'Current version',
       panelName: 'Panel',
       reiwaName: 'Reiwa (cabinet)',
+      reiwaBehind: '⚠ The cabinet is older than the panel — what does not work',
       available: 'Update available',
       releaseNotes: 'Release notes',
       upToDate: 'You are on the latest version',

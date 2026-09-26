@@ -6,6 +6,14 @@ import { AddOnType } from '@prisma/client';
 import { AddOnEligibilityService } from '../src/modules/add-ons/services/add-on-eligibility.service';
 import { DEFAULT_NOTIFICATION_TEMPLATES } from '../src/modules/notifications/catalog/default-templates.catalog';
 import { UserNotificationsService } from '../src/modules/notifications/services/user-notifications.service';
+import { CabinetView } from '../src/modules/reiwa-peers/cabinet-capabilities';
+
+/**
+ * The cabinet registry, knowing a cabinet whose web can show everything: the
+ * offer is asked for that cabinet (pair reliability). A cabinet the panel does
+ * not know leaves the answer out — `add-on-reset-end-gate.spec.ts`.
+ */
+const KNOWN_CABINET = { knownView: async () => CabinetView.all() };
 
 /**
  * «Трафик исчерпан» (`limited`) for a subscription with no end date (the owner,
@@ -114,6 +122,7 @@ function relayingService(input: {
     undefined,
     undefined,
     moduleRef as never,
+    KNOWN_CABINET as never,
   );
   const send = async (payload: Record<string, unknown>) => {
     const notice = await service.createInTransaction(

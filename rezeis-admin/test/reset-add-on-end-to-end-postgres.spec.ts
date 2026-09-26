@@ -27,6 +27,7 @@ import {
   stampRemnawaveProfileFacts,
 } from '../src/modules/remnawave/utils/remnawave-profile-facts.util';
 import { removeDurableFixtures } from './helpers/durable-rows-cleanup';
+import { CabinetView } from '../src/modules/reiwa-peers/cabinet-capabilities';
 
 /**
  * A TRAFFIC ADD-ON «ДО СБРОСА», FROM THE TILL TO THE PANEL — W7 test 2
@@ -196,6 +197,7 @@ run('a traffic add-on «до сброса», bought, held and taken off — Post
       addOnId,
       subscriptionId: subscription.id,
       gatewayType: 'YOOKASSA' as never,
+      audience: CabinetView.all(),
       contractVersion: 2,
     });
     const draft = await prisma.transaction.findUniqueOrThrow({ where: { paymentId: answer.paymentId } });

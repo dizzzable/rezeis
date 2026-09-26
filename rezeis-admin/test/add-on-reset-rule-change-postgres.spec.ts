@@ -40,6 +40,7 @@ import { PlansAdminService } from '../src/modules/plans/services/plans-admin.ser
 import { PlansAdminValidators } from '../src/modules/plans/services/plans-admin.validators';
 import { PlanSnapshotSyncService } from '../src/modules/subscriptions/services/plan-snapshot-sync.service';
 import { removeDurableFixtures } from './helpers/durable-rows-cleanup';
+import { CabinetView } from '../src/modules/reiwa-peers/cabinet-capabilities';
 
 /**
  * A PLAN'S RESET RULE CHANGES MID-PERIOD (P6; the owner's rule of 24.09.2026),
@@ -302,7 +303,7 @@ async function catalogTrafficAddOn(): Promise<string> {
 /** One traffic add-on offered, checked out and captured — as the cabinet and the payment webhook run them. */
 async function offerCheckOutCapture(owner: Owner) {
   const addOnId = await catalogTrafficAddOn();
-  const listing = await offers.listForSubscription(owner.subscriptionId);
+  const listing = await offers.listForSubscription(owner.subscriptionId, undefined, CabinetView.all());
   const offered = listing.addOns.find((addOn) => addOn.id === addOnId);
   assert.ok(offered, 'the traffic add-on is offered');
   const answer = await checkout.checkout({
@@ -310,6 +311,7 @@ async function offerCheckOutCapture(owner: Owner) {
     addOnId,
     subscriptionId: owner.subscriptionId,
     gatewayType: 'YOOKASSA' as never,
+    audience: CabinetView.all(),
     contractVersion: 2,
   });
   const draft = await prisma.transaction.findUniqueOrThrow({ where: { paymentId: answer.paymentId } });

@@ -116,6 +116,65 @@ export class RawCacheService implements OnModuleInit, OnModuleDestroy {
     } while (cursor !== '0');
   }
 
+  /**
+   * Several keys' values read as JSON in one MGET, in the order asked; `null`
+   * in a slot whose key is absent or whose value is not JSON.
+   *
+   * `null` for the whole answer when the cache is unavailable, which is NOT a
+   * list of nulls: a caller that decides something from absence has to tell
+   * "nothing is there" from "could not look". A command error is thrown, as
+   * `get` would throw it.
+   */
+  async getMany<T>(keys: readonly string[]): Promise<Array<T | null> | null> {
+    if (!this.isReady()) return null;
+    if (keys.length === 0) return [];
+    const raws = await this.redis.mget(...keys);
+    return keys.map((_key, index) => {
+      const raw = raws[index];
+      if (typeof raw !== 'string') return null;
+      try {
+        return JSON.parse(raw) as T;
+      } catch {
+        return null;
+      }
+    });
+  }
+
+  /**
+   * An index kept as a sorted set: `member` scored by `score` (ZADD), the set
+   * given `ttlSeconds` so an abandoned index goes too, and — past `cap`
+   * members — the lowest-scored ones removed, but never one scored `keepFrom`
+   * or higher: with it, the set holds more than `cap` while those do. Answers
+   * the members it removed, so the caller can delete what they stood for.
+   * Nothing when the cache is unavailable.
+   */
+  async sortedIndexAdd(
+    key: string,
+    member: string,
+    score: number,
+    options: { readonly cap: number; readonly ttlSeconds: number; readonly keepFrom?: number },
+  ): Promise<string[]> {
+    if (!this.isReady()) return [];
+    await this.redis.zadd(key, score, member);
+    await this.redis.expire(key, options.ttlSeconds);
+    const excess = (await this.redis.zcard(key)) - options.cap;
+    if (excess <= 0) return [];
+    // The `excess` lowest-scored, of those scored below `keepFrom`.
+    const below = options.keepFrom === undefined ? '+inf' : `(${options.keepFrom}`;
+    const dropped = await this.redis.zrangebyscore(key, '-inf', below, 'LIMIT', 0, excess);
+    if (dropped.length > 0) await this.redis.zrem(key, ...dropped);
+    return dropped;
+  }
+
+  /**
+   * The `count` highest-scored members of a sorted-set index, highest first;
+   * `null` when the cache is unavailable (not the same answer as `[]`).
+   */
+  async sortedIndexNewest(key: string, count: number): Promise<string[] | null> {
+    if (!this.isReady()) return null;
+    return this.redis.zrevrange(key, 0, count - 1);
+  }
+
   async exists(key: string): Promise<boolean> {
     if (!this.isReady()) return false;
     return (await this.redis.exists(key)) === 1;

@@ -20,6 +20,7 @@ import {
   readPayerLocale,
   resolvePayerLocale,
 } from '../src/modules/payments/utils/payer-facing-text.util';
+import { CabinetView } from '../src/modules/reiwa-peers/cabinet-capabilities';
 
 /**
  * What a payer reads about a purchase on the provider's side — the payment
@@ -472,6 +473,7 @@ function addOnWorld(payer: Record<string, unknown>) {
       addOnId: 'addon-1',
       subscriptionId: 'sub-1',
       gatewayType: 'YOOKASSA' as never,
+      audience: CabinetView.all(),
       contractVersion: 2,
       idempotencyKey: 'idem-1',
     });

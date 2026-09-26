@@ -32,6 +32,7 @@ import {
   resolveConfiguredEntitlementBaseline,
 } from '../../add-on-entitlements/services/configured-baseline.util';
 import { AddOnSwitchesService } from '../../add-on-entitlements/switches/add-on-switches.service';
+import { CABINET_CAPABILITY, type CabinetView } from '../../reiwa-peers/cabinet-capabilities';
 import { RemnawaveProfileFactsService } from '../../remnawave/services/remnawave-profile-facts.service';
 import { SettingsService } from '../../settings/services/settings.service';
 
@@ -234,9 +235,16 @@ export class AddOnEligibilityService {
     @Optional() private readonly profileFacts?: RemnawaveProfileFactsService,
   ) {}
 
+  /**
+   * `audience` is the cabinet the offer is FOR — what it can show
+   * (`ReiwaPeerRegistry`: the caller's own headers, or what the panel recorded
+   * about the web). Required, with no default, so every caller says whose
+   * screen this is; a spec passes `CabinetView.all()`.
+   */
   public async listForSubscription(
     subscriptionId: string,
-    owner?: { readonly userId?: string; readonly telegramId?: string },
+    owner: { readonly userId?: string; readonly telegramId?: string } | undefined,
+    audience: CabinetView,
   ): Promise<AddOnEligibilityResult> {
     const subscription = await this.prismaService.subscription.findUnique({
       where: { id: subscriptionId },
@@ -366,6 +374,17 @@ export class AddOnEligibilityService {
       );
       if (evaluated === null) continue;
       const { lifetime, ...offered } = evaluated;
+      // «ДО СБРОСА» ONLY TO A CABINET THAT CAN SHOW IT (pair reliability,
+      // 26.09.2026). Reiwa 0.9.7.52 and older print such an add-on as
+      // «Действует до 01.10.26» — no word of the reset, by the phone's clock,
+      // and no warning of a reset less than a day away — so the customer pays
+      // for traffic without being told it ends at the reset. Withheld from
+      // that cabinet rather than sold under another lifetime: «до конца
+      // подписки» would give away every month what stage 4 exists to stop, and
+      // the checkout refuses it for the same audience. Devices, traffic on a
+      // plan without a reset and «Сброс трафика» are «до конца подписки» and
+      // are not touched.
+      if (lifetime === AddOnLifetime.UNTIL_NEXT_RESET && !audience.can(CABINET_CAPABILITY.addonResetEnd)) continue;
       const eligibility: AddOnEligibilityInfo = {
         ...offered,
         dated:

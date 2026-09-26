@@ -3,6 +3,7 @@ import {
   Body,
   Controller,
   Get,
+  Headers,
   HttpCode,
   HttpStatus,
   Param,
@@ -13,6 +14,8 @@ import {
 import { SkipThrottle } from '@nestjs/throttler';
 
 import { InternalAdminAuthGuard } from '../../auth/guards/internal-admin-auth.guard';
+import type { HeaderBag } from '../../reiwa-peers/reiwa-client-headers';
+import { ReiwaPeerRegistry } from '../../reiwa-peers/reiwa-peer-registry.service';
 import { AddOnEligibilityService, AddOnEligibilityResult } from '../services/add-on-eligibility.service';
 import { AddOnsService, AddOnInterface } from '../services/add-ons.service';
 import { TrafficResetService } from '../services/traffic-reset.service';
@@ -36,6 +39,7 @@ export class InternalAddOnsController {
     private readonly addOnsService: AddOnsService,
     private readonly addOnEligibilityService: AddOnEligibilityService,
     private readonly trafficResetService: TrafficResetService,
+    private readonly peers: ReiwaPeerRegistry,
   ) {}
 
   /**
@@ -56,14 +60,24 @@ export class InternalAddOnsController {
    * the subscription to that owner (a mismatch is a 404) so one user can never
    * read another's eligibility. The reiwa BFF always forwards the authenticated
    * session identity.
+   *
+   * The CALLER is the audience: the offer is what this cabinet can show
+   * (`ReiwaPeerRegistry.viewOfRequest`) — its own headers, or for a silent one
+   * the evidence it left. The web page that shows the offer is served by
+   * reiwa-api, which declares the SPA's `web.*` capabilities.
    */
   @Get('subscriptions/:subscriptionId')
-  public listForSubscription(
+  public async listForSubscription(
     @Param('subscriptionId') subscriptionId: string,
     @Query('userId') userId?: string,
     @Query('telegramId') telegramId?: string,
+    @Headers() headers?: HeaderBag,
   ): Promise<AddOnEligibilityResult> {
-    return this.addOnEligibilityService.listForSubscription(subscriptionId, { userId, telegramId });
+    return this.addOnEligibilityService.listForSubscription(
+      subscriptionId,
+      { userId, telegramId },
+      await this.peers.viewOfRequest(headers, 'api'),
+    );
   }
 
   /**
@@ -96,6 +110,7 @@ export class InternalAddOnsController {
       readonly userId?: unknown;
       readonly telegramId?: unknown;
     },
+    @Headers() headers?: HeaderBag,
   ): Promise<{ readonly ok: boolean; readonly reason: string | null }> {
     const addOnId = typeof body.addOnId === 'string' ? body.addOnId : null;
     if (addOnId === null) {
@@ -119,9 +134,13 @@ export class InternalAddOnsController {
     // show. Checking only `isActive` and the type, as the first version did,
     // let a customer post an add-on id read off some other subscription's
     // listing and reset traffic on a plan it was never offered for.
+    // Asked as the caller's own listing, so it offers exactly what that page
+    // showed. A reset is never withheld by the cabinet's capabilities; only
+    // «до сброса» traffic is (`AddOnEligibilityService.listForSubscription`).
     const offer = await this.addOnEligibilityService.listForSubscription(
       subscriptionId,
       owner,
+      await this.peers.viewOfRequest(headers, 'api'),
     );
     const offered = offer.addOns.find((candidate) => candidate.id === addOnId);
     if (offered === undefined || offered.freeAllowance?.isFree !== true) {

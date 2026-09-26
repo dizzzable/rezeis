@@ -6,6 +6,7 @@ import { NotFoundException } from '@nestjs/common';
 import { AddOnEligibilityService } from '../src/modules/add-ons/services/add-on-eligibility.service';
 import { resolveAddOnRolloutFlags } from '../src/modules/add-on-entitlements/add-on-rollout.config';
 import { ResetCapabilityMap } from '../src/modules/add-on-entitlements/domain/reset-cycle-policy';
+import { CabinetView } from '../src/modules/reiwa-peers/cabinet-capabilities';
 
 type CatalogAddOn = {
   id: string;
@@ -221,12 +222,12 @@ const deviceAddOn: CatalogAddOn = {
 describe('AddOnEligibilityService.listForSubscription', () => {
   it('throws NotFound for a missing subscription', async () => {
     const { service } = build({ status: null });
-    await assert.rejects(() => service.listForSubscription('sub-1'), (e: unknown) => e instanceof NotFoundException);
+    await assert.rejects(() => service.listForSubscription('sub-1', undefined, CabinetView.all()), (e: unknown) => e instanceof NotFoundException);
   });
 
   it('returns EMPTY for a non-active subscription', async () => {
     const { service } = build({ status: 'EXPIRED', term: financeTerm, catalog: [trafficAddOn] });
-    const result = await service.listForSubscription('sub-1');
+    const result = await service.listForSubscription('sub-1', undefined, CabinetView.all());
     assert.equal(result.availability, 'EMPTY');
     assert.equal(result.target, null);
     assert.deepEqual(result.addOns, []);
@@ -234,7 +235,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
 
   it('falls back to the subscription baseline when there is no active term (finite → offered, termId empty)', async () => {
     const { service } = build({ status: 'ACTIVE', term: null, catalog: [trafficAddOn, deviceAddOn] });
-    const result = await service.listForSubscription('sub-1');
+    const result = await service.listForSubscription('sub-1', undefined, CabinetView.all());
     assert.equal(result.availability, 'AVAILABLE');
     // planId comes from planSnapshot.id; termId is the empty sentinel.
     assert.deepEqual(result.target, { subscriptionId: 'sub-1', termId: '', planId: 'plan-a' });
@@ -253,7 +254,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
       catalog: [deviceAddOn],
       sub: { deviceLimit: 0 },
     });
-    const result = await service.listForSubscription('sub-1');
+    const result = await service.listForSubscription('sub-1', undefined, CabinetView.all());
     assert.equal(result.addOns.length, 0);
     assert.equal(result.availability, 'EMPTY');
   });
@@ -265,7 +266,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
       catalog: [trafficAddOn],
       sub: { trafficLimit: null },
     });
-    const result = await service.listForSubscription('sub-1');
+    const result = await service.listForSubscription('sub-1', undefined, CabinetView.all());
     assert.equal(result.addOns.length, 0);
   });
 
@@ -276,7 +277,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
       catalog: [trafficAddOn],
       sub: { expiresAt: null },
     });
-    const result = await service.listForSubscription('sub-1');
+    const result = await service.listForSubscription('sub-1', undefined, CabinetView.all());
     assert.equal(result.addOns.length, 0);
   });
 
@@ -286,7 +287,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
     // used to withhold it for good.
     const nextReset: CatalogAddOn = { ...trafficAddOn, id: 'a-reset', lifetime: 'UNTIL_NEXT_RESET' };
     const { service } = build({ status: 'ACTIVE', term: null, catalog: [nextReset], enabledMonth: true });
-    const result = await service.listForSubscription('sub-1');
+    const result = await service.listForSubscription('sub-1', undefined, CabinetView.all());
     assert.equal(result.addOns.length, 1);
     const offered = result.addOns[0]!;
     assert.equal(offered.lifetime, 'UNTIL_SUBSCRIPTION_END');
@@ -305,7 +306,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
       enabledMonth: true,
       sub: { planSnapshot: { id: 'plan-a', trafficLimitStrategy: 'MONTH' } },
     });
-    const result = await service.listForSubscription('sub-1');
+    const result = await service.listForSubscription('sub-1', undefined, CabinetView.all());
     assert.equal(result.addOns.length, 0);
     assert.equal(result.availability, 'EMPTY');
   });
@@ -318,7 +319,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
       catalog: [scoped],
       sub: { planSnapshot: {} },
     });
-    const result = await service.listForSubscription('sub-1');
+    const result = await service.listForSubscription('sub-1', undefined, CabinetView.all());
     assert.equal(result.addOns.length, 0);
     assert.equal(result.target?.planId, '');
   });
@@ -326,7 +327,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
   it('offers a finite-baseline UNTIL_SUBSCRIPTION_END add-on with the term end as expiry', async () => {
     // Stage 4 off: with it on (the default) this traffic ends at the reset.
     const { service } = build({ status: 'ACTIVE', term: financeTerm, catalog: [trafficAddOn, deviceAddOn], stage4Off: true });
-    const result = await service.listForSubscription('sub-1');
+    const result = await service.listForSubscription('sub-1', undefined, CabinetView.all());
     assert.equal(result.availability, 'AVAILABLE');
     assert.deepEqual(result.target, { subscriptionId: 'sub-1', termId: 'term-1', planId: 'plan-a' });
     assert.equal(result.addOns.length, 2);
@@ -343,7 +344,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
   it('withholds EXTRA_TRAFFIC when the traffic baseline is unlimited', async () => {
     const term: Term = { ...financeTerm, baseTrafficLimitBytes: null };
     const { service } = build({ status: 'ACTIVE', term, catalog: [trafficAddOn] });
-    const result = await service.listForSubscription('sub-1');
+    const result = await service.listForSubscription('sub-1', undefined, CabinetView.all());
     assert.equal(result.availability, 'EMPTY');
     assert.equal(result.addOns.length, 0);
   });
@@ -351,7 +352,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
   it('withholds EXTRA_DEVICES when the device baseline is unlimited (null)', async () => {
     const term: Term = { ...financeTerm, baseDeviceLimit: null };
     const { service } = build({ status: 'ACTIVE', term, catalog: [deviceAddOn] });
-    const result = await service.listForSubscription('sub-1');
+    const result = await service.listForSubscription('sub-1', undefined, CabinetView.all());
     assert.equal(result.addOns.length, 0);
   });
 
@@ -361,7 +362,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
     // always last until the end of the subscription.
     const deviceReset: CatalogAddOn = { ...deviceAddOn, id: 'a-device-reset', lifetime: 'UNTIL_NEXT_RESET' };
     const { service } = build({ status: 'ACTIVE', term: financeTerm, catalog: [deviceReset], enabledMonth: true });
-    const result = await service.listForSubscription('sub-1');
+    const result = await service.listForSubscription('sub-1', undefined, CabinetView.all());
     assert.equal(result.addOns.length, 1);
     const offered = result.addOns[0]!;
     assert.equal(offered.lifetime, 'UNTIL_SUBSCRIPTION_END');
@@ -375,7 +376,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
     const deviceReset: CatalogAddOn = { ...deviceAddOn, id: 'a-device-reset', lifetime: 'UNTIL_NEXT_RESET' };
     const term: Term = { ...financeTerm, trafficResetStrategy: 'NO_RESET' };
     const { service } = build({ status: 'ACTIVE', term, catalog: [deviceReset], enabledMonth: true });
-    const result = await service.listForSubscription('sub-1');
+    const result = await service.listForSubscription('sub-1', undefined, CabinetView.all());
     assert.equal(result.addOns.length, 1);
     assert.equal(result.addOns[0]!.lifetime, 'UNTIL_SUBSCRIPTION_END');
     assert.equal(result.addOns[0]!.eligibility.expiresAt, LIVE_TERM_ENDS_AT.toISOString());
@@ -385,7 +386,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
     for (const bad of [0, -1]) {
       const term: Term = { ...financeTerm, baseDeviceLimit: bad };
       const { service } = build({ status: 'ACTIVE', term, catalog: [deviceAddOn] });
-      const result = await service.listForSubscription('sub-1');
+      const result = await service.listForSubscription('sub-1', undefined, CabinetView.all());
       assert.equal(result.addOns.length, 0, `deviceLimit ${bad} must be treated as unlimited`);
     }
   });
@@ -393,7 +394,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
   it('withholds EXTRA_TRAFFIC when a persisted term stores a negative byte baseline (anomaly)', async () => {
     const term: Term = { ...financeTerm, baseTrafficLimitBytes: -1n };
     const { service } = build({ status: 'ACTIVE', term, catalog: [trafficAddOn] });
-    const result = await service.listForSubscription('sub-1');
+    const result = await service.listForSubscription('sub-1', undefined, CabinetView.all());
     assert.equal(result.addOns.length, 0);
   });
 
@@ -401,7 +402,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
     const term: Term = { ...financeTerm, resetAnchorAt: null };
     const nextReset: CatalogAddOn = { ...trafficAddOn, id: 'a-reset', lifetime: 'UNTIL_NEXT_RESET' };
     const { service } = build({ status: 'ACTIVE', term, catalog: [nextReset], enabledMonth: true });
-    const result = await service.listForSubscription('sub-1');
+    const result = await service.listForSubscription('sub-1', undefined, CabinetView.all());
     assert.equal(result.addOns.length, 0);
   });
 
@@ -422,7 +423,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
       enabledRolling: true,
       profileFacts: facts,
     });
-    const result = await service.listForSubscription('sub-1');
+    const result = await service.listForSubscription('sub-1', undefined, CabinetView.all());
     assert.deepEqual(facts.calls, ['sub-1']);
     assert.equal(result.addOns.length, 1);
     const offered = result.addOns[0]!;
@@ -440,7 +441,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
       enabledRolling: true,
       profileFacts: facts,
     });
-    const result = await service.listForSubscription('sub-1');
+    const result = await service.listForSubscription('sub-1', undefined, CabinetView.all());
     assert.deepEqual(facts.calls, ['sub-1']);
     assert.deepEqual(
       result.addOns.map((addOn) => addOn.id),
@@ -459,7 +460,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
       profileFacts: facts,
       sub: { remnawaveProfileCreatedAt: profileCreatedAt },
     });
-    const result = await service.listForSubscription('sub-1');
+    const result = await service.listForSubscription('sub-1', undefined, CabinetView.all());
     assert.deepEqual(facts.calls, []);
     assert.equal(result.addOns.length, 1);
     assert.match(result.addOns[0]!.eligibility.nextResetAt ?? '', /-10T00:10:00\.000Z$/);
@@ -501,7 +502,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
     for (const { name, options } of cases) {
       const facts = profileFactsDouble(profileCreatedAt);
       const { service } = build({ status: 'ACTIVE', ...options, profileFacts: facts });
-      const result = await service.listForSubscription('sub-1');
+      const result = await service.listForSubscription('sub-1', undefined, CabinetView.all());
       assert.deepEqual(facts.calls, [], name);
       if (name === 'the term already carries its anchor') {
         assert.match(result.addOns[0]?.eligibility.nextResetAt ?? '', /-10T00:10:00\.000Z$/, name);
@@ -512,7 +513,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
   it('withholds UNTIL_SUBSCRIPTION_END when the subscription has no end (a lifetime subscription)', async () => {
     const term: Term = { ...financeTerm, endsAt: null };
     const { service } = build({ status: 'ACTIVE', term, catalog: [trafficAddOn], stage4Off: true, sub: { expiresAt: null } });
-    const result = await service.listForSubscription('sub-1');
+    const result = await service.listForSubscription('sub-1', undefined, CabinetView.all());
     assert.equal(result.addOns.length, 0);
   });
 
@@ -530,7 +531,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
       stage4Off: true,
       sub: { expiresAt: subscriptionEnds },
     });
-    const result = await service.listForSubscription('sub-1');
+    const result = await service.listForSubscription('sub-1', undefined, CabinetView.all());
     for (const offered of result.addOns) {
       assert.equal(offered.eligibility.expiresAt, subscriptionEnds.toISOString(), offered.id);
       assert.equal(offered.eligibility.endsBound, 'subscription_end', offered.id);
@@ -546,7 +547,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
       enabledMonth: true,
       sub: { expiresAt: subscriptionEnds },
     });
-    const reset = (await capped.service.listForSubscription('sub-1')).addOns[0]!;
+    const reset = (await capped.service.listForSubscription('sub-1', undefined, CabinetView.all())).addOns[0]!;
     assert.equal(reset.eligibility.endsBound, 'reset');
     assert.equal(Date.parse(reset.eligibility.expiresAt!) - Date.parse(reset.eligibility.nextResetAt!), 30 * 60 * 1000);
   });
@@ -557,7 +558,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
     // add-on vanished from sale with nothing on the page to say why.
     const storedReset: CatalogAddOn = { ...trafficAddOn, id: 'a-reset', lifetime: 'UNTIL_NEXT_RESET' };
     const { service } = build({ status: 'ACTIVE', term: financeTerm, catalog: [storedReset], stage4Off: true });
-    const result = await service.listForSubscription('sub-1');
+    const result = await service.listForSubscription('sub-1', undefined, CabinetView.all());
     assert.equal(result.addOns.length, 1);
     const offered = result.addOns[0]!;
     assert.equal(offered.lifetime, 'UNTIL_SUBSCRIPTION_END');
@@ -569,7 +570,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
   it('stage 4 ON: the same stored row is sold «до сброса» (R3a-06, the other switch state)', async () => {
     const storedReset: CatalogAddOn = { ...trafficAddOn, id: 'a-reset', lifetime: 'UNTIL_NEXT_RESET' };
     const { service } = build({ status: 'ACTIVE', term: financeTerm, catalog: [storedReset], enabledMonth: true });
-    const offered = (await service.listForSubscription('sub-1')).addOns[0]!;
+    const offered = (await service.listForSubscription('sub-1', undefined, CabinetView.all())).addOns[0]!;
     assert.equal(offered.lifetime, 'UNTIL_NEXT_RESET');
     assert.equal(offered.eligibility.endsBound, 'reset');
     assert.match(offered.eligibility.nextResetAt ?? '', /-01T00:20:00\.000Z$/);
@@ -584,7 +585,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
     for (const name of saved.keys()) delete process.env[name];
     try {
       const { service } = build({ status: 'ACTIVE', term: financeTerm, catalog: [trafficAddOn] });
-      const result = await service.listForSubscription('sub-1');
+      const result = await service.listForSubscription('sub-1', undefined, CabinetView.all());
       assert.equal(result.addOns.length, 1);
       assert.equal(result.addOns[0]!.lifetime, 'UNTIL_NEXT_RESET');
       assert.equal(result.addOns[0]!.eligibility.explanationCode, 'ELIGIBLE_UNTIL_NEXT_RESET');
@@ -612,7 +613,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
     // Explicitly OFF: unset is ON since the 24.09.2026 flip.
     process.env.ADDON_ENTITLEMENT_DIRECT_PURCHASE = 'false';
     try {
-      const result = await service.listForSubscription('sub-1');
+      const result = await service.listForSubscription('sub-1', undefined, CabinetView.all());
       // Nothing can bind a reset without the intake, so none is sold (R3a-06:
       // the stored row no longer withholds it); the purchase is the legacy
       // increment, and the offer says it carries no date.
@@ -636,7 +637,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
     process.env.ADDON_RESET_EXPIRY_MONTH = 'true';
     process.env.ADDON_ENTITLEMENT_DIRECT_PURCHASE = 'true';
     try {
-      const result = await service.listForSubscription('sub-1');
+      const result = await service.listForSubscription('sub-1', undefined, CabinetView.all());
       assert.equal(result.addOns.length, 1, 'both flags on → reset-scoped add-on is offered');
       assert.equal(result.addOns[0]!.eligibility.explanationCode, 'ELIGIBLE_UNTIL_NEXT_RESET');
     } finally {
@@ -651,7 +652,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
     // The row says «до конца подписки»: with stage 4 on, traffic on a plan
     // that resets is sold until the reset whatever the row says (P12).
     const { service } = build({ status: 'ACTIVE', term: financeTerm, catalog: [trafficAddOn], enabledMonth: true });
-    const result = await service.listForSubscription('sub-1');
+    const result = await service.listForSubscription('sub-1', undefined, CabinetView.all());
     assert.equal(result.addOns.length, 1);
     const reset = result.addOns[0]!;
     assert.equal(reset.lifetime, 'UNTIL_NEXT_RESET');
@@ -682,7 +683,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
       enabledMonth: true,
       sub: { planSnapshot: { id: 'plan-a', trafficLimitStrategy: 'NO_RESET' } },
     });
-    const kept = (await toNoReset.service.listForSubscription('sub-1')).addOns[0]!;
+    const kept = (await toNoReset.service.listForSubscription('sub-1', undefined, CabinetView.all())).addOns[0]!;
     assert.equal(kept.lifetime, 'UNTIL_SUBSCRIPTION_END');
     assert.equal(kept.eligibility.nextResetAt, null);
     assert.equal(kept.eligibility.expiresAt, LIVE_TERM_ENDS_AT.toISOString());
@@ -695,7 +696,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
       enabledMonth: true,
       sub: { planSnapshot: { id: 'plan-a', trafficLimitStrategy: 'MONTH' } },
     });
-    const reset = (await toMonth.service.listForSubscription('sub-1')).addOns[0]!;
+    const reset = (await toMonth.service.listForSubscription('sub-1', undefined, CabinetView.all())).addOns[0]!;
     assert.equal(reset.lifetime, 'UNTIL_NEXT_RESET');
     assert.match(reset.eligibility.nextResetAt ?? '', /-01T00:20:00\.000Z$/);
   });
@@ -708,7 +709,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
       enabledMonth: true,
       sub: { planSnapshot: { id: 'plan-b', trafficLimitStrategy: 'NO_RESET' } },
     });
-    const offered = (await service.listForSubscription('sub-1')).addOns[0]!;
+    const offered = (await service.listForSubscription('sub-1', undefined, CabinetView.all())).addOns[0]!;
     assert.equal(offered.lifetime, 'UNTIL_NEXT_RESET');
     assert.match(offered.eligibility.nextResetAt ?? '', /-01T00:20:00\.000Z$/);
   });
@@ -723,7 +724,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
       enabledMonth: true,
       sub: { expiresAt: endsSoon },
     });
-    const result = await service.listForSubscription('sub-1');
+    const result = await service.listForSubscription('sub-1', undefined, CabinetView.all());
     const offered = result.addOns[0]!;
     const nextResetAt = offered.eligibility.nextResetAt;
     assert.ok(nextResetAt !== null);
@@ -758,7 +759,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
       user: { findFirst: async () => ({ id: 'user-1' }) },
       addOn: { findMany: async () => [trafficAddOn] },
     };
-    const result = await new EnabledDayEligibilityService(prisma as never, {} as never).listForSubscription('sub-1');
+    const result = await new EnabledDayEligibilityService(prisma as never, {} as never).listForSubscription('sub-1', undefined, CabinetView.all());
     const offered = result.addOns[0]!;
     assert.equal(offered.eligibility.endsBound, 'reset');
     assert.match(offered.eligibility.nextResetAt ?? '', /T00:05:00\.000Z$/);
@@ -790,7 +791,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
       user: { findFirst: async () => ({ id: 'user-1' }) },
       addOn: { findMany: async () => [trafficAddOn] },
     };
-    const result = await new EnabledDayEligibilityService(prisma as never, {} as never).listForSubscription('sub-1');
+    const result = await new EnabledDayEligibilityService(prisma as never, {} as never).listForSubscription('sub-1', undefined, CabinetView.all());
     const offered = result.addOns[0]!;
     assert.equal(offered.eligibility.endsBound, 'subscription_end');
     assert.ok(offered.eligibility.nextResetAt !== null, 'the reset is still named');
@@ -816,7 +817,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
       {} as never,
       switches as never,
       settings as never,
-    ).listForSubscription('sub-1');
+    ).listForSubscription('sub-1', undefined, CabinetView.all());
     // The 1st, 00:20 by Moscow is 21:20 UTC on the last day of the month before.
     const nextResetAt = result.addOns[0]!.eligibility.nextResetAt ?? '';
     assert.match(nextResetAt, /T21:20:00\.000Z$/);
@@ -827,7 +828,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
 
   it('sends no display zone when none is set or the settings cannot be read (the dates are then UTC)', async () => {
     const { service } = build({ status: 'ACTIVE', term: financeTerm, catalog: [trafficAddOn] });
-    assert.equal((await service.listForSubscription('sub-1')).displayTimeZone, null);
+    assert.equal((await service.listForSubscription('sub-1', undefined, CabinetView.all())).displayTimeZone, null);
     const prisma = {
       subscription: {
         findUnique: async () => ({ id: 'sub-1', userId: 'user-1', status: 'ACTIVE', ...onRuleOf(financeTerm) }),
@@ -839,7 +840,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
     };
     const broken = { getPlatformBranding: async () => Promise.reject(new Error('settings row unreadable')) };
     const result = await new AddOnEligibilityService(prisma as never, {} as never, undefined, broken as never)
-      .listForSubscription('sub-1');
+      .listForSubscription('sub-1', undefined, CabinetView.all());
     assert.equal(result.displayTimeZone, null);
     assert.equal(result.addOns.length, 1, 'the listing itself does not fail');
   });
@@ -847,7 +848,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
   it('respects plan applicability (excludes add-ons scoped to other plans)', async () => {
     const otherPlan: CatalogAddOn = { ...trafficAddOn, id: 'a-other', applicablePlanIds: ['plan-z'] };
     const { service } = build({ status: 'ACTIVE', term: financeTerm, catalog: [otherPlan] });
-    const result = await service.listForSubscription('sub-1');
+    const result = await service.listForSubscription('sub-1', undefined, CabinetView.all());
     assert.equal(result.addOns.length, 0);
   });
 
@@ -859,7 +860,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
       catalog: [trafficAddOn],
       ownerUserId: 'user-1',
     });
-    const result = await service.listForSubscription('sub-1', { userId: 'user-1' });
+    const result = await service.listForSubscription('sub-1', { userId: 'user-1' }, CabinetView.all());
     assert.equal(result.availability, 'AVAILABLE');
   });
 
@@ -871,7 +872,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
       ownerUserId: 'user-1',
     });
     await assert.rejects(
-      () => service.listForSubscription('sub-1', { userId: 'intruder' }),
+      () => service.listForSubscription('sub-1', { userId: 'intruder' }, CabinetView.all()),
       (e: unknown) => e instanceof NotFoundException,
     );
   });
@@ -884,7 +885,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
       ownerUserId: 'user-1',
       telegramUser: { id: 'user-1' },
     });
-    const result = await ok.service.listForSubscription('sub-1', { telegramId: '42' });
+    const result = await ok.service.listForSubscription('sub-1', { telegramId: '42' }, CabinetView.all());
     assert.equal(result.availability, 'AVAILABLE');
 
     const missing = build({
@@ -895,7 +896,7 @@ describe('AddOnEligibilityService.listForSubscription', () => {
       telegramUser: null,
     });
     await assert.rejects(
-      () => missing.service.listForSubscription('sub-1', { telegramId: '999' }),
+      () => missing.service.listForSubscription('sub-1', { telegramId: '999' }, CabinetView.all()),
       (e: unknown) => e instanceof NotFoundException,
     );
   });
@@ -903,11 +904,11 @@ describe('AddOnEligibilityService.listForSubscription', () => {
   it('throws NotFound (fail-closed) for an empty identity object and a non-numeric telegramId', async () => {
     const { service } = build({ status: 'ACTIVE', term: financeTerm, catalog: [trafficAddOn] });
     await assert.rejects(
-      () => service.listForSubscription('sub-1', {}),
+      () => service.listForSubscription('sub-1', {}, CabinetView.all()),
       (e: unknown) => e instanceof NotFoundException,
     );
     await assert.rejects(
-      () => service.listForSubscription('sub-1', { telegramId: 'not-a-number' }),
+      () => service.listForSubscription('sub-1', { telegramId: 'not-a-number' }, CabinetView.all()),
       (e: unknown) => e instanceof NotFoundException,
     );
   });
@@ -960,7 +961,7 @@ describe('AddOnEligibilityService — an individually-configured limit decides t
       sub: { deviceLimit: 0, planSnapshot: decidableSnapshot() },
     });
 
-    const result = await service.listForSubscription('sub-1');
+    const result = await service.listForSubscription('sub-1', undefined, CabinetView.all());
 
     // Only the DEVICE add-on is withheld. Asserting the surviving traffic offer
     // keeps this from passing for the wrong reason — a blanket EMPTY would
@@ -978,7 +979,7 @@ describe('AddOnEligibilityService — an individually-configured limit decides t
       sub: { trafficLimit: null, planSnapshot: decidableSnapshot() },
     });
 
-    const result = await service.listForSubscription('sub-1');
+    const result = await service.listForSubscription('sub-1', undefined, CabinetView.all());
 
     assert.deepEqual(ids(result), ['a-device']);
   });
@@ -996,7 +997,7 @@ describe('AddOnEligibilityService — an individually-configured limit decides t
       sub: { deviceLimit: 0, planSnapshot: decidableSnapshot({ deviceLimit: 0 }) },
     });
 
-    const result = await service.listForSubscription('sub-1');
+    const result = await service.listForSubscription('sub-1', undefined, CabinetView.all());
 
     assert.deepEqual(ids(result), ['a-device']);
   });
@@ -1009,7 +1010,7 @@ describe('AddOnEligibilityService — an individually-configured limit decides t
       sub: { trafficLimit: null, planSnapshot: decidableSnapshot({ trafficLimit: null }) },
     });
 
-    const result = await service.listForSubscription('sub-1');
+    const result = await service.listForSubscription('sub-1', undefined, CabinetView.all());
 
     assert.deepEqual(ids(result), ['a-traffic']);
   });
@@ -1022,7 +1023,7 @@ describe('AddOnEligibilityService — an individually-configured limit decides t
       sub: { deviceLimit: 12, planSnapshot: decidableSnapshot() },
     });
 
-    const result = await service.listForSubscription('sub-1');
+    const result = await service.listForSubscription('sub-1', undefined, CabinetView.all());
 
     assert.deepEqual(ids(result), ['a-device']);
   });
@@ -1035,7 +1036,7 @@ describe('AddOnEligibilityService — an individually-configured limit decides t
       sub: { trafficLimit: 250, planSnapshot: decidableSnapshot() },
     });
 
-    const result = await service.listForSubscription('sub-1');
+    const result = await service.listForSubscription('sub-1', undefined, CabinetView.all());
 
     assert.deepEqual(ids(result), ['a-traffic']);
   });
@@ -1054,7 +1055,7 @@ describe('AddOnEligibilityService — an individually-configured limit decides t
       sub: { deviceLimit: 0, planSnapshot: unreadableLimits },
     });
 
-    const result = await service.listForSubscription('sub-1');
+    const result = await service.listForSubscription('sub-1', undefined, CabinetView.all());
 
     assert.deepEqual(ids(result), ['a-device']);
   });
@@ -1067,7 +1068,7 @@ describe('AddOnEligibilityService — an individually-configured limit decides t
       sub: { trafficLimit: null, planSnapshot: unreadableLimits },
     });
 
-    const result = await service.listForSubscription('sub-1');
+    const result = await service.listForSubscription('sub-1', undefined, CabinetView.all());
 
     assert.deepEqual(ids(result), ['a-traffic']);
   });
@@ -1091,7 +1092,7 @@ describe('AddOnEligibilityService — an individually-configured limit decides t
       projection: { activeTrafficContributionBytes: 0n, activeDeviceContribution: 5 },
     });
 
-    const result = await service.listForSubscription('sub-1');
+    const result = await service.listForSubscription('sub-1', undefined, CabinetView.all());
 
     assert.deepEqual(ids(result), ['a-device']);
     assert.equal(stats.projectionReads, 1, 'a hard 0 in place of the row is a second derivation');
@@ -1107,7 +1108,7 @@ describe('AddOnEligibilityService — an individually-configured limit decides t
       sub: { deviceLimit: 0, planSnapshot: decidableSnapshot() },
     });
 
-    const result = await service.listForSubscription('sub-1');
+    const result = await service.listForSubscription('sub-1', undefined, CabinetView.all());
 
     assert.deepEqual(ids(result), []);
     assert.equal(stats.projectionReads, 0, 'the pre-cutover path must not pay for a query it cannot use');

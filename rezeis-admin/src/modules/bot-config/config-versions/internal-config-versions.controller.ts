@@ -1,8 +1,11 @@
-import { Body, Controller, HttpCode, HttpStatus, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Headers, HttpCode, HttpStatus, Post, UseGuards } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { SkipThrottle } from '@nestjs/throttler';
 
 import { InternalAdminAuthGuard } from '../../auth/guards/internal-admin-auth.guard';
+import { panelAnnouncement, type PanelAnnouncement } from '../../reiwa-peers/panel-capabilities';
+import type { HeaderBag } from '../../reiwa-peers/reiwa-client-headers';
+import { ReiwaPeerRegistry } from '../../reiwa-peers/reiwa-peer-registry.service';
 import { ConfigDeliveryState } from './config-delivery-state';
 import {
   CONFIG_VERSION_KEYS,
@@ -40,6 +43,18 @@ export function readConfigVersionsPoll(body: unknown): ConfigVersionsPoll | null
   return { consumer, held: kept };
 }
 
+/** The poll's answer. */
+export interface ConfigVersionsAnswer {
+  readonly versions: ConfigVersions;
+  /**
+   * This panel's release and the `panel.*` capabilities it announces
+   * (`panel-capabilities.ts`). A cabinet of 0.9.7.53 reads `versions` only and
+   * ignores the key; a later one keeps it, and takes an answer without it — an
+   * older panel — as "announces nothing".
+   */
+  readonly panel: PanelAnnouncement;
+}
+
 /**
  * InternalConfigVersionsController
  * ────────────────────────────────
@@ -56,8 +71,15 @@ export function readConfigVersionsPoll(body: unknown): ConfigVersionsPoll | null
  * minutes after a save, a process still holding the old version is what raises
  * the operator's card.
  *
- * Response: `{ versions: { <group>: <32 hex> } }`. A group whose payload cannot
- * be read right now is absent, never guessed.
+ * The poll is also how the panel knows the cabinet (`ReiwaPeerRegistry`): a
+ * process of 0.9.7.54 and later says what it is and what it can do in two
+ * headers (`x-reiwa-client`, `x-reiwa-capabilities`); a poll without them is a
+ * 0.9.7.53 process. Recorded before anything else and never failing the poll.
+ * The body stays `{ consumer, held }` — a new body field would be a 400 on
+ * every older panel.
+ *
+ * Response: `{ versions: { <group>: <32 hex> }, panel: { version, capabilities } }`.
+ * A group whose payload cannot be read right now is absent, never guessed.
  *
  * Auth: `InternalAdminAuthGuard`, the api_token and signature every internal
  * route the cabinet calls uses.
@@ -77,16 +99,21 @@ export class InternalConfigVersionsController {
   public constructor(
     private readonly versions: ConfigVersionsService,
     private readonly state: ConfigDeliveryState,
+    private readonly peers: ReiwaPeerRegistry,
   ) {}
 
   @Post()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Current version of each settings group the cabinet copies; takes what it holds' })
-  public async poll(@Body() body: unknown): Promise<{ readonly versions: ConfigVersions }> {
+  public async poll(@Body() body: unknown, @Headers() headers?: HeaderBag): Promise<ConfigVersionsAnswer> {
+    // Who is polling, from the body's `consumer` alone: a report whose `held`
+    // this panel cannot read is still a process that polled. Never throws.
+    const consumer = typeof body === 'object' && body !== null ? (body as { consumer?: unknown }).consumer : undefined;
+    await this.peers.observePoll(consumer, headers);
     const report = readConfigVersionsPoll(body);
     if (report !== null) {
       await this.state.recordReport(report.consumer, { held: report.held, reportedAt: Date.now() });
     }
-    return { versions: await this.versions.current() };
+    return { versions: await this.versions.current(), panel: panelAnnouncement() };
   }
 }

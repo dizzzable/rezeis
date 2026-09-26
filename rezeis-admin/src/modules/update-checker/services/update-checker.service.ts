@@ -4,6 +4,7 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { firstValueFrom } from 'rxjs';
 
 import { shouldRunSchedules } from '../../../common/runtime/process-role.util';
+import { ReiwaPeerRegistry } from '../../reiwa-peers/reiwa-peer-registry.service';
 
 // CommonJS interop: Node 24 still loads JSON modules via `require()` more
 // reliably than via `import attributes`, and `package.json` lives outside
@@ -39,6 +40,14 @@ export interface UpdateCheckResultInterface {
   readonly error: string | null;
 }
 
+/** What the hourly check computes and caches. */
+interface CheckedUpdateStatus extends UpdateCheckResultInterface {
+  readonly components: {
+    readonly panel: UpdateCheckResultInterface;
+    readonly reiwa: UpdateCheckResultInterface;
+  };
+}
+
 /**
  * Combined update status for every component the panel tracks: the admin
  * panel itself plus the reiwa user cabinet (whose running version is
@@ -50,7 +59,15 @@ export interface UpdateCheckResultInterface {
 export interface UpdateStatusInterface extends UpdateCheckResultInterface {
   readonly components: {
     readonly panel: UpdateCheckResultInterface;
-    readonly reiwa: UpdateCheckResultInterface;
+    readonly reiwa: UpdateCheckResultInterface & {
+      /**
+       * The connected cabinet lacks something this panel expects
+       * (`ReiwaPeerRegistry.behindSurfaces`): the top bar's «кабинет старше
+       * панели», linking to «WEB Reiwa». Read on every call, not with the
+       * hourly cache — it changes the moment the cabinet is updated.
+       */
+      readonly behindPanel: boolean;
+    };
   };
 }
 
@@ -90,7 +107,7 @@ const RESULT_CACHE_MS = 60 * 60 * 1_000; // 1 hour
 export class UpdateCheckerService implements OnModuleInit {
   private readonly logger = new Logger(UpdateCheckerService.name);
 
-  private cached: UpdateStatusInterface | null = null;
+  private cached: CheckedUpdateStatus | null = null;
   private cachedAt = 0;
 
   /**
@@ -104,6 +121,14 @@ export class UpdateCheckerService implements OnModuleInit {
   public constructor(
     @Optional()
     private readonly httpService?: HttpService,
+    /**
+     * What the panel recorded about the cabinet, in its Redis: read BEFORE
+     * the in-memory heartbeat, which a panel restart loses — so the top bar
+     * no longer says 0.0.0 for the hour until reiwa's next heartbeat.
+     * `@Optional()` at the tail for a spec that builds this by hand.
+     */
+    @Optional()
+    private readonly peers?: ReiwaPeerRegistry,
   ) {}
 
   public async onModuleInit(): Promise<void> {
@@ -132,10 +157,37 @@ export class UpdateCheckerService implements OnModuleInit {
    * Used by the admin UI banner.
    */
   public async getStatus(forceRefresh = false): Promise<UpdateStatusInterface> {
-    if (!forceRefresh && this.cached && Date.now() - this.cachedAt < RESULT_CACHE_MS) {
-      return this.cached;
-    }
-    return this.safeCheck();
+    const checked =
+      !forceRefresh && this.cached && Date.now() - this.cachedAt < RESULT_CACHE_MS
+        ? this.cached
+        : await this.safeCheck();
+    const behind = (await this.peers?.behindSurfaces().catch((): readonly string[] => [])) ?? [];
+    return {
+      ...checked,
+      components: {
+        ...checked.components,
+        reiwa: { ...(await this.withRecordedReiwaVersion(checked.components.reiwa)), behindPanel: behind.length > 0 },
+      },
+    };
+  }
+
+  /**
+   * The cached Reiwa result with the version the panel has on record NOW.
+   *
+   * Read on every call, not with the hourly cache: the check at boot runs while
+   * the cache may still be connecting, and then it knows no version — with
+   * `REIWA_URL` unreachable it cached «0.0.0» for the hour. The records
+   * (`ReiwaPeerRegistry`) outlive a panel restart, so the first call that can
+   * read them corrects it; `hasUpdate` follows the version it is shown with.
+   */
+  private async withRecordedReiwaVersion(result: UpdateCheckResultInterface): Promise<UpdateCheckResultInterface> {
+    const recorded = (await this.peers?.runningVersion('api').catch((): null => null)) ?? null;
+    if (recorded === null || recorded === result.current) return result;
+    return {
+      ...result,
+      current: recorded,
+      hasUpdate: result.latest !== null ? compareSemver(recorded, result.latest) < 0 : false,
+    };
   }
 
   /**
@@ -155,27 +207,41 @@ export class UpdateCheckerService implements OnModuleInit {
    * panel result is spread at the top level so the legacy banner/indicator
    * (which read the flat fields) keep working unchanged.
    */
-  private async safeCheck(): Promise<UpdateStatusInterface> {
+  private async safeCheck(): Promise<CheckedUpdateStatus> {
     const panelCurrent = (PACKAGE_JSON.version ?? '0.0.0').trim();
-    // Prefer the heartbeat-reported version (fast, no network). When it
-    // hasn't arrived yet — typically right after an admin restart, since the
-    // report is in-memory and reiwa only re-announces hourly — pull the live
-    // version from reiwa's /health so the widget doesn't show a stale 0.0.0.
-    const reiwaCurrent =
-      this.reiwaReportedVersion ?? (await this.fetchReiwaVersionFromHealth()) ?? '0.0.0';
+    const reiwaCurrent = (await this.readReiwaVersion()) ?? '0.0.0';
 
     const [panel, reiwa] = await Promise.all([
       this.checkRepo(DEFAULT_GITHUB_REPO, panelCurrent),
       this.checkRepo(REIWA_GITHUB_REPO, reiwaCurrent),
     ]);
 
-    const result: UpdateStatusInterface = {
+    const result: CheckedUpdateStatus = {
       ...panel,
       components: { panel, reiwa },
     };
     this.cached = result;
     this.cachedAt = Date.now();
     return result;
+  }
+
+  /**
+   * reiwa's running version, cheapest source first:
+   *  1. what the panel recorded from the cabinet itself (`ReiwaPeerRegistry`,
+   *     in Redis, so it outlives a panel restart);
+   *  2. the heartbeat this process received (in memory);
+   *  3. reiwa's public `/health` — which is then recorded, so the cabinet is
+   *     known from the panel's first boot on this release rather than from its
+   *     first heartbeat an hour later. The registry files it only while it
+   *     knows nothing else about the cabinet's API.
+   */
+  private async readReiwaVersion(): Promise<string | null> {
+    const recorded = (await this.peers?.runningVersion('api').catch((): null => null)) ?? null;
+    if (recorded !== null) return recorded;
+    if (this.reiwaReportedVersion !== null) return this.reiwaReportedVersion;
+    const pulled = await this.fetchReiwaVersionFromHealth();
+    if (pulled !== null) await this.peers?.observeHealth(pulled);
+    return pulled;
   }
 
   /**

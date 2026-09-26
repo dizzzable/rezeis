@@ -28,6 +28,8 @@ import { InternalBrandingController } from '../src/modules/settings/controllers/
 import { InternalPlatformPolicyController } from '../src/modules/settings/controllers/internal-platform-policy.controller';
 import { InternalConnectPageController } from '../src/modules/subpage-config/connect-page/connect-page.controllers';
 import { InternalGuestSupportController } from '../src/modules/support-tickets/controllers/internal-guest-support.controller';
+import { panelAnnouncement } from '../src/modules/reiwa-peers/panel-capabilities';
+import type { ReiwaPeerRegistry } from '../src/modules/reiwa-peers/reiwa-peer-registry.service';
 
 /**
  * The versions the cabinet polls
@@ -228,7 +230,15 @@ describe('POST /api/internal/config-versions', () => {
       },
     } as unknown as ConfigDeliveryState;
     const service = { current: async () => versions } as unknown as ConfigVersionsService;
-    return { controller: new InternalConfigVersionsController(service, state), reports };
+    // The cabinet's record is `ReiwaPeerRegistry`'s own spec; here only what
+    // the poll hands it.
+    const polls: Array<{ consumer: unknown; headers: unknown }> = [];
+    const peers = {
+      observePoll: async (consumer: unknown, headers: unknown) => {
+        polls.push({ consumer, headers });
+      },
+    } as unknown as ReiwaPeerRegistry;
+    return { controller: new InternalConfigVersionsController(service, state, peers), reports, polls };
   }
 
   const V1 = 'a'.repeat(32);
@@ -239,7 +249,9 @@ describe('POST /api/internal/config-versions', () => {
 
     const answer = await route.poll({ consumer: 'bot', held: { botConfig: V1, platformPolicy: null } });
 
-    assert.deepEqual(answer, { versions: { landing: V1 } });
+    // `panel`: this panel's release and the capabilities it announces — a
+    // cabinet of 0.9.7.53 reads `versions` only.
+    assert.deepEqual(answer, { versions: { landing: V1 }, panel: panelAnnouncement() });
     assert.equal(reports.length, 1);
     const kept = reports[0] as { consumer: string; report: { held: unknown; reportedAt: number } };
     assert.equal(kept.consumer, 'bot');
@@ -249,9 +261,24 @@ describe('POST /api/internal/config-versions', () => {
 
   it('answers the versions to a poll with no report worth keeping, and keeps none', async () => {
     const { controller: route, reports } = controller({ landing: V1 });
-    assert.deepEqual(await route.poll(undefined), { versions: { landing: V1 } });
-    assert.deepEqual(await route.poll({ consumer: 'worker', held: {} }), { versions: { landing: V1 } });
+    assert.deepEqual(await route.poll(undefined), { versions: { landing: V1 }, panel: panelAnnouncement() });
+    assert.deepEqual(await route.poll({ consumer: 'worker', held: {} }), {
+      versions: { landing: V1 },
+      panel: panelAnnouncement(),
+    });
     assert.equal(reports.length, 0);
+  });
+
+  it('hands every poll to the cabinet registry, with its consumer and headers, before anything else', async () => {
+    const { controller: route, polls } = controller({ landing: V1 });
+    const headers = { 'x-reiwa-client': 'surface=api; version=0.9.7.54; instance=reiwa' };
+    // A `held` this panel cannot read is still a process that polled.
+    await route.poll({ consumer: 'api', held: 'unreadable' }, headers);
+    await route.poll(undefined);
+    assert.deepEqual(polls, [
+      { consumer: 'api', headers },
+      { consumer: undefined, headers: undefined },
+    ]);
   });
 
   it('keeps only groups it knows, holding a version or nothing', () => {

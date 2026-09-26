@@ -42,6 +42,8 @@ import type { NotifyDeliveryResult } from './bot-notifier.client';
 // The class is the lookup token only (`moduleRef.get`, on first use), never a
 // constructor dependency: see the `moduleRef` parameter.
 import { AddOnEligibilityService } from '../../add-ons/services/add-on-eligibility.service';
+import type { CabinetView } from '../../reiwa-peers/cabinet-capabilities';
+import { ReiwaPeerRegistry } from '../../reiwa-peers/reiwa-peer-registry.service';
 import { offerBringsTrafficBack, readTrafficTopUp, TRAFFIC_TOP_UP_KEY } from '../utils/traffic-top-up.util';
 
 /**
@@ -238,6 +240,9 @@ export const LADDER_MAX_BOT_DEFERRALS = 3;
  * heard yet, Remnawave once, for 3 s at most (`AddOnEligibilityService`).
  */
 const TRAFFIC_TOP_UP_DEADLINE_MS = 5_000;
+
+/** «Трафик исчерпан»'s answer when the panel does not know the cabinet's web (review R1-08). */
+const UNKNOWN_CABINET = Symbol('UNKNOWN_CABINET');
 
 interface CreateUserNotificationInput {
   readonly userId: string;
@@ -463,6 +468,15 @@ export class UserNotificationsService {
      */
     @Optional()
     private readonly moduleRef?: ModuleRef,
+    /**
+     * What the cabinet's web can show, for the add-on offer «Трафик исчерпан»
+     * asks about: the button is there exactly when that cabinet's add-on page
+     * lists something. Provided by the global `ReiwaPeersModule`; `@Optional()`
+     * at the tail for the positional specs — without it the offer is asked for
+     * the floor cabinet, which is never sold anything new.
+     */
+    @Optional()
+    private readonly reiwaPeers?: ReiwaPeerRegistry,
   ) {}
 
   /**
@@ -509,6 +523,12 @@ export class UserNotificationsService {
    * the button is there exactly when the page has something to buy. Any other
    * notice, a payload that already answers, and an answer that could not be
    * read in time are left as they are: the notice then behaves as before.
+   *
+   * The page is the CABINET's, so the offer is asked for what the cabinet's
+   * web can show (`ReiwaPeerRegistry.knownView('web')`): «до сброса» traffic
+   * that an old cabinet is not sold does not earn the button either. When the
+   * panel does not know the cabinet's web at all, nothing is asked and the
+   * notice keeps its buttons (review R1-08).
    */
   private async withTrafficTopUpAnswer(
     type: string,
@@ -519,9 +539,21 @@ export class UserNotificationsService {
     const offers = this.resolveAddOnOffers();
     if (subscriptionId === null || offers === null) return payload;
     try {
-      const offer = await withLadderDeadline(offers.listForSubscription(subscriptionId), TRAFFIC_TOP_UP_DEADLINE_MS);
+      const asked = (async () => {
+        const audience = await this.cabinetWebView();
+        return audience === null ? UNKNOWN_CABINET : offers.listForSubscription(subscriptionId, undefined, audience);
+      })();
+      const offer = await withLadderDeadline(asked, TRAFFIC_TOP_UP_DEADLINE_MS);
       if (offer === null) {
         this.logger.warn(`«Трафик исчерпан» for ${subscriptionId}: the add-on offer did not answer in time; the notice keeps its buttons`);
+        return payload;
+      }
+      if (offer === UNKNOWN_CABINET) {
+        // The panel does not know the cabinet's web right now (never heard
+        // from, or its records unreadable): the floor would stand in at a
+        // gate, but written into the notice it would outlast the moment
+        // (review R1-08). The notice keeps its buttons, as before the answer.
+        this.logger.warn(`«Трафик исчерпан» for ${subscriptionId}: the cabinet is not known to the panel; the notice keeps its buttons`);
         return payload;
       }
       return { ...payload, [TRAFFIC_TOP_UP_KEY]: offerBringsTrafficBack(offer) };
@@ -533,6 +565,16 @@ export class UserNotificationsService {
       );
       return payload;
     }
+  }
+
+  /**
+   * What the cabinet's web can show — `null` when the panel does not know it:
+   * never heard from, its records unreadable, or no registry at all (a spec).
+   * Never throws.
+   */
+  private async cabinetWebView(): Promise<CabinetView | null> {
+    if (this.reiwaPeers === undefined) return null;
+    return this.reiwaPeers.knownView('web');
   }
 
   /** The add-on offer, looked up once (see the `moduleRef` parameter). */

@@ -1,9 +1,11 @@
-import { Body, Controller, Get, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Headers, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { SkipThrottle } from '@nestjs/throttler';
 
 import { AdminJwtAuthGuard } from '../../auth/guards/admin-jwt-auth.guard';
 import { InternalAdminAuthGuard } from '../../auth/guards/internal-admin-auth.guard';
+import type { HeaderBag } from '../../reiwa-peers/reiwa-client-headers';
+import { ReiwaPeerRegistry } from '../../reiwa-peers/reiwa-peer-registry.service';
 import { ReportReiwaVersionDto } from '../dto/report-reiwa-version.dto';
 import { UpdateCheckerService } from '../services/update-checker.service';
 
@@ -41,6 +43,11 @@ export class AdminUpdateCheckerController {
  * to report its running version so the panel's Updates widget can show the
  * live reiwa version alongside the latest reiwa release. Guarded by the
  * internal API-token guard, same as every other `internal/*` route.
+ *
+ * It is also evidence of which cabinet is connected (`ReiwaPeerRegistry`):
+ * with `x-reiwa-client` it refreshes the declared record; without it, it
+ * files the exact version of a silent cabinet. The body stays `{ version }` —
+ * the DTO is strict, and a new field would be a 400 on every older panel.
  */
 @ApiTags('internal/update-checker')
 @UseGuards(InternalAdminAuthGuard)
@@ -54,11 +61,20 @@ export class AdminUpdateCheckerController {
 // `src/modules/user-hints/controllers/internal-user-hints.controller.ts`.
 @SkipThrottle()
 export class InternalUpdateCheckerController {
-  public constructor(private readonly updateCheckerService: UpdateCheckerService) {}
+  public constructor(
+    private readonly updateCheckerService: UpdateCheckerService,
+    private readonly peers: ReiwaPeerRegistry,
+  ) {}
 
   @Post('reiwa-version')
   @ApiOperation({ summary: 'reiwa reports its running version' })
-  public reportReiwaVersion(@Body() body: ReportReiwaVersionDto): { ok: true } {
+  public async reportReiwaVersion(
+    @Body() body: ReportReiwaVersionDto,
+    @Headers() headers?: HeaderBag,
+  ): Promise<{ ok: true }> {
+    // First, so the update check this report triggers reads the same record.
+    // Never throws.
+    await this.peers.observeHeartbeat(body.version, headers);
     this.updateCheckerService.reportReiwaVersion(body.version);
     return { ok: true };
   }

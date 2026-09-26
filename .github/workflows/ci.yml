@@ -267,3 +267,4 @@ jobs:
           test/reset-boundary-confirmation-postgres.spec.ts
           test/reset-schedule-check-postgres.spec.ts
           test/reset-add-on-end-to-end-postgres.spec.ts
+          test/cabinet-capability-gate-postgres.spec.ts

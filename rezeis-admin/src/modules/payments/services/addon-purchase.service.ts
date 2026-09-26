@@ -44,6 +44,7 @@ import {
 import { SubscriptionTermService } from '../../add-on-entitlements/services/subscription-term.service';
 import { PricingService } from '../../plans/services/pricing.service';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
+import { CABINET_CAPABILITY, type CabinetView } from '../../reiwa-peers/cabinet-capabilities';
 import { AccessModeGuard } from '../../settings/services/access-mode-guard.service';
 import { assertPurchaserNotBlocked } from '../utils/blocked-purchaser.util';
 import { SettingsService } from '../../settings/services/settings.service';
@@ -68,6 +69,12 @@ export interface AddOnCheckoutInput {
   readonly contractVersion?: number;
   readonly idempotencyKey?: string;
   readonly expectedAddOnRevision?: number;
+  /**
+   * The cabinet asking — what it can show (`ReiwaPeerRegistry.viewOfRequest`,
+   * from the headers of this request). Required, with no default: a checkout
+   * sells only what the same cabinet's listing offered.
+   */
+  readonly audience: CabinetView;
 }
 
 /**
@@ -407,6 +414,23 @@ export class AddOnPurchaseService {
       throw new BadRequestException({
         code: 'ADDON_LIFETIME_UNAVAILABLE',
         message: 'This add-on cannot be delivered for its advertised period on this subscription',
+      });
+    }
+    // ── Audience guard: «до сброса» only through a cabinet that shows it ──
+    //
+    // The listing withholds a «до сброса» add-on from a cabinet that cannot
+    // show its reset end (`AddOnEligibilityService.listForSubscription`), but
+    // a page opened before the panel was updated still holds the old listing,
+    // and its «Оплатить» lands here. Refused with the lifetime guard's own
+    // code, before any draft: no transaction, no provider invoice, no money.
+    if (
+      lifetimeGrant !== null &&
+      lifetimeGrant.lifetime === AddOnLifetime.UNTIL_NEXT_RESET &&
+      !input.audience.can(CABINET_CAPABILITY.addonResetEnd)
+    ) {
+      throw new BadRequestException({
+        code: 'ADDON_LIFETIME_UNAVAILABLE',
+        message: 'This add-on ends at the next traffic reset, which the calling cabinet cannot show; update Reiwa',
       });
     }
     // ── Pricing (per gateway currency) ────────────────────────────────────

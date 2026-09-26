@@ -7,6 +7,7 @@ import { Prisma } from '@prisma/client';
 import { AddOnEligibilityService } from '../src/modules/add-ons/services/add-on-eligibility.service';
 import { AddOnPurchaseService } from '../src/modules/payments/services/addon-purchase.service';
 import { buildAddOnCheckoutFingerprint } from '../src/modules/payments/utils/checkout-fingerprint.util';
+import { CabinetView } from '../src/modules/reiwa-peers/cabinet-capabilities';
 
 // `UNTIL_SUBSCRIPTION_END` because that is what the default catalog row below
 // sells. A `UNTIL_NEXT_RESET` add-on is only SELLABLE while the intake can bind
@@ -296,6 +297,7 @@ const baseInput = {
   addOnId: 'addon-1',
   subscriptionId: 'sub-1',
   gatewayType: 'YOOKASSA' as never,
+  audience: CabinetView.all(),
   contractVersion: 2,
   idempotencyKey: 'idem-1',
 };
@@ -363,7 +365,7 @@ describe('AddOnPurchaseService checkout idempotency (T-005)', () => {
   it('keyless (legacy) checkout always creates a fresh draft with no idempotency fields', async () => {
     const { service, created } = build({ existing: null });
     const result = await service.checkout({
-      userId: 'user-1', addOnId: 'addon-1', subscriptionId: 'sub-1', gatewayType: 'YOOKASSA' as never,
+      userId: 'user-1', addOnId: 'addon-1', subscriptionId: 'sub-1', gatewayType: 'YOOKASSA' as never, audience: CabinetView.all(),
     });
     assert.equal(created.length, 1);
     const draft = created[0];
@@ -596,9 +598,7 @@ describe('AddOnPurchaseService — checkout agrees with the offer about "already
       user: { findFirst: async () => ({ id: 'user-1' }) },
       addOn: { findMany: async () => [catalogEntry] },
     };
-    const offer = await new AddOnEligibilityService(eligibilityPrisma as never, {} as never).listForSubscription(
-      'sub-1',
-    );
+    const offer = await new AddOnEligibilityService(eligibilityPrisma as never, {} as never).listForSubscription('sub-1', undefined, CabinetView.all());
 
     const { service, state } = build({
       sub: world.sub,
@@ -614,6 +614,7 @@ describe('AddOnPurchaseService — checkout agrees with the offer about "already
         addOnId: 'addon-1',
         subscriptionId: 'sub-1',
         gatewayType: 'YOOKASSA' as never,
+        audience: CabinetView.all(),
         contractVersion: 2,
       });
       bought = true;

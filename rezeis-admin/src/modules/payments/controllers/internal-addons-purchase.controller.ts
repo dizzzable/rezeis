@@ -1,8 +1,10 @@
-import { Body, Controller, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Headers, Post, UseGuards } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { SkipThrottle } from '@nestjs/throttler';
 
 import { InternalAdminAuthGuard } from '../../auth/guards/internal-admin-auth.guard';
+import type { HeaderBag } from '../../reiwa-peers/reiwa-client-headers';
+import { ReiwaPeerRegistry } from '../../reiwa-peers/reiwa-peer-registry.service';
 import { InternalAddOnPurchaseDto } from '../dto/internal-addon-purchase.dto';
 import { InternalPaymentCheckoutInterface } from '../interfaces/internal-payment-checkout.interface';
 import { AddOnPurchaseService } from '../services/addon-purchase.service';
@@ -26,12 +28,22 @@ import { AddOnPurchaseService } from '../services/addon-purchase.service';
 // `src/modules/user-hints/controllers/internal-user-hints.controller.ts`.
 @SkipThrottle()
 export class InternalAddOnsPurchaseController {
-  public constructor(private readonly addOnPurchaseService: AddOnPurchaseService) {}
+  public constructor(
+    private readonly addOnPurchaseService: AddOnPurchaseService,
+    private readonly peers: ReiwaPeerRegistry,
+  ) {}
 
+  /**
+   * The audience is the CALLER, from the headers of this very request: a
+   * money gate never reads what the panel remembers about some other process
+   * (`ReiwaPeerRegistry.viewOfRequest`). A silent caller is judged by the
+   * evidence its surface left, and without any, by the floor.
+   */
   @Post('purchase')
   @ApiOperation({ summary: 'Create a checkout for an add-on top-up (reiwa edge)' })
-  public purchase(
+  public async purchase(
     @Body() input: InternalAddOnPurchaseDto,
+    @Headers() headers?: HeaderBag,
   ): Promise<InternalPaymentCheckoutInterface> {
     return this.addOnPurchaseService.checkout({
       userId: input.userId,
@@ -45,6 +57,7 @@ export class InternalAddOnsPurchaseController {
       contractVersion: input.contractVersion,
       idempotencyKey: input.idempotencyKey,
       expectedAddOnRevision: input.expectedAddOnRevision,
+      audience: await this.peers.viewOfRequest(headers, 'api'),
     });
   }
 }

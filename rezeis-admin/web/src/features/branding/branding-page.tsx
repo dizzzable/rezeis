@@ -33,6 +33,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { BrandingPreview } from "./branding-preview";
 import { BrandingAssetField } from "./branding-asset-field";
 import { BrandingDeliveryNotice } from "./branding-delivery-notice";
+import { CabinetCompatNotice } from "./cabinet-compat-notice";
 import { BrandMarkPreviewPanel } from "./brand-mark-tile";
 import { BRAND_LOGO_TILE_BASE_PX } from "./brand-logo-geometry";
 import { CARD_LOGO_PRESETS, CardLogoMark, type CardLogoPreset } from "./card-logo-mark";
@@ -1056,6 +1057,10 @@ export default function WebReiwaPage() {
           </Button>
         </div>
       </div>
+
+      {/* Which Reiwa the panel talks to, and what does not work while it is
+          older than the panel — above the cabinet's report on the last save. */}
+      <CabinetCompatNotice />
 
       <BrandingDeliveryNotice
         savedAt={savedAt}

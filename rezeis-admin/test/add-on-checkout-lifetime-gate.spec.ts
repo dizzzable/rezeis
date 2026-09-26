@@ -5,6 +5,7 @@ import { BadRequestException } from '@nestjs/common';
 
 import { AddOnEligibilityService } from '../src/modules/add-ons/services/add-on-eligibility.service';
 import { AddOnPurchaseService } from '../src/modules/payments/services/addon-purchase.service';
+import { CabinetView } from '../src/modules/reiwa-peers/cabinet-capabilities';
 
 /**
  * ── The offer and the checkout must agree about UNTIL WHEN ──────────────────
@@ -199,9 +200,7 @@ async function askBoth(world: {
   const trafficReset = {
     describeAllowance: async () => ({ freeUsesPerTerm: 0, freeRemaining: 0, isFree: false }),
   };
-  const offer = await new AddOnEligibilityService(eligibilityPrisma as never, trafficReset as never).listForSubscription(
-    'sub-1',
-  );
+  const offer = await new AddOnEligibilityService(eligibilityPrisma as never, trafficReset as never).listForSubscription('sub-1', undefined, CabinetView.all());
 
   const created: Array<{ data: Record<string, unknown> }> = [];
   const counters = { providerCalls: 0, inlineGrants: 0, alignments: 0 };
@@ -299,6 +298,7 @@ async function askBoth(world: {
       addOnId: 'addon-1',
       subscriptionId: 'sub-1',
       gatewayType: 'YOOKASSA' as never,
+      audience: CabinetView.all(),
       contractVersion: 2,
     });
     bought = true;

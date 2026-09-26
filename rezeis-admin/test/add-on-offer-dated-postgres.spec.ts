@@ -13,6 +13,7 @@ import { SubscriptionTermService } from '../src/modules/add-on-entitlements/serv
 import { AddOnEligibilityService } from '../src/modules/add-ons/services/add-on-eligibility.service';
 import { PaymentSubscriptionMutationService } from '../src/modules/payments/services/payment-subscription-mutation.service';
 import { removeDurableFixtures } from './helpers/durable-rows-cleanup';
+import { CabinetView } from '../src/modules/reiwa-peers/cabinet-capabilities';
 
 /**
  * THE OFFER SAYS «DATED» EXACTLY WHEN THE PURCHASE IS RECORDED WITH AN END —
@@ -125,7 +126,7 @@ async function catalogAddOn(): Promise<string> {
 
 /** What the offer says of `addOnId` on this subscription. */
 async function offerOf(subscriptionId: string, addOnId: string): Promise<{ dated: boolean; expiresAt: string | null }> {
-  const listing = await offers.listForSubscription(subscriptionId);
+  const listing = await offers.listForSubscription(subscriptionId, undefined, CabinetView.all());
   const offered = listing.addOns.find((addOn) => addOn.id === addOnId);
   assert.ok(offered !== undefined, 'fixture: the add-on is offered');
   return { dated: offered.eligibility.dated, expiresAt: offered.eligibility.expiresAt };
@@ -263,7 +264,7 @@ run('the offer’s «dated» against the real fulfilment — PostgreSQL', () => 
    */
   async function notOfferedToALifetimeSubscription(owner: { readonly userId: string; readonly subscriptionId: string }) {
     const addOnId = await catalogAddOn();
-    const listing = await withFlags({ direct: true }, () => offers.listForSubscription(owner.subscriptionId));
+    const listing = await withFlags({ direct: true }, () => offers.listForSubscription(owner.subscriptionId, undefined, CabinetView.all()));
     assert.equal(listing.addOns.some((addOn) => addOn.id === addOnId), false, 'not offered');
     const transactionId = await withFlags({ direct: true }, () => buy(owner, addOnId));
     const recorded = await prisma.addOnEntitlement.findFirst({ where: { sourceTransactionId: transactionId } });

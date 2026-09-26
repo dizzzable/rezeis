@@ -698,5 +698,30 @@ export const en = {
         'duplicate-destination-id': 'this section is already higher up in the navigation: it is not shown twice',
       },
     },
+    // The «Reiwa cabinet» block at the top of the page: which cabinet the panel
+    // talks to, and what does not work while it is older. The list comes from the panel.
+    cabinetCompat: {
+      title: 'Reiwa cabinet',
+      behindTitle: 'The cabinet is older than this panel ({{panel}})',
+      surfaces: {
+        api: 'Site and API',
+        bot: 'Bot',
+      },
+      seen: 'Reiwa {{version}} · last heard {{ago}}',
+      seenQuiet: 'Reiwa {{version}} · silent, last heard {{ago}}',
+      justNow: 'just now',
+      unknownVersion: '(version unknown)',
+      silent: 'reports its version, not what it can do (Reiwa 0.9.7.53 and older)',
+      never: 'has not reported itself yet (Reiwa 0.9.7.52 reports its version once an hour) or has not contacted the panel',
+      neverBot: 'does not report itself (Reiwa 0.9.7.52 and older) or has not contacted the panel yet',
+      unavailable: 'the panel cannot read what it knows about it right now',
+      untilUpdated: 'Until it is updated:',
+      nothingCharged:
+        'Everything else works, and nothing is charged for what is hidden. Update Reiwa and it all switches on by itself, with nothing to set up.',
+      untilHeard: 'Until the cabinet reports itself, the panel takes it for version {{floor}}:',
+      untilHeardFooter:
+        'Nothing is charged for what is hidden. Once the cabinet contacts the panel, this shows what it can actually do.',
+      newer: 'The cabinet is newer than the panel: it has capabilities the panel does not know yet ({{count}}). Update the panel.',
+    },
   },
 } as const

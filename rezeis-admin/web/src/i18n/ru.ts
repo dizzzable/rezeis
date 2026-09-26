@@ -35,6 +35,7 @@ export const ru = {
       current: 'Текущая версия',
       panelName: 'Панель',
       reiwaName: 'Reiwa (кабинет)',
+      reiwaBehind: '⚠ Кабинет старше панели — что не работает',
       available: 'Доступно обновление',
       releaseNotes: 'Заметки к релизу',
       upToDate: 'Установлена последняя версия',
