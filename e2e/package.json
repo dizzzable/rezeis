@@ -7,7 +7,9 @@
     "node": "^24.0.0"
   },
   "scripts": {
-    "test": "tsx e2e-runner.ts"
+    "e2e": "node run-e2e.mts",
+    "test": "tsx e2e-runner.ts",
+    "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
     "axios": "^1.18.1",

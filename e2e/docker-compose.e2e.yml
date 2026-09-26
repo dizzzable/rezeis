@@ -1,16 +1,28 @@
 # ═══════════════════════════════════════════════════════════════════════════
-#  E2E test stack: rezeis-admin (NestJS + worker) ↔ reiwa (BFF + bot)
+#  E2E test stack: rezeis-admin (NestJS + worker) ↔ reiwa (BFF API)
 #
 #  Architecture mirrors production: one API process and one worker process off
 #  the SAME rezeis-admin image, split by RUID_PROCESS_ROLE exactly as
 #  rezeis-admin/docker-compose.yml splits them, plus reiwa's BFF API.
+#
+#  START IT WITH `node run-e2e.mts`, not by hand. The runner builds or pulls
+#  both images, brings the services up in order, mints the cabinet's API token
+#  between the panel and the cabinet, runs the scenarios and ALWAYS tears the
+#  project down (`run-e2e.mts` header). `run-e2e.ps1` is a thin wrapper of it.
 #
 #  There is deliberately NO reiwa-bot service. grammy would need a BOT_TOKEN
 #  and a route to api.telegram.org, and nothing in e2e-runner.ts exercises the
 #  bot — an earlier version of this header described a bot container that was
 #  never declared here.
 #
-#  Containers
+#  There is no Remnawave either. Both panel containers point REMNAWAVE_HOST at
+#  a port nothing listens on. The panel boots, reports healthy and serves
+#  without it; the worker's jobs log "Remnawave … did not complete" and carry
+#  on. No scenario needs it. Without the bot, relay events the cabinet hands
+#  on to the bot (e.g. `reiwa.dev.notify`) answer 502 and are retried — log
+#  noise, not a failure.
+#
+#  Services (DNS names on the project network)
 #    - rezeis-e2e-db        Postgres 17  (admin source of truth)
 #    - rezeis-e2e-redis     Valkey 9     (admin BullMQ + cache)
 #    - rezeis-e2e-admin     rezeis-admin NestJS HTTP server  (role: api)
@@ -18,9 +30,22 @@
 #    - reiwa-e2e-redis      Valkey 9     (reiwa session store)
 #    - reiwa-e2e-api        reiwa BFF API
 #
-#  Shared docker network `rezeis-e2e` is created automatically by compose.
-#  All containers expose only their healthchecks; only the admin (8000)
-#  and reiwa (5000) ports are bound to 127.0.0.1 for the test runner.
+#  WHICH IMAGES. `E2E_PANEL_IMAGE` and `E2E_CABINET_IMAGE`, set by the runner
+#  from PANEL_IMAGE / CABINET_IMAGE: a local build of the working tree by
+#  default, or any published image — which is how a MIXED pair is run, a new
+#  panel against the released cabinet or the other way round. There is no
+#  `build:` here on purpose. The runner builds the local images itself and
+#  stamps each with its run id, so an image a failed build left behind can
+#  never pass for this run's; and a compose file that can build could also tag
+#  a local build with a registry name. `pull_policy: never` keeps compose from
+#  fetching a different `:main` than the one the runner pulled and inspected.
+#
+#  NO FIXED NAMES. Containers, the network and the database's anonymous volume
+#  are named by compose after the project (`-p`, default `rezeis-e2e`), so two
+#  stacks with different projects never collide and a teardown can find
+#  everything by the project label. Only the host ports are global; they are
+#  bound to 127.0.0.1 and can be moved with E2E_ADMIN_PORT, E2E_CABINET_PORT
+#  and E2E_DB_PORT.
 # ═══════════════════════════════════════════════════════════════════════════
 
 # The panel → cabinet relay secret, written ONCE and aliased into all three
@@ -31,18 +56,24 @@
 # Three hand-copied literals could drift the same way. Test value; the panel's
 # format is 64-256 alphanumerics.
 x-relay-secret: &relay-secret e2eRelaySecretNotForProduction0123456789abcdef0123456789abcdef01
+# The secret reiwa signs every internal call with (x-request-signature) and
+# the panel verifies, written ONCE for the same reason as the relay secret.
+# e2e-runner.ts reads it from this line to sign its own direct calls to the
+# panel's internal API, so the name and the shape of the line matter.
+x-internal-secret: &internal-secret e2e-internal-shared-secret-0123456789abcdef0123456789abcdef
 
 services:
   rezeis-e2e-db:
     image: postgres:17-alpine
-    container_name: rezeis-e2e-db
     environment:
       POSTGRES_DB: rezeis
       POSTGRES_USER: rezeis
       POSTGRES_PASSWORD: rezeis_secret
       TZ: UTC
+    # Not needed by the run: the panel migrates its own database at start
+    # (docker-entrypoint.sh). Published for a look inside a --keep-alive stack.
     ports:
-      - "127.0.0.1:15432:5432"
+      - "127.0.0.1:${E2E_DB_PORT:-15432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U rezeis -d rezeis"]
       interval: 3s
@@ -53,7 +84,6 @@ services:
 
   rezeis-e2e-redis:
     image: valkey/valkey:9-alpine
-    container_name: rezeis-e2e-redis
     command: ["--bind", "0.0.0.0"]
     healthcheck:
       test: ["CMD", "valkey-cli", "ping"]
@@ -64,16 +94,8 @@ services:
       - rezeis-e2e
 
   rezeis-e2e-admin:
-    build:
-      context: ../rezeis-admin
-      dockerfile: Dockerfile
-      # Stamped with the run's id so run-e2e.ps1 can tell THIS build's image
-      # from one left by an earlier run. A label is image metadata only: every
-      # cached layer stays cached. See Get-ImagesNotBuiltByThisRun.
-      labels:
-        org.rezeis.e2e.build: ${E2E_BUILD_ID:-unstamped}
-    image: rezeis-admin:e2e
-    container_name: rezeis-e2e-admin
+    image: ${E2E_PANEL_IMAGE:-rezeis-admin:e2e}
+    pull_policy: never
     environment:
       NODE_ENV: production
       REZEIS_DOMAIN: localhost
@@ -101,13 +123,20 @@ services:
       # validation before Nest starts.
       ADMIN_CORS_ORIGINS: http://localhost:18000
       # Must equal reiwa’s: reiwa signs internal calls with it and the panel
-      # verifies the HMAC. Test value, and the only place it exists.
-      REZEIS_INTERNAL_SHARED_SECRET: e2e-internal-shared-secret-0123456789abcdef0123456789abcdef
+      # verifies the HMAC. Test value, from the anchor at the top.
+      REZEIS_INTERNAL_SHARED_SECRET: *internal-secret
       # Production splits the one image into two processes by this variable
       # (rezeis-admin/docker-compose.yml: `api` here, `worker` below). Unset,
       # getProcessRole() falls back to `all` — so BOTH containers ran every
       # @Cron job and every tick fired twice, which is the exact double-firing
       # the split exists to prevent. The stack was not mirroring production.
+      #
+      # `api` is also what makes docker-entrypoint.sh run `prisma migrate
+      # deploy` before Nest starts. The schema therefore always comes from THIS
+      # image: a mixed pair built on a released panel gets that release's
+      # migrations. (run-e2e.ps1 used to migrate from the host out of the
+      # working tree, which on a released panel would have applied migrations
+      # it has never seen.)
       RUID_PROCESS_ROLE: api
       # Defaults to http://reiwa:5000 (env.schema.ts), a host that does not
       # exist on this network: every cabinet push would dial nowhere.
@@ -118,12 +147,14 @@ services:
       # Scenario 17 is what sees it now.
       WEBHOOK_SECRET_HEADER: *relay-secret
     ports:
-      - "127.0.0.1:18000:8000"
+      - "127.0.0.1:${E2E_ADMIN_PORT:-18000}:8000"
     depends_on:
       rezeis-e2e-db:
         condition: service_healthy
       rezeis-e2e-redis:
         condition: service_healthy
+    # The budget covers a fresh database: the entrypoint applies every
+    # migration before Nest listens.
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8000/api/health"]
       interval: 5s
@@ -134,8 +165,8 @@ services:
       - rezeis-e2e
 
   rezeis-e2e-worker:
-    image: rezeis-admin:e2e
-    container_name: rezeis-e2e-worker
+    image: ${E2E_PANEL_IMAGE:-rezeis-admin:e2e}
+    pull_policy: never
     # dist/main.js is the API entrypoint. This container ran a SECOND API —
     # Dockerfile line 6 and rezeis-admin/docker-compose.yml both say the worker
     # overrides CMD with dist/worker.js, which is the entrypoint that starts an
@@ -168,11 +199,12 @@ services:
       # validation before Nest starts.
       ADMIN_CORS_ORIGINS: http://localhost:18000
       # Must equal reiwa’s: reiwa signs internal calls with it and the panel
-      # verifies the HMAC. Test value, and the only place it exists.
-      REZEIS_INTERNAL_SHARED_SECRET: e2e-internal-shared-secret-0123456789abcdef0123456789abcdef
+      # verifies the HMAC. Test value, from the anchor at the top.
+      REZEIS_INTERNAL_SHARED_SECRET: *internal-secret
       # See the API container above. `worker` runs the @Cron jobs and binds no
       # port; dist/worker.js defaults to it, but production states it and so
-      # does this, because a role read from two places drifts.
+      # does this, because a role read from two places drifts. It also keeps
+      # the entrypoint from migrating a second time.
       RUID_PROCESS_ROLE: worker
       REIWA_URL: http://reiwa-e2e-api:5000
       # Needed HERE too, not only on the API. The worker loads the full
@@ -187,7 +219,7 @@ services:
         condition: service_healthy
     # Nothing depends_on this container, so without a probe a worker that dies
     # on boot — a missing env var, a failed migration — leaves the run green:
-    # every scenario talks to the API. `run-e2e.ps1` asserts this status.
+    # every scenario talks to the API. The runner asserts this status.
     # Same probe as production (rezeis-admin/docker-compose.yml): the worker
     # serves no HTTP, so liveness is PID 1 still being there.
     healthcheck:
@@ -201,7 +233,6 @@ services:
 
   reiwa-e2e-redis:
     image: valkey/valkey:9-alpine
-    container_name: reiwa-e2e-redis
     command: ["--bind", "0.0.0.0"]
     healthcheck:
       test: ["CMD", "valkey-cli", "ping"]
@@ -212,25 +243,18 @@ services:
       - rezeis-e2e
 
   reiwa-e2e-api:
-    build:
-      # reiwa is a SIBLING of rezeis, not a child: ../reiwa resolved to
-      # rezeis/reiwa and the build died with "unable to prepare context".
-      context: ../../reiwa
-      dockerfile: Dockerfile
-      labels:
-        org.rezeis.e2e.build: ${E2E_BUILD_ID:-unstamped}
-    image: reiwa:e2e
-    container_name: reiwa-e2e-api
+    image: ${E2E_CABINET_IMAGE:-reiwa:e2e}
+    pull_policy: never
     environment:
       NODE_ENV: production
       PORT: 5000
       REZEIS_HOST: rezeis-e2e-admin
       REZEIS_PORT: 8000
-      # `run-e2e.ps1` mints an api_token once the admin is up and exports it as
-      # REZEIS_E2E_TOKEN before `compose up reiwa-e2e-api`. The placeholder
-      # default keeps `compose build` and `compose down` from needing it.
+      # The runner mints an api_token once the admin is up and passes it as
+      # REZEIS_E2E_TOKEN to `compose up reiwa-e2e-api`. The placeholder
+      # default keeps `compose down` and `compose config` from needing it.
       #
-      # The script used to start this container with a hand-written
+      # The first runner started this container with a hand-written
       # `docker run`, which meant two copies of this env block that nothing
       # kept in step AND a container outside the compose project, so
       # `compose down` could not remove it.
@@ -244,19 +268,28 @@ services:
       #
       # Not set either: REIWA_COOKIE_SECURE / REIWA_ALLOW_INSECURE_COOKIES.
       # Unset in production means secure=true (api/app.ts), which is what
-      # .env.example ships and therefore what this mirrors — but it also means
-      # the browser would drop the session cookie over plain http://localhost.
-      # The day a scenario signs in on the cabinet, that is the variable to add.
-      REIWA_PUBLIC_WEB_URL: http://localhost:5500
+      # .env.example ships and therefore what this mirrors. The subscriber the
+      # money scenarios sign in (e2e-runner.ts, `money` fixture) is a Node
+      # client that keeps `reiwa_web_session` itself, so the `Secure` flag
+      # does not stop it over plain http. A BROWSER-driven scenario would
+      # have its cookie dropped: that is the day to add the insecure switch.
+      # A name with a TLD, on the reserved `.test` domain that never resolves:
+      # nothing dials it. The cabinet builds every payment return URL from it
+      # (`<this>/payment-return`), and the panel validates those with
+      # `@IsUrl`, which refuses a host without a TLD. The `http://localhost:5500`
+      # this used to be made every checkout on this stack a 400
+      # («successUrl must be a URL address») before it reached the panel's
+      # add-on rules.
+      REIWA_PUBLIC_WEB_URL: https://cabinet.rezeis-e2e.test
       # Mandatory for reiwa in production (>= 32 chars) and must match the
       # panel’s, above.
-      REZEIS_INTERNAL_SHARED_SECRET: e2e-internal-shared-secret-0123456789abcdef0123456789abcdef
+      REZEIS_INTERNAL_SHARED_SECRET: *internal-secret
       # Verifies the relay's `X-Rezeis-Signature`. Unset, `POST
       # /api/v1/webhooks/rezeis` answers 401 to everything, the panel's own
       # WEBHOOK_SECRET_HEADER notwithstanding.
       REZEIS_WEBHOOK_SECRET: *relay-secret
     ports:
-      - "127.0.0.1:15000:5000"
+      - "127.0.0.1:${E2E_CABINET_PORT:-15000}:5000"
     depends_on:
       reiwa-e2e-redis:
         condition: service_healthy
@@ -271,7 +304,9 @@ services:
     networks:
       - rezeis-e2e
 
+# Named by compose after the project (`<project>_rezeis-e2e`); it used to be a
+# fixed `rezeis-e2e`, which two stacks could not share and a teardown had to
+# be told about separately.
 networks:
   rezeis-e2e:
-    name: rezeis-e2e
     driver: bridge

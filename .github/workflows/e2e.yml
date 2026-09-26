@@ -1,0 +1,221 @@
+name: E2E
+
+# The pair's end-to-end suite (e2e/) against the panel image Docker Publish
+# has just pushed, in three pairings:
+#
+#   next pair   this panel + the cabinet's `:main`                  every scenario
+#   mixed pair  this panel + the cabinet release operators run now  `core` only
+#   floor pair  this panel + the OLDEST cabinet it supports         `core` only
+#
+# The mixed pair is what an operator runs between updating the panel and
+# updating the cabinet. It is pinned to a release, not to `:latest`, which
+# moves when the cabinet is tagged and can make this job test new + new in the
+# release window: e2e/released-image.mts takes the newest `v*` cabinet image,
+# or the one before it while that release is the same build as the cabinet's
+# `:main`. The floor pair is the oldest cabinet this panel still promises to
+# work with: `CABINET_FLOOR_VERSION` in
+# rezeis-admin/src/modules/reiwa-peers/cabinet-capabilities.ts, read from the
+# commit that was built, so the job cannot drift from the panel's own promise.
+# What each pairing must show is read off the pair table in e2e/e2e-runner.ts;
+# the cabinet's `:main` in the next pair is PROBED (E2E_PROBE), since it may
+# predate a pair change this panel carries — then the job says so and tests
+# what that cabinet has.
+#
+# reiwa/.github/workflows/e2e.yml is the mirror: every cabinet build against
+# this panel's `:main` and its release.
+#
+# Every image is pulled ANONYMOUSLY from ghcr.io, the way an operator pulls
+# it. Nothing here logs in and no secret is used.
+#
+# FINDING THE RUN OF A COMMIT. A run started by `workflow_run` is filed under
+# the head of the DEFAULT branch at the moment it starts, not under the commit
+# it tests: its headBranch is `main` even for a tag build, and its headSha is
+# whatever main points at by then. `gh run list --commit <sha>` therefore
+# finds it only while main has not moved on. The title below names the built
+# ref and the full sha, so the release step waits on it by title:
+#
+#   gh run list --workflow e2e.yml --limit 20 \
+#     --json databaseId,displayTitle,status,conclusion \
+#     --jq '.[] | select(.displayTitle | contains("<full sha>"))'
+#
+# Every job of a run must be green, just like the jobs of CI.
+
+run-name: >-
+  ${{ github.event_name == 'workflow_run'
+  && format('E2E · {0} · {1}', github.event.workflow_run.head_branch, github.event.workflow_run.head_sha)
+  || format('E2E · manual · {0} · {1}', github.ref_name, github.sha) }}
+
+on:
+  workflow_run:
+    workflows: [Docker Publish]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      panel_image:
+        description: Panel image, for every job
+        type: string
+        default: ghcr.io/dizzzable/rezeis:main
+      cabinet_image:
+        description: Cabinet image of the next-pair job (every scenario)
+        type: string
+        default: ghcr.io/dizzzable/reiwa:main
+      released_cabinet_image:
+        description: Cabinet image of the mixed-pair job (core); empty = the release operators run now
+        type: string
+        default: ''
+      floor_cabinet_image:
+        description: Cabinet image of the floor job (core); empty = the panel source's CABINET_FLOOR_VERSION
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+env:
+  PANEL_REPOSITORY: ghcr.io/dizzzable/rezeis
+  CABINET_REPOSITORY: ghcr.io/dizzzable/reiwa
+  # Where the panel states the oldest cabinet it supports.
+  FLOOR_SOURCE: rezeis-admin/src/modules/reiwa-peers/cabinet-capabilities.ts
+
+jobs:
+  e2e:
+    name: ${{ matrix.title }}
+    # Only a successful build has an image to test. Docker Publish never runs
+    # for a pull request; the last two conditions keep it that way should that
+    # change, since a run started by workflow_run checks out the built commit
+    # with THIS repository's token.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event != 'pull_request' &&
+      github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    # A run takes two to four minutes: the image pulls, a fresh database the
+    # panel migrates, then the scenarios.
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - title: E2E · next pair · this panel + cabinet main · all scenarios
+            pairing: next
+            scenarios: all
+          - title: E2E · mixed pair · this panel + released cabinet · core
+            pairing: mixed
+            scenarios: core
+          - title: E2E · floor pair · this panel + oldest supported cabinet · core
+            pairing: floor
+            scenarios: core
+    steps:
+      # The suite, and the panel's own statement of its floor, from the commit
+      # that was built: a scenario that came with a panel change runs against
+      # that panel. Only these two directories are needed.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          sparse-checkout: |
+            e2e
+            rezeis-admin/src/modules/reiwa-peers
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: e2e/package-lock.json
+
+      - name: Resolve the pair
+        id: pair
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BUILT_SHA: ${{ github.event.workflow_run.head_sha }}
+          PAIRING: ${{ matrix.pairing }}
+          INPUT_PANEL: ${{ inputs.panel_image }}
+          INPUT_CABINET: ${{ inputs.cabinet_image }}
+          INPUT_RELEASED_CABINET: ${{ inputs.released_cabinet_image }}
+          INPUT_FLOOR_CABINET: ${{ inputs.floor_cabinet_image }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = workflow_run ]; then
+            # Docker Publish tags every build `sha-<first 7 of the commit>`
+            # (metadata-action `type=sha,format=short`), main and tag builds
+            # alike, so this is the image that was just built and nothing newer.
+            panel="$PANEL_REPOSITORY:sha-${BUILT_SHA:0:7}"
+          else
+            panel="${INPUT_PANEL:-$PANEL_REPOSITORY:main}"
+          fi
+          note=""
+          case "$PAIRING" in
+            next) cabinet="${INPUT_CABINET:-$CABINET_REPOSITORY:main}" ;;
+            mixed)
+              if [ -n "${INPUT_RELEASED_CABINET:-}" ]; then
+                cabinet="$INPUT_RELEASED_CABINET"
+                note="mixed pair: the cabinet named at dispatch, $cabinet"
+              else
+                why="${RUNNER_TEMP:-/tmp}/released-image.why"
+                if ! cabinet="$(node e2e/released-image.mts "${CABINET_REPOSITORY#ghcr.io/}" 2> "$why")"; then
+                  cat "$why"
+                  echo "::error title=E2E mixed::could not resolve the cabinet release operators run now"
+                  exit 1
+                fi
+                # Its reason, one line, for the job summary.
+                note="$(tail -n 1 "$why")"
+              fi
+              ;;
+            floor)
+              if [ -n "${INPUT_FLOOR_CABINET:-}" ]; then
+                cabinet="$INPUT_FLOOR_CABINET"
+              else
+                floor="$(sed -n "s/^export const CABINET_FLOOR_VERSION = '\([0-9][0-9.]*\)';.*/\1/p" "$FLOOR_SOURCE" 2>/dev/null || true)"
+                if [ -z "$floor" ]; then
+                  echo "::error title=E2E floor::no CABINET_FLOOR_VERSION in $FLOOR_SOURCE at this commit"
+                  exit 1
+                fi
+                cabinet="$CABINET_REPOSITORY:v$floor"
+                note="floor pair: CABINET_FLOOR_VERSION $floor, from $FLOOR_SOURCE"
+              fi
+              ;;
+            *) echo "::error::unknown pairing $PAIRING"; exit 1 ;;
+          esac
+          {
+            echo "panel=$panel"
+            echo "cabinet=$cabinet"
+            echo "note=$note"
+          } >> "$GITHUB_OUTPUT"
+          echo "panel    $panel"
+          echo "cabinet  $cabinet"
+          [ -z "$note" ] || echo "$note"
+
+      - name: Install the scenario runner
+        working-directory: e2e
+        run: npm ci --no-audit --no-fund
+
+      # tsx runs the suite without reading its types (R1-10c).
+      - name: Typecheck the suite
+        working-directory: e2e
+        run: npm run typecheck
+
+      # Pulls both images, starts the stack, runs the scenarios, prints every
+      # container's log tail and the failing scenarios on a failure, and tears
+      # the stack down in every case (e2e/run-e2e.mts).
+      - name: Run the pair
+        working-directory: e2e
+        env:
+          PANEL_IMAGE: ${{ steps.pair.outputs.panel }}
+          CABINET_IMAGE: ${{ steps.pair.outputs.cabinet }}
+          E2E_SCENARIOS: ${{ matrix.scenarios }}
+          E2E_LABEL: ${{ matrix.title }}
+          E2E_LOG_DIR: ${{ runner.temp }}/e2e-logs
+          E2E_SUMMARY_NOTE: ${{ steps.pair.outputs.note }}
+          # The other half: its unreleased `:main` is probed, never this panel.
+          E2E_PROBE: cabinet
+        run: node run-e2e.mts
+
+      - name: Keep the container logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-logs-${{ matrix.pairing }}
+          path: ${{ runner.temp }}/e2e-logs
+          if-no-files-found: ignore
+          retention-days: 14
