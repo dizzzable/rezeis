@@ -10,7 +10,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { isStaleChunkError, recoverFromStaleChunk } from './lazy-chunk'
+import { failedChunkUrl, isStaleChunkError, recoverFromStaleChunk } from './lazy-chunk'
 
 const STALE = new TypeError(
   'Failed to fetch dynamically imported module: https://panel.example/assets/user-detail-panel-Dlgy7jQG.js',
@@ -67,27 +67,147 @@ describe('a chunk the server no longer has', () => {
     expect(reload).not.toHaveBeenCalled()
   })
 
-  it('clears the mark when a chunk loads, so a later deploy can recover too', async () => {
+  it('is NOT re-armed when a different chunk loads — the endless reload of R1-16', async () => {
+    // On a signed-in page the default background chunk loads on every
+    // document, ahead of a page chunk that goes to the network. When any load
+    // cleared the mark, a page chunk that failed every time reloaded the tab
+    // forever instead of reaching the error screen.
     await settled(recoverFromStaleChunk(() => Promise.reject(STALE))())
     reload.mockClear()
 
     await recoverFromStaleChunk(() => Promise.resolve({ default: () => null }))()
+    await expect(recoverFromStaleChunk(() => Promise.reject(STALE))()).rejects.toThrow(STALE.message)
+
+    expect(reload).not.toHaveBeenCalled()
+  })
+
+  it('gives every failing chunk URL its own reload', async () => {
     await settled(recoverFromStaleChunk(() => Promise.reject(STALE))())
+    reload.mockClear()
+
+    const other = new TypeError(
+      'Failed to fetch dynamically imported module: https://panel.example/assets/plans-page-Q9x.js',
+    )
+    await settled(recoverFromStaleChunk(() => Promise.reject(other))())
 
     expect(reload).toHaveBeenCalledTimes(1)
   })
 
-  it('reloads even where sessionStorage is unavailable', async () => {
+  it('is re-armed by a new deploy — the entry script names the build', async () => {
+    const entry = document.createElement('script')
+    entry.type = 'module'
+    entry.src = '/assets/index-Build1.js'
+    document.head.appendChild(entry)
+    try {
+      await settled(recoverFromStaleChunk(() => Promise.reject(STALE))())
+      await settled(recoverFromStaleChunk(() => Promise.reject(STALE))())
+      expect(reload).toHaveBeenCalledTimes(1) // spent in this build
+
+      entry.src = '/assets/index-Build2.js' // the next document is a new deploy
+      await settled(recoverFromStaleChunk(() => Promise.reject(STALE))())
+      expect(reload).toHaveBeenCalledTimes(2)
+    } finally {
+      entry.remove()
+    }
+  })
+
+  describe('when documents alternate between builds (review R1-22)', () => {
+    // Two panel replicas mid-update, or a CDN caching index.html, serve two
+    // builds in turn. Each document below is one load: the entry script names
+    // its build, and that build's chunk fails. With only the current build
+    // remembered, each build wiped the other's mark and both reloaded forever.
+    let entry: HTMLScriptElement
+    beforeEach(() => {
+      entry = document.createElement('script')
+      entry.type = 'module'
+      document.head.appendChild(entry)
+    })
+    afterEach(() => entry.remove())
+
+    /** One document of `build` whose chunk fails: 'reloaded' or 'error screen'. */
+    async function documentOf(build: string): Promise<'reloaded' | 'error screen'> {
+      entry.src = `/assets/index-${build}.js`
+      const before = reload.mock.calls.length
+      const failure = new TypeError(
+        `Failed to fetch dynamically imported module: https://panel.example/assets/users-page-${build}.js`,
+      )
+      const outcome = await Promise.race([
+        recoverFromStaleChunk(() => Promise.reject(failure))().then(
+          () => 'loaded',
+          () => 'error screen' as const,
+        ),
+        new Promise((resolve) => setTimeout(() => resolve('pending'), 10)),
+      ])
+      if (reload.mock.calls.length > before) return 'reloaded'
+      expect(outcome).toBe('error screen')
+      return 'error screen'
+    }
+
+    it('A/B/A/B: each build reloads once, then both end on the error screen', async () => {
+      const outcomes = [await documentOf('A'), await documentOf('B'), await documentOf('A'), await documentOf('B')]
+      expect(outcomes).toEqual(['reloaded', 'reloaded', 'error screen', 'error screen'])
+    })
+
+    it('A/B/C/A: three builds are remembered', async () => {
+      const outcomes = [
+        await documentOf('A'),
+        await documentOf('B'),
+        await documentOf('C'),
+        await documentOf('A'),
+      ]
+      expect(outcomes).toEqual(['reloaded', 'reloaded', 'reloaded', 'error screen'])
+    })
+
+    it('A/B/C/D/A: a fourth build pushes the oldest out — the memory stays bounded', async () => {
+      const outcomes = [
+        await documentOf('A'),
+        await documentOf('B'),
+        await documentOf('C'),
+        await documentOf('D'),
+        await documentOf('A'),
+      ]
+      expect(outcomes).toEqual(['reloaded', 'reloaded', 'reloaded', 'reloaded', 'reloaded'])
+    })
+  })
+
+  it('shares one reload among failures that name no URL (Safari)', async () => {
+    const safari = new TypeError('Importing a module script failed.')
+    await settled(recoverFromStaleChunk(() => Promise.reject(safari))())
+    await settled(recoverFromStaleChunk(() => Promise.reject(safari))())
+
+    expect(reload).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not reload at all where sessionStorage cannot be read — it could never stop', async () => {
+    // Nothing could remember the reload, so every fresh document would reload
+    // again. The error screen shows instead, and its button reloads by hand.
     vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
       throw new Error('storage is blocked')
     })
+
+    await expect(recoverFromStaleChunk(() => Promise.reject(STALE))()).rejects.toThrow(STALE.message)
+
+    expect(reload).not.toHaveBeenCalled()
+  })
+
+  it('does not reload where the reload cannot be written down either', async () => {
     vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
-      throw new Error('storage is blocked')
+      throw new DOMException('quota exceeded', 'QuotaExceededError')
     })
 
-    await settled(recoverFromStaleChunk(() => Promise.reject(STALE))())
+    await expect(recoverFromStaleChunk(() => Promise.reject(STALE))()).rejects.toThrow(STALE.message)
 
-    expect(reload).toHaveBeenCalledTimes(1)
+    expect(reload).not.toHaveBeenCalled()
+  })
+})
+
+describe('failedChunkUrl', () => {
+  it('reads the URL Chrome and Firefox put in the message, and answers empty for Safari', () => {
+    expect(failedChunkUrl(STALE)).toBe('https://panel.example/assets/user-detail-panel-Dlgy7jQG.js')
+    expect(
+      failedChunkUrl(new TypeError('error loading dynamically imported module: https://panel.example/assets/a-B1.js')),
+    ).toBe('https://panel.example/assets/a-B1.js')
+    expect(failedChunkUrl(new TypeError('Importing a module script failed.'))).toBe('')
   })
 })
 

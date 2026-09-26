@@ -5,6 +5,7 @@ import { AlertTriangle, RotateCcw } from 'lucide-react'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { logClientDiagnostic, reportReactError } from '@/lib/client-logger'
+import { isStaleChunkError } from '@/lib/lazy-chunk'
 
 interface ErrorBoundaryProps {
   readonly children: ReactNode
@@ -42,7 +43,16 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
       if (this.props.fallback) {
         return this.props.fallback
       }
-      return <ErrorFallback onReset={() => this.setState({ hasError: false, error: null })} />
+      // A chunk that failed to load cannot be rendered back: the browser keeps
+      // the failed module record and React keeps the rejected lazy() result,
+      // so re-rendering only throws the same error again. For that one kind of
+      // error the button reloads the page, and a fresh document fetches the
+      // chunk anew (lib/lazy-chunk.ts). Every other error keeps the in-place
+      // retry, which a transient render failure can recover from.
+      const onRetry = isStaleChunkError(this.state.error)
+        ? () => window.location.reload()
+        : () => this.setState({ hasError: false, error: null })
+      return <ErrorFallback onReset={onRetry} />
     }
     return this.props.children
   }

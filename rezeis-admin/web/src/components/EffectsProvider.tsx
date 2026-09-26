@@ -9,7 +9,7 @@
  * PixelTrail, BlobCursor) anchor to the viewport instead of collapsing to
  * the document flow.
  */
-import { Suspense, type ReactNode } from 'react'
+import { Component, Suspense, type ReactNode } from 'react'
 import {
   useEffectsStore,
   type CursorEffectId,
@@ -58,13 +58,54 @@ export function EffectsProvider({ children }: { children: ReactNode }) {
     <>
       {children}
       {isActive && (
-        <Suspense fallback={null}>
-          <CursorEffectRenderer effect={cursorEffect} />
-        </Suspense>
+        <DecorationBoundary resetKey={cursorEffect}>
+          <Suspense fallback={null}>
+            <CursorEffectRenderer effect={cursorEffect} />
+          </Suspense>
+        </DecorationBoundary>
       )}
-      {isActive && <ClickEffectRenderer effect={clickEffect} />}
+      {isActive && (
+        <DecorationBoundary resetKey={clickEffect}>
+          <ClickEffectRenderer effect={clickEffect} />
+        </DecorationBoundary>
+      )}
     </>
   )
+}
+
+// ── Decoration boundary ──────────────────────────────────────────────────────
+
+/**
+ * Renders nothing in place of an effect that fails: a chunk that will not load,
+ * or an effect that throws while rendering (a WebGL context it cannot get).
+ *
+ * The effects sit beside the pages, directly under the providers, outside every
+ * page's error boundary. Without this one, a failing decoration unmounted the
+ * whole panel: a blank page with no «Попробовать снова» (review R1-21). The
+ * likeliest way there is a cursor-effect chunk failing again after its one
+ * automatic reload (`lib/lazy-chunk.ts`). A decoration may vanish; it must never
+ * take the page down. Picking another effect tries again (`resetKey`). This is
+ * the arrangement of the glass background's `GlassErrorBoundary`.
+ */
+class DecorationBoundary extends Component<
+  { readonly children: ReactNode; readonly resetKey: string },
+  { failed: boolean }
+> {
+  state = { failed: false }
+
+  static getDerivedStateFromError(): { failed: boolean } {
+    return { failed: true }
+  }
+
+  componentDidUpdate(prev: { readonly resetKey: string }): void {
+    if (prev.resetKey !== this.props.resetKey && this.state.failed) {
+      this.setState({ failed: false })
+    }
+  }
+
+  render(): ReactNode {
+    return this.state.failed ? null : this.props.children
+  }
 }
 
 // ── Fixed overlay wrapper ────────────────────────────────────────────────────

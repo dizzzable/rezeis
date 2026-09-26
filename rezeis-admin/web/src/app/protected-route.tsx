@@ -6,6 +6,25 @@ import { translateApiError } from "@/lib/translate-error";
 import { captureReturnTo } from "@/lib/return-to";
 
 /**
+ * The full-screen wait between a verified session and the first page.
+ *
+ * Two waits share it, one after the other: the /me probe below, and the admin
+ * shell chunk the router loads right after it (`app/router.tsx`). One look for
+ * both, so the handover reads as a single spinner whose caption changes, not
+ * as a spinner followed by a different placeholder.
+ */
+export function FullScreenSpinner({ label }: { readonly label: string }) {
+  return (
+    <div className="flex min-h-dvh items-center justify-center bg-background pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)]">
+      <div className="flex flex-col items-center gap-3">
+        <div className="h-9 w-9 animate-spin rounded-full border-4 border-muted border-t-primary" />
+        <p className="text-sm text-muted-foreground">{label}</p>
+      </div>
+    </div>
+  );
+}
+
+/**
  * Gates the admin shell behind a verified session.
  *
  * Three terminal states:
@@ -41,10 +60,11 @@ export default function ProtectedRoute() {
     captureReturnTo(location.pathname + location.search + location.hash);
   }, [willRedirectToSignIn, location.pathname, location.search, location.hash]);
 
-  // min-h-dvh, not -screen. On iOS `100vh` is the LARGE viewport — the height
-  // the page WOULD have with the address bar collapsed — so with the bar
-  // showing, a `min-h-screen` shell overflows and its centred content sits
-  // low, partly under the bar. `dvh` tracks what is actually visible. The
+  // min-h-dvh, not -screen — here and in `FullScreenSpinner` above. On iOS
+  // `100vh` is the LARGE viewport — the height the page WOULD have with the
+  // address bar collapsed — so with the bar showing, a `min-h-screen` shell
+  // overflows and its centred content sits low, partly under the bar. `dvh`
+  // tracks what is actually visible. The
   // safe-area padding is not optional either: index.html ships
   // `viewport-fit=cover` with a black-translucent status bar, so content
   // extends under the notch and home indicator unless it is padded off them.
@@ -52,14 +72,7 @@ export default function ProtectedRoute() {
   // This spinner in particular is the whole post-login round trip on a phone
   // — it is on screen for as long as /me takes, which is where it is seen.
   if (isLoading) {
-    return (
-      <div className="flex min-h-dvh items-center justify-center bg-background pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)]">
-        <div className="flex flex-col items-center gap-3">
-          <div className="h-9 w-9 animate-spin rounded-full border-4 border-muted border-t-primary" />
-          <p className="text-sm text-muted-foreground">{t("auth.verifyingSession")}</p>
-        </div>
-      </div>
-    );
+    return <FullScreenSpinner label={t("auth.verifyingSession")} />;
   }
 
   if (sessionError) {

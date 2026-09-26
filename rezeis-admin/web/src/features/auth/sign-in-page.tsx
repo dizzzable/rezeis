@@ -18,6 +18,7 @@ import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Aurora } from '@/components/effects/Aurora'
 import { SplitText } from '@/components/effects/SplitText'
+import { useWarmAdminShellOnIntent, warmAdminShellAfterSubmit } from '@/app/admin-shell-loader'
 
 import { useAuth } from './auth-provider'
 import { getAuthStatus, loginApi, registerApi } from './auth-api'
@@ -137,6 +138,9 @@ function LoginForm() {
   const navigate = useNavigate()
   const { login } = useAuth()
   const autoFocusField = useAutoFocusOnFinePointer()
+  // The admin frame starts downloading on the operator's first sign of intent
+  // here (a field, a button, an autofill), so it is ready when «Войти» lands.
+  const warmShellOnIntent = useWarmAdminShellOnIntent()
   const [error, setError] = useState<string | null>(null)
   const [totpRequired, setTotpRequired] = useState(false)
   const [totpCode, setTotpCode] = useState('')
@@ -208,6 +212,8 @@ function LoginForm() {
     setError(null)
     setPendingCredentials(data)
     mutation.mutate(data)
+    // After `mutate`, so the login request leaves before the shell's.
+    warmAdminShellAfterSubmit()
   }
 
   const onSubmitTotp = (event: React.FormEvent) => {
@@ -275,7 +281,7 @@ function LoginForm() {
   }
 
   return (
-    <Card data-glass-card>
+    <Card data-glass-card {...warmShellOnIntent}>
       <CardHeader className="text-center">
         <CardTitle>{t('signInPage.login.title')}</CardTitle>
         <CardDescription>{t('signInPage.login.subtitle')}</CardDescription>
@@ -332,6 +338,7 @@ function RegisterForm() {
   const navigate = useNavigate()
   const { login } = useAuth()
   const autoFocusField = useAutoFocusOnFinePointer()
+  const warmShellOnIntent = useWarmAdminShellOnIntent()
   const [error, setError] = useState<string | null>(null)
 
   const registerSchema = useRegisterSchema()
@@ -354,10 +361,11 @@ function RegisterForm() {
   const onSubmit = (data: RegisterFormData) => {
     setError(null)
     mutation.mutate({ username: data.username, password: data.password })
+    warmAdminShellAfterSubmit()
   }
 
   return (
-    <Card data-glass-card>
+    <Card data-glass-card {...warmShellOnIntent}>
       <CardHeader className="text-center">
         <CardTitle>{t('signInPage.register.title')}</CardTitle>
         <CardDescription>{t('signInPage.register.subtitle')}</CardDescription>

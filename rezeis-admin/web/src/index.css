@@ -524,6 +524,23 @@ input[type="number"]::-webkit-inner-spin-button {
   }
 }
 
+/* ── Autofill detector (sign-in card) ───────────────────────────────────────
+ * A browser that fills saved credentials types nothing and focuses nothing, so
+ * the sign-in card cannot hear it the usual way. What it can hear: a filled
+ * field matches `:-webkit-autofill` (Chrome, Safari, and Firefox as an alias),
+ * and an animation started by that match fires `animationstart`. The keyframes
+ * change nothing — opacity 1 to 1 for a millisecond. The card listens for this
+ * name to start fetching the admin frame (`app/admin-shell-loader.ts`,
+ * AUTOFILL_ANIMATION); the two names must stay equal. */
+@keyframes rezeis-autofill-detected {
+  from { opacity: 1; }
+  to { opacity: 1; }
+}
+[data-autofill-watch] input:-webkit-autofill {
+  animation-name: rezeis-autofill-detected;
+  animation-duration: 1ms;
+}
+
 /* ── Glass background host sizing ───────────────────────────────────────────
  * The animated background (GlassBackground) fills the viewport. It is sized
  * to the LARGE viewport (`lvw`/`lvh`) on purpose: on iOS the address-bar

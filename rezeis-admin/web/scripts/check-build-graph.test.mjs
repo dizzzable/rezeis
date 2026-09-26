@@ -23,6 +23,7 @@ import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
 import {
+  ADMIN_SHELL_WARMUP,
   DENIED_BUNDLES,
   EAGER_BYTE_BUDGET,
   EAGER_CHUNK_BUDGET,
@@ -30,6 +31,7 @@ import {
   RENDER_BLOCKING_LOCALE,
   auditDist,
   evaluate,
+  findDynamicImports,
   formatReport,
   inspectChunk,
   isRelativeSpecifier,
@@ -37,6 +39,7 @@ import {
   parseHtmlAssetRefs,
   parseStaticImportSpecifiers,
   selectRenderBlockingChunks,
+  sourceAtOffset,
   walkEagerGraph,
 } from './check-build-graph.mjs'
 
@@ -288,6 +291,101 @@ describe('inspectChunk', () => {
   })
 })
 
+describe('DENIED_BUNDLES — the admin shell and the libraries only it uses', () => {
+  // Until 0.9.7.70 the router imported the shell statically and /sign-in
+  // downloaded all of this before its form could paint. These entries keep it
+  // off. Each pattern is checked in both directions, because the failure that
+  // matters is quiet: a pattern that also matches the tooltip would fail every
+  // build (and be deleted), one that misses a real path passes a regression.
+  const bundle = (id) => DENIED_BUNDLES.find((b) => b.id === id)
+
+  it('attributes the shell by its own files, not by the route files next door', () => {
+    const { sourcePattern } = bundle('admin-shell')
+    for (const src of [
+      '../../src/components/layout/admin-shell.tsx',
+      '../../src/components/layout/admin-sidebar/nav-items.tsx',
+      '../../src/components/layout/admin-topbar/notification-bell.tsx',
+      '../../src/components/quick-search/quick-search-overlay.tsx',
+    ]) {
+      expect(sourcePattern.test(src), src).toBe(true)
+    }
+    // The router, the session gate and the error boundary ARE on the route.
+    for (const src of [
+      '../../src/app/router.tsx',
+      '../../src/app/protected-route.tsx',
+      '../../src/components/ErrorBoundary.tsx',
+      '../../src/components/layout/page-title.tsx',
+      '../../src/components/layout/admin-shell-fallback.tsx',
+    ]) {
+      expect(sourcePattern.test(src), src).toBe(false)
+    }
+  })
+
+  it('names the Radix primitives that left the route, not the tooltip that stays', () => {
+    const { sourcePattern } = bundle('radix-kit')
+    for (const src of [
+      '../../node_modules/@radix-ui/react-select/dist/index.mjs',
+      '../../node_modules/@radix-ui/react-dropdown-menu/dist/index.mjs',
+      '../../node_modules/@radix-ui/react-menu/dist/index.mjs',
+      '../../node_modules/@radix-ui/react-dialog/dist/index.mjs',
+      '../../node_modules/@radix-ui/react-scroll-area/dist/index.mjs',
+      '../../node_modules/@radix-ui/react-popover/dist/index.mjs',
+    ]) {
+      expect(sourcePattern.test(src), src).toBe(true)
+    }
+    // `TooltipProvider` is in providers.tsx: the tooltip and everything it is
+    // built on are render-blocking by design.
+    for (const src of [
+      '../../node_modules/@radix-ui/react-tooltip/dist/index.mjs',
+      '../../node_modules/@radix-ui/react-popper/dist/index.mjs',
+      '../../node_modules/@radix-ui/react-dismissable-layer/dist/index.mjs',
+      '../../node_modules/@radix-ui/react-presence/dist/index.mjs',
+      '../../node_modules/@radix-ui/react-portal/dist/index.mjs',
+      '../../node_modules/@radix-ui/react-primitive/dist/index.mjs',
+      '../../node_modules/@radix-ui/react-slot/dist/index.mjs',
+    ]) {
+      expect(sourcePattern.test(src), src).toBe(false)
+    }
+  })
+
+  it('recognises the realtime client, dnd-kit and cmdk by their packages', () => {
+    for (const [id, src] of [
+      ['socket-io', '../../node_modules/socket.io-client/build/esm/socket.js'],
+      ['socket-io', '../../node_modules/socket.io-parser/build/esm/index.js'],
+      ['socket-io', '../../node_modules/engine.io-client/build/esm/socket.js'],
+      ['socket-io', '../../node_modules/engine.io-parser/build/esm/index.js'],
+      ['dnd-kit', '../../node_modules/@dnd-kit/core/dist/core.esm.js'],
+      ['dnd-kit', '../../node_modules/@dnd-kit/sortable/dist/sortable.esm.js'],
+      ['cmdk', '../../node_modules/cmdk/dist/index.mjs'],
+    ]) {
+      expect(bundle(id).sourcePattern.test(src), `${id}: ${src}`).toBe(true)
+    }
+    expect(bundle('socket-io').sourcePattern.test('../../src/lib/realtime/use-realtime-updates.ts')).toBe(false)
+  })
+
+  it('tells the reader to look for a static import when the shell is back', () => {
+    // The generic advice — hunt for the manualChunks group — is right for a
+    // vendor library and wrong here: the shell comes back through an import.
+    const shell = bundle('admin-shell')
+    const failures = evaluate(
+      report({
+        eager: [
+          {
+            rel: 'assets/index-AAA.js',
+            bytes: 400_000,
+            hits: inspectChunk({ code: 'x', sources: ['../../src/components/layout/admin-shell.tsx'] }),
+          },
+        ],
+      }),
+    )
+    expect(failures.map((f) => f.rule)).toEqual(['denylist'])
+    const text = failures[0].lines.join('\n')
+    expect(text).toContain(shell.label)
+    expect(text).toContain('only inside lazy()')
+    expect(text).not.toContain('build.rollupOptions.output.manualChunks')
+  })
+})
+
 describe('selectRenderBlockingChunks', () => {
   // Shapes taken verbatim from a real build: the locale chunks' sourcemaps
   // carry exactly one source each.
@@ -465,13 +563,198 @@ describe('evaluate — denylist', () => {
   })
 })
 
+describe('evaluate — the sign-in page', () => {
+  // Found by a smoke run of the build that made the admin shell lazy: the
+  // Radix group left the render-blocking graph and was still downloaded on
+  // /sign-in, because the sign-in page imported it for a label and a line.
+  const radix = DENIED_BUNDLES.find((b) => b.id === 'radix-kit')
+  const withPage = (signInPage, eager = [{ rel: 'assets/index-AAA.js', bytes: 1000 }]) => ({
+    ...report({ eager }),
+    signInPage,
+  })
+
+  it('fails when a denied library rides in with the sign-in page', () => {
+    const r = withPage([
+      { rel: 'assets/sign-in-page-JJJ.js', bytes: 3000, hits: [] },
+      {
+        rel: 'assets/vendor-ui-LLL.js',
+        bytes: 88_084,
+        hits: [{ bundle: radix, detections: [{ detector: 'content marker', evidence: radix.markers[0] }] }],
+      },
+    ])
+    const failures = evaluate(r)
+    expect(failures.map((f) => f.rule)).toEqual(['denylist/sign-in-page'])
+    expect(failures[0].lines[0]).toContain('assets/vendor-ui-LLL.js')
+    expect(failures[0].lines[0]).toContain(radix.label)
+    expect(failures[0].lines.join('\n')).toContain('not render-blocking')
+    expect(formatReport(r, failures)).toContain('← DENIED: radix-kit')
+  })
+
+  it('does not count the sign-in page against the budget', () => {
+    // The ceiling describes the render-blocking graph and stays that: 1.69 MB
+    // eager plus a 500 KB page is inside it.
+    const failures = evaluate(
+      withPage([{ rel: 'assets/sign-in-page-JJJ.js', bytes: 500_000, hits: [] }], [
+        { rel: 'assets/index-AAA.js', bytes: 1_690_000 },
+      ]),
+    )
+    expect(failures).toEqual([])
+  })
+
+  it('fails when the sign-in page could not be found, rather than audit nothing', () => {
+    const failures = evaluate(withPage(null))
+    expect(failures.map((f) => f.rule)).toEqual(['sign-in-page'])
+    expect(failures[0].lines.join('\n')).toContain('SIGN_IN_PAGE')
+  })
+})
+
+describe('findDynamicImports / sourceAtOffset', () => {
+  it('keeps every import site, duplicates included, with its offset', () => {
+    const code = 'a();const x=()=>import(`./s.js`);const y=()=>import("./s.js");'
+    expect(findDynamicImports(code)).toEqual([
+      { spec: './s.js', index: code.indexOf('import(`') },
+      { spec: './s.js', index: code.indexOf('import("') },
+    ])
+  })
+
+  it('attributes an offset to the source of the last segment at or before it', () => {
+    // Line 0: col 0 → source 0, col 5 → source 1 ("K" is 5, "C" is +1).
+    // Line 1: col 0 → source index 1 − 1 = 0. The source delta carries ACROSS
+    // lines: a decoder that restarted it per line would answer source 1 here.
+    const map = { sources: ['../../src/main.tsx', '../../src/app/admin-shell-loader.ts'], mappings: 'AAAA,KCAA;ADAA' }
+    const code = 'abcdefghij\nklmnop'
+    expect(sourceAtOffset(map, code, 2)).toBe('../../src/main.tsx')
+    expect(sourceAtOffset(map, code, 5)).toBe('../../src/app/admin-shell-loader.ts')
+    expect(sourceAtOffset(map, code, 9)).toBe('../../src/app/admin-shell-loader.ts')
+    expect(sourceAtOffset(map, code, 13)).toBe('../../src/main.tsx')
+  })
+
+  it('answers null for an unmapped position or a map without mappings', () => {
+    // "K" alone is a one-field segment: generated code with no source.
+    expect(sourceAtOffset({ sources: ['a.ts'], mappings: 'AAAA,K' }, 'abcdefghij', 7)).toBeNull()
+    expect(sourceAtOffset({ sources: ['a.ts'] }, 'abc', 1)).toBeNull()
+    expect(sourceAtOffset(null, 'abc', 1)).toBeNull()
+  })
+})
+
+describe('evaluate — the admin shell is imported lazily once, by its loader', () => {
+  const LOADER = '../../src/app/admin-shell-loader.ts'
+  const site = (from, origin) => ({ from, target: 'assets/admin-shell-S.js', origin })
+  const withShell = (adminShell) => ({ ...report({ eager: [{ rel: 'assets/index-A.js', bytes: 1000 }] }), adminShell })
+  const rules = (r) => evaluate(r).map((f) => f.rule)
+
+  it('passes exactly one import, from the loader', () => {
+    expect(rules(withShell({ chunks: ['assets/admin-shell-S.js'], imports: [site('assets/index-A.js', LOADER)] }))).toEqual([])
+  })
+
+  it('fails a second import — the warm-up on mount the budget cannot see', () => {
+    const failures = evaluate(
+      withShell({
+        chunks: ['assets/admin-shell-S.js'],
+        imports: [
+          site('assets/index-A.js', LOADER),
+          site('assets/sign-in-page-J.js', '../../src/features/auth/sign-in-page.tsx'),
+        ],
+      }),
+    )
+    expect(failures.map((f) => f.rule)).toEqual([ADMIN_SHELL_WARMUP.id])
+    const text = failures[0].lines.join('\n')
+    expect(text).toContain('from 2 places')
+    expect(text).toContain('sign-in-page.tsx')
+    expect(text).toContain('adminShell.preload()')
+  })
+
+  it('fails a single import that does not come from the loader', () => {
+    expect(
+      rules(withShell({ chunks: ['assets/admin-shell-S.js'], imports: [site('assets/index-A.js', '../../src/main.tsx')] })),
+    ).toEqual([ADMIN_SHELL_WARMUP.id])
+    // An unattributable site is not the loader either.
+    expect(rules(withShell({ chunks: ['assets/admin-shell-S.js'], imports: [site('assets/index-A.js', null)] }))).toEqual([
+      ADMIN_SHELL_WARMUP.id,
+    ])
+  })
+
+  it('fails when nothing imports the shell lazily, and when the shell cannot be found', () => {
+    const none = evaluate(withShell({ chunks: ['assets/index-A.js'], imports: [] }))
+    expect(none.map((f) => f.rule)).toEqual([ADMIN_SHELL_WARMUP.id])
+    expect(none[0].lines.join('\n')).toContain('imported statically')
+    expect(rules(withShell({ chunks: [], imports: [] }))).toEqual([ADMIN_SHELL_WARMUP.id])
+  })
+})
+
+/**
+ * The two regressions ADMIN_SHELL_WARMUP and the denylist split between them,
+ * on a dist/ written to disk, so sourcemap attribution is part of what is tested.
+ */
+describe('auditDist — regressions of the lazy admin shell', () => {
+  const dirs = []
+  afterAll(() => {
+    for (const dir of dirs) rmSync(dir, { recursive: true, force: true })
+  })
+
+  /** index.html + a mapped entry + the shell + whatever `extra` adds. */
+  function distWith({ entryLines, entryMap, extra = [] }) {
+    const dir = mkdtempSync(join(tmpdir(), 'build-graph-shell-'))
+    dirs.push(dir)
+    const put = (rel, body, map) => {
+      const full = join(dir, rel)
+      mkdirSync(join(full, '..'), { recursive: true })
+      writeFileSync(full, body)
+      if (map) writeFileSync(`${full}.map`, JSON.stringify({ version: 3, ...map }))
+    }
+    put('index.html', '<!doctype html><script type="module" src="/assets/index-A.js"></script>')
+    put('assets/index-A.js', entryLines.join('\n'), entryMap)
+    put('assets/admin-shell-S.js', 'export default function Shell(){};const k="rezeis_admin_push_resync";', {
+      sources: ['../../src/components/layout/admin-shell.tsx'],
+    })
+    for (const [rel, body, map] of extra) put(rel, body, map)
+    return dir
+  }
+
+  it('fails a second dynamic import of the shell, from the sign-in page', () => {
+    const dir = distWith({
+      entryLines: ['const signIn=()=>import(`./sign-in-page-J.js`);', 'const shell=()=>import(`./admin-shell-S.js`);'],
+      entryMap: { sources: ['../../src/main.tsx', '../../src/app/admin-shell-loader.ts'], mappings: 'AAAA;ACAA' },
+      extra: [
+        [
+          'assets/sign-in-page-J.js',
+          'useEffect(()=>{import(`./admin-shell-S.js`)},[]);export default 1;',
+          { sources: ['../../src/features/auth/sign-in-page.tsx'], mappings: 'AAAA' },
+        ],
+      ],
+    })
+    const report = auditDist(dir)
+    expect(report.adminShell.imports.map((s) => s.origin)).toEqual([
+      '../../src/app/admin-shell-loader.ts',
+      '../../src/features/auth/sign-in-page.tsx',
+    ])
+    expect(evaluate(report).map((f) => f.rule)).toContain(ADMIN_SHELL_WARMUP.id)
+  })
+
+  it('fails a STATIC import of the shell onto the route, even with the loader import in place', () => {
+    const dir = distWith({
+      entryLines: ['import"./admin-shell-S.js";', 'const shell=()=>import(`./admin-shell-S.js`);'],
+      entryMap: { sources: ['../../src/main.tsx', '../../src/app/admin-shell-loader.ts'], mappings: 'AAAA;ACAA' },
+    })
+    const report = auditDist(dir)
+    // The one import() is the allowed one...
+    expect(report.adminShell.imports.map((s) => s.origin)).toEqual(['../../src/app/admin-shell-loader.ts'])
+    // ...and the denylist still fails the chunk it made eager.
+    const denied = evaluate(report).filter((f) => f.rule === 'denylist')
+    expect(denied).toHaveLength(1)
+    expect(denied[0].lines[0]).toContain('assets/admin-shell-S.js')
+    expect(denied[0].lines[0]).toContain(DENIED_BUNDLES.find((b) => b.id === 'admin-shell').label)
+  })
+})
+
 describe('evaluate — marker liveness', () => {
   it('fails when a denied library matches nothing anywhere in dist', () => {
     // A marker set that matches zero chunks means the denylist has been
     // passing without testing anything — the exact failure mode this whole
     // guard exists to prevent, applied to the guard itself.
-    const liveness = new Map(DENIED_BUNDLES.map((b) => [b.id, []]))
-    liveness.set('three', ['assets/vendor-three-AAA.js'])
+    // Every other library is found; only the charting stack is not.
+    const liveness = new Map(DENIED_BUNDLES.map((b) => [b.id, [`assets/${b.id}-lazy.js`]]))
+    liveness.set('charts', [])
     const failures = evaluate(report({ liveness }))
     expect(failures.map((f) => f.rule)).toEqual(['marker-liveness'])
     expect(failures[0].lines[0]).toContain(charts.label)
@@ -567,7 +850,21 @@ describe('auditDist over a synthetic dist/', () => {
     'const alt=async()=>(await import(`./en-DDD.js`)).en;',
     // A lazy route. Must never be counted.
     'const page=()=>import(`./analytics-EEE.js`);',
+    // The sign-in page: lazy too, so never budgeted — but its own imports
+    // are downloaded on /sign-in, so the denylist reads them.
+    'const signIn=()=>import(`./sign-in-page-JJJ.js`);',
+    // The admin shell's one dynamic import. The map below attributes this
+    // line — and only this one — to the loader module, as the real build does.
+    'const shell=()=>import(`./frame-SSS.js`);',
   ].join('\n')
+
+  // One segment per line: lines 0–5 come from main.tsx (source 0), line 6
+  // from the loader (source index +1 → 1). "A" is 0 and "C" is +1 in VLQ.
+  const ENTRY_MAP = {
+    version: 3,
+    sources: ['../../src/main.tsx', '../../src/app/admin-shell-loader.ts'],
+    mappings: 'AAAA;AAAA;AAAA;AAAA;AAAA;AAAA;ACAA',
+  }
 
   const write = (rel, body, sources) => {
     const full = join(dist, rel)
@@ -585,7 +882,13 @@ describe('auditDist over a synthetic dist/', () => {
         '<link rel="modulepreload" crossorigin href="/assets/vendor-BBB.js">' +
         '</head><body></body></html>',
     )
-    write('assets/index-AAA.js', entry, ['../../src/main.tsx'])
+    write('assets/index-AAA.js', entry)
+    writeFileSync(join(dist, 'assets/index-AAA.js.map'), JSON.stringify(ENTRY_MAP))
+    // Named unlike its module on purpose: the shell's chunk is found by its
+    // sourcemap, never by its name (see ADMIN_SHELL_WARMUP).
+    write('assets/frame-SSS.js', 'export default function Shell(){}', [
+      '../../src/components/layout/admin-shell.tsx',
+    ])
     write('assets/vendor-BBB.js', 'export const v=1;'.padEnd(500, ';'), [
       '../../node_modules/react/index.js',
     ])
@@ -599,6 +902,21 @@ describe('auditDist over a synthetic dist/', () => {
     // build does (three.js and recharts exist, just not on the login route).
     write('assets/vendor-three-FFF.js', 'const d=window.__THREE_DEVTOOLS__;')
     write('assets/charts-GGG.js', 'const e="rechartsEventEmitter";')
+    // …and so do the admin shell and the libraries only it uses: lazy, alive.
+    for (const bundle of DENIED_BUNDLES.filter((b) => b.id !== 'three' && b.id !== 'charts')) {
+      write(`assets/${bundle.id}-lazy-III.js`, `const m=${JSON.stringify(bundle.markers[0])};`)
+    }
+    // The sign-in page imports an eager chunk (already audited) and a small
+    // shared one of its own — the shape the real label wrapper has.
+    write(
+      'assets/sign-in-page-JJJ.js',
+      'import"./vendor-BBB.js";import"./label-KKK.js";export default 1;'.padEnd(3_000, ';'),
+      ['../../src/features/auth/sign-in-page.tsx'],
+    )
+    write('assets/label-KKK.js', 'export const l=1;'.padEnd(700, ';'), [
+      '../../node_modules/@radix-ui/react-label/dist/index.mjs',
+      '../../src/components/ui/label.tsx',
+    ])
   })
 
   afterAll(() => rmSync(dist, { recursive: true, force: true }))
@@ -633,6 +951,37 @@ describe('auditDist over a synthetic dist/', () => {
     expect([...auditDist(dist).singletons]).toEqual([['react', ['assets/vendor-BBB.js']]])
   })
 
+  it('audits the sign-in page and its own imports, outside the budget', () => {
+    const report = auditDist(dist)
+    expect(report.signInPage.map((c) => c.rel)).toEqual([
+      'assets/sign-in-page-JJJ.js',
+      'assets/label-KKK.js',
+    ])
+    // The eager chunk the page also imports is audited once — as eager.
+    expect(report.signInPage.map((c) => c.rel)).not.toContain('assets/vendor-BBB.js')
+    // Not budgeted: the total is still the render-blocking graph alone.
+    expect(report.eager.map((c) => c.rel)).not.toContain('assets/sign-in-page-JJJ.js')
+    expect(report.totalBytes).toBe(report.eager.reduce((sum, c) => sum + c.bytes, 0))
+    expect(evaluate(report)).toEqual([])
+    expect(formatReport(report, [])).toContain('loaded with the sign-in page')
+  })
+
+  it('finds the one dynamic import of the admin shell, and the module it came from', () => {
+    const { adminShell } = auditDist(dist)
+    // By sourcemap, not by name: `frame-SSS.js` is the shell because its map
+    // says so, and `admin-shell-lazy-III.js` (a marker-liveness stub with no
+    // map) is not.
+    expect(adminShell.chunks).toEqual(['assets/frame-SSS.js'])
+    expect(adminShell.imports).toEqual([
+      {
+        from: 'assets/index-AAA.js',
+        target: 'assets/frame-SSS.js',
+        origin: '../../src/app/admin-shell-loader.ts',
+      },
+    ])
+    expect(formatReport(auditDist(dist), [])).toContain('admin-shell-loader.ts')
+  })
+
   it('counts sourcemaps that exist, not chunks that ought to have them', () => {
     // The mutation this exists for: `sourcemapped: eager.length`. The two
     // numbers must differ for that to be visible, which is why the fixture
@@ -652,7 +1001,7 @@ describe('auditDist over a synthetic dist/', () => {
       // …and the locale is still found, because the NAME fallback covers it.
       expect(report.renderBlocking).toEqual(['assets/ru-CCC.js'])
     } finally {
-      writeFileSync(join(dist, 'assets/index-AAA.js.map'), JSON.stringify({ version: 3, sources: ['../../src/main.tsx'] }))
+      writeFileSync(join(dist, 'assets/index-AAA.js.map'), JSON.stringify(ENTRY_MAP))
       writeFileSync(join(dist, 'assets/vendor-BBB.js.map'), JSON.stringify({ version: 3, sources: ['../../node_modules/react/index.js'] }))
       writeFileSync(join(dist, 'assets/ru-CCC.js.map'), JSON.stringify({ version: 3, sources: ['../../src/i18n/ru.ts'] }))
     }

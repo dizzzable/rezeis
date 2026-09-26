@@ -15,6 +15,7 @@
 import { Component, Suspense, useState, useEffect, useRef, useMemo, type ReactNode, type CSSProperties } from 'react'
 import { useGlassStore, type BackgroundId } from '@/lib/theme/glass-store'
 import { useAuth } from '@/features/auth/auth-provider'
+import { prefetchWhenIdle } from '@/lib/idle-prefetch'
 import { BG_COMPONENTS, BG_LOADERS } from './backgrounds'
 
 // ── Error Boundary ───────────────────────────────────────────────────────────
@@ -102,31 +103,12 @@ const ANIMATED_LAYER: CSSProperties = {
  * pre-auth "nothing runs on the GPU" invariant is intact. Rendering the
  * `lazy()` component is what would break it, and that is exactly why the raw
  * loader is exported separately.
+ *
+ * The idle scheduling and the swallowed failure live in `lib/idle-prefetch.ts`,
+ * shared with the admin shell's warm-up on the sign-in form.
  */
 function prefetchBackground(id: Exclude<BackgroundId, 'none'>): () => void {
-  let cancelled = false
-  const run = () => {
-    if (cancelled) return
-    void BG_LOADERS[id]?.().catch(() => {
-      // A failed warm-up is a non-event: the `lazy()` component will retry
-      // the same import when it actually mounts, and the ErrorBoundary
-      // already covers the case where that fails too.
-    })
-  }
-  // iOS Safari has no requestIdleCallback; a timeout keeps behaviour close
-  // enough without ever competing with the login-critical requests.
-  if (typeof requestIdleCallback === 'function') {
-    const handle = requestIdleCallback(run, { timeout: 4_000 })
-    return () => {
-      cancelled = true
-      cancelIdleCallback(handle)
-    }
-  }
-  const handle = setTimeout(run, 2_000)
-  return () => {
-    cancelled = true
-    clearTimeout(handle)
-  }
+  return prefetchWhenIdle(() => BG_LOADERS[id]?.() ?? Promise.resolve())
 }
 
 export function GlassBackground() {

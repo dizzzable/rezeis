@@ -2,6 +2,7 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from '@/App'
 import { Providers } from '@/app/providers'
+import { warmAdminShellForFirstScreen } from '@/app/router'
 import { registerServiceWorker } from '@/lib/register-sw'
 import { i18nReady } from '@/i18n/i18n'
 import '@/index.css'
@@ -15,6 +16,9 @@ void registerServiceWorker()
 // pre-auth spinner shows translated copy instead of raw keys like
 // "auth.verifyingSession". `.finally` so a failed locale fetch still renders.
 void i18nReady.finally(() => {
+  // A tab opened on a signed-in page fetches the admin shell alongside the
+  // session check this render starts, not after it (`app/router.tsx`).
+  warmAdminShellForFirstScreen()
   ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
     <React.StrictMode>
       <Providers>

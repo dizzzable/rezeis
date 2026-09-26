@@ -26,11 +26,16 @@
  * WHAT IT ASSERTS
  * ---------------
  *   • DENYLIST — no chunk in the login route's render-blocking graph may
- *     contain the three.js stack or the recharts/d3 charting stack. Matched by
+ *     contain the three.js stack, the recharts/d3 charting stack, or the admin
+ *     shell and the libraries only it uses (dnd-kit, socket.io, the Radix
+ *     primitives beyond the tooltip, cmdk). Matched by
  *     CONTENT (library-internal marker strings) and by SOURCE ATTRIBUTION (the
  *     `sources` array of the emitted sourcemap), never by chunk name: the
  *     chunk NAME is exactly what changed when the `vendor-charts` group was
  *     deleted, so a name-based rule would evaporate at the moment it matters.
+ *     The same denylist also covers the SIGN-IN PAGE chunk and its static
+ *     imports: fetched after first paint (so outside the budget), but still
+ *     downloaded on /sign-in — see SIGN_IN_PAGE.
  *   • BUDGET — total render-blocking bytes and chunk count stay under a
  *     ceiling.
  *   • MARKER LIVENESS — each denied library must still be findable SOMEWHERE
@@ -92,7 +97,19 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 //
 //   before the zustand fix     3,003,270 B  (2,784,062 static + locale) / 16 chunks
 //   before the charts fix      1,915,083 B  (1,695,875 static + locale) / 14 chunks
-//   CURRENT                    1,479,136 B  (1,259,928 static + locale) / 13 chunks
+//   after the charts fix       1,479,136 B  (1,259,928 static + locale) / 13 chunks
+//   0.9.7.70 (2026-09-25)      1,688,272 B  (1,334,178 static + 354,094 ru) / 14 chunks
+//   lazy admin shell           1,391,834 B  (1,037,740 static + 354,094 ru) / 12 chunks
+//   + the shell warm-up        1,392,439 B  (1,038,253 static + 354,186 ru) / 12 chunks
+//   CURRENT — + reload guard   1,393,616 B  (1,039,430 static + 354,186 ru) / 12 chunks
+//
+// The climb to 0.9.7.70 left 11,728 B of headroom. Most of it was the admin
+// shell — the frame around every signed-in page — imported statically by the
+// router, with dnd-kit, socket.io and the Radix menus behind it; the shell is
+// lazy now, and DENIED_BUNDLES below keeps it and those libraries off the
+// route. The ceiling was deliberately NOT lowered to bank the gain: it is the
+// goal the budget was set against, and the headroom (307,561 B) is what the
+// next legitimate feature spends.
 //
 // The ceiling is the goal the fix was measured against, not the current
 // number: a guard pinned to the exact measurement fails on every legitimate
@@ -131,6 +148,57 @@ export const RENDER_BLOCKING_LOCALE = {
 }
 
 /**
+ * The chunk the router loads for /sign-in, and everything it imports
+ * statically.
+ *
+ * NOT budgeted: it is fetched after first paint through the router's
+ * `lazy()`, and the budget has always described the render-blocking graph.
+ * But it IS downloaded on /sign-in before the form appears, so DENIED_BUNDLES
+ * applies to it as well. Without that a denied library could leave the
+ * render-blocking graph and still be downloaded on the route — which is what
+ * happened in the very build that made the admin shell lazy: the whole
+ * `vendor-ui` group (Select, the menus, Dialog — ~110 KB) came back with the
+ * sign-in page, because the form's label and separator lived in that group.
+ *
+ * Discovered the way the locale is: sourcemap attribution first
+ * (`src/features/auth/sign-in-page.tsx` exactly), the emitted name as the
+ * fallback. If neither finds it, `evaluate` fails rather than audit nothing.
+ */
+export const SIGN_IN_PAGE = {
+  id: 'sign-in-page',
+  label: 'the sign-in page chunk app/router.tsx loads for /sign-in',
+  sourcePattern: /(?:^|[\\/])src[\\/]features[\\/]auth[\\/]sign-in-page\.tsx$/,
+  namePattern: /(?:^|\/)sign-in-page-[^/]*\.js$/,
+}
+
+/**
+ * The admin shell may be imported lazily in exactly ONE place.
+ *
+ * The shell left the login route by becoming lazy, and lazy must not mean late.
+ * So its download starts at boot when the first screen is the shell, or on the
+ * sign-in form's first sign of intent. All of that goes through one
+ * `import()` in `app/admin-shell-loader.ts`: the router renders
+ * `adminShell.Component`, and the warm-ups call `adminShell.preload()`.
+ *
+ * The walker above ignores dynamic imports by design — they are the lazy
+ * routes — and that leaves one blind spot. A second `import()` of the shell
+ * would fetch it on /sign-in and the budget would never see it: say a warm-up
+ * on mount instead of on intent, or a `void import()` at boot. So the rule is
+ * stated over the emitted code. Every dynamic import in `dist/` that resolves
+ * to the chunk carrying `admin-shell.tsx` is attributed to its source module
+ * through the sourcemap, at the position of the `import(`. There must be
+ * exactly one, and it must come from the loader. A static import of the shell
+ * is the denylist's job (DENIED_BUNDLES → admin-shell) and fails there.
+ */
+export const ADMIN_SHELL_WARMUP = {
+  id: 'admin-shell/import',
+  label: 'the one dynamic import of the admin shell',
+  shellPattern: /(?:^|[\\/])src[\\/]components[\\/]layout[\\/]admin-shell\.tsx$/,
+  loaderPattern: /(?:^|[\\/])src[\\/]app[\\/]admin-shell-loader\.ts$/,
+  loader: 'src/app/admin-shell-loader.ts',
+}
+
+/**
  * Libraries that must never appear in the login route's eager graph.
  *
  * `markers` are library-internal strings, not CSS class names. That
@@ -146,6 +214,10 @@ export const RENDER_BLOCKING_LOCALE = {
  * comment). It is the precise detector; the markers are the one that keeps
  * working if sourcemaps are ever switched off. Both run; either one firing is
  * a failure, and the report says which fired.
+ *
+ * `fix`, where present, replaces the generic advice in the failure message
+ * (look for the manualChunks group that carried the library in). For the
+ * admin shell the usual cause is a plain static import, so it says that.
  *
  * The charts `sourcePattern` deliberately lists only the chart-math d3
  * packages. d3-drag / d3-zoom / d3-selection / d3-interpolate / d3-color are
@@ -173,6 +245,76 @@ export const DENIED_BUNDLES = [
     markers: ['rechartsEventEmitter', 'recharts_measurement_span', 'recharts.syncEvent.tooltip'],
     sourcePattern:
       /(?:^|[\\/])node_modules[\\/](?:recharts|victory-vendor|internmap|d3-(?:array|format|path|scale|shape|time|time-format))[\\/]/,
+  },
+  // ── The admin shell, and what only it brought onto the route ──────────────
+  //
+  // Until 0.9.7.70 `app/router.tsx` imported the shell statically, so /sign-in
+  // downloaded the frame of every signed-in page — and the four libraries
+  // below with it — before its form could paint. Making the shell lazy, and
+  // taking out of the eager manualChunks groups what only it used, cut the
+  // route from 1,688,272 B to 1,391,834 B, at a moment when 11,728 B of
+  // budget were left. Each
+  // library has an entry of its own, not only the shell, because each can
+  // come back WITHOUT the shell: one eager component that opens a Select, or
+  // a module put back into a manualChunks group the entry reaches (the
+  // `app-core` and `vendor-ui-utils` groups in vite.config.ts carried the
+  // Radix dialog and cmdk onto the route exactly that way). Every marker was
+  // checked against a real dist/ to match only the chunk that holds its
+  // library by sourcemap.
+  {
+    id: 'admin-shell',
+    label: 'the admin shell (sidebar, topbar, quick search)',
+    reason:
+      'the frame only renders behind a verified session. app/router.tsx loads it with lazy(); ' +
+      'a static import of admin-shell — or of anything under admin-sidebar/, admin-topbar/ or ' +
+      'quick-search/ — from a module the entry reaches brings the frame back.',
+    fix: [
+      `find the static import: from the entry, only app/router.tsx should name admin-shell,`,
+      `and only inside lazy(). Something the entry imports statically (a provider, the router,`,
+      `a store) now imports the shell or one of its parts.`,
+    ],
+    // A first-party string that only admin-shell.tsx carries (its session key
+    // for the push re-sync). Minification keeps string literals.
+    markers: ['rezeis_admin_push_resync'],
+    sourcePattern:
+      /(?:^|[\\/])src[\\/]components[\\/](?:layout[\\/](?:admin-shell\.tsx$|admin-sidebar[\\/]|admin-topbar[\\/])|quick-search[\\/])/,
+  },
+  {
+    id: 'dnd-kit',
+    label: 'dnd-kit (drag and drop)',
+    reason: 'the sidebar reorders its items after sign-in; the login route has nothing to drag.',
+    markers: ['DndDescribedBy', 'DndLiveRegion'],
+    sourcePattern: /(?:^|[\\/])node_modules[\\/]@dnd-kit[\\/]/,
+  },
+  {
+    id: 'socket-io',
+    label: 'the socket.io / engine.io realtime client',
+    reason: 'the realtime socket opens inside the admin shell, after the session is verified.',
+    markers: ['upgradeError', 'pollComplete'],
+    sourcePattern:
+      /(?:^|[\\/])node_modules[\\/](?:socket\.io-client|socket\.io-parser|engine\.io-client|engine\.io-parser)[\\/]/,
+  },
+  {
+    // The tooltip and what it is built on (popper, dismissable layer, portal,
+    // presence, slot…) ARE on the route, legitimately: `TooltipProvider` sits
+    // in providers.tsx. The pattern names the primitives that are not, and
+    // only those — any of them on the route means the whole `vendor-ui`
+    // group (88 KB at 0.9.7.70) came back with it.
+    id: 'radix-kit',
+    label: 'the Radix primitives beyond the tooltip (select, menus, dialogs, scroll areas…)',
+    reason:
+      'the login form uses none of them. Each lives in the vendor-ui group, so one eager ' +
+      'import of any of them puts the whole group on the route.',
+    markers: ['SelectItemAlignedPosition', 'MenuSubContent', 'DialogOverlay'],
+    sourcePattern:
+      /(?:^|[\\/])node_modules[\\/]@radix-ui[\\/]react-(?:select|menu|dropdown-menu|scroll-area|slider|popover|dialog|alert-dialog|checkbox|radio-group|switch|tabs|collapsible|progress|avatar)[\\/]/,
+  },
+  {
+    id: 'cmdk',
+    label: 'cmdk (command palette)',
+    reason: 'only the plan form and the timezone picker use it, both on lazy routes.',
+    markers: ['cmdk-list-sizer', 'cmdk-item-select'],
+    sourcePattern: /(?:^|[\\/])node_modules[\\/]cmdk[\\/]/,
   },
 ]
 
@@ -306,6 +448,86 @@ export function parseDynamicImportSpecifiers(code) {
 }
 
 /**
+ * Every dynamic import in `code`, with the offset of its `import(`.
+ *
+ * Unlike `parseDynamicImportSpecifiers` this keeps duplicates: two `import()`
+ * expressions of the same chunk are two import sites, and ADMIN_SHELL_WARMUP
+ * counts sites.
+ *
+ * @returns {Array<{ spec: string, index: number }>}
+ */
+export function findDynamicImports(code) {
+  const found = []
+  const re = new RegExp(DYNAMIC_IMPORT_RE.source, 'g')
+  let m
+  while ((m = re.exec(code))) found.push({ spec: m[1], index: m.index })
+  return found
+}
+
+const BASE64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+
+/** One sourcemap segment (`"AAgBC"`) → its fields, still delta-encoded. */
+function decodeVlqSegment(segment) {
+  const fields = []
+  let value = 0
+  let shift = 0
+  for (const char of segment) {
+    const digit = BASE64.indexOf(char)
+    if (digit === -1) return fields
+    value += (digit & 31) << shift
+    if (digit & 32) {
+      shift += 5
+      continue
+    }
+    fields.push(value & 1 ? -(value >>> 1) : value >>> 1)
+    value = 0
+    shift = 0
+  }
+  return fields
+}
+
+/**
+ * The source module a position in an emitted chunk came from.
+ *
+ * Walks the sourcemap's `mappings` up to the position's line and takes the
+ * last segment that starts at or before its column. The source index in a
+ * segment is a delta from the previous segment ANYWHERE in the map, not only on
+ * the same line, so every earlier line has to be read, even though only its
+ * source indices matter.
+ *
+ * @param {{ sources?: string[], mappings?: string } | null} map
+ * @param {string} code  the chunk exactly as emitted
+ * @param {number} index offset in `code` (UTF-16, i.e. a JS string index)
+ * @returns {string | null} the `sources` entry, or null when unmapped
+ */
+export function sourceAtOffset(map, code, index) {
+  if (!map || typeof map.mappings !== 'string' || !Array.isArray(map.sources)) return null
+  let line = 0
+  let lineStart = 0
+  for (let nl = code.indexOf('\n'); nl !== -1 && nl < index; nl = code.indexOf('\n', nl + 1)) {
+    line += 1
+    lineStart = nl + 1
+  }
+  const column = index - lineStart
+  const lines = map.mappings.split(';')
+  let sourceIndex = 0
+  let found = null
+  for (let l = 0; l <= line && l < lines.length; l++) {
+    let generatedColumn = 0
+    for (const segment of lines[l].split(',')) {
+      if (!segment) continue
+      const fields = decodeVlqSegment(segment)
+      generatedColumn += fields[0] ?? 0
+      if (fields.length >= 4) sourceIndex += fields[1]
+      if (l !== line) continue
+      if (generatedColumn > column) return found
+      found = fields.length >= 4 ? (map.sources[sourceIndex] ?? null) : null
+    }
+  }
+  return found
+}
+
+/**
  * Is this a specifier that names a sibling chunk on disk?
  *
  * Spelled out rather than `spec.startsWith('.')` because both spellings occur:
@@ -409,16 +631,21 @@ export function inspectChunk({ code, sources = [] }, denied = DENIED_BUNDLES) {
 
 const toRel = (href) => href.replace(/^\/+/, '').split('?')[0].split('#')[0]
 
+/** A chunk's parsed sourcemap, or null when it was not emitted or is unreadable. */
+function readChunkMap(distDir, rel) {
+  const mapPath = path.join(distDir, `${rel}.map`)
+  if (!existsSync(mapPath)) return null
+  try {
+    return JSON.parse(readFileSync(mapPath, 'utf8'))
+  } catch {
+    return null
+  }
+}
+
 /** `sources` of a chunk's sourcemap, or [] when the map was not emitted. */
 function readChunkSources(distDir, rel) {
-  const mapPath = path.join(distDir, `${rel}.map`)
-  if (!existsSync(mapPath)) return []
-  try {
-    const parsed = JSON.parse(readFileSync(mapPath, 'utf8'))
-    return Array.isArray(parsed.sources) ? parsed.sources : []
-  } catch {
-    return []
-  }
+  const parsed = readChunkMap(distDir, rel)
+  return parsed && Array.isArray(parsed.sources) ? parsed.sources : []
 }
 
 /** Every emitted .js under dist/, relative to dist/, for the liveness scan. */
@@ -510,22 +737,66 @@ export function auditDist(distDir) {
   ]
   eager.sort((a, b) => b.bytes - a.bytes)
 
+  // The sign-in page and what it imports statically — downloaded on /sign-in
+  // after first paint. Denylist only; see SIGN_IN_PAGE. `null` means it could
+  // not be found, which `evaluate` reports instead of auditing nothing.
+  const signInEntry = [...dynamicTargets.values()].find(
+    (c) => c.sources.some((s) => SIGN_IN_PAGE.sourcePattern.test(s)) || SIGN_IN_PAGE.namePattern.test(c.rel),
+  )
+  const audited = new Set(eager.map((c) => c.rel))
+  const signInPage = signInEntry
+    ? walkEagerGraph({ seeds: [signInEntry.rel], loadChunk })
+        .chunks.filter((rel) => !audited.has(rel))
+        .map((rel) => ({
+          rel,
+          bytes: statSync(path.join(distDir, rel)).size,
+          hits: inspectChunk(
+            { code: readFileSync(path.join(distDir, rel), 'utf8'), sources: readChunkSources(distDir, rel) },
+            DENIED_BUNDLES,
+          ),
+        }))
+        .sort((a, b) => b.bytes - a.bytes)
+    : null
+
   // Liveness: prove each marker set still matches the library somewhere.
   // Same pass locates the singleton libraries by sourcemap attribution — the
   // chunk NAME is exactly the thing that turned out to be untrustworthy.
   const liveness = new Map(DENIED_BUNDLES.map((b) => [b.id, []]))
   const singletons = new Map(EAGER_SINGLETONS.map((s) => [s.id, []]))
+  // Same pass: where the admin shell lives, and every dynamic import site in
+  // dist/ (ADMIN_SHELL_WARMUP). Filtered down to the shell after the loop,
+  // since the shell's chunk is only known once every map has been read.
+  const shellChunks = []
+  const dynamicSites = []
   for (const rel of allEmittedChunks(distDir)) {
     const code = readFileSync(path.join(distDir, rel), 'utf8')
     for (const bundle of DENIED_BUNDLES) {
       if (bundle.markers.some((marker) => code.includes(marker))) liveness.get(bundle.id).push(rel)
+    }
+    for (const { spec, index } of findDynamicImports(code)) {
+      if (!isRelativeSpecifier(spec)) continue
+      const target = path.posix.normalize(path.posix.join(path.posix.dirname(rel), spec))
+      dynamicSites.push({ from: rel, target, index })
     }
     const sources = readChunkSources(distDir, rel)
     if (!sources.length) continue
     for (const singleton of EAGER_SINGLETONS) {
       if (sources.some((s) => singleton.sourcePattern.test(s))) singletons.get(singleton.id).push(rel)
     }
+    if (sources.some((s) => ADMIN_SHELL_WARMUP.shellPattern.test(s))) shellChunks.push(rel)
   }
+  const shellSet = new Set(shellChunks)
+  const shellImports = dynamicSites
+    .filter((site) => shellSet.has(site.target))
+    .map((site) => ({
+      from: site.from,
+      target: site.target,
+      origin: sourceAtOffset(
+        readChunkMap(distDir, site.from),
+        readFileSync(path.join(distDir, site.from), 'utf8'),
+        site.index,
+      ),
+    }))
 
   const stylesheetBytes = refs.stylesheets
     .map(toRel)
@@ -548,6 +819,8 @@ export function auditDist(distDir) {
     sourcemapped: eager.filter((c) => c.sourcemapped).length,
     totalBytes: eager.reduce((sum, c) => sum + c.bytes, 0),
     undeclared: eager.filter((c) => !c.declared && !c.renderBlocking).map((c) => c.rel),
+    signInPage,
+    adminShell: { chunks: shellChunks, imports: shellImports },
   }
 }
 
@@ -570,10 +843,93 @@ export function evaluate(report, { byteBudget = EAGER_BYTE_BUDGET, chunkBudget =
           ...detections.map((d) => `    detected by ${d.detector}: ${d.evidence}`),
           `    why this is a bug: ${bundle.reason}`,
           `    rule: no chunk reachable from the entry's STATIC import graph may contain this library.`,
-          `    fix: find the rule in vite.config.ts (build.rollupOptions.output.manualChunks) that`,
-          `         puts this library in a group the entry reaches, and check what else landed in`,
-          `         that group — the last two times, an unrelated package (zustand; React via CJS`,
-          `         interop) was the thing dragging it onto /sign-in.`,
+          ...(bundle.fix
+            ? bundle.fix.map((line, i) => `    ${i === 0 ? 'fix: ' : '     '}${line}`)
+            : [
+                `    fix: find the rule in vite.config.ts (build.rollupOptions.output.manualChunks) that`,
+                `         puts this library in a group the entry reaches, and check what else landed in`,
+                `         that group — the last two times, an unrelated package (zustand; React via CJS`,
+                `         interop) was the thing dragging it onto /sign-in. If no group explains it, look`,
+                `         for a static import of it from a module the entry reaches.`,
+              ]),
+        ],
+      })
+    }
+  }
+
+  // The sign-in page's own imports: outside the budget, not outside the route.
+  for (const chunk of report.signInPage ?? []) {
+    for (const { bundle, detections } of chunk.hits) {
+      failures.push({
+        rule: 'denylist/sign-in-page',
+        lines: [
+          `${chunk.rel} (${n(chunk.bytes)} B) contains ${bundle.label}, and the sign-in page imports it.`,
+          ...detections.map((d) => `    detected by ${d.detector}: ${d.evidence}`),
+          `    why this is a bug: ${bundle.reason}`,
+          `    It is not render-blocking, so the budget does not count it — but the sign-in page`,
+          `    chunk imports it statically, so every visit to /sign-in downloads it before the form`,
+          `    appears.`,
+          `    fix: find what the sign-in page shares with it. Last time it was a manualChunks group`,
+          `         (vite.config.ts) holding both a primitive the form draws and this library — the`,
+          `         form's label and separator sat in \`vendor-ui\` with Select, the menus and Dialog.`,
+        ],
+      })
+    }
+  }
+
+  // `null` — not merely empty — means auditDist looked and found no sign-in
+  // page. Fixtures that never set the field have no opinion about it.
+  if (report.signInPage === null) {
+    failures.push({
+      rule: 'sign-in-page',
+      lines: [
+        `${SIGN_IN_PAGE.label} was not found among the entry's dynamic imports.`,
+        `    source pattern: ${SIGN_IN_PAGE.sourcePattern}`,
+        `    name pattern:   ${SIGN_IN_PAGE.namePattern}`,
+        `    The denylist audits what that chunk imports, because /sign-in downloads it. Either the`,
+        `    page moved or was renamed (update SIGN_IN_PAGE) or the router stopped loading it`,
+        `    lazily. Do not "fix" this by deleting the check: without it a denied library can leave`,
+        `    the render-blocking graph and still be downloaded on the route.`,
+      ],
+    })
+  }
+
+  // The admin shell: exactly one dynamic import, from the loader. Fixtures that
+  // never set the field have no opinion about it.
+  const shell = report.adminShell
+  if (shell) {
+    const { imports } = shell
+    const fromLoader = imports.filter((site) => ADMIN_SHELL_WARMUP.loaderPattern.test(site.origin ?? ''))
+    const describeSite = (site) =>
+      `      ${site.from} → ${site.target}   (from ${site.origin ?? 'an unmapped position'})`
+    if (shell.chunks.length === 0) {
+      failures.push({
+        rule: ADMIN_SHELL_WARMUP.id,
+        lines: [
+          `the admin shell (${ADMIN_SHELL_WARMUP.shellPattern}) was not found in any chunk's sourcemap.`,
+          `    Either admin-shell.tsx moved or was renamed (update ADMIN_SHELL_WARMUP), or sourcemaps are`,
+          `    off. Until then this rule checks nothing.`,
+        ],
+      })
+    } else if (imports.length === 0) {
+      failures.push({
+        rule: ADMIN_SHELL_WARMUP.id,
+        lines: [
+          `no dynamic import of the admin shell (${shell.chunks.join(', ')}) was found.`,
+          `    The shell is meant to load through ONE import() in ${ADMIN_SHELL_WARMUP.loader}.`,
+          `    If the denylist above names the shell, it was imported statically: that is the bug.`,
+          `    Otherwise the loader moved or was renamed — update ADMIN_SHELL_WARMUP.`,
+        ],
+      })
+    } else if (imports.length > 1 || fromLoader.length !== 1) {
+      failures.push({
+        rule: ADMIN_SHELL_WARMUP.id,
+        lines: [
+          `the admin shell is imported dynamically from ${imports.length} place${imports.length === 1 ? '' : 's'}, and only ${ADMIN_SHELL_WARMUP.loader} may do it:`,
+          ...imports.map(describeSite),
+          `    why this is a bug: every other import() is another way for the shell to be fetched —`,
+          `    e.g. on mount of the sign-in page — and the budget cannot see a dynamic import. The router`,
+          `    renders adminShell.Component and the warm-ups call adminShell.preload(); use those.`,
         ],
       })
     }
@@ -739,6 +1095,26 @@ export function formatReport(report, failures) {
       `  ${String(n(report.stylesheetBytes)).padStart(11)} B  eager CSS — reported, NOT budgeted:`,
     )
     lines.push(`               these ceilings govern the JS module graph only.`)
+  }
+  if (report.signInPage?.length) {
+    lines.push('')
+    lines.push(`  loaded with the sign-in page after first paint — denylist only, NOT budgeted:`)
+    for (const chunk of report.signInPage) {
+      const flags = chunk.hits.map((h) => `DENIED: ${h.bundle.id}`)
+      lines.push(
+        `  ${String(n(chunk.bytes)).padStart(11)} B  ${chunk.rel}${flags.length ? `   ← ${flags.join(', ')}` : ''}`,
+      )
+    }
+    const pageBytes = report.signInPage.reduce((sum, c) => sum + c.bytes, 0)
+    lines.push(`  ${'—'.repeat(11)}`)
+    lines.push(`  ${String(n(pageBytes)).padStart(11)} B  across ${report.signInPage.length} chunks`)
+  }
+  if (report.adminShell?.imports.length) {
+    lines.push('')
+    lines.push(`  admin shell — dynamic import sites (exactly one allowed, from ${ADMIN_SHELL_WARMUP.loader}):`)
+    for (const site of report.adminShell.imports) {
+      lines.push(`               ${site.from} → ${site.target}   (from ${site.origin ?? 'an unmapped position'})`)
+    }
   }
   if (report.undeclared.length) {
     lines.push('')

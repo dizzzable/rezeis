@@ -156,6 +156,22 @@ describe('GlassBackground login-screen prefetch', () => {
     expect(loaderCalls.count).toBe(0)
   })
 
+  it('does not prefetch while the browser reports offline', () => {
+    // The shared idle warm-up (`lib/idle-prefetch.ts`) checks when it would
+    // start. A fetch made offline fails for certain, and the browser keeps the
+    // failed module record: the background's own import after sign-in would
+    // fail from it and reload the page.
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: false })
+    try {
+      render(<GlassBackground />)
+      vi.advanceTimersByTime(5_000)
+
+      expect(loaderCalls.count).toBe(0)
+    } finally {
+      delete (navigator as unknown as Record<string, unknown>).onLine
+    }
+  })
+
   it('cancels the pending warm-up when it unmounts first', () => {
     // Sign-in resolves fast on a warm session: the shell can unmount before
     // idle ever arrives, and a stray import firing into a torn-down tree is

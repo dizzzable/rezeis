@@ -118,14 +118,12 @@ describe('manualChunks', () => {
       'lib/utils.ts',
       'lib/translate-error.ts',
       'lib/locale-storage.ts',
+      'lib/lazy-chunk.ts',
       'i18n/i18n.ts',
       'components/ui/alert.tsx',
-      'components/ui/badge.tsx',
       'components/ui/button.tsx',
-      'components/ui/dialog.tsx',
       'components/ui/skeleton.tsx',
       'components/ui/tooltip.tsx',
-      'features/remnawave/remnawave-icon.tsx',
     ]) {
       expect(manualChunks(`${SRC}${module}`), module).toBe('app-core')
     }
@@ -141,6 +139,90 @@ describe('manualChunks', () => {
     ]) {
       expect(manualChunks(`${SRC}${module}`), module).toBeUndefined()
     }
+    // Only the admin shell imported these, and the shell is lazy: left in the
+    // group, the dialog alone kept Radix Dialog and react-remove-scroll
+    // (~20 KB) on /sign-in.
+    for (const module of [
+      'components/ui/badge.tsx',
+      'components/ui/dialog.tsx',
+      'features/remnawave/remnawave-icon.tsx',
+    ]) {
+      expect(manualChunks(`${SRC}${module}`), module).not.toBe('app-core')
+    }
+  })
+
+  it('sends the shadcn wrappers the admin shell renders to the Radix group, and not the sign-in ones', () => {
+    // One request instead of seven for the lazy shell: over HTTP/1.1 its
+    // requests shared six sockets with the session check.
+    const SRC = 'V:/repo/rezeis-admin/web/src/'
+    for (const module of ['avatar', 'badge', 'dialog', 'dropdown-menu', 'popover', 'scroll-area', 'sheet']) {
+      expect(manualChunks(`${SRC}components/ui/${module}.tsx`), module).toBe('vendor-ui')
+    }
+    // The sign-in form's own wrappers stay out: in the group, the sign-in page
+    // would download all of Radix with them.
+    for (const module of ['label', 'separator', 'card', 'input']) {
+      expect(manualChunks(`${SRC}components/ui/${module}.tsx`), module).toBeUndefined()
+    }
+  })
+
+  it('groups only IMPORT-FREE modules the shell shares with pages into shell-kit', () => {
+    const SRC = 'V:/repo/rezeis-admin/web/src/'
+    for (const module of [
+      'lib/admin-query-keys.ts',
+      'lib/admin-pwa-icon.ts',
+      'lib/copy-to-clipboard.ts',
+      'features/payments/payments-filters.ts',
+      'components/quick-search/search-text.ts',
+    ]) {
+      expect(manualChunks(`${SRC}${module}`), module).toBe('shell-kit')
+    }
+    // A group brings its dependencies along. These import modules without a
+    // group of their own (the API client, lucide icons), and grouping the nav
+    // config once put the error boundary's icons, and with them this group,
+    // on /sign-in.
+    for (const module of [
+      'lib/push.ts',
+      'lib/api.ts',
+      'features/notification-centre/use-notification-inbox.ts',
+      'components/layout/admin-nav-config.ts',
+      'components/layout/admin-shell.tsx',
+    ]) {
+      expect(manualChunks(`${SRC}${module}`), module).toBeUndefined()
+    }
+  })
+
+  it('keeps the always-loaded theme stores in the eager vendor-state chunk', () => {
+    // The providers read them on every screen, and the lazy admin shell reads
+    // them too; without a rule rolldown lifts them into a chunk of their own
+    // on the login route (22 KB, one more request).
+    const SRC = 'V:/repo/rezeis-admin/web/src/'
+    for (const module of [
+      'lib/theme/appearance-store.ts',
+      'lib/theme/effects-store.ts',
+      'lib/theme/theme-store.ts',
+      'lib/theme/glass-store.ts',
+      'features/appearance/background-controls.ts',
+    ]) {
+      expect(manualChunks(`${SRC}${module}`), module).toBe('vendor-state')
+    }
+  })
+
+  it('keeps the two Radix primitives the sign-in form draws out of the vendor-ui group', () => {
+    // In the group, the sign-in page chunk imported all of `vendor-ui` (~110 KB:
+    // Select, the menus, Dialog…) for a label and a separator.
+    expect(manualChunks(`${NM}@radix-ui/react-label/dist/index.mjs`)).toBeUndefined()
+    expect(manualChunks(`${NM}@radix-ui/react-separator/dist/index.mjs`)).toBeUndefined()
+    // …while the rest of Radix still travels together.
+    expect(manualChunks(`${NM}@radix-ui/react-select/dist/index.mjs`)).toBe('vendor-ui')
+    expect(manualChunks(`${NM}@radix-ui/react-dropdown-menu/dist/index.mjs`)).toBe('vendor-ui')
+  })
+
+  it('keeps lazy-only libraries out of the eager vendor-ui-utils group', () => {
+    // The group is eager because the Toaster is (providers.tsx), so whatever
+    // else it names rides onto /sign-in. cmdk did: 11 KB used by two forms.
+    expect(manualChunks(`${NM}sonner/dist/index.mjs`)).toBe('vendor-ui-utils')
+    expect(manualChunks(`${NM}cmdk/dist/index.mjs`)).toBeUndefined()
+    expect(manualChunks(`${NM}vaul/dist/index.mjs`)).toBeUndefined()
   })
 
   it('leaves first-party sources to rolldown (route-level splitting)', () => {

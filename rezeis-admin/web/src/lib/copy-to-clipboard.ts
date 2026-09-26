@@ -1,8 +1,11 @@
 // Copying to the clipboard, answered truthfully. Kept apart from the
-// `CopyableId` component so that the app shell (the top bar’s support menu),
-// which ships in the entry bundle, can copy without pulling the component and
-// the (i) tip and label it draws into the render-blocking payload that
-// `npm run check:build-graph` holds to 15 chunks.
+// `CopyableId` component so that the app shell (the top bar’s support menu)
+// can copy without pulling in the component and the (i) tip and label it
+// draws. The shell used to ship in the entry bundle, where that mattered to
+// the render-blocking payload `npm run check:build-graph` holds to 15 chunks.
+// It is lazy now, and what matters instead is that this file imports NOTHING:
+// that is the condition for its place in the `shell-kit` chunk
+// (vite.config.ts), which keeps the lazy shell's requests few.
 export interface CopyTextOptions {
   /**
    * Where the fallback's hidden field goes: an element next to the control

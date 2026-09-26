@@ -43,8 +43,8 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks(id: string) {
-          // ── The two always-loaded theme stores travel with the state
-          // layer they are built on.
+          // ── The always-loaded theme stores travel with the state layer
+          // they are built on.
           //
           // They live in the entry chunk when only the shell reads them
           // (AppearanceProvider, EffectsProvider). As soon as a LAZY page
@@ -56,9 +56,18 @@ export default defineConfig({
           // here puts them inside the eager vendor-state chunk instead —
           // same bytes, no extra request, and the zustand singleton these
           // stores are built on is in that very chunk.
+          //
+          // The theme and glass stores, and the background catalogue the glass
+          // store reads, joined the first two for the same reason once the
+          // admin shell became a lazy chunk (router.tsx): the shell reads all
+          // three, and without a rule rolldown lifted them into a 22 KB chunk
+          // of their own on the login route.
           if (
             id.includes('/src/lib/theme/appearance-store') ||
-            id.includes('/src/lib/theme/effects-store')
+            id.includes('/src/lib/theme/effects-store') ||
+            id.includes('/src/lib/theme/theme-store') ||
+            id.includes('/src/lib/theme/glass-store') ||
+            id.includes('/src/features/appearance/background-controls')
           ) {
             return 'vendor-state'
           }
@@ -78,22 +87,79 @@ export default defineConfig({
           //
           // List a module here ONLY if the entry imports it statically. Anything
           // else would ride onto the login route with the group.
+          //
+          // That rule is why `badge`, `dialog` and `remnawave-icon` are no longer
+          // listed: only the admin shell imported them, and the shell is lazy
+          // now. Left here, the dialog alone kept Radix Dialog, react-remove-
+          // scroll and the focus scope (~20 KB) on /sign-in, which renders no
+          // dialog. `lazy-chunk` joined for the opposite reason: the router
+          // imports it statically AND the lazy shell does too, which lifted it
+          // into a 738 B chunk of its own.
           if (
             [
               '/src/lib/utils.ts',
               '/src/lib/translate-error.ts',
               '/src/lib/locale-storage.ts',
+              '/src/lib/lazy-chunk.ts',
               '/src/i18n/i18n.ts',
               '/src/components/ui/alert.tsx',
-              '/src/components/ui/badge.tsx',
               '/src/components/ui/button.tsx',
-              '/src/components/ui/dialog.tsx',
               '/src/components/ui/skeleton.tsx',
               '/src/components/ui/tooltip.tsx',
-              '/src/features/remnawave/remnawave-icon.tsx',
             ].some((module) => id.endsWith(module))
           ) {
             return 'app-core'
+          }
+
+          // ── The shadcn wrappers the admin shell renders, with the Radix
+          // primitives they wrap (the `vendor-ui` rule below).
+          //
+          // Left to rolldown, each is a chunk of its own, shared by the shell
+          // and the pages: seven of the 23 requests the lazy shell cost over
+          // the eager set. Over HTTP/1.1 — six sockets per host, first come
+          // first served — the shell's requests go out alongside the session
+          // check, and `/me` queued behind them. Every wrapper here imports
+          // only modules that already have a group (Radix, lucide, cva,
+          // react-i18next, lib/utils), so the group pulls nothing else in.
+          // A module with an ungrouped dependency must not be added: rolldown
+          // brings a group's ungrouped dependencies along, and a trial that
+          // grouped the shell's own modules this way pulled the API client
+          // in, and with it the whole frame onto /sign-in.
+          if (
+            [
+              '/src/components/ui/avatar.tsx',
+              '/src/components/ui/badge.tsx',
+              '/src/components/ui/dialog.tsx',
+              '/src/components/ui/dropdown-menu.tsx',
+              '/src/components/ui/popover.tsx',
+              '/src/components/ui/scroll-area.tsx',
+              '/src/components/ui/sheet.tsx',
+            ].some((module) => id.endsWith(module))
+          ) {
+            return 'vendor-ui'
+          }
+
+          // ── Small modules the admin shell shares with the pages, in one
+          // chunk instead of five — for the same `/me` as above.
+          //
+          // ONLY modules that import nothing at all. A group takes its
+          // dependencies with it even when another group claims them: a trial
+          // that added `admin-nav-config` (it imports lucide icons) moved the
+          // icons out of `vendor-icons` into this group; the error boundary's
+          // icons went with them, and the entry then loaded the group on
+          // /sign-in. `scripts/check-build-graph.mjs` failed that build.
+          // None of the five is reachable from the entry, /sign-in,
+          // /change-password or the not-found page.
+          if (
+            [
+              '/src/lib/admin-query-keys.ts',
+              '/src/lib/admin-pwa-icon.ts',
+              '/src/lib/copy-to-clipboard.ts',
+              '/src/features/payments/payments-filters.ts',
+              '/src/components/quick-search/search-text.ts',
+            ].some((module) => id.endsWith(module))
+          ) {
+            return 'shell-kit'
           }
 
           if (id.includes('node_modules')) {
@@ -177,7 +243,22 @@ export default defineConfig({
             ) {
               return 'vendor-data'
             }
-            // Radix UI primitives
+            // Radix UI primitives — except the two the sign-in form renders.
+            //
+            // The label (the form's field labels) and the separator (the line
+            // above the OAuth buttons) are the only Radix pieces /sign-in draws.
+            // Inside this group they made the sign-in page chunk import all of
+            // `vendor-ui` — Select, the menus, Dialog, ScrollArea, ~110 KB — so
+            // the group stayed on the route even after it left the render-
+            // blocking graph with the admin shell. Left to rolldown, each rides
+            // in the small shared chunk of its shadcn wrapper instead. The
+            // build-graph guard audits the sign-in page's own imports for this.
+            if (
+              id.includes('@radix-ui/react-label/') ||
+              id.includes('@radix-ui/react-separator/')
+            ) {
+              return undefined
+            }
             if (id.includes('@radix-ui/')) {
               return 'vendor-ui'
             }
@@ -216,14 +297,17 @@ export default defineConfig({
             if (id.includes('/motion/') || id.includes('motion-dom') || id.includes('motion-utils')) {
               return 'vendor-motion'
             }
-            // Remaining UI utilities
+            // Remaining UI utilities. Only what the login route needs anyway:
+            // the group is eager because `sonner` is (the Toaster lives in
+            // providers.tsx), so anything else named here rides onto /sign-in
+            // with it. `cmdk` did exactly that — 11 KB of command palette that
+            // only the plan form and the timezone picker use — and `vaul` is not
+            // imported at all. Both are left to rolldown now.
             if (
               id.includes('class-variance-authority') ||
               id.includes('clsx') ||
               id.includes('tailwind-merge') ||
-              id.includes('sonner') ||
-              id.includes('cmdk') ||
-              id.includes('vaul')
+              id.includes('sonner')
             ) {
               return 'vendor-ui-utils'
             }

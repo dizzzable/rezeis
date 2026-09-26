@@ -1,12 +1,19 @@
 /* eslint-disable react-refresh/only-export-components */
-import { createBrowserRouter, Navigate, useLocation } from 'react-router';
+import { createBrowserRouter, Navigate, useLocation, type RouteObject } from 'react-router';
 import { Suspense } from 'react';
-import ProtectedRoute from './protected-route';
-import AdminShell from '@/components/layout/admin-shell';
+import { useTranslation } from 'react-i18next';
+import ProtectedRoute, { FullScreenSpinner } from './protected-route';
+import {
+  ADMIN_SHELL_ROUTE_ID,
+  adminShell,
+  shouldWarmAdminShellAtBoot,
+} from './admin-shell-loader';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { withFeatureBundle } from '@/i18n/i18n';
 import { lazyWithChunkRecovery as lazy } from '@/lib/lazy-chunk';
+import { browserReportsOffline } from '@/lib/idle-prefetch';
+import { useAuthStore } from '@/stores/auth-store';
 
 /**
  * Wraps children in an ErrorBoundary that resets whenever the
@@ -18,7 +25,22 @@ function RouteErrorBoundary({ children }: { readonly children: React.ReactNode }
   return <ErrorBoundary key={pathname}>{children}</ErrorBoundary>;
 }
 
-// Lazy-load pages
+// The frame around every signed-in page: sidebar, topbar, quick search, the
+// notification bell, the realtime socket. Lazy like the pages it frames.
+//
+// It used to be a static import here, and this file is on the entry's static
+// graph, so /sign-in downloaded the whole frame before its form could paint:
+// dnd-kit (sidebar reordering), socket.io, the Radix menus and scroll areas —
+// 259,657 B of the 1,688,272 B the login route took at 0.9.7.70. None of it
+// renders before a session is verified. `scripts/check-build-graph.mjs`
+// (DENIED_BUNDLES → admin-shell and the libraries after it) fails the build if
+// the frame comes back onto the route.
+//
+// Lazy must not mean late: its download starts at boot when the first screen
+// is the shell (`warmAdminShellForFirstScreen` below), or on the sign-in form's
+// first sign of intent. The component and those warm-ups share one import,
+// in `admin-shell-loader.ts`.
+const AdminShell = adminShell.Component;
 const SignInPage = lazy(() => import('@/features/auth/sign-in-page'));
 const ForcePasswordChangePage = lazy(() => import('@/features/auth/force-password-change-page'));
 const DashboardPage = lazy(
@@ -135,6 +157,21 @@ function PageFallback() {
   );
 }
 
+/**
+ * What stands in for the admin frame while its chunk loads: the spinner the
+ * session probe showed a moment earlier, so the operator sees one wait, not
+ * a spinner followed by a skeleton of a page with no frame around it.
+ *
+ * Usually never on screen. The frame is fetched at boot or on the sign-in
+ * form's first sign of intent, and once it is here it renders without
+ * suspending (`lazyWithPreload`). It shows only when the session check
+ * finishes before that download does.
+ */
+function ShellFallback() {
+  const { t } = useTranslation();
+  return <FullScreenSpinner label={t('common.loading')} />;
+}
+
 function withSuspense(element: React.ReactNode) {
   return (
     <RouteErrorBoundary>
@@ -143,7 +180,7 @@ function withSuspense(element: React.ReactNode) {
   );
 }
 
-export const router = createBrowserRouter([
+export const routes: RouteObject[] = [
   {
     path: '/sign-in',
     element: withSuspense(<SignInPage />),
@@ -156,9 +193,14 @@ export const router = createBrowserRouter([
         element: withSuspense(<ForcePasswordChangePage />),
       },
       {
+        // Named so the boot warm-up can tell whether the first screen is the
+        // shell (`warmAdminShellForFirstScreen`).
+        id: ADMIN_SHELL_ROUTE_ID,
         element: (
           <ErrorBoundary>
-            <AdminShell />
+            <Suspense fallback={<ShellFallback />}>
+              <AdminShell />
+            </Suspense>
           </ErrorBoundary>
         ),
         children: [
@@ -233,4 +275,25 @@ export const router = createBrowserRouter([
     path: '*',
     element: withSuspense(<NotFoundPage />),
   },
-]);
+];
+
+export const router = createBrowserRouter(routes);
+
+/**
+ * Start fetching the admin shell now if this tab's first screen will be it.
+ *
+ * Called once by `main.tsx`, right before the first render, so the download
+ * runs in parallel with the session check that render starts. On 0.9.7.70 the
+ * shell was part of the entry and was already there when the check finished.
+ * This keeps it that way without putting it back on /sign-in. `router.state`
+ * already holds the first URL's matches: routes here have no loaders, so
+ * nothing is pending at creation.
+ */
+export function warmAdminShellForFirstScreen(): void {
+  const warm = shouldWarmAdminShellAtBoot({
+    hasSession: useAuthStore.getState().token.length > 0,
+    routeIds: router.state.matches.map((match) => match.route.id),
+    offline: browserReportsOffline(),
+  });
+  if (warm) void adminShell.preload();
+}
