@@ -7,6 +7,7 @@ import {
   ConflictException,
   ForbiddenException,
   NotFoundException,
+  ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
 
@@ -478,6 +479,78 @@ describe('AdminSafeExceptionFilter', () => {
     assert.equal(body.code, undefined);
     assert.equal(body.errorCode, 'BAD_REQUEST');
     assert.equal(body.message, 'Plain client-facing validation issue');
+  });
+
+  /**
+   * The four refusals the Reiwa cabinet branches on, which this filter used to
+   * strip (pair reliability, 26.09.2026). Every throw site sent `{ code,
+   * message }`, and the wire carried the sentence and a status-derived
+   * `errorCode` instead: the cabinet never ended a blocked customer's session,
+   * and could tell the add-on checkout's refusals apart only by their English
+   * sentences. Each is asserted at the status its throw site uses;
+   * `cabinet-refusal-codes-wire.http.spec.ts` drives the real throw sites
+   * through the real routes.
+   */
+  for (const { code, status, exception } of [
+    {
+      code: 'ADDON_LIFETIME_UNAVAILABLE',
+      status: 400,
+      exception: new BadRequestException({
+        code: 'ADDON_LIFETIME_UNAVAILABLE',
+        message: 'This add-on cannot be delivered for its advertised period on this subscription',
+      }),
+    },
+    {
+      code: 'ADDON_REVISION_CONFLICT',
+      status: 409,
+      exception: new ConflictException({
+        code: 'ADDON_REVISION_CONFLICT',
+        message: 'Add-on changed since it was shown; refresh and try again',
+      }),
+    },
+    {
+      code: 'PROVIDER_OUTCOME_UNKNOWN',
+      status: 503,
+      exception: new ServiceUnavailableException({
+        code: 'PROVIDER_OUTCOME_UNKNOWN',
+        message: 'Payment provider outcome is unknown; awaiting reconciliation',
+      }),
+    },
+    {
+      code: 'USER_BLOCKED',
+      status: 403,
+      exception: new ForbiddenException({ code: 'USER_BLOCKED', message: 'USER_BLOCKED' }),
+    },
+  ]) {
+    it(`forwards ${code} at ${status}, the code the Reiwa cabinet branches on`, () => {
+      const captured = runFilter(exception, { originalUrl: '/api/internal/x', headers: {} });
+
+      assert.equal(captured.statusCode, status);
+      const body = assertResponseBody(captured.body);
+      assert.equal(body.statusCode, status);
+      assert.equal(body.code, code, `${code} must survive the filter`);
+      assert.equal(body.errorCode, code);
+    });
+  }
+
+  it('still strips an unlisted code at each of those four statuses', () => {
+    const cases: ReadonlyArray<readonly [number, string, unknown]> = [
+      [400, 'BAD_REQUEST', new BadRequestException({ code: 'NOT_AN_ALLOWLISTED_CODE', message: 'refused' })],
+      [409, 'CONFLICT', new ConflictException({ code: 'NOT_AN_ALLOWLISTED_CODE', message: 'refused' })],
+      // A real 503 of the checkouts, deliberately not allowlisted: no client reads it.
+      [
+        503,
+        'INTERNAL_SERVER_ERROR',
+        new ServiceUnavailableException({ code: 'PROVIDER_CHECKOUT_RESULT_INVALID', message: 'refused' }),
+      ],
+      [403, 'FORBIDDEN', new ForbiddenException({ code: 'NOT_AN_ALLOWLISTED_CODE', message: 'refused' })],
+    ];
+    for (const [status, errorCode, exception] of cases) {
+      const body = assertResponseBody(runFilter(exception, { originalUrl: '/api/internal/x', headers: {} }).body);
+      assert.equal(body.statusCode, status);
+      assert.equal(body.code, undefined, `${status}: an unlisted code reached the wire`);
+      assert.equal(body.errorCode, errorCode);
+    }
   });
 
   it('answers a body-parser refusal with its own 4xx, not a generic 500', () => {

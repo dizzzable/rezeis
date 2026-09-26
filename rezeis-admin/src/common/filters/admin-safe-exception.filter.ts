@@ -418,6 +418,14 @@ export const SAFE_PRODUCT_CODES: ReadonlySet<string> = new Set<string>([
   // changed. The SPA says so in the operator's language; stripped of the code
   // it could only print the server's English sentence.
   'PLAN_ASSIGNMENT_BLOCKED_BY_QUEUED_RENEWAL',
+  // The add-on purchase page of Reiwa 0.9.7.54 re-reads its add-on list on it; a fixed label that carries no data.
+  'ADDON_LIFETIME_UNAVAILABLE',
+  // The add-on purchase page of Reiwa 0.9.7.54 re-reads the changed add-on on it; a fixed label naming no add-on.
+  'ADDON_REVISION_CONFLICT',
+  // The add-on purchase page of Reiwa 0.9.7.54 says the provider did not answer (503); a fixed label, no provider text.
+  'PROVIDER_OUTCOME_UNKNOWN',
+  // Reiwa ends the session of a blocked customer on it (stale-user-session.ts, since 0.9.7.19); only about the calling account.
+  'USER_BLOCKED',
 ]);
 /**
  * Codes whose refusal is meaningless without naming the credential it wants.
