@@ -719,8 +719,8 @@ async function saveBrandNameAndWaitForCabinet(
 /**
  * THE RELAY CARRIES AN OPERATOR'S SAVE TO THE CABINET.
  *
- * Everything the cabinet caches from the panel — theme, landing, access mode,
- * the connect screen — and every notification and broadcast reaches it over
+ * Everything the cabinet caches from the panel — theme, access mode, the
+ * connect screen — and every notification and broadcast reaches it over
  * one hop: the panel queues the event (`reiwa-relay`), a processor POSTs it to
  * `<REIWA_URL>/api/v1/webhooks/rezeis` signed with WEBHOOK_SECRET_HEADER, and
  * reiwa checks that signature against REZEIS_WEBHOOK_SECRET before acting.
@@ -867,6 +867,28 @@ const PAIR_FEATURES = {
    * heartbeat at boot, then hourly.
    */
   'cabinet.polls-versions': { half: 'cabinet', since: '0.9.7.53' },
+  /**
+   * The cabinet keeps the panel's last good answer of each settings group in
+   * its own Redis (`reiwa:lkg:<group>:v<shape>`) and serves it while the panel
+   * is down. For the landing that copy had no TTL.
+   */
+  'cabinet.saved-copies': { half: 'cabinet', since: '0.9.7.53' },
+  /**
+   * The web landing is gone from the panel (D2): the builder and its admin API
+   * (`/api/admin/landing-config*` → 404) are deleted, and the one route a
+   * cabinet reads, `GET /api/internal/landing-config/effective`, stays as a
+   * shim that always answers `{"enabled":false}` — whatever the tables hold —
+   * with the `landing` settings-version group computed from that constant.
+   */
+  'panel.landing-retired': { half: 'panel', since: 'next' },
+  /**
+   * The cabinet shows no landing (D2): no `/api/v1/landing` (404), no landing
+   * head on `/` and `/welcome`, no landing version group, no read of its saved
+   * landing copy; a `reiwa.landing.invalidate` hint is acked with 204. In the
+   * landing's place every document it serves is named after the operator:
+   * `<title>`, `og:title` and `og:site_name` (`document-title.ts`).
+   */
+  'cabinet.landing-retired': { half: 'cabinet', since: 'next' },
 } as const satisfies Record<string, { readonly half: Half; readonly since: string }>;
 
 type PairFeature = keyof typeof PAIR_FEATURES;
@@ -991,6 +1013,17 @@ const NEXT_PROBES: Readonly<Partial<Record<PairFeature, (ctx: ScenarioContext) =
     ]);
     if (found.code !== 0) throw new Error(`could not look into the cabinet image: ${found.stderr.trim()}`);
     return { has: found.stdout.trim() === 'yes', how: `x-reiwa-client ${found.stdout.trim() === 'yes' ? 'in' : 'not in'} its dist/` };
+  },
+  // The builder's admin API: a panel that still has it answers 401 to an
+  // unauthenticated read; one that retired the landing has no route (404).
+  'panel.landing-retired': async (ctx) => {
+    const answer = await ctx.admin.get('/admin/landing-config');
+    return { has: answer.status === 404, how: `GET /api/admin/landing-config → ${answer.status}` };
+  },
+  // The cabinet's public landing route: 200 on a cabinet that still has it.
+  'cabinet.landing-retired': async (ctx) => {
+    const answer = await ctx.reiwa.get('/api/v1/landing');
+    return { has: answer.status === 404, how: `GET reiwa /api/v1/landing → ${answer.status}` };
   },
 };
 
@@ -1137,10 +1170,13 @@ function expectedOffer(pair: PairInfo): {
 const E2E_PROJECT = process.env.E2E_PROJECT ?? '';
 const E2E_COMPOSE_FILE = process.env.E2E_COMPOSE_FILE ?? '';
 
-function composeRun(args: readonly string[]): { readonly code: number; readonly stdout: string; readonly stderr: string } {
+function composeRun(
+  args: readonly string[],
+  input?: string,
+): { readonly code: number; readonly stdout: string; readonly stderr: string } {
   if (E2E_PROJECT === '' || E2E_COMPOSE_FILE === '') {
     // Run by run-e2e.mts — it sets E2E_RESULTS_FILE — the stack is right there,
-    // and a lost wiring must not turn 22-25 into green skips (R1-10a).
+    // and a lost wiring must not turn the pair scenarios into green skips (R1-10a).
     if ((process.env.E2E_RESULTS_FILE ?? '') !== '') {
       throw new Error('run-e2e.mts passed no E2E_PROJECT / E2E_COMPOSE_FILE: the pair scenarios cannot reach the stack');
     }
@@ -1150,6 +1186,7 @@ function composeRun(args: readonly string[]): { readonly code: number; readonly 
     encoding: 'utf8',
     maxBuffer: 256 * 1024 * 1024,
     windowsHide: true,
+    ...(input === undefined ? {} : { input }),
   });
   return { code: r.status ?? 1, stdout: r.stdout ?? '', stderr: r.stderr ?? `${r.error?.message ?? ''}` };
 }
@@ -1162,19 +1199,73 @@ function inValkey(service: 'rezeis-e2e-redis' | 'reiwa-e2e-redis', script: strin
 }
 
 /**
- * The secret the cabinet signs its internal calls with. Read off the compose
- * file's `x-internal-secret` anchor, the one place it is written — a copy here
- * would drift the way the compose file's own header warns about.
+ * SQL through `psql` in the panel's database container, from stdin, stopping
+ * at the first error; the rows come back unaligned, tuples only. For what no
+ * API of the panel can do any more (the retired landing's rows).
  */
-function internalSecret(): string {
+function inPanelDatabase(sql: string): string {
+  const r = composeRun(
+    ['exec', '-T', 'rezeis-e2e-db', 'psql', '-U', 'rezeis', '-d', 'rezeis', '-v', 'ON_ERROR_STOP=1', '-q', '-t', '-A'],
+    sql,
+  );
+  if (r.code !== 0) throw new Error(`psql in rezeis-e2e-db exited ${r.code}: ${r.stderr.trim()}`);
+  return r.stdout;
+}
+
+/** The value of one key in the cabinet's Valkey, or null when there is none. */
+function cabinetRedisGet(key: string): string | null {
+  const r = composeRun(['exec', '-T', 'reiwa-e2e-redis', 'valkey-cli', '--raw', 'GET', key]);
+  if (r.code !== 0) throw new Error(`reiwa-e2e-redis: GET ${key} exited ${r.code}: ${r.stderr.trim()}`);
+  const value = r.stdout.replace(/\r?\n$/, '');
+  return value === '' ? null : value;
+}
+
+/** Writes `value` to one key of the cabinet's Valkey, passed on stdin (`-x`), so no shell quotes it. */
+function cabinetRedisSet(key: string, value: string): void {
+  const r = composeRun(['exec', '-T', 'reiwa-e2e-redis', 'valkey-cli', '-x', 'SET', key], value);
+  if (r.code !== 0 || !/^OK/.test(r.stdout.trim())) {
+    throw new Error(`reiwa-e2e-redis: SET ${key} exited ${r.code}: ${`${r.stdout}${r.stderr}`.trim()}`);
+  }
+}
+
+/** One `&anchor value` line of the compose file the stack was started from. */
+function composeAnchor(name: string): string {
   // The file the stack was started from; beside this runner when run by hand.
   const compose = readFileSync(
     E2E_COMPOSE_FILE !== '' ? E2E_COMPOSE_FILE : new URL('./docker-compose.e2e.yml', import.meta.url),
     'utf8',
   );
-  const found = /^x-internal-secret: &internal-secret (\S+)\s*$/m.exec(compose);
-  assert(found !== null, 'docker-compose.e2e.yml has no `x-internal-secret: &internal-secret …` line');
+  const found = new RegExp(`^x-${name}: &${name} (\\S+)\\s*$`, 'm').exec(compose);
+  assert(found !== null, `docker-compose.e2e.yml has no \`x-${name}: &${name} …\` line`);
   return found[1]!;
+}
+
+/**
+ * The secret the cabinet signs its internal calls with. Read off the compose
+ * file's `x-internal-secret` anchor, the one place it is written — a copy here
+ * would drift the way the compose file's own header warns about.
+ */
+function internalSecret(): string {
+  return composeAnchor('internal-secret');
+}
+
+/**
+ * A settings hint as the panel's relay sends it: `POST /api/v1/webhooks/rezeis`,
+ * signed with the relay secret (the compose file's `x-relay-secret` anchor,
+ * `WEBHOOK_SECRET_HEADER` on the panel, `REZEIS_WEBHOOK_SECRET` on reiwa) over
+ * `<t>.<raw body>`. Scenario 16 proves a wrong secret is refused; this one is
+ * the right secret, so the cabinet acts on it.
+ */
+async function sendRelayHint(ctx: ScenarioContext, event: string): Promise<number> {
+  const body = JSON.stringify({ event, metadata: { reason: 'e2e' } });
+  const t = Math.floor(Date.now() / 1000);
+  const v1 = createHmac('sha256', composeAnchor('relay-secret')).update(`${t}.${body}`).digest('hex');
+  const answer = await ctx.reiwa.post('/api/v1/webhooks/rezeis', body, {
+    headers: { 'Content-Type': 'application/json', 'X-Rezeis-Signature': `t=${t},v1=${v1}` },
+    // The exact bytes that were signed.
+    transformRequest: [(data: unknown) => data],
+  });
+  return answer.status;
 }
 
 async function directToken(ctx: ScenarioContext): Promise<string> {
@@ -1227,7 +1318,7 @@ async function internalCall<T>(
 }
 
 /**
- * THE MARK OF A REFUSAL PROVOKED ON PURPOSE, for scenario 25 — the headers to
+ * THE MARK OF A REFUSAL PROVOKED ON PURPOSE, for scenario 27 — the headers to
  * send with the call. Its `x-request-id` reaches the panel's refusal line
  * (`requestId=… status=… path=…`): sent to the panel directly, or to the
  * cabinet, which forwards it on its own call to the panel (reiwa
@@ -1884,8 +1975,398 @@ async function scenarioCabinetKnowsItsPanel(ctx: ScenarioContext): Promise<strin
   return `${String(view.kind)} view of the panel (${JSON.stringify(view.capabilities)}) · poll answered · heartbeat taken`;
 }
 
+// ── The retired web landing (D2) ───────────────────────────────────────────
+
+/** The seeded landing's `meta.title`: what a landing head on `/` would carry. */
+const E2E_LANDING_TITLE = 'E2E landing';
+const E2E_LANDING_REVISION_ID = 'e2e-landing-revision';
+const E2E_LANDING_CONFIG_ID = 'e2e-landing-config';
+
 /**
- * The refusal scenario 25 provokes in EVERY pairing, as its positive control:
+ * A published landing as panel 0.9.7.70's builder stored it (its
+ * `landingConfigSchema`, schema version 1): one visible hero. ASCII only, since
+ * it goes through psql.
+ */
+const E2E_LANDING = {
+  schemaVersion: 1,
+  enabled: true,
+  theme: { inherit: true },
+  locales: ['ru', 'en'],
+  defaultLocale: 'ru',
+  meta: {
+    title: { ru: E2E_LANDING_TITLE, en: E2E_LANDING_TITLE },
+    description: { ru: 'Seeded by the pair E2E', en: 'Seeded by the pair E2E' },
+  },
+  sections: [
+    {
+      id: 'e2e-hero',
+      type: 'hero',
+      visible: true,
+      data: {
+        heading: { ru: 'E2E landing hero', en: 'E2E landing hero' },
+        primaryCta: { label: { ru: 'Sign in', en: 'Sign in' }, action: 'login' },
+        align: 'center',
+      },
+    },
+  ],
+} as const;
+
+/** What the retired route answers, whatever the tables hold. */
+const RETIRED_LANDING = { enabled: false } as const;
+
+/** Where cabinet 0.9.7.53 kept its landing copy, with no TTL (`LANDING_LKG` in its `last-known-good.ts`). */
+const LANDING_COPY_KEY = 'reiwa:lkg:landing:v1';
+
+/** The SPA document's mount point (reiwa `web/index.html`): what tells the document from any other page. */
+const SPA_ROOT = /<div id="root"/;
+
+/** The build's own `<title>`, and the panel's default «Название бренда». */
+const STOCK_BRAND_NAME = 'Reiwa';
+const TITLE_TAG = /<title\b[^>]*>([\s\S]*?)<\/title\s*>/i;
+const OG_TITLE_META = /<meta\b[^>]*\bproperty=(["'])og:title\1[^>]*>/i;
+const OG_SITE_NAME_META = /<meta\b[^>]*\bproperty=(["'])og:site_name\1[^>]*>/i;
+const TWITTER_TITLE_META = /<meta\b[^>]*\bname=(["'])twitter:title\1[^>]*>/i;
+const CONTENT_ATTRIBUTE = /\bcontent=(["'])([\s\S]*?)\1/i;
+
+interface DocumentNames {
+  readonly title: string | null;
+  readonly ogTitle: string | null;
+  readonly twitterTitle: string | null;
+  readonly siteName: string | null;
+}
+
+/** What a document's head names itself (null where a tag is absent). */
+function documentNames(html: string): DocumentNames {
+  const content = (tag: RegExpExecArray | null): string | null => (tag === null ? null : (CONTENT_ATTRIBUTE.exec(tag[0])?.[2] ?? null));
+  return {
+    title: TITLE_TAG.exec(html)?.[1] ?? null,
+    ogTitle: content(OG_TITLE_META.exec(html)),
+    twitterTitle: content(TWITTER_TITLE_META.exec(html)),
+    siteName: content(OG_SITE_NAME_META.exec(html)),
+  };
+}
+
+/**
+ * THE NEW CABINET NAMES ITS DOCUMENTS AFTER THE OPERATOR (reiwa
+ * `document-title.ts`, the owner's decision of 26.09.2026). With the landing
+ * gone nothing else gives `/` a title, so a link preview now says the
+ * operator's name:
+ *  - `<title>`, `og:title`, `twitter:title` — the tab title: «Заголовок
+ *    веб-страницы», else «Название проекта» («Платформа» → «Брендинг»), else
+ *    «Название бренда» («WEB Reiwa» → «Идентичность»);
+ *  - `og:site_name` — the brand;
+ *  - with the stock brand «Reiwa» and neither title: the document as built,
+ *    `<title>Reiwa</title>` and no preview tags.
+ * The fixture sets a brand of its own, then a web title over it, through the
+ * panel's settings API, reads the served head after each, and puts the
+ * operator's values back.
+ */
+async function documentNamedAfterOperator(ctx: ScenarioContext): Promise<string> {
+  const auth = { Authorization: `Bearer ${ctx.bearerToken}` };
+  const current = await ctx.admin.get<{ brandName: string }>('/admin/settings/branding', { headers: auth });
+  expectStatus(current, 200, 'GET /admin/settings/branding');
+  const originalBrand = current.data.brandName;
+  // What the cabinet reads the titles from: the panel's public config.
+  const config = await internalCall<{ platformBranding?: { webTitle?: string | null; projectName?: string | null } }>(
+    ctx,
+    'GET',
+    '/api/internal/branding/public-config',
+  );
+  expectStatus(config, 200, 'GET /api/internal/branding/public-config');
+  const originalWebTitle = config.data.platformBranding?.webTitle ?? null;
+  const originalTitle = (originalWebTitle ?? '').trim() || (config.data.platformBranding?.projectName ?? '').trim();
+
+  const served = async (label: string): Promise<DocumentNames> => {
+    const answer = await ctx.reiwa.get<string>('/', { headers: { Accept: 'text/html' }, responseType: 'text' });
+    expectStatus(answer, 200, `GET reiwa / (${label})`);
+    return documentNames(answer.data);
+  };
+  // A settings save reaches the cabinet by the relay at once, or by its
+  // version poll (~20 s) when a hint is lost: the document is read until it
+  // names what is expected, or the deadline passes.
+  const servedOnce = async (label: string, title: string, deadlineMs: number): Promise<DocumentNames> => {
+    const deadline = Date.now() + deadlineMs;
+    for (;;) {
+      const names = await served(label);
+      if (names.title === title || Date.now() > deadline) return names;
+      await sleep(500);
+    }
+  };
+  const notes: string[] = [];
+
+  if (originalBrand === STOCK_BRAND_NAME && originalTitle === '') {
+    const stock = await served('the stock brand');
+    assert(
+      stock.title === STOCK_BRAND_NAME && stock.ogTitle === null && stock.twitterTitle === null && stock.siteName === null,
+      `with the stock brand and no title the document is not as built: ${JSON.stringify(stock)}`,
+    );
+    notes.push(`stock brand → <title>${STOCK_BRAND_NAME}</title>, no preview tags`);
+  }
+
+  const brand = `E2E brand ${ctx.runId}`;
+  const webTitle = `E2E tab ${ctx.runId}`;
+  let brandSet = false;
+  let webTitleSet = false;
+  try {
+    await saveBrandNameAndWaitForCabinet(ctx, auth, brand);
+    brandSet = true;
+    const withBrand = originalTitle || brand;
+    const named = await servedOnce(`brand "${brand}"`, withBrand, RELAY_DEADLINE_MS);
+    assert(
+      named.title === withBrand && named.ogTitle === withBrand && named.twitterTitle === withBrand && named.siteName === brand,
+      `with the brand "${brand}" the document is named ${JSON.stringify(named)}; ` +
+        `expected <title>, og:title and twitter:title "${withBrand}", og:site_name "${brand}"`,
+    );
+    notes.push(`brand set → title "${withBrand}", og:site_name "${brand}"`);
+
+    const saved = await ctx.admin.patch('/admin/settings/platform', { platformBranding: { webTitle } }, { headers: auth });
+    expectStatus(saved, 200, 'PATCH /admin/settings/platform (platformBranding.webTitle)');
+    webTitleSet = true;
+    const titled = await servedOnce(`web title "${webTitle}"`, webTitle, 35_000);
+    assert(
+      titled.title === webTitle && titled.ogTitle === webTitle && titled.twitterTitle === webTitle && titled.siteName === brand,
+      `with the web title "${webTitle}" the document is named ${JSON.stringify(titled)}; ` +
+        `expected <title>, og:title and twitter:title "${webTitle}", og:site_name "${brand}"`,
+    );
+    notes.push(`web title set → title "${webTitle}", og:site_name still "${brand}"`);
+  } finally {
+    if (webTitleSet) {
+      await ctx.admin
+        .patch('/admin/settings/platform', { platformBranding: { webTitle: originalWebTitle } }, { headers: auth })
+        .catch(() => undefined);
+    }
+    if (brandSet) {
+      await ctx.admin.patch('/admin/settings/branding', { brandName: originalBrand }, { headers: auth }).catch(() => undefined);
+    }
+  }
+  return notes.join(' · ');
+}
+
+/** Both halves' settings version of a payload (`config-version-hash.ts`, reiwa `config-version.ts`). */
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
+  if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(',')}]`;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record)
+    .filter((key) => record[key] !== undefined)
+    .sort();
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(',')}}`;
+}
+
+function configVersionOf(payload: unknown): string {
+  const wire: unknown = JSON.parse(JSON.stringify(payload) ?? 'null');
+  return createHash('sha256').update(canonicalJson(wire), 'utf8').digest('hex').slice(0, 32);
+}
+
+function landingTitleOf(body: unknown): unknown {
+  const meta = (body as { meta?: { title?: Record<string, unknown> } } | null)?.meta;
+  return meta?.title?.['ru'];
+}
+
+/**
+ * The operator's published landing, written straight into the panel's tables:
+ * the builder that wrote it is gone from a retired panel, and its rows are
+ * exactly what an operator updating from 0.9.7.70 still has. Idempotent.
+ */
+function seedPublishedLanding(): void {
+  const json = JSON.stringify(E2E_LANDING);
+  inPanelDatabase(
+    `INSERT INTO landing_revisions (id, schema_version, config, published_by)
+       VALUES ('${E2E_LANDING_REVISION_ID}', 1, $e2e$${json}$e2e$::jsonb, 'e2e')
+       ON CONFLICT (id) DO UPDATE SET config = EXCLUDED.config;
+     INSERT INTO landing_configs (id, key, draft, published_revision_id, version, updated_at)
+       VALUES ('${E2E_LANDING_CONFIG_ID}', 'default', $e2e$${json}$e2e$::jsonb, '${E2E_LANDING_REVISION_ID}', 1, now())
+       ON CONFLICT (key) DO UPDATE SET draft = EXCLUDED.draft,
+         published_revision_id = EXCLUDED.published_revision_id, updated_at = now();\n`,
+  );
+}
+
+/**
+ * THE PANEL'S LANDING ANSWER, WITH A PUBLISHED LANDING IN ITS TABLES.
+ *
+ * A panel that still has the builder serves the seeded landing — the proof
+ * that the seed is one. A panel that retired it answers `{"enabled":false}`
+ * over the very same rows: the one answer every supported cabinet reads as
+ * "sign-in on `/`, no landing head" and that makes 0.9.7.53 replace its saved
+ * copy (a 404 would have pinned it, D2 §4.1). Its `landing` settings-version
+ * group stays, computed from that constant, so a 0.9.7.53 holding a landing
+ * re-reads at its next poll; and the builder's admin API is gone.
+ */
+async function scenarioPanelLandingAnswer(ctx: ScenarioContext): Promise<string> {
+  const pair = requirePair(ctx);
+  seedPublishedLanding();
+  const answer = await internalCall<Record<string, unknown>>(ctx, 'GET', '/api/internal/landing-config/effective');
+  expectStatus(answer, 200, 'GET /api/internal/landing-config/effective');
+  if (!pairHas(pair, 'panel.landing-retired')) {
+    assert(
+      answer.data['enabled'] === true && landingTitleOf(answer.data) === E2E_LANDING_TITLE,
+      `panel ${pair.panel.effective} does not serve the seeded landing: ${JSON.stringify(answer.data).slice(0, 300)}`,
+    );
+    return `panel ${pair.panel.effective} still has the builder: it serves the seeded landing «${E2E_LANDING_TITLE}»`;
+  }
+  assert(
+    JSON.stringify(answer.data) === JSON.stringify(RETIRED_LANDING),
+    `with a published landing in its tables the route answers ${JSON.stringify(answer.data).slice(0, 300)}, not {"enabled":false}`,
+  );
+  // An empty poll: no consumer and no headers, so the panel files no peer and
+  // no report for it — it only answers the versions.
+  const polled = await internalCall<{ versions?: Record<string, unknown> }>(ctx, 'POST', '/api/internal/config-versions', {
+    body: {},
+  });
+  expectStatus(polled, 200, 'POST /api/internal/config-versions');
+  const version = configVersionOf(RETIRED_LANDING);
+  assert(
+    polled.data.versions?.['landing'] === version,
+    `the landing settings-version group is ${JSON.stringify(polled.data.versions?.['landing'])}, not ${version} (the constant's)`,
+  );
+  const builder = await ctx.admin.get('/admin/landing-config', { headers: { Authorization: `Bearer ${ctx.bearerToken}` } });
+  expectStatus(builder, 404, "GET /api/admin/landing-config (the builder's API)");
+  return `{"enabled":false} over a published landing · landing group ${version} · /api/admin/landing-config 404`;
+}
+
+/**
+ * WHAT THE CABINET SERVES OF A LANDING.
+ *
+ * Read from the cabinet alone, the way a visitor and the cabinet's own Redis
+ * see it, after the hint a panel up to 0.9.7.70 sends on every publish (signed
+ * with the relay secret): an old cabinet drops its landing and reads it again
+ * at once, the new one only acks it with 204.
+ *  - Old panel and old cabinet (the positive control): the landing is still
+ *    served, on `/api/v1/landing` and in the head of `/` and `/welcome`.
+ *  - A retired panel behind an old cabinet: `/api/v1/landing` is the panel's
+ *    `{"enabled":false}`, which the SPA reads as "sign-in on `/`" (its home
+ *    page goes to `/welcome` only for `enabled: true` with sections), and the
+ *    head carries nothing. On 0.9.7.53 the landing copy saved in Redis, seeded
+ *    here as that cabinet left it, is replaced by that answer.
+ *  - The new cabinet, with either panel: no `/api/v1/landing` (404, not the
+ *    SPA document) and no landing in any head — even while panel 0.9.7.70
+ *    serves one (scenario 25) — and its old saved copy is never read or
+ *    rewritten.
+ * The client-side redirects of the new cabinet (`/` and `/welcome?…` to
+ * `/sign-in?…`) run in the browser and are not visible to HTTP; reiwa's
+ * `web/test/welcome-alias.test.tsx` holds them.
+ */
+async function scenarioCabinetLanding(ctx: ScenarioContext): Promise<string> {
+  const pair = requirePair(ctx);
+  const panelRetired = pairHas(pair, 'panel.landing-retired');
+  const cabinetRetired = pairHas(pair, 'cabinet.landing-retired');
+  const keepsCopy = pairHas(pair, 'cabinet.saved-copies');
+  const shown = !panelRetired && !cabinetRetired;
+  const notes: string[] = [];
+  // As scenario 25 left it; again, so this one stands alone.
+  seedPublishedLanding();
+
+  // The copy a 0.9.7.53 cabinet saved while an old panel served a landing.
+  const seededAt = Date.now() - 60_000;
+  if (keepsCopy) {
+    cabinetRedisSet(
+      LANDING_COPY_KEY,
+      JSON.stringify({ shape: 1, savedAt: seededAt, hash: configVersionOf(E2E_LANDING), payload: E2E_LANDING }),
+    );
+  }
+
+  const hint = await sendRelayHint(ctx, 'reiwa.landing.invalidate');
+  assert(hint === 204, `a signed reiwa.landing.invalidate got ${hint}, not 204`);
+  notes.push('hint → 204');
+
+  const landing = await ctx.reiwa.get<string>('/api/v1/landing', {
+    headers: { Accept: 'application/json' },
+    responseType: 'text',
+  });
+  if (cabinetRetired) {
+    expectStatus(landing, 404, 'GET reiwa /api/v1/landing');
+    // Not the SPA document under an API path — a page left open by 0.9.7.53
+    // reads a 404 as "no landing" — and none of the landing.
+    assert(!SPA_ROOT.test(landing.data), 'GET reiwa /api/v1/landing answers the SPA document, not a 404 of its own');
+    assert(!landing.data.includes(E2E_LANDING_TITLE), 'the 404 of GET reiwa /api/v1/landing carries the landing');
+    notes.push('/api/v1/landing 404');
+  } else {
+    expectStatus(landing, 200, 'GET reiwa /api/v1/landing');
+    const body = JSON.parse(landing.data) as Record<string, unknown>;
+    if (shown) {
+      assert(
+        body['enabled'] === true && landingTitleOf(body) === E2E_LANDING_TITLE,
+        `the released pair does not show the seeded landing: ${landing.data.slice(0, 300)}`,
+      );
+      notes.push(`/api/v1/landing «${E2E_LANDING_TITLE}»`);
+    } else {
+      assert(
+        JSON.stringify(body) === JSON.stringify(RETIRED_LANDING),
+        `cabinet ${pair.cabinet.effective} serves ${landing.data.slice(0, 300)}, not the panel's {"enabled":false}`,
+      );
+      notes.push('/api/v1/landing {"enabled":false}');
+    }
+  }
+
+  // After that read the cabinet holds its answer, so the heads below are
+  // written from it without waiting on the panel.
+  for (const path of ['/', '/welcome?utm_source=x&ref=y']) {
+    const page = await ctx.reiwa.get<string>(path, { headers: { Accept: 'text/html' }, responseType: 'text' });
+    expectStatus(page, 200, `GET reiwa ${path}`);
+    assert(SPA_ROOT.test(page.data), `GET reiwa ${path} is not the SPA document: ${page.data.slice(0, 200)}`);
+    const carries = page.data.includes(E2E_LANDING_TITLE);
+    assert(
+      carries === shown,
+      shown
+        ? `${path}: the released pair's head does not carry the landing «${E2E_LANDING_TITLE}»`
+        : `${path}: the head carries the retired landing «${E2E_LANDING_TITLE}»`,
+    );
+    // Uptime monitors and `curl -I` ask with HEAD. Every cabinet up to 0.9.7.53
+    // answered it 200 from the landing's own route; with that route gone the
+    // document must still answer HEAD as it answers GET (review R1-24).
+    const probe = await ctx.reiwa.head(path, { headers: { Accept: 'text/html' } });
+    expectStatus(probe, 200, `HEAD reiwa ${path}`);
+    assert(
+      String(probe.headers['content-type'] ?? '').includes('text/html'),
+      `HEAD reiwa ${path} is ${String(probe.headers['content-type'])}, not the document's headers`,
+    );
+  }
+  notes.push(shown ? `/ and /welcome carry «${E2E_LANDING_TITLE}»` : '/ and /welcome carry no landing');
+  notes.push('HEAD / and /welcome 200');
+
+  if (keepsCopy) {
+    const read = (): { savedAt?: unknown; payload?: { enabled?: unknown } } | null => {
+      const raw = cabinetRedisGet(LANDING_COPY_KEY);
+      return raw === null ? null : (JSON.parse(raw) as { savedAt?: unknown; payload?: { enabled?: unknown } });
+    };
+    if (cabinetRetired) {
+      const copy = read();
+      assert(
+        copy?.savedAt === seededAt && copy.payload?.enabled === true,
+        `the new cabinet rewrote its old landing copy: ${JSON.stringify(copy).slice(0, 300)}`,
+      );
+      notes.push('its old landing copy untouched');
+    } else {
+      // Saved in the background after the read; what the panel said, freshly.
+      const deadline = Date.now() + 10_000;
+      let copy = read();
+      while (!(typeof copy?.savedAt === 'number' && copy.savedAt > seededAt) && Date.now() < deadline) {
+        await sleep(250);
+        copy = read();
+      }
+      assert(
+        typeof copy?.savedAt === 'number' && copy.savedAt > seededAt && copy.payload?.enabled === shown,
+        `cabinet ${pair.cabinet.effective} kept its landing copy (${JSON.stringify(copy).slice(0, 300)}) ` +
+          `instead of the panel's ${shown ? 'landing' : '{"enabled":false}'}`,
+      );
+      notes.push(`its saved copy now ${shown ? 'the landing' : '{"enabled":false}'}`);
+    }
+  }
+
+  if (panelRetired) {
+    const rows = inPanelDatabase(
+      `SELECT (SELECT count(*) FROM landing_revisions WHERE id = '${E2E_LANDING_REVISION_ID}') || ' ' ||
+              (SELECT count(*) FROM landing_configs WHERE key = 'default' AND published_revision_id = '${E2E_LANDING_REVISION_ID}');\n`,
+    ).trim();
+    assert(rows === '1 1', `the panel's landing rows are gone (revision, config: ${rows})`);
+    notes.push('the landing rows kept');
+  }
+  if (cabinetRetired) notes.push(await documentNamedAfterOperator(ctx));
+  return notes.join(' · ');
+}
+
+/**
+ * The refusal scenario 27 provokes in EVERY pairing, as its positive control:
  * an internal call with no API token, which `InternalAdminAuthGuard` refuses
  * with 401 in every panel release in the table. A cheap, read-only route.
  */
@@ -1987,10 +2468,12 @@ async function scenarioNoInternalCallRefused(ctx: ScenarioContext): Promise<stri
 //   18-21 are the money surface a subscriber meets, and the order boxes of
 //      pair releases are mostly about it: `core`, with each pairing's
 //      expectations read off the pair table.
-//   22-25 are what each half knows about the other, and the gate that knowing
+//   22-24 are what each half knows about the other, and the gate that knowing
 //      drives. A scenario that does not apply to a pairing (an old panel keeps
 //      no peer records) skips with that reason; it never passes vacuously.
-//      25 runs last: it reads the whole run's panel log.
+//   25-26 are the retired web landing: either half may be updated first, and
+//      an operator on any pairing must see no landing, and no old copy of one.
+//   27 runs last: it reads the whole run's panel log.
 const SCENARIOS: Array<{
   name: string;
   tag: ScenarioTag;
@@ -2020,7 +2503,9 @@ const SCENARIOS: Array<{
   { name: '22 · Pair · The panel knows its cabinet', tag: 'core', run: scenarioPanelKnowsItsCabinet },
   { name: '23 · Pair · The «до сброса» gate asked directly', tag: 'core', run: scenarioPanelGateAskedDirectly },
   { name: '24 · Pair · The cabinet knows its panel', tag: 'core', run: scenarioCabinetKnowsItsPanel },
-  { name: '25 · Pair · No internal call refused', tag: 'core', run: scenarioNoInternalCallRefused },
+  { name: '25 · Landing · What the panel answers', tag: 'core', run: scenarioPanelLandingAnswer },
+  { name: '26 · Landing · What the cabinet serves', tag: 'core', run: scenarioCabinetLanding },
+  { name: '27 · Pair · No internal call refused', tag: 'core', run: scenarioNoInternalCallRefused },
 ];
 
 /** Without these nothing else can run, so they abort the run when they fail. */
