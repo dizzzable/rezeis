@@ -78,7 +78,6 @@ const LEGACY_ADMIN_ALLOWED_RESOURCES: ReadonlySet<string> = new Set([
   'remnawave',
   'notifications',
   'subpage_config',
-  'landing_config',
   'email',
   'appearance',
   'branding',
@@ -150,6 +149,37 @@ function cacheKey(adminId: string, roleId: string | null, legacyRole: UserRole):
 
 function permissionToToken(resource: string, action: string): string {
   return `${resource}:${action}`;
+}
+
+/**
+ * The stored grants this build still knows
+ * ════════════════════════════════════════
+ * `admin_permissions` rows outlive the catalog: when a resource leaves
+ * `RBAC_RESOURCES` with its feature (`landing_config` with the web landing,
+ * 0.9.7.71), its rows stay, because neither the boot seed nor a role save
+ * prunes rows it did not write. Read as they are stored, they would lock
+ * operators out of their own panel:
+ *
+ *  - the role editor sends back every pair a role holds, so the first save of
+ *    such a role would fail `assertPermissionsValid` with 400 «Unknown
+ *    permission», and the role could be neither renamed nor edited;
+ *  - an admin holding such a role would carry a token nobody can hold — DEV
+ *    and `superadmin` resolve to the catalog — so the subset checks in
+ *    `admin-admins.controller.ts` would refuse even a DEV with 403 «holds
+ *    permissions you do not hold», and assigning the role would fail the same
+ *    way.
+ *
+ * So every read of stored rows goes through here: a pair the catalog does not
+ * name grants nothing, counts for nothing and is shown nowhere. The rows
+ * themselves are left alone, so a rollback to the release that still knew them
+ * finds them; only a role saved after the update loses its own, because a save
+ * rewrites the role from its payload, which no longer carries them. No
+ * migration deletes anything.
+ */
+function catalogGrants<T extends { readonly resource: string; readonly action: string }>(
+  rows: readonly T[],
+): T[] {
+  return rows.filter((row) => isValidPermission(row.resource, row.action));
 }
 
 /**
@@ -289,7 +319,9 @@ export class RbacService implements OnModuleInit {
       displayName: r.displayName,
       description: r.description,
       isSystem: r.isSystem,
-      permissionsCount: r.permissions.length,
+      // What the role grants, as the editor shows it: a retired pair it still
+      // stores is not counted (`catalogGrants`).
+      permissionsCount: catalogGrants(r.permissions).length,
       assignedAdminCount: r._count.admins,
       createdAt: r.createdAt.toISOString(),
       updatedAt: r.updatedAt.toISOString(),
@@ -444,8 +476,12 @@ export class RbacService implements OnModuleInit {
           where: { id },
           include: ROLE_INCLUDE,
         }),
+        // What the holders effectively held: a retired pair granted nothing
+        // (`catalogGrants`), so dropping it on this save is not a narrowing.
+        // Counted, the first unchanged save of such a role after the update
+        // would sign out every holder of it.
         before: new Set(
-          existing.permissions.map((p) => permissionToToken(p.resource, p.action)),
+          catalogGrants(existing.permissions).map((p) => permissionToToken(p.resource, p.action)),
         ),
       };
     });
@@ -481,7 +517,7 @@ export class RbacService implements OnModuleInit {
     // then under-fire, silently, the day that table grows a mapping. Over-firing
     // on a deliberate, infrequent act that takes permissions away is the safe side.
     const after = new Set(
-      updated.permissions.map((p) => permissionToToken(p.resource, p.action)),
+      catalogGrants(updated.permissions).map((p) => permissionToToken(p.resource, p.action)),
     );
     const narrowed = [...before].some((token) => !after.has(token));
     if (narrowed) {
@@ -654,7 +690,10 @@ export class RbacService implements OnModuleInit {
         // collision with the boot seed - and the boot seed fails soft (see
         // `onModuleInit`) with nothing retrying it.
         if (role.isSystem && role.name === SUPERADMIN_ROLE_NAME) grantedAll = true;
-        for (const p of role.permissions) {
+        // Only pairs the catalog still names: a retired one would otherwise sit
+        // in this set and fail every subset check against an actor who, being
+        // DEV or superadmin, holds exactly the catalog (`catalogGrants`).
+        for (const p of catalogGrants(role.permissions)) {
           granted.add(permissionToToken(p.resource, p.action));
         }
       }
@@ -731,7 +770,9 @@ export class RbacService implements OnModuleInit {
     if (role.isSystem && role.name === SUPERADMIN_ROLE_NAME) {
       return new Set(getAllPermissions().map((p) => permissionToToken(p.resource, p.action)));
     }
-    return new Set(role.permissions.map((p) => permissionToToken(p.resource, p.action)));
+    return new Set(
+      catalogGrants(role.permissions).map((p) => permissionToToken(p.resource, p.action)),
+    );
   }
 
   /**
@@ -806,7 +847,9 @@ function mapRole(role: RoleWithCounts): AdminRoleInterface {
     displayName: role.displayName,
     description: role.description,
     isSystem: role.isSystem,
-    permissions: role.permissions.map((p) => ({
+    // The editor sends this list back on save, so a retired pair shown here
+    // would come back as 400 «Unknown permission» (`catalogGrants`).
+    permissions: catalogGrants(role.permissions).map((p) => ({
       resource: p.resource,
       action: p.action as RbacAction,
     })),

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { RouterProvider, createMemoryRouter } from 'react-router'
 
 import { renderWithProviders } from '@/test/test-utils'
 import { UnsavedChangesGuard } from './unsaved-changes-guard'
@@ -109,5 +110,91 @@ describe('outside a data router', () => {
     // the first tests above already showed.
     renderWithProviders(<UnsavedChangesGuard when {...LABELS} />)
     expect(screen.queryByText(LABELS.title)).not.toBeInTheDocument()
+  })
+})
+
+/**
+ * The in-app half, under a real data router.
+ *
+ * `useBlocker` needs a data router, and the only suite that mounted this guard
+ * under one was the landing builder's page test. It went with the builder
+ * (0.9.7.71), and its two cases moved here, so the half that holds a click on
+ * the side menu — which the connect-screen editor and the bot flow editor
+ * rely on — still has a test.
+ */
+describe('inside a data router', () => {
+  function mount(when: boolean): ReturnType<typeof createMemoryRouter> {
+    const router = createMemoryRouter(
+      [
+        {
+          path: '/',
+          element: (
+            <div>
+              <p>Editor</p>
+              <UnsavedChangesGuard when={when} {...LABELS} />
+            </div>
+          ),
+        },
+        { path: '/elsewhere', element: <div>Elsewhere</div> },
+        { path: '/sign-in', element: <div>Sign in</div> },
+      ],
+      { initialEntries: ['/'] },
+    )
+    render(<RouterProvider router={router} />)
+    return router
+  }
+
+  it('holds an in-app navigation while there is work to lose, and lets it go on «leave»', async () => {
+    const router = mount(true)
+
+    await act(async () => {
+      void router.navigate('/elsewhere')
+    })
+    expect(screen.getByText(LABELS.title)).toBeInTheDocument()
+    expect(screen.queryByText('Elsewhere')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: LABELS.leave }))
+
+    expect(await screen.findByText('Elsewhere')).toBeInTheDocument()
+  })
+
+  it('stays put on «stay»', async () => {
+    const router = mount(true)
+
+    await act(async () => {
+      void router.navigate('/elsewhere')
+    })
+    fireEvent.click(screen.getByRole('button', { name: LABELS.stay }))
+
+    await act(async () => {})
+    expect(screen.getByText('Editor')).toBeInTheDocument()
+    expect(screen.queryByText('Elsewhere')).not.toBeInTheDocument()
+    expect(router.state.location.pathname).toBe('/')
+  })
+
+  it('does not hold a navigation while there is nothing to lose', async () => {
+    const router = mount(false)
+
+    await act(async () => {
+      void router.navigate('/elsewhere')
+    })
+
+    expect(screen.queryByText(LABELS.title)).not.toBeInTheDocument()
+    expect(screen.getByText('Elsewhere')).toBeInTheDocument()
+  })
+
+  it('lets the forced sign-out navigation through instead of holding it', async () => {
+    // Clearing the session answers with a `<Navigate>` to /sign-in — an in-app
+    // navigation, and so this blocker's business. Holding it puts a "stay" in
+    // front of an operator whose session is already gone.
+    const router = mount(true)
+    vi.mocked(isForceLogoutInProgress).mockReturnValue(true)
+
+    await act(async () => {
+      void router.navigate('/sign-in')
+    })
+
+    expect(screen.queryByText(LABELS.title)).not.toBeInTheDocument()
+    expect(screen.getByText('Sign in')).toBeInTheDocument()
   })
 })

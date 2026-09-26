@@ -3259,13 +3259,16 @@ model SubpageConfig {
   @@map("subpage_configs")
 }
 
-/// Web landing-page builder — singleton draft config the operator is editing
-/// (`key = "default"`). The public site serves only the PUBLISHED revision
-/// (see `LandingRevision`); this row holds the in-progress draft plus a pointer
-/// to the currently-published revision and an optimistic-concurrency `version`.
-/// Mirrors the `SubpageConfig` singleton-JSON pattern. rezeis-admin is the
-/// source of truth; reiwa fetches the effective published config via the
-/// internal endpoint.
+/// RETIRED in 0.9.7.71 — KEPT FOR THE OPERATORS' DATA. NEVER DROP, TRUNCATE OR
+/// EMPTY THIS TABLE, AND NEVER DELETE THIS MODEL (without it `prisma migrate
+/// dev` writes a `DROP TABLE`). `test/landing-data-kept.spec.ts` refuses both.
+///
+/// The web landing builder was removed from the panel and the cabinet (owner's
+/// decision, 26.09.2026); nothing reads or writes this table any more. It keeps
+/// what an operator built: the draft (`key = "default"`), a pointer to the
+/// revision that was published and the draft's optimistic-concurrency
+/// `version`. Backups still dump it and restores still bring it back, and a
+/// rollback to 0.9.7.70 finds its landing where it left it.
 model LandingConfig {
   id                  String   @id @default(cuid()) @map("id")
   /// Singleton guard — always "default"; unique so only one row can exist.
@@ -3283,10 +3286,12 @@ model LandingConfig {
   @@map("landing_configs")
 }
 
-/// Append-only published landing snapshots (immutable). The effective public
-/// config is the revision referenced by `LandingConfig.publishedRevisionId`.
-/// Rollback copies an old snapshot into a NEW revision and repoints — history
-/// is never mutated. Retention is bounded (newest N kept, older pruned).
+/// RETIRED in 0.9.7.71 — KEPT FOR THE OPERATORS' DATA. NEVER DROP, TRUNCATE OR
+/// EMPTY THIS TABLE, AND NEVER DELETE THIS MODEL; see `LandingConfig`.
+///
+/// Every landing an operator published, newest last (immutable snapshots; the
+/// one that was live is `LandingConfig.publishedRevisionId`). Nothing reads,
+/// prunes or appends to it any more.
 model LandingRevision {
   id            String   @id @default(cuid()) @map("id")
   schemaVersion Int      @map("schema_version")

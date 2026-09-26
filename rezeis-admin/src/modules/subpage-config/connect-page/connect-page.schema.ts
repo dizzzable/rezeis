@@ -144,8 +144,8 @@ const httpUrlSchema = z
   .max(MAX_URL_LENGTH)
   // A scheme token is not an address: `https:`, `http://` and
   // `https://<control chars>` all passed the old check and rendered a button
-  // that goes nowhere. The neighbour (`landing-config.schema.ts`) already
-  // requires a whole URL, and this now matches it.
+  // that goes nowhere. The landing builder's schema (retired in 0.9.7.71)
+  // already required a whole URL, and this was made to match it.
   .refine(
     (value) =>
       /^https?:\/\/[^\s]+$/i.test(value.trim()) &&

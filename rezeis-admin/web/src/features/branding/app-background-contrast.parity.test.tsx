@@ -20,8 +20,8 @@
  *      delegates instead of quietly growing a second implementation again.
  *
  * Layers 1 and 2 need the sibling reiwa checkout and skip without it, exactly
- * as `live-kit-manifest.test.ts` does for the vendored landing kit. Layers 3
- * and 4 run everywhere.
+ * as `media-viewer-kit-manifest.test.ts` does for the vendored media-viewer kit.
+ * Layers 3 and 4 run everywhere.
  */
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'

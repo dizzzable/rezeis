@@ -131,7 +131,7 @@ describe('when a hint is sent', () => {
 
   it('never fails the save when the queue refuses the check', async () => {
     const { service } = build(world(), { queueRefuses: true });
-    await assert.doesNotReject(() => service.hintSent('reiwa.landing.invalidate', 'publish'));
+    await assert.doesNotReject(() => service.hintSent('reiwa.connect-page.invalidate', 'connect-page catalog saved'));
   });
 
   it('keeps the relay’s final word on the hint', async () => {

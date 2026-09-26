@@ -27,9 +27,10 @@
  * full strength instead of at its configured opacity.
  *
  * WHY A VERBATIM COPY, NOT A PORT. This repo already vendors reiwa code that
- * must not drift: `src/features/landing-builder/live/` is copied by
- * `scripts/sync-landing-kit.mjs` and byte-frozen by `live-kit-manifest.test.ts`,
- * after a hand-maintained preview re-implementation of the landing renderer
+ * must not drift — the media-viewer and QR kits, copied by
+ * `scripts/sync-landing-kit.mjs` and byte-frozen by their manifest tests. The
+ * first such kit was the landing renderer (gone with the landing builder in
+ * 0.9.7.71), vendored after a hand-maintained preview re-implementation of it
  * drifted from production in 12 documented ways. That is the same failure this
  * file just had, so it gets the same treatment, one file wide: everything below
  * the marker is a byte-for-byte copy of reiwa's module, and

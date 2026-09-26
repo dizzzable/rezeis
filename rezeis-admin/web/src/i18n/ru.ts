@@ -154,7 +154,6 @@ export const ru = {
       platform: 'Платформа',
       webReiwa: 'WEB Reiwa',
       subpageConfig: 'Страница подписки',
-      landingBuilder: 'Веб-лендинг',
       legalDocuments: 'Документы',
       gateways: 'Платёжные шлюзы',
       externalAuth: 'Внешняя авторизация',

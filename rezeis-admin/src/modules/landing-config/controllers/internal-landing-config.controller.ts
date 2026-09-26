@@ -3,18 +3,22 @@ import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { SkipThrottle } from '@nestjs/throttler';
 
 import { InternalAdminAuthGuard } from '../../auth/guards/internal-admin-auth.guard';
-import { LandingConfigService } from '../services/landing-config.service';
-import type { EffectiveLandingPayload } from '../landing-config.schema';
+import { RETIRED_LANDING_ANSWER, type RetiredLandingAnswer } from '../landing-retired';
 
 /**
- * InternalLandingConfigController
- * ───────────────────────────────
- * Service-facing read endpoint consumed by the reiwa BFF. reiwa fetches the
- * effective PUBLISHED config here (or the `{ enabled: false }` sentinel), caches
- * it with a short TTL, and refreshes on the `reiwa.landing.invalidate` webhook.
+ * InternalLandingConfigController — RETIRED, answers a constant
+ * ─────────────────────────────────────────────────────────────
+ * The landing is gone (0.9.7.71). This route stays only for cabinets up to
+ * 0.9.7.53, which still read it: it always answers `{"enabled":false}`, the
+ * "nothing published" answer they turn into "`/` opens sign-in". Why an answer
+ * and not a 404, and when the route may go: `../landing-retired.ts`.
  *
- * Auth: `InternalAdminAuthGuard` — the same Bearer api_token mechanism reiwa
- * uses for branding / platform-policy.
+ * No constructor and no service on purpose: it cannot read the landing tables,
+ * so nothing an operator left in them can reach a visitor again.
+ *
+ * Same path, same guard and same throttling as before, so an old cabinet sees
+ * no difference other than the answer. Auth: `InternalAdminAuthGuard` — the
+ * Bearer api_token reiwa uses for branding / platform-policy.
  */
 @ApiTags('internal/landing-config')
 @UseGuards(InternalAdminAuthGuard)
@@ -28,11 +32,14 @@ import type { EffectiveLandingPayload } from '../landing-config.schema';
 // `src/modules/user-hints/controllers/internal-user-hints.controller.ts`.
 @SkipThrottle()
 export class InternalLandingConfigController {
-  public constructor(private readonly landingConfigService: LandingConfigService) {}
-
   @Get('effective')
-  @ApiOperation({ summary: 'Effective published landing config consumed by reiwa' })
-  public async getEffective(): Promise<EffectiveLandingPayload> {
-    return this.landingConfigService.getEffectivePublished();
+  @ApiOperation({
+    summary: 'Retired landing: always {"enabled":false}, read by cabinets up to 0.9.7.53',
+  })
+  // Async because the settings-version source that reads this handler awaits
+  // a promise (`config-version-sources.ts`). A fresh object per call, so no
+  // caller can mutate what the next one is served.
+  public async getEffective(): Promise<RetiredLandingAnswer> {
+    return { ...RETIRED_LANDING_ANSWER };
   }
 }

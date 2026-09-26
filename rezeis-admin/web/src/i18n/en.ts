@@ -146,7 +146,6 @@ export const en = {
       platform: 'Platform',
       webReiwa: 'WEB Reiwa',
       subpageConfig: 'Subscription page',
-      landingBuilder: 'Web landing',
       legalDocuments: 'Legal documents',
       gateways: 'Payment gateways',
       externalAuth: 'External auth',

@@ -65,6 +65,10 @@ export type ConfigDeliveryFinding =
 const GROUP_TITLES: Readonly<Record<ConfigVersionKey, string>> = {
   publicConfig: 'оформление кабинета',
   botConfig: 'настройки бота',
+  // Retired group (0.9.7.71): no hint names it any more, so no new check is
+  // scheduled for it — only a check queued by the previous release in its last
+  // two minutes can still read this. The record type needs every key; it
+  // leaves with the group (`landing-config/landing-retired.ts`).
   landing: 'веб-лендинг',
   connectPage: 'экран подключения',
   platformPolicy: 'правила доступа',

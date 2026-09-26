@@ -1,28 +1,20 @@
 import { Module } from '@nestjs/common';
 
 import { AuthModule } from '../auth/auth.module';
-import { BotConfigModule } from '../bot-config/bot-config.module';
-import { AdminLandingConfigController } from './controllers/admin-landing-config.controller';
 import { InternalLandingConfigController } from './controllers/internal-landing-config.controller';
-import { LandingConfigService } from './services/landing-config.service';
 
 /**
- * LandingConfigModule
- * ───────────────────
- * rezeis-admin owns the web landing-page config: a singleton draft the operator
- * edits and an append-only history of published revisions. The admin panel
- * writes via the REST controller; the reiwa BFF reads the effective published
- * config via the internal endpoint and renders it to unauthenticated web
- * visitors before sign-in.
+ * LandingConfigModule — RETIRED (0.9.7.71)
+ * ────────────────────────────────────────
+ * The web landing builder is gone: no admin API, no service, no publish hint.
+ * The module stays only to host the one route cabinets up to 0.9.7.53 still
+ * read, which now always answers "no landing" (`landing-retired.ts`).
  *
- * Imports `BotConfigModule` to inject `ReiwaCacheInvalidatorService`, which the
- * service calls (event `reiwa.landing.invalidate`) on publish/rollback so the
- * reiwa edge cache refreshes promptly. Ships disabled by default.
+ * `AuthModule` for `InternalAdminAuthGuard` and the `JwtService` it needs.
+ * Nothing here touches the database: the landing tables stay, unread.
  */
 @Module({
-  imports: [AuthModule, BotConfigModule],
-  controllers: [AdminLandingConfigController, InternalLandingConfigController],
-  providers: [LandingConfigService],
-  exports: [LandingConfigService],
+  imports: [AuthModule],
+  controllers: [InternalLandingConfigController],
 })
 export class LandingConfigModule {}

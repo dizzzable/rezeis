@@ -14,7 +14,8 @@
  * (sha256 per file plus the source commit). `originkit-manifest.test.ts` turns a
  * hand-edited copy or a stale manifest into a red test. To change an effect:
  * edit it in reiwa, run this script, commit both repos — the paired-release flow
- * both projects already use, and the same arrangement as the landing kit.
+ * both projects already use, and the same arrangement as the kits of
+ * `sync-landing-kit.mjs`.
  *
  * Usage:  node scripts/sync-originkit.mjs [--check] [--source <reiwa-root>]
  *   --check   verify only (exit 1 on drift), copy nothing

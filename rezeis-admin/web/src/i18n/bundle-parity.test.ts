@@ -55,8 +55,6 @@ import { en as dashboardEn } from './features/dashboard.en'
 import { ru as dashboardRu } from './features/dashboard.ru'
 import { en as importsEn } from './features/imports.en'
 import { ru as importsRu } from './features/imports.ru'
-import { en as landingBuilderEn } from './features/landingBuilder.en'
-import { ru as landingBuilderRu } from './features/landingBuilder.ru'
 import { en as legalDocumentsEn } from './features/legalDocuments.en'
 import { ru as legalDocumentsRu } from './features/legalDocuments.ru'
 import { en as notificationsEn } from './features/notifications.en'
@@ -116,7 +114,6 @@ const PAIRS = [
   { name: 'features/broadcast.{en,ru}.ts', en: broadcastEn as unknown, ru: broadcastRu as unknown },
   { name: 'features/dashboard.{en,ru}.ts', en: dashboardEn as unknown, ru: dashboardRu as unknown },
   { name: 'features/imports.{en,ru}.ts', en: importsEn as unknown, ru: importsRu as unknown },
-  { name: 'features/landingBuilder.{en,ru}.ts', en: landingBuilderEn as unknown, ru: landingBuilderRu as unknown },
   { name: 'features/legalDocuments.{en,ru}.ts', en: legalDocumentsEn as unknown, ru: legalDocumentsRu as unknown },
   { name: 'features/notifications.{en,ru}.ts', en: notificationsEn as unknown, ru: notificationsRu as unknown },
   { name: 'features/payments.{en,ru}.ts', en: paymentsEn as unknown, ru: paymentsRu as unknown },

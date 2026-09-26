@@ -104,9 +104,6 @@ const ExternalAuthPage = lazy(() => import('@/features/external-auth/external-au
 const SubpageConfigPage = lazy(
   withFeatureBundle('subpageConfig', () => import('@/features/subpage-config/subpage-config-page')),
 );
-const LandingBuilderPage = lazy(
-  withFeatureBundle('landingBuilder', () => import('@/features/landing-builder/landing-builder-page')),
-);
 const LegalDocumentsPage = lazy(
   withFeatureBundle('legalDocuments', () => import('@/features/legal-documents/legal-documents-page')),
 );
@@ -220,7 +217,8 @@ export const routes: RouteObject[] = [
           { path: 'settings', element: withSuspense(<SettingsPage />) },
           { path: 'web-reiwa', element: withSuspense(<WebReiwaPage />) },
           { path: 'subpage-config', element: withSuspense(<SubpageConfigPage />) },
-          { path: 'landing-builder', element: withSuspense(<LandingBuilderPage />) },
+          // `landing-builder` is gone with the web landing (0.9.7.71) and has no
+          // redirect: nothing replaced it, so a bookmark opens the 404 page.
           { path: 'legal-documents', element: withSuspense(<LegalDocumentsPage />) },
           { path: 'settings/api-tokens', element: withSuspense(<ApiTokensPage />) },
           { path: 'settings/panel', element: withSuspense(<PanelSettingsHub />) },

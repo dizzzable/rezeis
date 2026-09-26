@@ -100,7 +100,7 @@ describe('the relay and a cache hint', () => {
   it('a hint with attempts left is retried, and reports nothing yet', async () => {
     const { tracker, settled } = recordingTracker();
     const { relay } = processor(outcome('timeout'), tracker);
-    await assert.rejects(() => relay.process(job('reiwa.landing.invalidate', 0, 2)));
+    await assert.rejects(() => relay.process(job('reiwa.connect-page.invalidate', 0, 2)));
     assert.deepEqual(settled, []);
   });
 
@@ -117,6 +117,34 @@ describe('the relay and a cache hint', () => {
     await assert.rejects(() => relay.process(job('reiwa.dev.notify', 3, 4)));
     assert.equal(emitted.length, 1);
     assert.deepEqual(settled, []);
+  });
+
+  it('a landing hint the previous release queued before the update is still sent, and is no hint any more', async () => {
+    // `reiwa.landing.invalidate` left the panel with the landing (0.9.7.71),
+    // but a job queued by 0.9.7.70 moments before the update is still in
+    // Redis. The processor sends whatever event a job names, so the old
+    // cabinet still gets it, and it is not a settings hint here any more.
+    const retired = 'reiwa.landing.invalidate';
+    assert.equal((Object.keys(HINT_GROUPS) as string[]).includes(retired), false);
+    const sentEvents: string[] = [];
+    const { tracker, settled } = recordingTracker();
+    const relay = new ReiwaRelayProcessor(
+      {
+        deliverRelayEvent: async (event: string) => {
+          sentEvents.push(event);
+          return outcome('unconfirmed', { httpStatus: 204 });
+        },
+      } as never,
+      () => undefined,
+      { broadcast: { updateMany: async () => ({ count: 0 }) } } as never,
+      tracker,
+    );
+
+    const done = await relay.process(job(retired as ReiwaRelayEvent, 0, 2));
+
+    assert.deepEqual(sentEvents, [retired]);
+    assert.equal(done.delivered, true);
+    assert.deepEqual(settled, [], 'no delivery check follows a hint the panel no longer sends');
   });
 });
 
@@ -159,16 +187,16 @@ describe('the invalidator tells the check about every hint', () => {
     await service.invalidate('bot-config.buttons');
     await service.invalidatePolicy('platform.accessMode');
     await service.invalidateBranding('branding.primary');
-    await service.invalidateLanding('publish');
     await service.invalidateConnectPage('connect-page catalog saved');
 
     assert.deepEqual(sent, [
       { event: 'reiwa.bot.invalidate', reason: 'bot-config.buttons' },
       { event: 'reiwa.platform.policy_invalidated', reason: 'platform.accessMode' },
       { event: 'reiwa.branding.invalidate', reason: 'branding.primary' },
-      { event: 'reiwa.landing.invalidate', reason: 'publish' },
       { event: 'reiwa.connect-page.invalidate', reason: 'connect-page catalog saved' },
     ]);
+    // The landing hint left with the landing (0.9.7.71): no method sends it.
+    assert.equal('invalidateLanding' in service, false);
     assert.deepEqual(order.slice(0, 2), ['hintSent reiwa.bot.invalidate', 'enqueue reiwa.bot.invalidate bot-config.buttons']);
   });
 

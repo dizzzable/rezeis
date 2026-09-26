@@ -24,12 +24,12 @@ import { isForceLogoutInProgress } from '@/lib/admin-session'
  * exactly like losing it to a closed tab. So this is ONE component and it does
  * both, because a caller cannot then remember only half of it.
  *
- * Lifted from `landing-builder-page.tsx`, which now uses it too, so the
- * force-logout rule exists once. That editor's own tests are what hold this
- * component honest: `landing-builder-page.test.tsx` drives the browser prompt,
- * the sign-out exception, and the in-app blocker through a real data router —
- * the third of those cannot be reached from a `MemoryRouter`, which is what
- * most component tests in this panel render under.
+ * Lifted from the landing builder's page (removed with the builder in
+ * 0.9.7.71), so the force-logout rule exists once. `unsaved-changes-guard.test.tsx`
+ * holds it honest: the browser prompt, the sign-out exception, and the in-app
+ * blocker through a real data router — the last of those cannot be reached
+ * from a `MemoryRouter`, which is what most component tests in this panel
+ * render under.
  *
  * ── Not during a forced sign-out ─────────────────────────────────────────────
  *

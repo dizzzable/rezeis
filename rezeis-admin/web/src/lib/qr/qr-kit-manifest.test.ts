@@ -18,7 +18,7 @@ import { describe, expect, it } from 'vitest'
  * drifted would keep those promises inside the panel and break them in
  * production, silently.
  *
- * Same treatment as the landing and media-viewer kits:
+ * Same treatment as the media-viewer kit:
  *
  *  1. someone edits `kit/` by hand — the copy no longer matches its manifest;
  *  2. someone edits the renderer in reiwa and forgets to run the sync — the

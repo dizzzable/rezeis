@@ -49,7 +49,7 @@ export const PERMISSION_GROUPS = [
   },
   {
     id: 'content',
-    resources: ['bot_config', 'notifications', 'subpage_config', 'landing_config', 'branding', 'appearance'],
+    resources: ['bot_config', 'notifications', 'subpage_config', 'branding', 'appearance'],
   },
   { id: 'remnawave', resources: ['remnawave', 'imports'] },
   { id: 'integrations', resources: ['automations', 'webhooks', 'email', 'api_tokens'] },

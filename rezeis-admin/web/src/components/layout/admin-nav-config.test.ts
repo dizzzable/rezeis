@@ -19,7 +19,14 @@ import { describe, expect, it } from 'vitest'
 
 import { RBAC_RESOURCES, SYSTEM_ROLES } from '../../../../src/modules/rbac/rbac.resources'
 
-import { HUB_TABS, canShowNavItem, deepLinkNavItems, navGroups, type NavItem } from './admin-nav-config'
+import {
+  HUB_TABS,
+  canShowNavItem,
+  deepLinkNavItems,
+  navGroups,
+  type NavItem,
+  type NavPermission,
+} from './admin-nav-config'
 import { en } from '@/i18n/en'
 import { ru } from '@/i18n/ru'
 
@@ -165,6 +172,34 @@ describe('deepLinkNavItems vs the sidebar', () => {
     const paths = deepLinkNavItems.map((i) => i.path)
     expect(new Set(keys).size).toBe(keys.length)
     expect(new Set(paths).size).toBe(paths.length)
+  })
+})
+
+/**
+ * A gate on a permission the server no longer has hides the item from every
+ * role — nobody can be granted it — while a DEV, who passes every gate, still
+ * sees it and lands on whatever is left at that path. That is the shape a
+ * retired page leaves behind if only half of it goes: «Веб-лендинг» and its
+ * `landing_config` left together (0.9.7.71), and this keeps it that way for
+ * the next one.
+ */
+describe('every gate names a permission the server still has', () => {
+  it('in the sidebar and in the Cmd+K deep links, main gate and alternatives alike', () => {
+    const items = [...navGroups.flatMap((group) => group.items), ...deepLinkNavItems]
+    const gates = items.flatMap((item) =>
+      [item.requiredPermission, ...(item.alsoOpenedBy ?? [])]
+        .filter((gate): gate is NavPermission => gate !== undefined)
+        .map((gate) => ({ key: item.key, resource: gate.resource, action: gate.action })),
+    )
+    // Anti-emptiness: a list of nothing passes any check.
+    expect(gates.length).toBeGreaterThan(20)
+    const catalog = RBAC_RESOURCES as Readonly<Record<string, readonly string[] | undefined>>
+    const unknown = gates
+      .filter(({ resource, action }) =>
+        !(Object.prototype.hasOwnProperty.call(catalog, resource) && (catalog[resource] ?? []).includes(action)),
+      )
+      .map(({ key, resource, action }) => `${key}: ${resource}:${action}`)
+    expect(unknown, 'gated on a permission nobody can be granted').toEqual([])
   })
 })
 

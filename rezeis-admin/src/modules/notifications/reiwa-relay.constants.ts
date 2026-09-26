@@ -17,9 +17,14 @@ export const REIWA_RELAY_QUEUE = 'reiwa-relay';
 export const REIWA_RELAY_JOB = 'reiwa.relay';
 
 /**
- * The ten events this queue owns, in the order the audit listed them.
+ * The nine events this queue owns, in the order the audit listed them.
  *
  * `reiwa.backup.document` is deliberately absent — see `REIWA_RELAY_QUEUE`.
+ *
+ * `reiwa.landing.invalidate` left with the web landing (0.9.7.71). A job the
+ * previous release queued just before the update is still sent: the processor
+ * delivers whatever event a job names, and a cabinet acks an event it does not
+ * know with 204.
  */
 export const REIWA_RELAY_EVENTS = [
   'reiwa.user.notify',
@@ -30,7 +35,6 @@ export const REIWA_RELAY_EVENTS = [
   'reiwa.bot.invalidate',
   'reiwa.platform.policy_invalidated',
   'reiwa.branding.invalidate',
-  'reiwa.landing.invalidate',
   'reiwa.connect-page.invalidate',
 ] as const;
 

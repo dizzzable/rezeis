@@ -138,7 +138,7 @@ operator-facing areas are:
   withdrawals, quests, and advertising requests.
 - **Support and communications:** broadcasts, event-driven notifications,
   FAQ with media, support tickets and document requests, AI-support controls,
-  Bot Studio, custom emoji packs, and Web Landing/Subpage configuration.
+  Bot Studio, custom emoji packs, and Subpage configuration.
 - **Infrastructure and operations:** Remnawave provisioning and profile sync,
   dashboard/system health, realtime updates, system events/logs, anti-fraud,
   imports, backups/restores, and configuration portability.

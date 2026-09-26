@@ -12,9 +12,17 @@
  *   3. Run the seed script — `superadmin` system role auto-receives the
  *      new entries on the next backend boot.
  *
- * Removing a resource is intentionally NOT exposed: the database stores
- * granted permissions and removal would silently revoke access. Mark a
- * resource as legacy in comments and stop guarding new endpoints with it.
+ * Removing a resource
+ * ───────────────────
+ * Only together with everything it guards: a resource whose routes still
+ * exist must stay, or removal silently revokes access to them. When the
+ * feature itself is gone — `landing_config` left with the web landing in
+ * 0.9.7.71 — the entry leaves this table and the SPA's catalog in the same
+ * change, and nothing else is needed. The rows already granted stay in
+ * `admin_permissions` until their role is next saved, so a rollback finds
+ * them; `RbacService` reads past every stored pair this table no longer names
+ * (`catalogGrants`), so a role holding one still saves and assigns, and an
+ * admin holding one can still be edited.
  */
 
 export const RBAC_ACTIONS = [
@@ -161,10 +169,6 @@ export const RBAC_RESOURCES: Readonly<Record<string, readonly RbacAction[]>> = {
   /// Subscription-page config (branding / app catalog / baseSettings /
   /// translations) consumed by rezeis-subpage.
   subpage_config: ['view', 'edit'],
-  /// Web landing-page builder — the operator-authored marketing page shown to
-  /// unauthenticated web visitors before sign-in (consumed by reiwa). `edit`
-  /// covers save-draft, publish and rollback.
-  landing_config: ['view', 'edit'],
   /// SMTP email settings + connection test / test-send.
   email: ['view', 'edit'],
 
@@ -242,8 +246,14 @@ export function getAllPermissions(): ReadonlyArray<{ resource: string; action: R
  * Validates a (resource, action) pair against the catalog.
  * Returns `false` for unknown resources or actions not declared on the
  * resource.
+ *
+ * Own keys only. `RbacService` also runs STORED rows through this on every
+ * permission lookup (`catalogGrants`), so a row naming `constructor` or
+ * `toString` must read as unknown, not reach `Object.prototype` and throw on
+ * `.includes`.
  */
 export function isValidPermission(resource: string, action: string): boolean {
+  if (!Object.prototype.hasOwnProperty.call(RBAC_RESOURCES, resource)) return false;
   const actions = (RBAC_RESOURCES as Record<string, readonly RbacAction[] | undefined>)[resource];
   if (!actions) return false;
   return (actions as readonly string[]).includes(action);

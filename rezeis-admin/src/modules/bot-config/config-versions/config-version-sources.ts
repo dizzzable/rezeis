@@ -45,6 +45,12 @@ export function buildConfigVersionSources(moduleRef: ModuleRef): readonly Config
       read: () => handler(InternalBotConfigController).getBotConfig(),
     },
     {
+      // Retired (0.9.7.71): the route answers the constant `{"enabled":false}`,
+      // so this version is `5acf3ff77b4420677b5923071f303fac` on every panel.
+      // Kept, not dropped: a 0.9.7.53 cabinet that still holds a published
+      // landing sees the version move once and re-reads at its next poll,
+      // replacing its memory and Redis copies with no visitor needed.
+      // `landing-config/landing-retired.ts` says when it may go.
       key: CONFIG_VERSION_KEY.landing,
       read: () => handler(InternalLandingConfigController).getEffective(),
     },

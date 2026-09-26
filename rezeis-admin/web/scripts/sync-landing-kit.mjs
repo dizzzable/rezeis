@@ -2,26 +2,16 @@
 /**
  * Vendor shared kits from the sibling reiwa checkout.
  *
- * The name is historical: this started as the landing kit alone and now carries
- * a table of them. Renaming the file would ripple through the manifest, the
- * drift test and half a dozen source comments for no behavioural gain, so the
- * table moved in instead.
+ * The name is historical: this started as the web landing's kit alone and grew
+ * a table of kits. The landing kit left with the landing builder (0.9.7.71);
+ * the name stays, because both remaining manifests, their drift tests and a
+ * few source comments quote it, and renaming buys nothing.
  *
- * ── The landing kit → `src/features/landing-builder/live/` ────────────────
- *
- * The kit (schema, sections, renderer, background, CSS — everything in reiwa's
- * `web/src/features/landing/` except the reiwa-only `landing-page.tsx`) is the
- * SINGLE renderer for the public landing page. The admin preview renders this
- * vendored copy, so the operator looks at the exact code visitors will see —
- * the previous hand-maintained preview re-implementation drifted 12 ways from
- * production and is gone.
- *
- * The copy is tracked in git and byte-frozen by `landing-kit.manifest.json`
- * (sha256 per file + source commit). `live-kit-manifest.test.ts` fails when a
- * vendored file is hand-edited or the manifest is stale, which converts silent
- * drift into a red test. To change the renderer: edit it in reiwa, run this
- * script, commit both repos — the same paired-release flow both projects
- * already use.
+ * Each copy is tracked in git and byte-frozen by its manifest (sha256 per file
+ * plus the source commit). The kit's manifest test fails when a vendored file
+ * is hand-edited or the manifest is stale, which turns silent drift into a red
+ * test. To change a kit: edit it in reiwa, run this script, commit both repos —
+ * the same paired-release flow both projects already use.
  *
  * ── The media-viewer kit → `src/components/media/kit/` ───────────────────
  *
@@ -78,19 +68,11 @@ const reiwaRoot =
  * Every kit vendored from reiwa.
  *
  * `exclude` lists files that live beside the kit in reiwa but belong only to
- * reiwa — the page that mounts the landing renderer, the React components that
- * render the viewer. They are the reason this is a file list and not a whole
- * directory: the shared part is the part with no app in it.
+ * reiwa — the React components that render the viewer. They are the reason
+ * this is a file list and not a whole directory: the shared part is the part
+ * with no app in it.
  */
 const KITS = [
-  {
-    name: 'landing',
-    sourcePath: 'web/src/features/landing',
-    dst: join(webRoot, 'src', 'features', 'landing-builder', 'live'),
-    manifest: 'landing-kit.manifest.json',
-    exclude: new Set(['landing-page.tsx']),
-    note: 'DO NOT EDIT files in live/ by hand — they are vendored from reiwa',
-  },
   {
     name: 'media-viewer',
     sourcePath: 'web/src/features/media-viewer',

@@ -212,7 +212,7 @@ export class ConnectPageService {
    * is decoration, and refusing to serve the catalog because a palette went
    * bad would take the whole screen down over a colour. It is logged, because
    * silently reverting an operator's choice with nothing in the log is how
-   * `landing-config` earned its `corrupted` marker.
+   * the landing builder (retired in 0.9.7.71) earned its `corrupted` marker.
    */
   public async readTheme(): Promise<ConnectPageTheme | null> {
     const row = await this.prisma.subpageConfig.findUnique({
@@ -285,8 +285,8 @@ export class ConnectPageService {
    * because the two look identical from `getEffectiveConfig` + `hasStoredConfig`:
    * both hand back the built-in default with `stored: true`. An operator would
    * see the default, assume it was their catalog, change one label and save —
-   * destroying the real one. The neighbouring landing builder was bitten by
-   * exactly this and now returns a `corrupted` marker; so does this.
+   * destroying the real one. The landing builder (retired in 0.9.7.71) was
+   * bitten by exactly this and grew a `corrupted` marker; so does this.
    */
   public async readState(): Promise<{
     readonly config: ConnectPageConfig;

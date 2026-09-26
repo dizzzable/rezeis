@@ -503,14 +503,6 @@ export const en = {
           edit: 'Change and save them, switch the connect screen on and off.',
         },
       },
-      landing_config: {
-        name: 'Web landing',
-        description: 'The website page visitors see before they sign in.',
-        actions: {
-          view: 'The draft, the published version and the history.',
-          edit: 'Save the draft, publish it, roll back to an earlier version.',
-        },
-      },
       branding: {
         name: 'Branding',
         description:

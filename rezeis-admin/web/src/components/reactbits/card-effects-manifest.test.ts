@@ -15,8 +15,8 @@ import { CARD_EFFECT_COMPONENTS } from '@/features/branding/card-effect-registry
  * quietly, and the drift only ever surfaces as "it looked different in the
  * panel". Thirty files were kept in step by hand and NOTHING enforced it —
  * `originkit-manifest.test.ts` covers only the vendored Originkit set, and the
- * landing kit covers only itself. Everything under this directory that both
- * apps draw was on trust.
+ * landing kit (removed in 0.9.7.71) covered only itself. Everything under this
+ * directory that both apps draw was on trust.
  *
  * The trust was already misplaced when this file was written, which is the
  * whole argument for it: `paper.tsx` had diverged in both directions (prose,

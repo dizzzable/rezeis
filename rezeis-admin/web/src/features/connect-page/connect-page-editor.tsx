@@ -196,8 +196,8 @@ export function ConnectPageEditor(): JSX.Element {
   // anything typed WHILE it was in flight, which is the case a boolean flag
   // gets wrong — makes `config` a different object and the editor dirty again.
   // Nothing typed, and it is the same object. Borrowed from the landing
-  // builder, which needs a version guard on top only because it seeds its
-  // state in an effect and this editor does not.
+  // builder (removed in 0.9.7.71), which needed a version guard on top only
+  // because it seeded its state in an effect and this editor does not.
   const [savedConfig, setSavedConfig] = useState<ConnectPageConfig | null>(null);
 
   /**
@@ -317,7 +317,8 @@ export function ConnectPageEditor(): JSX.Element {
   //
   // `retry: false` is the client default, so a failed fetch is the only
   // attempt; an endless skeleton with no words was the answer before that.
-  // Same shape as `landing-builder-page.tsx`, and for the same reason.
+  // The landing builder's page (removed in 0.9.7.71) had the same shape, for
+  // the same reason.
   if (config === null && (isError || !isLoading)) {
     return (
       <Card className="border-destructive/40 bg-destructive/5">

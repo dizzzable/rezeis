@@ -12,7 +12,14 @@ export const CONFIG_VERSION_KEY = {
   publicConfig: 'publicConfig',
   /** `GET /api/internal/bot-config`. */
   botConfig: 'botConfig',
-  /** `GET /api/internal/landing-config/effective`. */
+  /**
+   * `GET /api/internal/landing-config/effective`. RETIRED in 0.9.7.71: the
+   * route always answers `{"enabled":false}` and no hint names the group, so
+   * its version is a constant. It stays so a cabinet up to 0.9.7.53 still
+   * holding a published landing sees the version move once and re-reads "no
+   * landing" at its next poll; it leaves with the shim
+   * (`landing-config/landing-retired.ts`).
+   */
   landing: 'landing',
   /** `GET /api/internal/connect-page/effective`. */
   connectPage: 'connectPage',
@@ -45,13 +52,15 @@ export function isConfigVersionConsumer(value: unknown): value is ConfigVersionC
   return typeof value === 'string' && (CONFIG_VERSION_CONSUMERS as readonly string[]).includes(value);
 }
 
-/** The five relay events that are cache hints — "the copy of these groups is stale". */
+/**
+ * The four relay events that are cache hints — "the copy of these groups is
+ * stale". `reiwa.landing.invalidate` left with the landing (0.9.7.71).
+ */
 export type ConfigHintEvent = Extract<
   ReiwaRelayEvent,
   | 'reiwa.bot.invalidate'
   | 'reiwa.platform.policy_invalidated'
   | 'reiwa.branding.invalidate'
-  | 'reiwa.landing.invalidate'
   | 'reiwa.connect-page.invalidate'
 >;
 
@@ -72,7 +81,6 @@ export const HINT_GROUPS: Readonly<Record<ConfigHintEvent, readonly ConfigVersio
     CONFIG_VERSION_KEY.publicConfig,
   ],
   'reiwa.branding.invalidate': [CONFIG_VERSION_KEY.publicConfig, CONFIG_VERSION_KEY.customEmojiPacks],
-  'reiwa.landing.invalidate': [CONFIG_VERSION_KEY.landing],
   'reiwa.connect-page.invalidate': [CONFIG_VERSION_KEY.connectPage],
 };
 

@@ -27,7 +27,7 @@ import {
  *     copy no longer matches the source (checked only where the sibling reiwa
  *     checkout exists; this repo's CI has no reiwa working tree).
  *
- * Same arrangement, and the same reasoning, as the vendored landing kit.
+ * Same arrangement, and the same reasoning, as the vendored media-viewer kit.
  */
 
 const ORIGINKIT_DIR = join(__dirname, 'originkit')

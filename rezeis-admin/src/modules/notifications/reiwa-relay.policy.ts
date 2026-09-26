@@ -97,7 +97,6 @@ export const RELAY_EVENT_POLICY: Readonly<Record<ReiwaRelayEvent, RelayEventPoli
   'reiwa.bot.invalidate': { ...BOUNDED, botDedupKeyed: false },
   'reiwa.platform.policy_invalidated': { ...BOUNDED, botDedupKeyed: false },
   'reiwa.branding.invalidate': { ...BOUNDED, botDedupKeyed: false },
-  'reiwa.landing.invalidate': { ...BOUNDED, botDedupKeyed: false },
   'reiwa.connect-page.invalidate': { ...BOUNDED, botDedupKeyed: false },
 };
 

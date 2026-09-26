@@ -15,7 +15,8 @@ import { describe, expect, it } from 'vitest'
  * not, because a viewer whose paging differed between the two would be two
  * viewers wearing the same name.
  *
- * Same two silent failure modes as the landing kit, same treatment:
+ * The same two silent failure modes as every vendored kit, and the same
+ * treatment:
  *
  *  1. someone edits `kit/` by hand — the copy no longer matches its manifest;
  *  2. someone edits the kit in reiwa and forgets to run the sync — the copy no

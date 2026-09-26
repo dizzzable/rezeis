@@ -127,17 +127,6 @@ export class ReiwaCacheInvalidatorService {
   }
 
   /**
-   * Notify reiwa that the published web-landing config changed so the reiwa
-   * edge drops its cached `/api/v1/landing` payload and the next visitor sees
-   * the freshly-published landing without waiting for the HTTP cache TTL.
-   * Called explicitly on publish/rollback (never on draft save). Queued,
-   * bounded.
-   */
-  public async invalidateLanding(reason: string): Promise<void> {
-    await this.hint('reiwa.landing.invalidate', reason);
-  }
-
-  /**
    * Notify reiwa that the connect-screen catalog changed so the cabinet drops
    * its cached copy and the next customer to tap "Подключить" sees the apps the
    * operator just edited, instead of waiting out the HTTP cache TTL. Queued,
@@ -175,7 +164,6 @@ export class ReiwaCacheInvalidatorService {
       | 'reiwa.bot.invalidate'
       | 'reiwa.platform.policy_invalidated'
       | 'reiwa.branding.invalidate'
-      | 'reiwa.landing.invalidate'
       | 'reiwa.connect-page.invalidate',
     metadata: Record<string, unknown>,
   ): Promise<boolean> {

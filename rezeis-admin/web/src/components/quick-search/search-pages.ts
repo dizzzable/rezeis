@@ -116,7 +116,6 @@ export const SEARCH_KEY_TARGETS: Readonly<Record<string, string>> = {
   subpageConfigPage: '/subpage-config',
   connectPageEditor: '/subpage-config',
   connectScreen: '/subpage-config',
-  landingBuilderPage: '/landing-builder',
   legalDocumentsPage: '/legal-documents',
   externalAuthPage: '/external-auth',
   faqPage: '/faq',
