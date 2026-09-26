@@ -35,7 +35,7 @@ const DEGRADED = {
   id: 'web.bell-addon-not-applied',
   kind: 'degraded',
   since: '0.9.7.53',
-  operatorText: 'уведомление «Докупка не применена» в колокольчике открывает «Доп. опции», а не «Поддержку»',
+  operatorText: 'уведомление «Докупка не применена» в колокольчике открывает «Дополнительные опции», а не «Поддержку»',
   operatorTextEn: 'the bell’s “Add-on not applied” opens “Add-ons” instead of “Support”',
 }
 

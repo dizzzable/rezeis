@@ -137,7 +137,7 @@ export const CABINET_CAPABILITY_REGISTRY: readonly CabinetCapabilityRow[] = [
     surface: 'web',
     since: '0.9.7.53',
     kind: 'degraded',
-    operatorText: 'уведомление «Докупка не применена» в колокольчике открывает «Доп. опции», а не «Поддержку»',
+    operatorText: 'уведомление «Докупка не применена» в колокольчике открывает «Дополнительные опции», а не «Поддержку»',
     operatorTextEn: 'the bell’s “Add-on not applied” opens “Add-ons” instead of “Support”',
   },
   {
@@ -145,8 +145,10 @@ export const CABINET_CAPABILITY_REGISTRY: readonly CabinetCapabilityRow[] = [
     surface: 'web',
     since: '0.9.7.53',
     kind: 'degraded',
-    operatorText: 'даты в кабинете идут по часам телефона, а не в часовом поясе из «Настройки» → «Платформа»',
-    operatorTextEn: 'dates in the cabinet follow the phone’s clock, not the time zone set in “Settings” → “Platform”',
+    operatorText:
+      'даты в кабинете идут по часам телефона, а не в часовом поясе из «Платформа» → «Настройки платформы» → «Часовой пояс»',
+    operatorTextEn:
+      'dates in the cabinet follow the phone’s clock, not the time zone set in “Platform” → “Platform Settings” → “Time zone”',
   },
   {
     id: CABINET_CAPABILITY.appearanceReport,
