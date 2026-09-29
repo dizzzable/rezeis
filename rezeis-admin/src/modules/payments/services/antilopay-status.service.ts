@@ -22,10 +22,16 @@ import {
   classifyAntilopayPaymentStatus,
   postAntilopay,
 } from '../utils/antilopay-api.util';
+import {
+  antilopayRefundEnvelope,
+  completedAntilopayRefunds,
+  readAntilopayRefunds,
+} from '../utils/antilopay-refund.util';
 import { readGatewaySettings } from '../utils/payment-gateway-settings.util';
 import { redactPaymentDiagnosticMessage } from '../utils/payment-provider-error.util';
 import { writeTransactionGatewayData } from '../utils/transaction-gateway-data.util';
 import { readOptionalString } from './payment-provider-execution.helpers';
+import type { PaymentWebhookEnvelopeInterface } from '../interfaces/payment-webhook-envelope.interface';
 import { PaymentWebhookInboxService } from './payment-webhook-inbox.service';
 import { PaymentWebhookNormalizerService } from './payment-webhook-normalizer.service';
 import { ProviderSubscriptionService } from './provider-subscription.service';
@@ -110,6 +116,8 @@ export interface AntilopayCheckedRow {
   readonly paymentId: string;
   readonly createdAt: Date;
   readonly gatewayData: Prisma.JsonValue | null;
+  /** Read for a completed payment: a refund is settled only against a payment whose fulfilment is done. */
+  readonly fulfilledAt?: Date | null;
 }
 
 /** What the expiry sweep does with a row after the check: see `PaymentPendingExpiryService`. */
@@ -465,7 +473,7 @@ export class AntilopayStatusService {
           createdAt: { gte: since },
           ...(cursor === null ? {} : { id: { gt: cursor } }),
         },
-        select: { id: true, paymentId: true, createdAt: true, gatewayData: true },
+        select: { id: true, paymentId: true, createdAt: true, gatewayData: true, fulfilledAt: true },
         orderBy: { id: 'asc' },
         take: COMPLETED_PAGE,
       });
@@ -513,13 +521,13 @@ export class AntilopayStatusService {
       await this.handToReconciliation(row, settingsJson, check);
       return;
     }
-    if (check.verdict !== 'PAID') {
-      // A completed payment that Antilopay now calls open or dead is not
-      // something a status can undo; someone should look, nothing is changed.
-      this.logger.warn(
-        `Antilopay reports the completed payment ${row.paymentId} as ${check.status}; nothing changed`,
-      );
+    if (check.verdict === 'PAID') {
+      await this.handRefundsToReconciliation(row, check.payload);
+      return;
     }
+    // A completed payment that Antilopay now calls open or dead is not
+    // something a status can undo; someone should look, nothing is changed.
+    this.logger.warn(`Antilopay reports the completed payment ${row.paymentId} as ${check.status}; nothing changed`);
   }
 
   private async stamp(transactionId: string, status: string, now: Date, onlyIfStatus: TransactionStatus): Promise<void> {
@@ -527,6 +535,60 @@ export class AntilopayStatusService {
       onlyIfStatus,
       merge: { antilopayCheckedAt: now.toISOString(), antilopayStatus: status },
     });
+  }
+
+  /**
+   * A look by our order id — the job a refund's callback queues, which names
+   * the payment and no order. Settles what Antilopay answers for the payment as
+   * it stands now: an open one is asked about as the sweep asks, a completed one
+   * as the daily run does (a reversal, a chargeback, the refunds it lists).
+   */
+  public async checkByOrder(orderId: string): Promise<void> {
+    const row = await this.prismaService.transaction.findUnique({
+      where: { paymentId: orderId },
+      select: {
+        id: true,
+        paymentId: true,
+        createdAt: true,
+        gatewayData: true,
+        gatewayType: true,
+        status: true,
+        fulfilledAt: true,
+      },
+    });
+    if (row === null || row.gatewayType !== PaymentGatewayType.ANTILOPAY) return;
+    const gateway = await this.prismaService.paymentGateway.findUnique({
+      where: { type: PaymentGatewayType.ANTILOPAY },
+      select: { settings: true },
+    });
+    if (gateway === null) return;
+    if (row.status === TransactionStatus.PENDING) {
+      await this.settleOpenPayment(row, gateway.settings, new Date());
+    } else if (row.status === TransactionStatus.COMPLETED) {
+      await this.recheckCompleted(row, gateway.settings);
+    }
+  }
+
+  /**
+   * Books each refund a completed payment lists, through the refund path every
+   * other refund takes (`antilopayRefundEnvelope`). Only against a payment
+   * whose fulfilment is done: a refund settled before it would cancel a payment
+   * about to be fulfilled, and the fulfilment would then revive it.
+   */
+  private async handRefundsToReconciliation(
+    row: AntilopayCheckedRow,
+    payload: Record<string, unknown>,
+  ): Promise<void> {
+    const refunds = completedAntilopayRefunds(readAntilopayRefunds(payload['refunds']));
+    if (refunds.length === 0) return;
+    if (row.fulfilledAt === null) return;
+    const providerPaymentId = readOptionalString(payload, ['payment_id']);
+    for (const refund of refunds) {
+      this.logger.warn(`Antilopay lists refund ${refund.id} of payment ${row.paymentId}; handing it to the refund path`);
+      await this.enqueueEnvelope(
+        antilopayRefundEnvelope({ paymentId: row.paymentId, providerPaymentId, refund, currency: 'RUB' }),
+      );
+    }
   }
 
   /**
@@ -556,6 +618,11 @@ export class AntilopayStatusService {
       }),
       providerEventId: `antilopay-check:${row.paymentId}:${check.status}`,
     };
+    await this.enqueueEnvelope(envelope);
+  }
+
+  /** Records a notice in the inbox and queues its reconciliation, once per key and payload. */
+  private async enqueueEnvelope(envelope: PaymentWebhookEnvelopeInterface): Promise<void> {
     const received = await this.paymentWebhookInboxService.recordReceived({ envelope });
     if (received.duplicate) return;
     await this.paymentWebhookInboxService.markEnqueued(received.event.id);

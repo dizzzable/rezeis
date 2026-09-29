@@ -1,5 +1,6 @@
 import { ProviderSubscriptionStatus } from '@prisma/client';
 
+import { type AntilopayRefund, readAntilopayRefunds } from './antilopay-refund.util';
 import { antilopayRecurrentTypeFor, type ProviderPeriod } from './provider-subscription-period.util';
 
 /**
@@ -138,6 +139,8 @@ export interface AntilopayCharge {
   readonly disputed: boolean;
   /** `original_amount`, the sum the charge was made for; null when not reported. */
   readonly amount: string | null;
+  /** Refunds listed beside it (`refunds[]`): money given back after the day of the payment. */
+  readonly refunds: readonly AntilopayRefund[];
 }
 
 export interface AntilopayRecurrentState {
@@ -179,6 +182,7 @@ export function parseAntilopayRecurrent(data: Record<string, unknown>): Antilopa
         providerStatus: status,
         disputed: DISPUTED_PAYMENT_STATUSES.has(status),
         amount: readAmountText(payment['original_amount']),
+        refunds: readAntilopayRefunds(payment['refunds']),
       },
       index,
     });

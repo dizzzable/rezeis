@@ -1,13 +1,16 @@
 import { Processor, WorkerHost } from '@nestjs/bullmq';
+import { Optional } from '@nestjs/common';
 import { PaymentGatewayType } from '@prisma/client';
 import { Job } from 'bullmq';
 
 import {
+  ANTILOPAY_PAYMENT_CHECK_JOB,
   PAYMENT_RECONCILIATION_CONCURRENCY,
   PAYMENT_RECONCILIATION_JOB,
   PAYMENT_RECONCILIATION_QUEUE,
   PROVIDER_SUBSCRIPTION_SYNC_JOB,
 } from '../constants/payment-reconciliation.constant';
+import { AntilopayStatusService } from '../services/antilopay-status.service';
 import { PaymentReconciliationService } from '../services/payment-reconciliation.service';
 import { ProviderSubscriptionService } from '../services/provider-subscription.service';
 
@@ -16,6 +19,12 @@ export class PaymentReconciliationProcessor extends WorkerHost {
   public constructor(
     private readonly paymentReconciliationService: PaymentReconciliationService,
     private readonly providerSubscriptionService: ProviderSubscriptionService,
+    /**
+     * Looks at an Antilopay payment a refund's callback named. Last and
+     * optional: specs build this positionally.
+     */
+    @Optional()
+    private readonly antilopayStatusService?: AntilopayStatusService,
   ) {
     super();
   }
@@ -35,6 +44,14 @@ export class PaymentReconciliationProcessor extends WorkerHost {
       } else {
         await this.providerSubscriptionService.sync(target.gatewayType, target.providerSubscriptionId);
       }
+      return;
+    }
+    if (job.name === ANTILOPAY_PAYMENT_CHECK_JOB) {
+      const orderId = (job.data as { orderId?: unknown } | null | undefined)?.orderId;
+      if (typeof orderId !== 'string' || orderId.length === 0) {
+        throw new Error('Antilopay payment check job payload is invalid');
+      }
+      await this.antilopayStatusService?.checkByOrder(orderId);
       return;
     }
     if (job.name !== PAYMENT_RECONCILIATION_JOB) {

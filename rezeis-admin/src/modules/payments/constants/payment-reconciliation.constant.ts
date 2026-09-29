@@ -6,6 +6,12 @@ export const PAYMENT_RECONCILIATION_ENQUEUE_FAILED = 'FAILED';
  * successful charge into a delivered renewal. Its callbacks only trigger this.
  */
 export const PROVIDER_SUBSCRIPTION_SYNC_JOB = 'sync-provider-subscription';
+/**
+ * Asks Antilopay (`payment/check`) about one of our payments by its order id and
+ * settles what it answers: a refund's callback names the payment but no order,
+ * and the callback is only a reason to look.
+ */
+export const ANTILOPAY_PAYMENT_CHECK_JOB = 'check-antilopay-payment';
 
 /**
  * Worker concurrency for payment webhook reconciliation. Tunable via

@@ -47,6 +47,7 @@ interface Row {
   createdAt: Date;
   gatewayData: Record<string, unknown> | null;
   status: TransactionStatus;
+  fulfilledAt?: Date | null;
 }
 
 function row(overrides: Partial<Row> & { readonly ageMinutes?: number } = {}): Row {
@@ -126,6 +127,10 @@ function createHarness(input: {
       },
     },
     transaction: {
+      findUnique: async ({ where }: { where: { paymentId: string } }) => {
+        const found = input.rows.find((candidate) => candidate.paymentId === where.paymentId);
+        return found === undefined ? null : { ...found, gatewayType: PaymentGatewayType.ANTILOPAY };
+      },
       findMany: async (args: Record<string, unknown>) => {
         findManyArgs.push(args);
         const where = args['where'] as { status?: TransactionStatus; id?: { gt: string } };
@@ -619,6 +624,77 @@ describe('Antilopay: the sweeps reach every row, not the same first ones', () =>
     const h = createHarness({ rows: many(2, TransactionStatus.COMPLETED, 60 * 24 * 3), answer: () => new Error('connect ECONNRESET') });
     await h.service.recheckCompletedPayments(NOW, { throttleMs: 0 });
     assert.equal(h.rows.every((candidate) => candidate.gatewayData === null), true);
+  });
+});
+
+describe('Antilopay: refunds made after the day of the payment', () => {
+  const completed = (id: string, extra: Partial<Row> = {}): Row =>
+    row({ id: `tx-${id}`, paymentId: `pay-${id}`, status: TransactionStatus.COMPLETED, ageMinutes: 60 * 24 * 3, ...extra });
+  const refunds = [
+    { refund_id: 'RF-1', order_id: 'merchant-1', amount: 100, status: 'COMPLETE' },
+    { refund_id: 'RF-2', amount: 49.5, status: 'COMPLETE' },
+    { refund_id: 'RF-3', amount: 10, status: 'FAIL' },
+  ];
+
+  it('books each completed refund the payment lists, as the notice the refund path settles, and none that failed', async () => {
+    const h = createHarness({ rows: [completed('a')], answer: (id) => checkReply(id, 'SUCCESS', { refunds }) });
+
+    await h.service.recheckCompletedPayments(NOW, { throttleMs: 0 });
+
+    assert.deepEqual(
+      h.recorded.map((envelope) => [envelope['providerEventId'], envelope['eventStatus'], envelope['paymentId']]),
+      [
+        ['antilopay-refund:pay-a:RF-1', 'REFUNDED', 'pay-a'],
+        ['antilopay-refund:pay-a:RF-2', 'REFUNDED', 'pay-a'],
+      ],
+    );
+    const raw = (h.recorded[0] as { rawPayload: { object: unknown } }).rawPayload;
+    assert.deepEqual(raw.object, { id: 'RF-1', amount: { value: '100', currency: 'RUB' } });
+    assert.equal(h.queued.length, 2);
+    assert.equal(h.queued[0]?.name, PAYMENT_RECONCILIATION_JOB);
+  });
+
+  it('books a refund once: asked again, the same notice is a duplicate', async () => {
+    const h = createHarness({ rows: [completed('a')], answer: (id) => checkReply(id, 'SUCCESS', { refunds }) });
+
+    await h.service.recheckCompletedPayments(NOW, { throttleMs: 0 });
+    await h.service.recheckCompletedPayments(new Date(NOW.getTime() + 24 * 60 * MINUTE), { throttleMs: 0 });
+
+    assert.equal(h.recorded.length, 2);
+    assert.equal(h.queued.length, 2);
+  });
+
+  it('books nothing against a payment whose fulfilment is not done, and nothing for a payment that lists none', async () => {
+    const unfinished = createHarness({
+      rows: [completed('a', { fulfilledAt: null })],
+      answer: (id) => checkReply(id, 'SUCCESS', { refunds }),
+    });
+    await unfinished.service.recheckCompletedPayments(NOW, { throttleMs: 0 });
+    assert.equal(unfinished.recorded.length, 0);
+
+    const none = createHarness({ rows: [completed('a')], answer: (id) => checkReply(id, 'SUCCESS') });
+    await none.service.recheckCompletedPayments(NOW, { throttleMs: 0 });
+    assert.equal(none.recorded.length, 0);
+  });
+
+  it('looks by order id when a refund\'s callback asks: a completed payment is read as the daily run reads it', async () => {
+    const h = createHarness({ rows: [completed('a')], answer: (id) => checkReply(id, 'SUCCESS', { refunds }) });
+
+    await h.service.checkByOrder('pay-a');
+
+    assert.deepEqual(h.posts.map((post) => (JSON.parse(post.body) as { order_id: string }).order_id), ['pay-a']);
+    assert.equal(h.recorded.length, 2);
+  });
+
+  it('looks at an open payment as the sweep does, and at one that is none of ours or gone not at all', async () => {
+    const open = createHarness({ rows: [row({ paymentId: 'pay-open' })], answer: (id) => checkReply(id, 'SUCCESS') });
+    await open.service.checkByOrder('pay-open');
+    assert.equal(open.recorded.length, 1, 'a payment paid at Antilopay whose callback was lost is settled');
+    assert.equal((open.recorded[0] as { eventStatus: string }).eventStatus, 'SUCCESS');
+
+    const unknown = createHarness({ rows: [], answer: (id) => checkReply(id, 'SUCCESS') });
+    await unknown.service.checkByOrder('pay-nobody');
+    assert.equal(unknown.posts.length, 0);
   });
 });
 

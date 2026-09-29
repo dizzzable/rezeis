@@ -9,6 +9,7 @@ import {
   SystemEventsService,
 } from '../../../common/services/system-events.service';
 import {
+  ANTILOPAY_PAYMENT_CHECK_JOB,
   PAYMENT_RECONCILIATION_ENQUEUE_FAILED,
   PAYMENT_RECONCILIATION_JOB,
   PAYMENT_RECONCILIATION_QUEUE,
@@ -76,7 +77,7 @@ export class PaymentWebhookIngressService {
    */
   private announceWebhook(
     gatewayType: PaymentGatewayType,
-    kind: 'payment' | 'subscription-status' | 'subscription-charge' | 'card-binding',
+    kind: 'payment' | 'subscription-status' | 'subscription-charge' | 'card-binding' | 'refund',
     metadata: Record<string, unknown> = {},
   ): void {
     this.systemEventsService.info(
@@ -210,6 +211,29 @@ export class PaymentWebhookIngressService {
       return { accepted: true, duplicate: false, lifecycleStatus: PAYMENT_WEBHOOK_STATUS_ENQUEUED };
     }
 
+    // An Antilopay refund's callback (`type: refund`) names the refund and the
+    // payment, and no order. It used to run the pipeline below as a payment
+    // notice with an unknown status and change nothing, so a refund made in the
+    // cabinet after the payment day was never seen. It is a reason to look: the
+    // payment lists its refunds, and the refund path books each one.
+    const antilopayRefund = readAntilopayRefundCallback(input.gatewayType, input.rawBody);
+    if (antilopayRefund !== null) {
+      if (input.verifySignature) {
+        this.paymentWebhookNormalizerService.verifyWebhookSignature({
+          gatewayType: input.gatewayType,
+          rawBody: input.rawBody,
+          headers: input.headers,
+          clientIp: input.clientIp,
+          gatewaySettings: gateway.settings,
+        });
+      }
+      this.announceWebhook(input.gatewayType, 'refund', { providerPaymentId: antilopayRefund.providerPaymentId });
+      if (antilopayRefund.status === 'COMPLETE') {
+        await this.lookAtAntilopayRefund(antilopayRefund.providerPaymentId);
+      }
+      return { accepted: true, duplicate: false, lifecycleStatus: PAYMENT_WEBHOOK_STATUS_ENQUEUED };
+    }
+
     // Antilopay puts `recurrent_id` on a payment that is part of a repeat-charge
     // subscription: the sign-up's own first payment, and every charge after it.
     // A charge's `order_id` is not one of ours (Antilopay makes it up when it
@@ -326,6 +350,51 @@ export class PaymentWebhookIngressService {
   }
 
   /**
+   * Queues the look a refund's callback asks for. The callback names Antilopay's
+   * payment id: our transaction holds it as `gatewayId` for a first payment,
+   * and a scheduled charge's renewal carries it in its marker
+   * (`providerChargeId`), whose autopay is then read again, because Antilopay's
+   * check is by OUR order id and a scheduled charge has none of ours. A payment
+   * we do not know is another integration's on the same project.
+   */
+  private async lookAtAntilopayRefund(providerPaymentId: string): Promise<void> {
+    const gatewayType = PaymentGatewayType.ANTILOPAY;
+    const payment = await this.prismaService.transaction.findFirst({
+      where: { gatewayType, gatewayId: providerPaymentId },
+      select: { paymentId: true },
+    });
+    if (payment !== null) {
+      await runPaymentReconciliationEnqueueWithTimeout(() =>
+        this.paymentReconciliationQueue.add(
+          ANTILOPAY_PAYMENT_CHECK_JOB,
+          { orderId: payment.paymentId },
+          {
+            attempts: 5,
+            backoff: { type: 'exponential', delay: 30_000 },
+            removeOnComplete: 100,
+            removeOnFail: 100,
+          },
+        ),
+      );
+      return;
+    }
+    const charge = await this.prismaService.transaction.findFirst({
+      where: { gatewayType, gatewayData: { path: ['providerChargeId'], equals: providerPaymentId } },
+      select: { gatewayData: true },
+    });
+    const data = charge?.gatewayData;
+    const subscriptionKey =
+      typeof data === 'object' && data !== null && !Array.isArray(data)
+        ? (data as Record<string, unknown>)['providerSubscriptionId']
+        : undefined;
+    if (typeof subscriptionKey === 'string' && subscriptionKey.length > 0) {
+      await this.providerSubscriptionService.enqueueSync(gatewayType, subscriptionKey);
+      return;
+    }
+    this.logger.warn(`Refund callback for Antilopay payment ${providerPaymentId}, which is none of ours; ignored`);
+  }
+
+  /**
    * The RollyPay payment to look up when a callback's `order_id` is none of
    * our payments. Every checkout's transaction exists, under its `paymentId`,
    * before RollyPay is asked for a link, so an unknown order is not a race.
@@ -372,6 +441,43 @@ export function readRollypayCallbackReferences(
   if (typeof orderId !== 'string' || orderId.trim().length === 0) return null;
   if (typeof paymentId !== 'string' || paymentId.trim().length === 0) return null;
   return { orderId: orderId.trim(), paymentId: paymentId.trim() };
+}
+
+/** An Antilopay refund's callback: the refund, the payment it belongs to, and how it ended. */
+export interface AntilopayRefundCallback {
+  readonly refundId: string | null;
+  /** Antilopay's own payment id, not our order. */
+  readonly providerPaymentId: string;
+  /** COMPLETE or FAIL, upper-cased. */
+  readonly status: string | null;
+}
+
+/** The refund a callback of `type: refund` names, or null for anything else. */
+export function readAntilopayRefundCallback(
+  gatewayType: PaymentGatewayType,
+  rawBody: Buffer,
+): AntilopayRefundCallback | null {
+  if (gatewayType !== PaymentGatewayType.ANTILOPAY) {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawBody.toString('utf8'));
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return null;
+  }
+  const root = parsed as Record<string, unknown>;
+  if (root['type'] !== 'refund') return null;
+  const read = (key: string): string | null => {
+    const value = root[key];
+    return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+  };
+  const providerPaymentId = read('payment_id');
+  if (providerPaymentId === null) return null;
+  return { refundId: read('refund_id'), providerPaymentId, status: read('status')?.toUpperCase() ?? null };
 }
 
 /** What an Antilopay callback of a repeat-charge subscription's payment names. */

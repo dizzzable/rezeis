@@ -17,6 +17,7 @@ import {
 import { of } from 'rxjs';
 
 import {
+  ANTILOPAY_PAYMENT_CHECK_JOB,
   PAYMENT_RECONCILIATION_JOB,
   PROVIDER_SUBSCRIPTION_SYNC_JOB,
 } from '../src/modules/payments/constants/payment-reconciliation.constant';
@@ -24,6 +25,7 @@ import { PaymentProviderExecutionService } from '../src/modules/payments/service
 import {
   PaymentWebhookIngressService,
   readAntilopayCallbackReferences,
+  readAntilopayRefundCallback,
 } from '../src/modules/payments/services/payment-webhook-ingress.service';
 import { PaymentWebhookPayloadRedactionService } from '../src/modules/payments/services/payment-webhook-payload-redaction.service';
 import {
@@ -31,6 +33,11 @@ import {
   ProviderSubscriptionService,
 } from '../src/modules/payments/services/provider-subscription.service';
 import { PaymentReconciliationProcessor } from '../src/modules/payments/processors/payment-reconciliation.processor';
+import {
+  antilopayRefundEnvelope,
+  completedAntilopayRefunds,
+  readAntilopayRefunds,
+} from '../src/modules/payments/utils/antilopay-refund.util';
 import {
   type AntilopayCharge,
   assignAntilopayChargeRoles,
@@ -544,13 +551,22 @@ describe('the ingress of an Antilopay callback of a repeat-charge payment', () =
   function ingress(ownedOrders: string[]) {
     const recurrentJobs: Array<{ recurrentId: string; orderId: string | null; hints?: unknown }> = [];
     const recorded: unknown[] = [];
-    const queued: unknown[] = [];
+    const queued: Array<{ name: string; data: unknown }> = [];
+    const syncs: string[] = [];
     const service = new PaymentWebhookIngressService(
       {
         paymentGateway: { findUnique: async () => ({ type: PaymentGatewayType.ANTILOPAY, settings: GATEWAY_SETTINGS }) },
         transaction: {
           findUnique: async ({ where }: { where: { paymentId: string } }) =>
             ownedOrders.includes(where.paymentId) ? { id: 'tx-1' } : null,
+          findFirst: async ({ where }: { where: { gatewayId?: string; gatewayData?: { equals: string } } }) => {
+            // A first payment by Antilopay's payment id; a scheduled charge's renewal by its marker.
+            if (where.gatewayId === 'APAY-first') return { paymentId: 'ours-1' };
+            if (where.gatewayData?.equals === 'APAY-scheduled') {
+              return { gatewayData: { providerSubscriptionId: 'APAY-first', providerChargeId: 'APAY-scheduled' } };
+            }
+            return null;
+          },
         },
       } as never,
       {
@@ -588,10 +604,13 @@ describe('the ingress of an Antilopay callback of a repeat-charge payment', () =
         ) => {
           recurrentJobs.push({ recurrentId, orderId, hints });
         },
+        enqueueSync: async (_gateway: unknown, providerSubscriptionId: string) => {
+          syncs.push(providerSubscriptionId);
+        },
       } as never,
       { info: () => undefined } as never,
     );
-    return { service, recurrentJobs, recorded, queued };
+    return { service, recurrentJobs, recorded, queued, syncs };
   }
   const post = (service: PaymentWebhookIngressService, payload: Record<string, unknown>) =>
     service.ingestWebhook({
@@ -636,11 +655,104 @@ describe('the ingress of an Antilopay callback of a repeat-charge payment', () =
     ]);
   });
 
+  describe('a refund\'s callback', () => {
+    const refund = (extra: Record<string, unknown> = {}) => ({
+      type: 'refund',
+      refund_id: 'RF-1',
+      payment_id: 'APAY-first',
+      amount: 100,
+      status: 'COMPLETE',
+      ...extra,
+    });
+
+    it('queues a look at the payment by OUR order, and runs no payment pipeline for it', async () => {
+      const h = ingress(['ours-1']);
+      const result = await post(h.service, refund());
+
+      assert.equal(result.accepted, true);
+      assert.equal(h.recorded.length, 0, 'it is not a payment notice with an unknown status');
+      assert.deepEqual(
+        h.queued.map((job) => [job.name, job.data]),
+        [[ANTILOPAY_PAYMENT_CHECK_JOB, { orderId: 'ours-1' }]],
+      );
+    });
+
+    it('reads the autopay again when the refund is of a scheduled charge, which has no order of ours', async () => {
+      const h = ingress([]);
+      await post(h.service, refund({ payment_id: 'APAY-scheduled' }));
+
+      assert.deepEqual(h.syncs, ['APAY-first']);
+      assert.equal(h.queued.length, 0);
+    });
+
+    it('answers and does nothing for a payment that is none of ours, and for a refund that failed', async () => {
+      const h = ingress(['ours-1']);
+      assert.equal((await post(h.service, refund({ payment_id: 'somebody-elses' }))).accepted, true);
+      assert.equal((await post(h.service, refund({ status: 'FAIL' }))).accepted, true);
+
+      assert.equal(h.queued.length, 0);
+      assert.equal(h.syncs.length, 0);
+      assert.equal(h.recorded.length, 0);
+    });
+
+    it('is read from a body of type refund with a payment, and from nothing else', () => {
+      const body = (value: unknown) => Buffer.from(JSON.stringify(value));
+      assert.deepEqual(readAntilopayRefundCallback(PaymentGatewayType.ANTILOPAY, body(refund())), {
+        refundId: 'RF-1',
+        providerPaymentId: 'APAY-first',
+        status: 'COMPLETE',
+      });
+      assert.equal(readAntilopayRefundCallback(PaymentGatewayType.ANTILOPAY, body({ type: 'payment', payment_id: 'p' })), null);
+      assert.equal(readAntilopayRefundCallback(PaymentGatewayType.ANTILOPAY, body({ type: 'refund' })), null);
+      assert.equal(readAntilopayRefundCallback(PaymentGatewayType.ROLLYPAY, body(refund())), null);
+      assert.equal(readAntilopayRefundCallback(PaymentGatewayType.ANTILOPAY, Buffer.from('nope')), null);
+    });
+  });
+
   it('leaves an ordinary payment of ours alone', async () => {
     const h = ingress(['ours-1']);
     await post(h.service, { type: 'payment', payment_id: 'p-1', order_id: 'ours-1', status: 'SUCCESS' });
     assert.equal(h.recorded.length, 1);
     assert.equal(h.recurrentJobs.length, 0);
+  });
+});
+
+describe('the refunds Antilopay lists', () => {
+  it('reads refund_id, amount and status, once each, and keeps only what moved money back', () => {
+    const refunds = readAntilopayRefunds([
+      { refund_id: 'RF-1', order_id: 'merchant-1', amount: 100, status: 'COMPLETE' },
+      { refund_id: 'RF-1', amount: 100, status: 'COMPLETE' },
+      { refund_id: 'RF-2', amount: '49.50', status: 'complete' },
+      { refund_id: 'RF-3', amount: 10, status: 'FAIL' },
+      { amount: 5, status: 'COMPLETE' },
+      'nonsense',
+    ]);
+    assert.deepEqual(refunds, [
+      { id: 'RF-1', amount: '100', status: 'COMPLETE' },
+      { id: 'RF-2', amount: '49.50', status: 'COMPLETE' },
+      { id: 'RF-3', amount: '10', status: 'FAIL' },
+    ]);
+    assert.deepEqual(completedAntilopayRefunds(refunds).map((refund) => refund.id), ['RF-1', 'RF-2']);
+    assert.deepEqual(readAntilopayRefunds(undefined), []);
+  });
+
+  it('makes the notice the refund path settles: the refund\'s id and sum where it reads them, keyed by payment and refund', () => {
+    const refund = { id: 'RF-1', amount: '100', status: 'COMPLETE' };
+    const envelope = antilopayRefundEnvelope({ paymentId: 'ours-1', providerPaymentId: 'APAY-first', refund, currency: 'RUB' });
+
+    assert.equal(envelope.gatewayType, PaymentGatewayType.ANTILOPAY);
+    assert.equal(envelope.paymentId, 'ours-1');
+    assert.equal(envelope.eventStatus, 'REFUNDED');
+    assert.equal(envelope.providerEventId, 'antilopay-refund:ours-1:RF-1');
+    // What `resolveRefundEvent` reads: `object.id` for the ledger, `object.amount.value` for the total.
+    assert.deepEqual(envelope.rawPayload['object'], { id: 'RF-1', amount: { value: '100', currency: 'RUB' } });
+    // The same refund asked about again is the same notice.
+    const again = antilopayRefundEnvelope({ paymentId: 'ours-1', providerPaymentId: 'APAY-first', refund, currency: 'RUB' });
+    assert.equal(again.payloadHash, envelope.payloadHash);
+    assert.notEqual(
+      antilopayRefundEnvelope({ paymentId: 'ours-1', providerPaymentId: 'APAY-first', refund: { ...refund, id: 'RF-2' }, currency: 'RUB' }).providerEventId,
+      envelope.providerEventId,
+    );
   });
 });
 
@@ -673,6 +785,18 @@ describe('the reconciliation worker', () => {
       [PaymentGatewayType.ANTILOPAY, 'rec-1', 'ours-1', { paymentId: 'p-1', status: 'SUCCESS' }],
       [PaymentGatewayType.ANTILOPAY, 'rec-2', null, { paymentId: null, status: null }],
     ]);
+  });
+
+  it('hands a payment check job to the Antilopay status service, and refuses one that names no order', async () => {
+    const checked: string[] = [];
+    const processor = new PaymentReconciliationProcessor(
+      {} as never,
+      {} as never,
+      { checkByOrder: async (orderId: string) => void checked.push(orderId) } as never,
+    );
+    await processor.process({ name: ANTILOPAY_PAYMENT_CHECK_JOB, data: { orderId: 'ours-1' } } as never);
+    assert.deepEqual(checked, ['ours-1']);
+    await assert.rejects(processor.process({ name: ANTILOPAY_PAYMENT_CHECK_JOB, data: {} } as never), /invalid/);
   });
 });
 
@@ -1206,6 +1330,56 @@ describe('which charge completes the first payment: by what it is, never by wher
   });
 });
 
+describe('refunds of a recurrent\'s charges', () => {
+  const refunded = (id: string, ctime: string, orderId: string | null = null) => ({
+    ...payment(id, ctime, 'SUCCESS', 299, orderId),
+    refunds: [
+      { refund_id: `RF-${id}`, amount: 299, status: 'COMPLETE' },
+      { refund_id: `RF-fail-${id}`, amount: 10, status: 'FAIL' },
+    ],
+  });
+
+  it('books the refunds of a delivered first payment and of a delivered renewal, under their own ids', async () => {
+    const h = harness({ providerRecurrentId: 'rec-1', status: ProviderSubscriptionStatus.ACTIVE });
+    h.deliverFirst();
+    h.answer(() => recurrentAnswer({}, [refunded('APAY-first', '2026-09-01 09:00:00')]));
+    await h.service.sync(PaymentGatewayType.ANTILOPAY, 'APAY-first');
+
+    const refundKeys = () => h.events.map((event) => event.providerEventId).filter((key) => key.startsWith('antilopay-refund:'));
+    assert.deepEqual(refundKeys(), ['antilopay-refund:ours-1:RF-APAY-first']);
+    const notice = h.events.find((event) => event.providerEventId === 'antilopay-refund:ours-1:RF-APAY-first');
+    assert.equal(notice?.eventStatus, 'REFUNDED');
+
+    // A second look at the same list books it once.
+    await h.service.sync(PaymentGatewayType.ANTILOPAY, 'APAY-first');
+    assert.equal(refundKeys().length, 1);
+  });
+
+  it('waits for a charge whose renewal is not delivered yet: a refund settled first would cancel the payment about to be fulfilled', async () => {
+    const h = harness({ providerRecurrentId: 'rec-1', status: ProviderSubscriptionStatus.ACTIVE });
+    h.deliverFirst();
+    h.answer(() =>
+      recurrentAnswer({}, [
+        payment('APAY-first', '2026-09-01 09:00:00', 'SUCCESS', 299, 'ours-1'),
+        refunded('APAY-second', '2026-10-01 09:00:00', 'made-up'),
+      ]),
+    );
+    await h.service.sync(PaymentGatewayType.ANTILOPAY, 'APAY-first');
+    // The renewal was made PENDING and its settlement queued: nothing booked yet.
+    assert.equal(h.events.some((event) => event.providerEventId.startsWith('antilopay-refund:')), false);
+
+    // Once it is delivered, the next look books it.
+    const renewal = h.transactions.find((t) => t.idempotencyKey === keyedChargeKey('ps-1', 'APAY-second')) as Tx;
+    renewal.status = TransactionStatus.COMPLETED;
+    renewal.fulfilledAt = new Date();
+    await h.service.sync(PaymentGatewayType.ANTILOPAY, 'APAY-first');
+    assert.deepEqual(
+      h.events.map((event) => event.providerEventId).filter((key) => key.startsWith('antilopay-refund:')),
+      [`antilopay-refund:${renewal.paymentId}:RF-APAY-second`],
+    );
+  });
+});
+
 describe('assignAntilopayChargeRoles', () => {
   const charge = (id: string, at: string | null, extra: Partial<AntilopayCharge> = {}): AntilopayCharge => ({
     id,
@@ -1214,6 +1388,7 @@ describe('assignAntilopayChargeRoles', () => {
     providerStatus: 'SUCCESS',
     disputed: false,
     amount: '299',
+    refunds: [],
     ...extra,
   });
   const roles = (

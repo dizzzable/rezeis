@@ -37,6 +37,7 @@ import {
   classifyAntilopayPaymentStatus,
   postAntilopay,
 } from '../utils/antilopay-api.util';
+import { antilopayRefundEnvelope, completedAntilopayRefunds } from '../utils/antilopay-refund.util';
 import {
   type AntilopayCharge,
   assignAntilopayChargeRoles,
@@ -823,6 +824,23 @@ export class ProviderSubscriptionService {
           data: { appliedChargeCount: chargeNumber },
         });
         applied = chargeNumber;
+      }
+      // A refund made at Antilopay after the day of the charge is listed beside
+      // it (a scheduled charge's is in the recurrent's `payments[]`, and the
+      // payment check cannot ask about an order id Antilopay made up). Settled
+      // only against a charge that is delivered: before that it would cancel a
+      // payment about to be fulfilled, which the fulfilment then revives.
+      if (transaction.status === TransactionStatus.COMPLETED && transaction.fulfilledAt !== null) {
+        for (const refund of completedAntilopayRefunds(charge.refunds)) {
+          await this.enqueueNotice(
+            antilopayRefundEnvelope({
+              paymentId: transaction.paymentId,
+              providerPaymentId: charge.id,
+              refund,
+              currency: row.currency,
+            }),
+          );
+        }
       }
     }
     return subscriptionId;
