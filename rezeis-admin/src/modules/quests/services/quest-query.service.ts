@@ -79,16 +79,18 @@ export class QuestQueryService {
       if (completion === null) {
         if (actionAlreadyDone(quest.type, cabinetUser)) {
           // The customer already did the thing and nothing recorded it — the
-          // normal state for a quest an operator created AFTER the fact. The
-          // ten-minute reconciler is the backstop for every type.
+          // normal state for a quest an operator created AFTER the fact, and
+          // for EVERY account that signed up through Telegram: it is born with
+          // its Telegram id, so the «Telegram linked» event that completes
+          // LINK_TELEGRAM never fires for it.
           //
-          // INSTALL_PWA is settled HERE instead. "I already have the app, why
-          // does this quest do nothing" is the exact dead end the flow was
-          // asked to avoid, and ten minutes of an empty list is that dead end
-          // with a timer on it. Same idempotent call the reconciler makes: it
-          // re-checks the window and the audience, and the unique key absorbs
-          // a concurrent create.
-          if (quest.type !== QuestType.INSTALL_PWA) continue;
+          // Settled HERE, for every detected type. Only INSTALL_PWA used to
+          // be; the rest waited for the ten-minute reconciler and stayed
+          // hidden meanwhile, so a customer who came through the bot saw no
+          // «Забрать» at all — and the reconciler's 200-a-pass batches could
+          // take hours to reach a new account. Same idempotent call the
+          // reconciler makes: it re-checks the window and the audience, and
+          // the unique key absorbs a concurrent create.
           await this.progressService.completeForUser(quest, userId);
           const settled = await this.prismaService.questCompletion.findUnique({
             where: { questId_userId_periodKey: { questId: quest.id, userId, periodKey: '' } },

@@ -145,6 +145,7 @@ describe('the quest listener', () => {
 describe('the catch-up reconciler', () => {
   function buildReconciler(questType: QuestType) {
     const queries: Array<Record<string, unknown>> = [];
+    const orders: unknown[] = [];
     const completed: string[] = [];
     const quest = {
       id: 'q-1',
@@ -158,12 +159,18 @@ describe('the catch-up reconciler', () => {
     const prisma = {
       quest: { findMany: async () => [quest] },
       user: {
-        findMany: async (args: { where: Record<string, unknown> }) => {
+        findMany: async (args: { where: Record<string, unknown>; orderBy?: unknown }) => {
           queries.push(args.where);
+          orders.push(args.orderBy);
           return [{ id: 'u-1' }, { id: 'u-2' }];
         },
       },
-      referral: { findMany: async () => [] },
+      referral: {
+        findMany: async (args: { where: Record<string, unknown> }) => {
+          queries.push(args.where);
+          return [];
+        },
+      },
     };
     const progress = {
       completeForUser: async (_quest: unknown, userId: string) => {
@@ -172,7 +179,7 @@ describe('the catch-up reconciler', () => {
       advanceInvite: async () => undefined,
     };
     const service = new QuestDetectionReconcilerService(prisma as never, progress as never);
-    return { service, queries, completed };
+    return { service, queries, orders, completed };
   }
 
   it('reaches users who installed before the quest existed', async () => {
@@ -191,5 +198,25 @@ describe('the catch-up reconciler', () => {
     const { service, queries } = buildReconciler(QuestType.INSTALL_PWA);
     await service['backfillQuest']({ id: 'q-1', type: QuestType.INSTALL_PWA } as never);
     assert.deepEqual(queries[0].questCompletions, { none: { questId: 'q-1' } });
+  });
+
+  for (const type of [QuestType.LINK_TELEGRAM, QuestType.LINK_EMAIL, QuestType.INSTALL_PWA]) {
+    it(`${type}: selects only accounts completeForUser accepts, newest first`, async () => {
+      // A refusal writes nothing, so a batch that let `completeForUser` turn
+      // away blocked accounts got the same accounts back on every pass and
+      // never reached the new ones. The selection has to carry the refusal.
+      const { service, queries, orders } = buildReconciler(type);
+      await service['backfillQuest']({ id: 'q-1', type, audienceFilter: null } as never);
+      assert.deepEqual(queries[0].AND, [{ AND: [{ isBlocked: false }, {}] }]);
+      assert.deepEqual(orders[0], { createdAt: 'desc' });
+    });
+  }
+
+  it('INVITE_FRIENDS: skips referrers completeForUser would refuse', async () => {
+    const { service, queries } = buildReconciler(QuestType.INVITE_FRIENDS);
+    await service['backfillQuest']({ id: 'q-1', type: QuestType.INVITE_FRIENDS, audienceFilter: null } as never);
+    const referrer = queries[0].referrer as Record<string, unknown>;
+    assert.deepEqual(referrer.AND, [{ AND: [{ isBlocked: false }, {}] }]);
+    assert.deepEqual(referrer.questCompletions, { none: { questId: 'q-1' } });
   });
 });

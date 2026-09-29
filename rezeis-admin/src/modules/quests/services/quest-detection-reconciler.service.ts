@@ -4,7 +4,7 @@ import { Quest, QuestType } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { shouldRunSchedules } from '../../../common/runtime/process-role.util';
-import { QuestProgressService, withinWindow } from './quest-progress.service';
+import { eligibleUsersWhere, QuestProgressService, withinWindow } from './quest-progress.service';
 
 /**
  * Catch-up backstop for event-driven completion detection. The event bus has no
@@ -54,9 +54,23 @@ export class QuestDetectionReconcilerService {
   }
 
   private async backfillQuest(quest: Quest): Promise<void> {
+    // Only accounts `completeForUser` will accept, newest first. A pass used
+    // to take 200 accounts in no particular order and leave the refusal —
+    // blocked, outside the audience — to `completeForUser`. A refusal writes
+    // nothing, so the same accounts came back on every pass and the batch
+    // could stop reaching anyone else. Newest first: the account that signed
+    // up a minute ago is the one waiting for its reward.
+    const eligible = eligibleUsersWhere(quest);
+    const newestFirst = { createdAt: 'desc' } as const;
+
     if (quest.type === QuestType.LINK_TELEGRAM) {
       const users = await this.prismaService.user.findMany({
-        where: { telegramId: { not: null }, questCompletions: { none: { questId: quest.id } } },
+        where: {
+          telegramId: { not: null },
+          questCompletions: { none: { questId: quest.id } },
+          AND: [eligible],
+        },
+        orderBy: newestFirst,
         select: { id: true },
         take: QuestDetectionReconcilerService.BATCH,
       });
@@ -71,7 +85,9 @@ export class QuestDetectionReconcilerService {
         where: {
           webAccount: { emailVerifiedAt: { not: null } },
           questCompletions: { none: { questId: quest.id } },
+          AND: [eligible],
         },
+        orderBy: newestFirst,
         select: { id: true },
         take: QuestDetectionReconcilerService.BATCH,
       });
@@ -84,13 +100,15 @@ export class QuestDetectionReconcilerService {
     if (quest.type === QuestType.INSTALL_PWA) {
       // `pwaInstalledAt` is stamped once, server-side, the first time the
       // cabinet reports an installed-app surface. Users who installed BEFORE
-      // the operator created the quest never produced an event, and this is
-      // the only path that reaches them.
+      // the operator created the quest never produced an event; the quest
+      // list settles them when they look, and this reaches the rest.
       const users = await this.prismaService.user.findMany({
         where: {
           pwaInstalledAt: { not: null },
           questCompletions: { none: { questId: quest.id } },
+          AND: [eligible],
         },
+        orderBy: newestFirst,
         select: { id: true },
         take: QuestDetectionReconcilerService.BATCH,
       });
@@ -105,7 +123,7 @@ export class QuestDetectionReconcilerService {
     const referrers = await this.prismaService.referral.findMany({
       where: {
         qualifiedAt: { not: null },
-        referrer: { questCompletions: { none: { questId: quest.id } } },
+        referrer: { questCompletions: { none: { questId: quest.id } }, AND: [eligible] },
       },
       distinct: ['referrerId'],
       select: { referrerId: true },

@@ -100,16 +100,24 @@ export class QuestProgressService {
 
   /** A quest with an audience filter only applies to matching users. */
   public async isEligible(quest: Quest, userId: string): Promise<boolean> {
-    const filter = normalizeAudienceFilter(quest.audienceFilter);
-    // Always exclude blocked users (broadcast parity) — even when the quest has
-    // no audience filter, a blocked user must never be targeted.
-    const where =
-      filter === null ? {} : buildAudienceWhere(BroadcastAudience.ALL, filter);
     const count = await this.prismaService.user.count({
-      where: { AND: [{ id: userId }, { isBlocked: false }, where] },
+      where: { AND: [{ id: userId }, eligibleUsersWhere(quest)] },
     });
     return count > 0;
   }
+}
+
+/**
+ * Who a quest may complete for, as a selection. `isEligible` asks it of one
+ * user; the catch-up reconciler selects by it, so a batch never fills with
+ * accounts `completeForUser` would refuse.
+ */
+export function eligibleUsersWhere(quest: Pick<Quest, 'audienceFilter'>): Prisma.UserWhereInput {
+  const filter = normalizeAudienceFilter(quest.audienceFilter);
+  // Always exclude blocked users (broadcast parity) — even when the quest has
+  // no audience filter, a blocked user must never be targeted.
+  const audience = filter === null ? {} : buildAudienceWhere(BroadcastAudience.ALL, filter);
+  return { AND: [{ isBlocked: false }, audience] };
 }
 
 export function withinWindow(quest: Pick<Quest, 'startAt' | 'endAt'>, now: number = Date.now()): boolean {

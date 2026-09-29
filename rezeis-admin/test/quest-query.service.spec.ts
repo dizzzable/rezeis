@@ -112,11 +112,40 @@ describe('QuestQueryService.listForUser', () => {
     assert.equal(res.quests[0].type, QuestType.INSTALL_PWA);
   });
 
-  it('auto-hides LINK_TELEGRAM when the user already linked Telegram and has no pending completion', async () => {
+  it('settles LINK_TELEGRAM on the spot for an account that signed up through Telegram', async () => {
+    // Such an account is born with its Telegram id, so the «Telegram linked»
+    // event never fires for it. Hiding the quest until the reconciler came
+    // round is what testers saw as «those who come through the bot get no
+    // bonus»: no row, no «Забрать», for ten minutes or for hours.
     const svc = makeService({
       user: { ...user, telegramId: 12345n },
       quests: [quest()],
       completions: [],
+      settled: { status: 'COMPLETED', progress: 1 },
+    });
+    const res = await svc.listForUser('u1');
+    assert.equal(res.quests.length, 1);
+    assert.equal(res.quests[0].claimable, true);
+  });
+
+  it('settles LINK_EMAIL on the spot for a verified email', async () => {
+    const svc = makeService({
+      user: { ...user, webAccount: { emailVerifiedAt: new Date('2026-09-01T00:00:00.000Z') } },
+      quests: [quest({ type: QuestType.LINK_EMAIL, iconRef: 'mail' })],
+      completions: [],
+      settled: { status: 'COMPLETED', progress: 1 },
+    });
+    const res = await svc.listForUser('u1');
+    assert.equal(res.quests.length, 1);
+    assert.equal(res.quests[0].claimable, true);
+  });
+
+  it('hides LINK_TELEGRAM when settling it was refused', async () => {
+    const svc = makeService({
+      user: { ...user, telegramId: 12345n },
+      quests: [quest()],
+      completions: [],
+      settled: null,
     });
     const res = await svc.listForUser('u1');
     assert.equal(res.quests.length, 0);
