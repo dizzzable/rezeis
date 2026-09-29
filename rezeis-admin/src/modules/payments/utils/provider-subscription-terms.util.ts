@@ -176,6 +176,22 @@ export function autopayNotAvailable(refusal: ProviderSubscriptionRefusal): BadRe
   });
 }
 
+/**
+ * The refusal of a gateway that would not create the repeat charge (Antilopay's
+ * errors 29 and 30). To the buyer it is the same code and reason as an approval
+ * switched off — the cabinet offers the ordinary payment — and `cause` is a
+ * bounded code that is also what the failed checkout keeps as its
+ * `failureReason`: an operator who opens the payment reads WHY, where a bare
+ * refusal read `PAYMENT_PROVIDER_ERROR`.
+ */
+export function autopayRefusedByGateway(cause: string): BadRequestException {
+  return new BadRequestException({
+    code: AUTOPAY_NOT_AVAILABLE_CODE,
+    message: cause,
+    reason: 'NOT_APPROVED' satisfies ProviderSubscriptionRefusal,
+  });
+}
+
 /** The terms a draft was created with, or null for an ordinary one-off payment. */
 export function readProviderSubscriptionTerms(planSnapshot: unknown): ProviderSubscriptionTerms | null {
   if (typeof planSnapshot !== 'object' || planSnapshot === null || Array.isArray(planSnapshot)) {

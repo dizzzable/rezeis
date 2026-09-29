@@ -7,6 +7,7 @@ import { firstValueFrom } from 'rxjs';
 import { HttpService } from '@nestjs/axios';
 
 import { paymentsConfig } from '../../../common/config/payments.config';
+import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
 import { appConfig } from '../../../common/config/app.config';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { readAdminBotToken, readEnvBotToken } from '../../../common/utils/admin-bot-token.util';
@@ -18,6 +19,7 @@ import {
 import { readGatewaySettings, resolvePlategaPaymentMethod } from '../utils/payment-gateway-settings.util';
 import {
   ANTILOPAY_API,
+  ANTILOPAY_BAD_RECURRENT_DATA,
   ANTILOPAY_NO_RECURRENT_PERMISSION,
   antilopayHeaders,
   signAntilopayBody,
@@ -32,8 +34,8 @@ import { isAutopayApproved } from '../utils/gateway-autopay.util';
 import { normalizePaymentProviderError, redactPaymentDiagnosticMessage } from '../utils/payment-provider-error.util';
 import { PLATEGA_INTERVAL_CODE } from '../utils/provider-subscription-period.util';
 import {
-  AUTOPAY_NOT_AVAILABLE_CODE,
   autopayNotAvailable,
+  autopayRefusedByGateway,
   type ProviderSubscriptionTerms,
   readProviderSubscriptionTerms,
 } from '../utils/provider-subscription-terms.util';
@@ -119,6 +121,13 @@ export function resolveYookassaSavePaymentMethod(input: {
   return { save: false, consent: false, reason: 'consent_required_omit' };
 }
 
+/**
+ * How often the operator is told a gateway refuses repeat charges: once per
+ * gateway and error in this window. Every buyer who tries is refused and
+ * logged, and only the first is a card.
+ */
+const OPERATOR_TOLD_EVERY_MS = 6 * 60 * 60 * 1000;
+
 interface ProviderCheckoutResult {
   readonly gatewayId: string | null;
   readonly checkoutUrl: string | null;
@@ -157,7 +166,16 @@ export class PaymentProviderExecutionService {
      * no cabinet address is known.
      */
     private readonly cabinetLinks?: ReiwaAdvertisingLinkConfigService,
+    /**
+     * The operator's card for a gateway that refuses repeat charges. Last and
+     * optional: specs build this service positionally.
+     */
+    @Optional()
+    private readonly systemEvents?: SystemEventsService,
   ) {}
+
+  /** When the operator was last told a gateway refused repeat charges, by gateway and error code. */
+  private readonly refusedAutopayTold = new Map<string, number>();
 
   /**
    * The bot token `createInvoiceLink` is signed with.
@@ -945,30 +963,47 @@ export class PaymentProviderExecutionService {
     const response = await firstValueFrom(
       this.httpService.post(`${ANTILOPAY_API}/payment/create`, bodyString, {
         headers: antilopayHeaders(secretId, signature),
+        // Antilopay's refusals are JSON bodies with a `code`, whichever HTTP
+        // status carries them: without this a code on a non-2xx never reached
+        // the branches below, and error 30 read as a bare `PAYMENT_PROVIDER_ERROR`.
+        validateStatus: () => true,
       }),
     );
 
-    const data = response.data as Record<string, unknown>;
+    const data = readRecord(response.data);
     if (data.code !== 0) {
       if (recurrent !== null && data.code === ANTILOPAY_NO_RECURRENT_PERMISSION) {
         // «Нет разрешения на создание рекуррентных платежей»: Antilopay has not
         // enabled repeat charges for this project. It is the operator's to fix,
-        // so it is said in words on the operator's side, and the payer is only
-        // told automatic charging is unavailable (the cabinet offers the
-        // ordinary payment).
-        this.logger.error(
-          'Antilopay refused a recurrent payment with error 30 («Нет разрешения на создание рекуррентных ' +
-            'платежей»): the project has no approval for repeat charges. Ask Antilopay to enable them, ' +
-            'and switch «Автоплатежи одобрены провайдером» off for the gateway until they do.',
+        // so it reaches the operator as a card, and the payer is only told
+        // automatic charging is unavailable (the cabinet offers the ordinary
+        // payment).
+        this.tellRecurrentRefused(
+          ANTILOPAY_NO_RECURRENT_PERMISSION,
+          'Antilopay не разрешила автоплатежи для проекта: покупатели уходят на обычную оплату',
+          'Antilopay отвечает ошибкой 30 («Нет разрешения на создание рекуррентных платежей»): для вашего ' +
+            'проекта не включены рекуррентные платежи. Попросите Antilopay включить их. Пока этого нет, откройте ' +
+            '«Платёжные шлюзы» → Antilopay → «Открыть настройки» и выключите «Автоплатежи одобрены провайдером»: ' +
+            'тогда пункты «для автоматического списания» перестанут предлагаться покупателям.',
         );
-        throw new BadRequestException({
-          code: AUTOPAY_NOT_AVAILABLE_CODE,
-          message: 'ANTILOPAY_RECURRENT_NOT_PERMITTED',
-          reason: 'NOT_APPROVED',
-        });
+        throw autopayRefusedByGateway('ANTILOPAY_RECURRENT_NOT_PERMITTED');
+      }
+      if (recurrent !== null && data.code === ANTILOPAY_BAD_RECURRENT_DATA) {
+        // «Ошибки в данных для рекуррентного платежа»: the only recurrent field
+        // the operator chooses is the number of charges.
+        this.tellRecurrentRefused(
+          ANTILOPAY_BAD_RECURRENT_DATA,
+          'Antilopay отклонила данные автоплатежа: покупатели уходят на обычную оплату',
+          'Antilopay отвечает ошибкой 29 («Ошибки в данных для рекуррентного платежа»). Проверьте «Число списаний ' +
+            '(вместе с первым)» в настройках шлюза Antilopay («Платёжные шлюзы» → Antilopay → «Открыть настройки»): ' +
+            'там нужно целое число не меньше 2 или пустое поле. Если поле пустое или число верное, сообщите код ' +
+            'ошибки Antilopay. Пока это не решено, выключите «Автоплатежи одобрены провайдером».',
+        );
+        throw autopayRefusedByGateway('ANTILOPAY_RECURRENT_DATA_REFUSED');
       }
       const providerError = redactPaymentDiagnosticMessage(String(data.error ?? 'unknown'), 120) ?? 'unknown';
-      throw new BadRequestException(`Antilopay error ${data.code}: ${providerError}`);
+      const reported = typeof data.code === 'number' ? String(data.code) : `HTTP ${response.status ?? '?'}`;
+      throw new BadRequestException(`Antilopay error ${reported}: ${providerError}`);
     }
 
     return {
@@ -978,6 +1013,26 @@ export class PaymentProviderExecutionService {
       providerStatus: 'PENDING',
       gatewayData: { provider: 'ANTILOPAY', providerResponse: this.redactProviderResponse(data), checkoutUrl: readOptionalString(data, ['payment_url']) },
     };
+  }
+
+  /**
+   * Tells the operator a gateway refused a repeat charge — once per gateway and
+   * error per six hours (`payment.autopay_attention`, operator-only), so it is
+   * one card that says what to switch and where, not one per buyer who tried.
+   * Also in the log, every time: that is the trail of who was refused.
+   */
+  private tellRecurrentRefused(code: number, title: string, note: string): void {
+    this.logger.error(`Antilopay refused a recurrent payment with error ${code}: ${note}`);
+    const key = `${PaymentGatewayType.ANTILOPAY}:${code}`;
+    const now = Date.now();
+    const last = this.refusedAutopayTold.get(key);
+    if (last !== undefined && now - last < OPERATOR_TOLD_EVERY_MS) return;
+    this.refusedAutopayTold.set(key, now);
+    this.systemEvents?.warn(EVENT_TYPES.PAYMENT_AUTOPAY_ATTENTION, 'PAYMENT', title, {
+      gatewayType: PaymentGatewayType.ANTILOPAY,
+      reason: `ANTILOPAY_ERROR_${code}`,
+      note,
+    });
   }
 
   /**

@@ -22,6 +22,7 @@ import {
 } from '../src/common/filters/admin-safe-exception.filter';
 import {
   autopayNotAvailable,
+  autopayRefusedByGateway,
   PROVIDER_SUBSCRIPTION_REFUSALS,
 } from '../src/modules/payments/utils/provider-subscription-terms.util';
 import {
@@ -630,6 +631,20 @@ describe('AdminSafeExceptionFilter', () => {
     assert.equal(body.code, 'AUTOPAY_NOT_AVAILABLE_FOR_PURCHASE', 'an older cabinet still branches on the code');
     assert.equal(body.errorCode, 'AUTOPAY_NOT_AVAILABLE_FOR_PURCHASE');
     assert.equal(body.reason, 'PENDING_SIGN_UP');
+  });
+
+  it('lets the refusal of a gateway that would not create the repeat charge through as an approval that is off', () => {
+    for (const cause of ['ANTILOPAY_RECURRENT_NOT_PERMITTED', 'ANTILOPAY_RECURRENT_DATA_REFUSED']) {
+      const captured = runFilter(autopayRefusedByGateway(cause), {
+        originalUrl: '/api/internal/payments/checkout',
+        headers: {},
+      });
+
+      assert.equal(captured.statusCode, 400, cause);
+      const body = assertResponseBody(captured.body);
+      assert.equal(body.code, 'AUTOPAY_NOT_AVAILABLE_FOR_PURCHASE', cause);
+      assert.equal(body.reason, 'NOT_APPROVED', 'the cabinet answers it as «сейчас недоступно»');
+    }
   });
 
   it('drops a reason outside the allowlist, and a reason on a code that declares none', () => {

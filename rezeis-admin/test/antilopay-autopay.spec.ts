@@ -330,6 +330,124 @@ describe('Antilopay checkout creation', () => {
     });
   });
 
+  describe('when Antilopay refuses the repeat charge', () => {
+    /** One service, so what it remembers between two refusals is what the operator is spared. */
+    function refusing(answer: { status?: number; data: unknown }) {
+      const cards: Array<{ type: string; category: string; message: string; metadata: Record<string, unknown> }> = [];
+      const calls: Array<{ options: { validateStatus?: (status: number) => boolean } }> = [];
+      const service = new PaymentProviderExecutionService(
+        {
+          post: (_url: string, _body: string, options: { validateStatus?: (status: number) => boolean }) => {
+            calls.push({ options });
+            return of(answer);
+          },
+        } as never,
+        { domain: 'https://user.example', botToken: 'bot-token-1' } as never,
+        new PaymentWebhookPayloadRedactionService(),
+        undefined,
+        undefined,
+        undefined,
+        {
+          warn: (type: string, category: string, message: string, metadata: Record<string, unknown>) => {
+            cards.push({ type, category, message, metadata });
+          },
+        } as never,
+      );
+      const attempt = (snapshot: Record<string, unknown> = { [PROVIDER_SUBSCRIPTION_SNAPSHOT_KEY]: terms('CARD') }) =>
+        service.createCheckout({
+          gateway: {
+            id: 'gw-1',
+            type: PaymentGatewayType.ANTILOPAY,
+            currency: Currency.RUB,
+            isActive: true,
+            orderIndex: 0,
+            settings: GATEWAY_SETTINGS,
+          } as never,
+          transaction: {
+            id: 'tx-1',
+            paymentId: 'payment-1',
+            userId: 'user-1',
+            gatewayType: PaymentGatewayType.ANTILOPAY,
+            amount: new Prisma.Decimal('299'),
+            currency: Currency.RUB,
+            planSnapshot: snapshot,
+            purchaseType: PurchaseType.NEW,
+            channel: PurchaseChannel.WEB,
+          } as never,
+          description: 'Plan purchase',
+          customerEmail: 'buyer@example.com',
+        } as never);
+      return { attempt, cards, calls };
+    }
+    const refused = (attempt: () => Promise<unknown>) =>
+      attempt().then(
+        () => null,
+        (error: Error) => error,
+      );
+
+    it('reads a refusal that comes with an HTTP error status: the code in a 400 was never seen', async () => {
+      const h = refusing({ status: 400, data: { code: 30, error: 'No permission' } });
+      const error = await refused(() => h.attempt());
+
+      assert.equal(h.calls[0]?.options.validateStatus?.(400), true, 'a non-2xx answer is read, not thrown');
+      assert.equal(error?.message, 'ANTILOPAY_RECURRENT_NOT_PERMITTED');
+      assert.equal(h.cards.length, 1);
+    });
+
+    it('tells the operator once per six hours, naming the switch and where it is', async () => {
+      let clock = 1_800_000_000_000;
+      const now = mock.method(Date, 'now', () => clock);
+      try {
+        const h = refusing({ data: { code: 30, error: 'No permission' } });
+
+        await refused(() => h.attempt());
+        await refused(() => h.attempt());
+        clock += 5 * 60 * 60 * 1000;
+        await refused(() => h.attempt());
+        assert.equal(h.cards.length, 1, 'many buyers, one card');
+
+        clock += 2 * 60 * 60 * 1000;
+        await refused(() => h.attempt());
+        assert.equal(h.cards.length, 2, 'and again after the six hours');
+
+        const card = h.cards[0]!;
+        assert.equal(card.type, 'payment.autopay_attention');
+        assert.equal(card.category, 'PAYMENT');
+        assert.equal(card.metadata['gatewayType'], PaymentGatewayType.ANTILOPAY);
+        assert.equal(card.metadata['reason'], 'ANTILOPAY_ERROR_30');
+        const note = String(card.metadata['note']);
+        assert.match(note, /«Автоплатежи одобрены провайдером»/);
+        assert.match(note, /«Платёжные шлюзы»/);
+        assert.match(note, /«Открыть настройки»/);
+      } finally {
+        now.mock.restore();
+      }
+    });
+
+    it('answers 29 with the setting the operator chose, and tells each error on its own', async () => {
+      const h = refusing({ data: { code: 29, error: 'Recurrent data' } });
+      const error = await refused(() => h.attempt());
+
+      assert.equal(error?.message, 'ANTILOPAY_RECURRENT_DATA_REFUSED');
+      assert.equal((error as { getResponse?: () => { reason?: string } }).getResponse?.().reason, 'NOT_APPROVED');
+      assert.equal(h.cards.length, 1);
+      assert.equal(h.cards[0]?.metadata['reason'], 'ANTILOPAY_ERROR_29');
+      assert.match(String(h.cards[0]?.metadata['note']), /«Число списаний \(вместе с первым\)»/);
+      assert.match(String(h.cards[0]?.metadata['note']), /«Автоплатежи одобрены провайдером»/);
+    });
+
+    it('says nothing to the operator of an ordinary payment, and reads an answer that is not JSON', async () => {
+      const ordinary = refusing({ data: { code: 30, error: 'nope' } });
+      await refused(() => ordinary.attempt({ id: 'plan-1' }));
+      assert.equal(ordinary.cards.length, 0);
+
+      const html = refusing({ status: 502, data: '<html>502 Bad Gateway</html>' });
+      const error = await refused(() => html.attempt({ id: 'plan-1' }));
+      assert.match(String(error?.message), /^Antilopay error HTTP 502: unknown$/);
+      assert.equal(html.cards.length, 0);
+    });
+  });
+
   it('leaves error 30 on an ordinary payment as the provider\'s own error', async () => {
     const created = await create({
       snapshot: { id: 'plan-1' },
