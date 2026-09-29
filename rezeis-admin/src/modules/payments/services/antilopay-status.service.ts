@@ -70,10 +70,20 @@ export const ANTILOPAY_COMPLETED_WINDOW_MS = 30 * DAY_MS;
 /** Rows read at a time by the daily sweep, and the pause between two questions to Antilopay. */
 const COMPLETED_PAGE = 100;
 const COMPLETED_THROTTLE_MS = 250;
-/** Most questions one daily run asks; the rest wait for tomorrow. */
+/** Most questions one daily run asks; the rest go first tomorrow (the oldest stamp first). */
 const COMPLETED_MAX_PER_RUN = 3000;
-/** Most rows one periodic sweep looks at. */
-const PENDING_MAX_PER_SWEEP = 200;
+/** Most completed payments one daily run reads, to choose among. */
+const COMPLETED_MAX_READ = 20_000;
+/** Rows the periodic sweep reads at a time, in all at most, and the questions it asks at most. */
+const PENDING_PAGE = 200;
+const PENDING_MAX_READ = 2_000;
+const PENDING_MAX_ASKS = 200;
+/**
+ * After this many failed expiry checks in a row the expiry sweep stops asking
+ * Antilopay for this long: the sweep goes on without it, as it does for every
+ * other gateway, and asks again on the next tick.
+ */
+const EXPIRY_BREAKER_MS = 4 * MINUTE_MS;
 /** A sweep stops after this many failed questions in a row: Antilopay is not answering. */
 const MAX_CONSECUTIVE_FAILURES = 3;
 /** Ended subscriptions the daily run reads again at most. */
@@ -131,6 +141,9 @@ export class AntilopayStatusService {
   private readonly logger = new Logger(AntilopayStatusService.name);
   private pendingSweepRunning = false;
   private completedSweepRunning = false;
+  /** Failed expiry checks in a row, and until when the breaker they open holds. */
+  private expiryFailures = 0;
+  private expiryBreakerUntil = 0;
 
   public constructor(
     private readonly prismaService: PrismaService,
@@ -202,30 +215,50 @@ export class AntilopayStatusService {
     }
   }
 
-  /** One pass of {@link sweepPending}; public for the specs. Returns how many payments it asked about. */
-  public async checkOpenPayments(now: Date): Promise<number> {
+  /**
+   * One pass of {@link sweepPending}; public for the specs. Returns how many
+   * payments it asked about.
+   *
+   * Every open payment of the window is read, a page at a time, and the ones
+   * not asked about lately are asked about in the order they were last asked —
+   * never-asked first. It used to read the oldest 200 and stop, and those were
+   * the very rows the five-minute rule then skipped: with more than 200 open,
+   * every newer one waited for ever.
+   */
+  public async checkOpenPayments(now: Date, options: { readonly maxAsks?: number } = {}): Promise<number> {
     const gateway = await this.prismaService.paymentGateway.findUnique({
       where: { type: PaymentGatewayType.ANTILOPAY },
       select: { settings: true },
     });
     if (gateway === null) return 0;
-    const rows = await this.prismaService.transaction.findMany({
-      where: {
-        gatewayType: PaymentGatewayType.ANTILOPAY,
-        status: TransactionStatus.PENDING,
-        createdAt: {
-          lt: new Date(now.getTime() - ANTILOPAY_FIRST_CHECK_AFTER_MS),
-          gte: new Date(now.getTime() - ANTILOPAY_SWEEP_WINDOW_MS),
+    const rows: AntilopayCheckedRow[] = [];
+    let cursor: string | null = null;
+    for (;;) {
+      const page: AntilopayCheckedRow[] = await this.prismaService.transaction.findMany({
+        where: {
+          gatewayType: PaymentGatewayType.ANTILOPAY,
+          status: TransactionStatus.PENDING,
+          createdAt: {
+            lt: new Date(now.getTime() - ANTILOPAY_FIRST_CHECK_AFTER_MS),
+            gte: new Date(now.getTime() - ANTILOPAY_SWEEP_WINDOW_MS),
+          },
+          ...(cursor === null ? {} : { id: { gt: cursor } }),
         },
-      },
-      select: { id: true, paymentId: true, createdAt: true, gatewayData: true },
-      orderBy: { createdAt: 'asc' },
-      take: PENDING_MAX_PER_SWEEP,
-    });
+        select: { id: true, paymentId: true, createdAt: true, gatewayData: true },
+        orderBy: { id: 'asc' },
+        take: PENDING_PAGE,
+      });
+      rows.push(...page);
+      if (page.length < PENDING_PAGE || rows.length >= PENDING_MAX_READ) break;
+      cursor = page[page.length - 1]?.id ?? null;
+    }
+    const due = rows
+      .filter((row) => !wasCheckedWithin(row.gatewayData, ANTILOPAY_RECHECK_EVERY_MS, now))
+      .sort((left, right) => stampOf(left.gatewayData, 'antilopayCheckedAt') - stampOf(right.gatewayData, 'antilopayCheckedAt'))
+      .slice(0, options.maxAsks ?? PENDING_MAX_ASKS);
     let asked = 0;
     let failures = 0;
-    for (const row of rows) {
-      if (wasCheckedWithin(row.gatewayData, ANTILOPAY_RECHECK_EVERY_MS, now)) continue;
+    for (const row of due) {
       try {
         await this.settleOpenPayment(row, gateway.settings, now);
         asked += 1;
@@ -255,6 +288,12 @@ export class AntilopayStatusService {
    *                        that has kept failing: cancel on our own clock.
    */
   public async verdictBeforeExpiry(row: AntilopayCheckedRow, now: Date = new Date()): Promise<AntilopayExpiryVerdict> {
+    // Three failed checks in a row open a breaker: the expiry sweep asks one row
+    // at a time, and every further row would wait its own turn for an Antilopay
+    // that is not answering. Rows go on as if the check had failed.
+    if (now.getTime() < this.expiryBreakerUntil) {
+      return this.unverifiedVerdict(row, now, 'Antilopay was not answering a moment ago');
+    }
     try {
       const gateway = await this.prismaService.paymentGateway.findUnique({
         where: { type: PaymentGatewayType.ANTILOPAY },
@@ -262,6 +301,7 @@ export class AntilopayStatusService {
       });
       if (gateway === null) throw new Error('the Antilopay gateway is not configured');
       const verdict = await this.settleOpenPayment(row, gateway.settings, now);
+      this.expiryFailures = 0;
       switch (verdict) {
         case 'PAID':
         case 'REVERSED':
@@ -272,17 +312,31 @@ export class AntilopayStatusService {
           return 'local-ttl';
       }
     } catch (error: unknown) {
-      const age = now.getTime() - row.createdAt.getTime();
-      if (age >= ANTILOPAY_GIVE_UP_AFTER_MS) {
+      this.expiryFailures += 1;
+      if (this.expiryFailures >= MAX_CONSECUTIVE_FAILURES) {
+        this.expiryFailures = 0;
+        this.expiryBreakerUntil = now.getTime() + EXPIRY_BREAKER_MS;
         this.logger.warn(
-          `Antilopay payment ${row.paymentId} could not be checked for ${Math.round(age / MINUTE_MS)} minutes ` +
-            `(${errorText(error)}); cancelled on our own clock`,
+          `Antilopay failed ${MAX_CONSECUTIVE_FAILURES} expiry checks in a row (${errorText(error)}); ` +
+            `not asking for ${EXPIRY_BREAKER_MS / MINUTE_MS} minutes`,
         );
-        return 'local-ttl';
       }
-      this.logger.warn(`Keeping Antilopay payment ${row.paymentId} pending; it could not be checked: ${errorText(error)}`);
-      return 'keep';
+      return this.unverifiedVerdict(row, now, errorText(error));
     }
+  }
+
+  /** What the expiry sweep does with a row Antilopay could not be asked about. */
+  private unverifiedVerdict(row: AntilopayCheckedRow, now: Date, why: string): AntilopayExpiryVerdict {
+    const age = now.getTime() - row.createdAt.getTime();
+    if (age >= ANTILOPAY_GIVE_UP_AFTER_MS) {
+      this.logger.warn(
+        `Antilopay payment ${row.paymentId} could not be checked for ${Math.round(age / MINUTE_MS)} minutes ` +
+          `(${why}); cancelled on our own clock`,
+      );
+      return 'local-ttl';
+    }
+    this.logger.warn(`Keeping Antilopay payment ${row.paymentId} pending; it could not be checked: ${why}`);
+    return 'keep';
   }
 
   /**
@@ -384,19 +438,27 @@ export class AntilopayStatusService {
    * shop with a thousand payments a month costs Antilopay a few requests a
    * second for a few minutes and never a burst. Returns how many it asked about.
    */
-  public async recheckCompletedPayments(now: Date, options: { readonly throttleMs?: number } = {}): Promise<number> {
+  public async recheckCompletedPayments(
+    now: Date,
+    options: { readonly throttleMs?: number; readonly maxPerRun?: number } = {},
+  ): Promise<number> {
     const throttleMs = options.throttleMs ?? COMPLETED_THROTTLE_MS;
+    const maxPerRun = options.maxPerRun ?? COMPLETED_MAX_PER_RUN;
     const gateway = await this.prismaService.paymentGateway.findUnique({
       where: { type: PaymentGatewayType.ANTILOPAY },
       select: { settings: true },
     });
     if (gateway === null) return 0;
     const since = new Date(now.getTime() - ANTILOPAY_COMPLETED_WINDOW_MS);
-    let asked = 0;
-    let failures = 0;
+    // Every completed payment of the month is read, a page at a time, and the
+    // run asks about the ones asked about longest ago — never-asked first, each
+    // stamped when it is. Ordered by id and cut at the cap, a shop with more
+    // payments a month than the cap asked about the same lowest ids for ever,
+    // and the newest were never asked.
+    const rows: AntilopayCheckedRow[] = [];
     let cursor: string | null = null;
     for (;;) {
-      const rows: AntilopayCheckedRow[] = await this.prismaService.transaction.findMany({
+      const page: AntilopayCheckedRow[] = await this.prismaService.transaction.findMany({
         where: {
           gatewayType: PaymentGatewayType.ANTILOPAY,
           status: TransactionStatus.COMPLETED,
@@ -407,31 +469,38 @@ export class AntilopayStatusService {
         orderBy: { id: 'asc' },
         take: COMPLETED_PAGE,
       });
-      if (rows.length === 0) break;
-      cursor = rows[rows.length - 1]?.id ?? null;
-      for (const row of rows) {
-        // A charge the autopay took is one of OUR payments for a payment id
-        // Antilopay never heard: it is asked about through its autopay.
-        if (isProviderSubscriptionCharge(row.gatewayData)) continue;
-        if (asked >= COMPLETED_MAX_PER_RUN) {
-          this.logger.warn(`Antilopay daily re-check stopped after ${asked} payments; the rest wait for tomorrow`);
+      // A charge the autopay took is one of OUR payments for a payment id
+      // Antilopay never heard: it is asked about through its autopay.
+      rows.push(...page.filter((row) => !isProviderSubscriptionCharge(row.gatewayData)));
+      if (page.length < COMPLETED_PAGE || rows.length >= COMPLETED_MAX_READ) break;
+      cursor = page[page.length - 1]?.id ?? null;
+    }
+    const chosen = rows
+      .sort((left, right) => stampOf(left.gatewayData, 'antilopayRecheckedAt') - stampOf(right.gatewayData, 'antilopayRecheckedAt'))
+      .slice(0, maxPerRun);
+    if (chosen.length < rows.length) {
+      this.logger.warn(`Antilopay daily re-check asks about ${chosen.length} of ${rows.length} payments; the rest go first tomorrow`);
+    }
+    let asked = 0;
+    let failures = 0;
+    for (const row of chosen) {
+      try {
+        await this.recheckCompleted(row, gateway.settings);
+        await writeTransactionGatewayData(this.prismaService, row.id, {
+          onlyIfStatus: TransactionStatus.COMPLETED,
+          merge: { antilopayRecheckedAt: now.toISOString() },
+        });
+        asked += 1;
+        failures = 0;
+      } catch (error: unknown) {
+        failures += 1;
+        this.logger.warn(`Antilopay payment ${row.paymentId} could not be re-checked: ${errorText(error)}`);
+        if (failures >= MAX_CONSECUTIVE_FAILURES) {
+          this.logger.warn('Antilopay is not answering; the daily re-check stops until tomorrow');
           return asked;
         }
-        try {
-          await this.recheckCompleted(row, gateway.settings);
-          asked += 1;
-          failures = 0;
-        } catch (error: unknown) {
-          failures += 1;
-          this.logger.warn(`Antilopay payment ${row.paymentId} could not be re-checked: ${errorText(error)}`);
-          if (failures >= MAX_CONSECUTIVE_FAILURES) {
-            this.logger.warn('Antilopay is not answering; the daily re-check stops until tomorrow');
-            return asked;
-          }
-        }
-        if (throttleMs > 0) await sleep(throttleMs);
       }
-      if (rows.length < COMPLETED_PAGE) break;
+      if (throttleMs > 0) await sleep(throttleMs);
     }
     return asked;
   }
@@ -515,6 +584,13 @@ function errorText(error: unknown): string {
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+/** When a stamp on `gatewayData` was written, as a number to sort by; a row with none sorts first. */
+function stampOf(gatewayData: Prisma.JsonValue | null, key: string): number {
+  const stamp = asRecord(gatewayData)?.[key];
+  const parsed = typeof stamp === 'string' ? Date.parse(stamp) : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 /** Whether the row was asked about within `windowMs` before `now` (`antilopayCheckedAt`). */

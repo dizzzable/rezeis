@@ -31,6 +31,7 @@ import {
 } from '../constants/payment-reconciliation.constant';
 import { PaymentWebhookEnvelopeInterface } from '../interfaces/payment-webhook-envelope.interface';
 import {
+  ANTILOPAY_CALL_TIMEOUT_MS,
   ANTILOPAY_NOT_FOUND,
   ANTILOPAY_RECURRENT_NOT_ACTIVE,
   classifyAntilopayPaymentStatus,
@@ -107,6 +108,12 @@ const RECENT_REFUND_CANCEL_MS = 60 * 60 * 1000;
 
 /** How many told unmatched disputes a process remembers. */
 const UNMATCHED_DISPUTES_REMEMBERED = 1000;
+
+/**
+ * How long an Antilopay cancel may take in all, its calls together: less than
+ * the 30 s a request gets, with room for the writes around it.
+ */
+const ANTILOPAY_CANCEL_BUDGET_MS = 24_000;
 
 /** What an Antilopay callback says beside the recurrent it names: its payment and its status. */
 export interface RecurrentCallbackHints {
@@ -579,6 +586,7 @@ export class ProviderSubscriptionService {
   private async resolveAntilopayRecurrentId(
     row: ProviderSubscription,
     settings: Record<string, unknown>,
+    timeoutMs?: number,
   ): Promise<string | null> {
     if (row.providerRecurrentId !== null) return row.providerRecurrentId;
     const first = await this.prismaService.transaction.findUnique({
@@ -586,7 +594,13 @@ export class ProviderSubscriptionService {
       select: { paymentId: true },
     });
     if (first === null) return null;
-    const reply = await postAntilopay(this.httpService, settings, 'payment/check', { order_id: first.paymentId });
+    const reply = await postAntilopay(
+      this.httpService,
+      settings,
+      'payment/check',
+      { order_id: first.paymentId },
+      timeoutMs === undefined ? {} : { timeoutMs },
+    );
     if (reply.code === ANTILOPAY_NOT_FOUND) return null;
     if (reply.code !== 0) {
       throw new Error(`Antilopay payment/check error ${reply.code}: ${antilopayErrorText(reply.data)}`);
@@ -2129,9 +2143,20 @@ export class ProviderSubscriptionService {
     row: Pick<ProviderSubscription, 'providerSubscriptionId' | 'providerRecurrentId' | 'firstTransactionId'>,
     settings: Record<string, unknown>,
   ): Promise<void> {
+    // «Отключить автосписание» waits for this inside the 30 s the panel gives a
+    // request, and the cancel is up to four calls (the recurrent's id, the
+    // cancel, its re-read, the first payment). Each waits at most 8 s, and all
+    // together at most this budget: past it the cancel fails and the sweep,
+    // which retries every marked row, finishes it.
+    const deadline = Date.now() + ANTILOPAY_CANCEL_BUDGET_MS;
+    const timeout = (): number => {
+      const remaining = deadline - Date.now();
+      if (remaining < 1_000) throw new Error('Antilopay cancel ran out of time; the sweep tries again');
+      return Math.min(ANTILOPAY_CALL_TIMEOUT_MS, remaining);
+    };
     const recurrentId =
       row.providerRecurrentId ??
-      (await this.resolveAntilopayRecurrentId(row as ProviderSubscription, settings));
+      (await this.resolveAntilopayRecurrentId(row as ProviderSubscription, settings, timeout()));
     const reply = await postAntilopay(
       this.httpService,
       settings,
@@ -2139,23 +2164,28 @@ export class ProviderSubscriptionService {
       // The initiating payment's id is a handle Antilopay takes for a recurrent
       // whose own id is not known here yet.
       recurrentId === null ? { transaction_id: row.providerSubscriptionId } : { recurrent_id: recurrentId },
+      { timeoutMs: timeout() },
     );
     if (reply.code !== 0 && reply.code !== ANTILOPAY_RECURRENT_NOT_ACTIVE) {
       throw new Error(`Antilopay payment/recurrent/cancel error ${reply.code}: ${antilopayErrorText(reply.data)}`);
     }
     if (recurrentId === null) {
-      if (await this.isAntilopaySignUpDead(row, settings)) return;
+      if (await this.isAntilopaySignUpDead(row, settings, timeout())) return;
       throw new Error(`Antilopay sign-up ${row.providerSubscriptionId} is not readable yet and its payer may still pay`);
     }
-    const after = await postAntilopay(this.httpService, settings, 'payment/recurrent/check', {
-      recurrent_id: recurrentId,
-    });
+    const after = await postAntilopay(
+      this.httpService,
+      settings,
+      'payment/recurrent/check',
+      { recurrent_id: recurrentId },
+      { timeoutMs: timeout() },
+    );
     if (after.code !== 0) {
       throw new Error(`Antilopay payment/recurrent/check error ${after.code}: ${antilopayErrorText(after.data)}`);
     }
     const status = typeof after.data['status'] === 'string' ? after.data['status'] : null;
     if (isAntilopayRecurrentEnded(status)) return;
-    if (isAntilopayRecurrentNotActiveYet(status) && (await this.isAntilopaySignUpDead(row, settings))) return;
+    if (isAntilopayRecurrentNotActiveYet(status) && (await this.isAntilopaySignUpDead(row, settings, timeout()))) return;
     throw new Error(`Antilopay did not cancel recurrent ${recurrentId} (status ${status ?? 'unreadable'})`);
   }
 
@@ -2163,13 +2193,20 @@ export class ProviderSubscriptionService {
   private async isAntilopaySignUpDead(
     row: Pick<ProviderSubscription, 'firstTransactionId'>,
     settings: Record<string, unknown>,
+    timeoutMs?: number,
   ): Promise<boolean> {
     const first = await this.prismaService.transaction.findUnique({
       where: { id: row.firstTransactionId },
       select: { paymentId: true },
     });
     if (first === null) return false;
-    const reply = await postAntilopay(this.httpService, settings, 'payment/check', { order_id: first.paymentId });
+    const reply = await postAntilopay(
+      this.httpService,
+      settings,
+      'payment/check',
+      { order_id: first.paymentId },
+      timeoutMs === undefined ? {} : { timeoutMs },
+    );
     if (reply.code === ANTILOPAY_NOT_FOUND) return true;
     return reply.code === 0 && classifyAntilopayPaymentStatus(String(reply.data['status'] ?? '')) === 'DEAD';
   }

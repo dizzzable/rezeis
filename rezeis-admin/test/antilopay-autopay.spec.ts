@@ -2,7 +2,7 @@ import 'reflect-metadata';
 
 import assert from 'node:assert/strict';
 import { createPublicKey, createVerify, generateKeyPairSync } from 'node:crypto';
-import { describe, it } from 'node:test';
+import { describe, it, mock } from 'node:test';
 
 import {
   Currency,
@@ -578,6 +578,7 @@ interface Tx {
 interface Post {
   readonly path: string;
   readonly body: Record<string, unknown>;
+  readonly timeout?: number;
 }
 
 function harness(initial: Partial<ProviderSubscription> = {}) {
@@ -732,10 +733,10 @@ function harness(initial: Partial<ProviderSubscription> = {}) {
     },
   };
   const http = {
-    post: (url: string, body: string) => {
+    post: (url: string, body: string, options?: { timeout?: number }) => {
       const path = url.replace('https://lk.antilopay.com/api/v1/', '');
       const parsed = JSON.parse(body) as Record<string, unknown>;
-      const post = { path, body: parsed };
+      const post = { path, body: parsed, timeout: options?.timeout };
       posts.push(post);
       return of({ data: answers(post) });
     },
@@ -1349,6 +1350,45 @@ describe('cancelling an Antilopay autopay', () => {
     const { h, outcome } = await cancel({ providerRecurrentId: 'rec-1' }, () => ({ code: 22, error: 'IP not allowed' }));
     await assert.rejects(outcome, /error 22/);
     assert.equal(h.row().status, ProviderSubscriptionStatus.ACTIVE);
+  });
+});
+
+describe('the cancel a customer waits for', () => {
+  /** Each Antilopay call takes `step` ms of the clock; returns what was asked, and what each call was given to wait. */
+  async function cancelWithSlowAntilopay(step: number) {
+    let clock = 1_000_000;
+    const now = mock.method(Date, 'now', () => clock);
+    try {
+      const h = harness({ providerRecurrentId: 'rec-1', status: ProviderSubscriptionStatus.PENDING });
+      h.answer((post) => {
+        clock += step;
+        if (post.path === 'payment/recurrent/check') return recurrentAnswer({ status: 'CREATED' });
+        if (post.path === 'payment/check') return { code: 0, order_id: 'ours-1', status: 'PENDING' };
+        return { code: 28, error: 'not active' };
+      });
+      const failure = await h.service.cancelForCustomer('user-1', 'ps-1').then(
+        () => null,
+        (error: Error) => error,
+      );
+      return { posts: h.posts, failure };
+    } finally {
+      now.mock.restore();
+    }
+  }
+
+  it('gives every call at most 8 seconds, and the last one what is left of the budget', async () => {
+    const { posts, failure } = await cancelWithSlowAntilopay(9_000);
+
+    assert.deepEqual(posts.map((post) => post.path), ['payment/recurrent/cancel', 'payment/recurrent/check', 'payment/check']);
+    assert.deepEqual(posts.map((post) => post.timeout), [8_000, 8_000, 6_000]);
+    assert.match(String(failure?.message), /did not cancel recurrent/);
+  });
+
+  it('gives up before a call it would not have the time for, instead of running past the request', async () => {
+    const { posts, failure } = await cancelWithSlowAntilopay(13_000);
+
+    assert.deepEqual(posts.map((post) => post.path), ['payment/recurrent/cancel', 'payment/recurrent/check']);
+    assert.match(String(failure?.message), /ran out of time/);
   });
 });
 

@@ -15,6 +15,15 @@ import { requireSetting } from '../services/payment-provider-execution.helpers';
  */
 export const ANTILOPAY_API = 'https://lk.antilopay.com/api/v1';
 
+/**
+ * How long a status, check or cancel call waits for Antilopay. The default of
+ * every outbound call is 45 s, and these calls are made one row at a time — by
+ * the expiry sweep, by the sweeps of the subscriptions, inside the 30 s the
+ * panel gives a customer's «Отключить автосписание» — so one slow answer was a
+ * stalled sweep, or a request the panel had already cut off.
+ */
+export const ANTILOPAY_CALL_TIMEOUT_MS = 8_000;
+
 /** The methods this panel calls, as the URL tail Antilopay documents. */
 export type AntilopayMethod =
   | 'payment/create'
@@ -95,6 +104,7 @@ export async function postAntilopay(
   settings: Record<string, unknown>,
   method: AntilopayMethod,
   payload: Record<string, unknown>,
+  options: { readonly timeoutMs?: number } = {},
 ): Promise<AntilopayReply> {
   const projectIdentificator = requireSetting(settings, 'projectIdentificator');
   const secretId = requireSetting(settings, 'secretId');
@@ -104,6 +114,7 @@ export async function postAntilopay(
     httpService.post(`${ANTILOPAY_API}/${method}`, bodyString, {
       headers: antilopayHeaders(secretId, signAntilopayBody(bodyString, privateKeyPem)),
       validateStatus: () => true,
+      timeout: options.timeoutMs ?? ANTILOPAY_CALL_TIMEOUT_MS,
     }),
   );
   const data = response.data as unknown;

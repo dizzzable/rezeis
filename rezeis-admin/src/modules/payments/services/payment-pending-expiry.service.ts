@@ -78,10 +78,25 @@ export class PaymentPendingExpiryService {
     private readonly antilopayStatusService?: AntilopayStatusService,
   ) {}
 
+  /** A sweep is running: see {@link expireStalePending}. */
+  private expiring = false;
+
   @Cron(CronExpression.EVERY_5_MINUTES, { name: 'payment-pending-expiry' })
   public async expireStalePending(): Promise<void> {
     if (!shouldRunSchedules()) return;
+    // The sweep asks a provider about a row at a time, so a slow one can outlast
+    // its five minutes: a second sweep on the same rows would ask about each
+    // again, and race the first one's writes.
+    if (this.expiring) return;
+    this.expiring = true;
+    try {
+      await this.expireOnce();
+    } finally {
+      this.expiring = false;
+    }
+  }
 
+  private async expireOnce(): Promise<void> {
     const cutoff = new Date(Date.now() - PENDING_TTL_MS);
     const stale = await this.prismaService.transaction.findMany({
       where: { status: TransactionStatus.PENDING, createdAt: { lt: cutoff } },

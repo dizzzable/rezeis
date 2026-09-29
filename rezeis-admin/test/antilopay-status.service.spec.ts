@@ -81,7 +81,7 @@ function checkReply(orderId: string, status: string, extra: Record<string, unkno
 
 interface Harness {
   readonly service: AntilopayStatusService;
-  readonly posts: Array<{ url: string; body: string; headers: Record<string, string> }>;
+  readonly posts: Array<{ url: string; body: string; headers: Record<string, string>; timeout?: number }>;
   readonly recorded: Array<Record<string, unknown>>;
   readonly queued: Array<{ name: string; data: Record<string, unknown> }>;
   readonly failed: string[];
@@ -132,7 +132,8 @@ function createHarness(input: {
         return input.rows
           .filter((candidate) => where.status === undefined || candidate.status === where.status)
           .filter((candidate) => where.id === undefined || candidate.id > where.id.gt)
-          .sort((a, b) => a.id.localeCompare(b.id));
+          .sort((a, b) => a.id.localeCompare(b.id))
+          .slice(0, typeof args['take'] === 'number' ? args['take'] : undefined);
       },
       updateMany: async (args: { where: { id: string; status?: string }; data: { gatewayData: Record<string, unknown> } }) => {
         const target = rowById(args.where.id);
@@ -155,8 +156,8 @@ function createHarness(input: {
     }),
   };
   const http = {
-    post: (url: string, body: string, options: { headers: Record<string, string> }) => {
-      posts.push({ url, body, headers: options.headers });
+    post: (url: string, body: string, options: { headers: Record<string, string>; timeout?: number }) => {
+      posts.push({ url, body, headers: options.headers, timeout: options.timeout });
       const parsed = JSON.parse(body) as { order_id: string };
       const reply = input.answer(parsed.order_id);
       return reply instanceof Error ? throwError(() => reply) : of(reply);
@@ -218,6 +219,12 @@ describe('Antilopay payment/check', () => {
     const verifier = createVerify('RSA-SHA256');
     verifier.update(h.posts[0]?.body ?? '');
     assert.equal(verifier.verify(createPublicKey(KEY_PAIR.publicKey), h.posts[0]?.headers['X-Apay-Sign'] ?? '', 'base64'), true);
+  });
+
+  it('waits for Antilopay 8 seconds, not the 45 an outbound call gets by default', async () => {
+    const h = createHarness({ rows: [row()], answer: (id) => checkReply(id, 'PENDING') });
+    await h.service.checkPayment(SETTINGS, 'pay-1');
+    assert.equal(h.posts[0]?.timeout, 8_000);
   });
 
   it('reads code 8 as a payment that was never created, and any other refusal as a failure', async () => {
@@ -480,6 +487,138 @@ describe('Antilopay: the daily re-check of completed payments', () => {
     const h = createHarness({ rows: many, answer: () => new Error('connect ECONNRESET') });
     assert.equal(await h.service.recheckCompletedPayments(NOW, { throttleMs: 0 }), 0);
     assert.equal(h.posts.length, 3);
+  });
+});
+
+describe('Antilopay: the expiry sweep does not stall on Antilopay', () => {
+  const failing = () => createHarness({ rows: [row({ ageMinutes: 31 })], answer: () => new Error('timeout of 8000ms exceeded') });
+  const young = (id: string) => ({ id, paymentId: `pay-${id}`, createdAt: new Date(NOW.getTime() - 31 * MINUTE), gatewayData: null });
+
+  it('stops asking after three failed checks in a row, and asks again once the breaker has held its time', async () => {
+    const h = failing();
+    const verdicts: string[] = [];
+    for (const id of ['a', 'b', 'c', 'd', 'e']) {
+      verdicts.push(await h.service.verdictBeforeExpiry(young(id) as never, NOW));
+    }
+    assert.equal(h.posts.length, 3, 'the fourth and fifth rows were not asked about');
+    assert.deepEqual(verdicts, ['keep', 'keep', 'keep', 'keep', 'keep'], 'young rows wait, as when a check fails');
+
+    await h.service.verdictBeforeExpiry(young('f') as never, new Date(NOW.getTime() + 5 * MINUTE));
+    assert.equal(h.posts.length, 4, 'asked again after the breaker');
+  });
+
+  it('cancels on our own clock a row past the give-up age, breaker or not', async () => {
+    const h = failing();
+    for (const id of ['a', 'b', 'c']) await h.service.verdictBeforeExpiry(young(id) as never, NOW);
+    const old = { ...young('old'), createdAt: new Date(NOW.getTime() - (ANTILOPAY_GIVE_UP_AFTER_MS + MINUTE)) };
+    assert.equal(await h.service.verdictBeforeExpiry(old as never, NOW), 'local-ttl');
+  });
+
+  it('counts only failures in a row: an answer in between starts the count again', async () => {
+    let calls = 0;
+    const h = createHarness({
+      // The rows the sweep hands over are stored ones: an answer stamps its row.
+      rows: ['a', 'b', 'c', 'd', 'e'].map((id) => row({ id, paymentId: `pay-${id}`, ageMinutes: 31 })),
+      answer: (id) => {
+        calls += 1;
+        return calls === 3 ? checkReply(id, 'PENDING') : new Error('timeout of 8000ms exceeded');
+      },
+    });
+    for (const id of ['a', 'b', 'c', 'd', 'e']) await h.service.verdictBeforeExpiry(young(id) as never, NOW);
+    assert.equal(h.posts.length, 5, 'two, an answer, two: no breaker');
+  });
+
+  it('runs one expiry sweep at a time', async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let reads = 0;
+    const prisma = {
+      transaction: {
+        findMany: async () => {
+          reads += 1;
+          await gate;
+          return [];
+        },
+      },
+    };
+    const expiry = new PaymentPendingExpiryService(
+      prisma as never,
+      { info: () => undefined, warn: () => undefined } as never,
+      {} as never,
+      {} as never,
+      {} as never,
+      {} as never,
+    );
+    const first = expiry.expireStalePending();
+    await expiry.expireStalePending();
+    assert.equal(reads, 1, 'the second sweep found the first still running and did nothing');
+    release();
+    await first;
+    await expiry.expireStalePending();
+    assert.equal(reads, 2, 'and the next one runs once the first is done');
+  });
+});
+
+describe('Antilopay: the sweeps reach every row, not the same first ones', () => {
+  const many = (count: number, status: TransactionStatus, ageMinutes: number): Row[] =>
+    Array.from({ length: count }, (_, index) => {
+      const id = String(index).padStart(3, '0');
+      return row({ id: `tx-${id}`, paymentId: `pay-${id}`, status, ageMinutes });
+    });
+
+  it('asks about the open payments beyond the first 200 on the sweeps that follow', async () => {
+    const h = createHarness({ rows: many(250, TransactionStatus.PENDING, 10), answer: (id) => checkReply(id, 'PENDING') });
+
+    assert.equal(await h.service.checkOpenPayments(NOW), 200);
+    // Those 200 were asked about a moment ago; the sweep skips them and reaches the other 50.
+    assert.equal(await h.service.checkOpenPayments(new Date(NOW.getTime() + MINUTE)), 50);
+    const asked = new Set(h.posts.map((post) => (JSON.parse(post.body) as { order_id: string }).order_id));
+    assert.equal(asked.size, 250, 'every open payment was asked about once');
+  });
+
+  it('asks the payment asked about longest ago first, never-asked before any', async () => {
+    const rows = many(3, TransactionStatus.PENDING, 20);
+    rows[0]!.gatewayData = { antilopayCheckedAt: new Date(NOW.getTime() - 30 * MINUTE).toISOString() };
+    rows[1]!.gatewayData = { antilopayCheckedAt: new Date(NOW.getTime() - 60 * MINUTE).toISOString() };
+    const h = createHarness({ rows, answer: (id) => checkReply(id, 'PENDING') });
+
+    await h.service.checkOpenPayments(NOW, { maxAsks: 2 });
+
+    assert.deepEqual(
+      h.posts.map((post) => (JSON.parse(post.body) as { order_id: string }).order_id),
+      ['pay-002', 'pay-001'],
+      'the never-asked one, then the one asked about an hour ago',
+    );
+  });
+
+  it('rotates the daily run: what it left first goes first the next day', async () => {
+    const h = createHarness({
+      rows: many(6, TransactionStatus.COMPLETED, 60 * 24 * 3),
+      answer: (id) => checkReply(id, 'SUCCESS'),
+    });
+    const orders = (from: number): string[] =>
+      h.posts.slice(from).map((post) => (JSON.parse(post.body) as { order_id: string }).order_id);
+    const day = (n: number) => new Date(NOW.getTime() + n * 24 * 60 * MINUTE);
+
+    await h.service.recheckCompletedPayments(day(0), { throttleMs: 0, maxPerRun: 2 });
+    await h.service.recheckCompletedPayments(day(1), { throttleMs: 0, maxPerRun: 2 });
+    await h.service.recheckCompletedPayments(day(2), { throttleMs: 0, maxPerRun: 2 });
+    await h.service.recheckCompletedPayments(day(3), { throttleMs: 0, maxPerRun: 2 });
+
+    assert.deepEqual(orders(0), [
+      'pay-000', 'pay-001',
+      'pay-002', 'pay-003',
+      'pay-004', 'pay-005',
+      'pay-000', 'pay-001',
+    ]);
+  });
+
+  it('does not stamp a payment it could not ask about, so tomorrow asks it again', async () => {
+    const h = createHarness({ rows: many(2, TransactionStatus.COMPLETED, 60 * 24 * 3), answer: () => new Error('connect ECONNRESET') });
+    await h.service.recheckCompletedPayments(NOW, { throttleMs: 0 });
+    assert.equal(h.rows.every((candidate) => candidate.gatewayData === null), true);
   });
 });
 
