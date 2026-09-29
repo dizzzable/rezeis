@@ -637,7 +637,13 @@ function harness(initial: Partial<ProviderSubscription> = {}) {
     paymentGateway: {
       findUnique: async () => ({ type: PaymentGatewayType.ANTILOPAY, settings: GATEWAY_SETTINGS }),
     },
-    transaction: { findUnique: async ({ where }: { where: Record<string, unknown> }) => findTransaction(where) },
+    transaction: {
+      findUnique: async ({ where }: { where: Record<string, unknown> }) => findTransaction(where),
+      findFirst: async ({ where }: { where: { paymentId?: { in: string[] }; gatewayType?: string } }) =>
+        transactions.find(
+          (t) => where.paymentId?.in.includes(t.paymentId) === true && t.gatewayType === where.gatewayType,
+        ) ?? null,
+    },
     subscription: { findUnique: async () => ({ expiresAt: new Date(Date.now() + 2 * 60 * 1000) }) },
     plan: { findMany: async () => [{ id: 'plan-1', name: 'Base' }] },
     providerSubscription: {
@@ -793,7 +799,40 @@ describe('linking a sign-up to the recurrent Antilopay names', () => {
     assert.equal(h.row().providerRecurrentId, 'rec-ours', 'what it learned about our own sign-up is kept');
     assert.equal(h.row().status, ProviderSubscriptionStatus.PENDING, 'but the foreign recurrent moved nothing');
     assert.equal(h.events.length, 0);
-    assert.equal(h.posts.every((post) => post.path === 'payment/check'), true);
+    assert.equal(
+      h.posts.every((post) => post.path === 'payment/check' || post.path === 'payment/recurrent/check'),
+      true,
+    );
+  });
+
+  it('finds the sign-up by the orders Antilopay lists for the recurrent when its first payment names none yet', async () => {
+    const h = harness();
+    h.answer((post) => {
+      // The first payment is still open at Antilopay and names no recurrent...
+      if (post.path === 'payment/check') return { code: 0, order_id: post.body['order_id'], status: 'PENDING' };
+      // ...but the recurrent lists the payment made for OUR order.
+      return recurrentAnswer({ recurrent_id: 'rec-7' }, [
+        { payment_id: 'APAY-first', order_id: 'ours-1', ctime: '2026-09-01 09:00:00', status: 'SUCCESS', original_amount: 299 },
+      ]);
+    });
+    await h.service.syncByRecurrent(PaymentGatewayType.ANTILOPAY, 'rec-7', 'made-up-by-antilopay');
+    assert.equal(h.row().providerRecurrentId, 'rec-7');
+    assert.equal(h.row().status, ProviderSubscriptionStatus.ACTIVE);
+    assert.equal(h.events.length, 1, 'its first charge was delivered to the checkout');
+  });
+
+  it('asks nothing more for a recurrent whose payments name none of our orders', async () => {
+    const h = harness();
+    h.answer((post) =>
+      post.path === 'payment/check'
+        ? { code: 0, order_id: post.body['order_id'], status: 'PENDING' }
+        : recurrentAnswer({ recurrent_id: 'rec-x' }, [
+            { payment_id: 'p-x', order_id: 'somebody-elses-order', ctime: '2026-09-01 09:00:00', status: 'SUCCESS' },
+          ]),
+    );
+    await h.service.syncByRecurrent(PaymentGatewayType.ANTILOPAY, 'rec-x', 'foreign-order');
+    assert.equal(h.row().providerRecurrentId, null);
+    assert.equal(h.events.length, 0);
   });
 
   it('leaves a sign-up whose payer has not paid as it is', async () => {

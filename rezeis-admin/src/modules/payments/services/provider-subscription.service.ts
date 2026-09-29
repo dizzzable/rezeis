@@ -375,7 +375,11 @@ export class ProviderSubscriptionService {
    *  3. by asking Antilopay about each sign-up not yet linked (`payment/check`
    *     by its first payment names its recurrent), for a callback whose order
    *     is Antilopay's own — an SBP subscription's first charge, or a first
-   *     callback that was lost.
+   *     callback that was lost;
+   *  4. by the orders Antilopay lists for the recurrent itself
+   *     (`payment/recurrent/check` names each payment's `order_id`): one of
+   *     them is OUR order when the sign-up started here, which finds it even
+   *     when the first payment carries no recurrent id yet.
    *
    * Null for a recurrent that is none of ours.
    */
@@ -415,7 +419,35 @@ export class ProviderSubscriptionService {
         );
       }
     }
-    return null;
+    return this.findAntilopayRowByListedOrders(providerRecurrentId, settings);
+  }
+
+  /**
+   * The sign-up whose order Antilopay lists among a recurrent's payments. The
+   * last resort of {@link findAntilopayRow}: one more question to Antilopay,
+   * asked only for a callback nothing else could place — which is also every
+   * callback of another integration on the same project, so it stays one call.
+   */
+  private async findAntilopayRowByListedOrders(
+    providerRecurrentId: string,
+    settings: Record<string, unknown>,
+  ): Promise<ProviderSubscription | null> {
+    const reply = await postAntilopay(this.httpService, settings, 'payment/recurrent/check', {
+      recurrent_id: providerRecurrentId,
+    });
+    if (reply.code === ANTILOPAY_NOT_FOUND) return null;
+    if (reply.code !== 0) {
+      throw new Error(`Antilopay payment/recurrent/check error ${reply.code}: ${antilopayErrorText(reply.data)}`);
+    }
+    const payments = Array.isArray(reply.data['payments']) ? (reply.data['payments'] as unknown[]) : [];
+    const orderIds = payments
+      .map((entry) => asRecord(entry)['order_id'])
+      .filter((orderId): orderId is string => typeof orderId === 'string' && orderId.length > 0);
+    if (orderIds.length === 0) return null;
+    const transaction = await this.prismaService.transaction.findFirst({
+      where: { paymentId: { in: orderIds }, gatewayType: PaymentGatewayType.ANTILOPAY },
+    });
+    return transaction === null ? null : this.linkAntilopayCheckout(transaction, providerRecurrentId);
   }
 
   /**
