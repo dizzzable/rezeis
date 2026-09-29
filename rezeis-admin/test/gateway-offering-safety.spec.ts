@@ -316,6 +316,45 @@ describe('buyer-facing gateway list', () => {
     );
   });
 
+  it('lists the methods an Antilopay operator approved, and keeps the boolean false there', async () => {
+    const antilopay = (id: string, settings: Record<string, unknown>) =>
+      gatewayRow({ id, type: PaymentGatewayType.ANTILOPAY, isActive: true, isConfigured: true, settings });
+    const controller = createController([
+      antilopay('none', {}),
+      antilopay('card', { autopayCardApproved: true }),
+      antilopay('sbp', { autopaySbpApproved: true }),
+      antilopay('both', { autopayCardApproved: true, autopaySbpApproved: true }),
+      antilopay('switched-off', { autopayCardApproved: false, autopaySbpApproved: false }),
+      // The one switch of the other gateways means nothing here.
+      antilopay('other-gateways-key', { savePaymentMethod: true }),
+      gatewayRow({
+        id: 'platega',
+        type: PaymentGatewayType.PLATEGA,
+        isActive: true,
+        isConfigured: true,
+        settings: { savePaymentMethod: true },
+      }),
+    ]);
+
+    const listed = await controller.listEnabledGateways('web');
+
+    // `autopay` stays false on Antilopay: a cabinet that knows only the boolean
+    // would offer its one option, and a method nobody approved with it.
+    assert.deepStrictEqual(
+      listed.map((gateway) => [gateway.id, gateway.autopay, gateway.autopayMethods]),
+      [
+        ['none', false, []],
+        ['card', false, ['CARD']],
+        ['sbp', false, ['SBP']],
+        ['both', false, ['CARD', 'SBP']],
+        ['switched-off', false, []],
+        ['other-gateways-key', false, []],
+        ['platega', true, undefined],
+      ],
+    );
+    assert.equal('autopayMethods' in listed[6]!, false, 'no other gateway carries the list at all');
+  });
+
   it('keeps hiding a disabled gateway even when its credentials are complete', async () => {
     const controller = createController([
       gatewayRow({ id: 'off', type: PaymentGatewayType.YOOKASSA, isActive: false, isConfigured: true }),

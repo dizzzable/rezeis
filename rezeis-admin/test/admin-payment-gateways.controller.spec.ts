@@ -50,6 +50,7 @@ describe('AdminPaymentGatewaysController', () => {
       'getGateway',
       'updateGateway',
       'moveGateway',
+      'checkGatewayKeys',
       'createDefaults',
     ]);
 
@@ -126,6 +127,20 @@ describe('AdminPaymentGatewaysController', () => {
       moveRoute,
     );
 
+    // A request signed with a stored credential, so the permission that changes
+    // the credential, not the one that lists it.
+    const checkKeysRoute = `${routeLabel(BASE_PATH, RequestMethod.POST, ':gatewayId/check-keys')} (Antilopay «Проверить ключи»)`;
+    assertRoute(
+      AdminPaymentGatewaysController.prototype.checkGatewayKeys,
+      { method: RequestMethod.POST, path: ':gatewayId/check-keys' },
+      checkKeysRoute,
+    );
+    assertRoutePermission(
+      AdminPaymentGatewaysController.prototype.checkGatewayKeys,
+      { resource: 'payment_gateways', action: 'edit' },
+      checkKeysRoute,
+    );
+
     const defaultsRoute = `${routeLabel(BASE_PATH, RequestMethod.POST, 'defaults')} (seed default gateways)`;
     assertRoute(
       AdminPaymentGatewaysController.prototype.createDefaults,
@@ -145,6 +160,17 @@ describe('AdminPaymentGatewaysController', () => {
     // admin rather than refused. On this controller that is the gateway
     // credential store. No route here is exempt, hence no list.
     assertEveryRouteGuarded(AdminPaymentGatewaysController);
+  });
+
+  it('hands the key check the gateway it is asked about, and reveals nothing whoever asks', async () => {
+    for (const canReveal of [false, true]) {
+      const { controller, calls } = createController(canReveal);
+
+      const result = await controller.checkGatewayKeys('gateway-1');
+
+      assert.deepStrictEqual(calls, [['check-keys', 'gateway-1']]);
+      assert.deepStrictEqual(result, { verdict: 'OK', code: null, httpStatus: 200, failure: null });
+    }
   });
 
   it('takes the admin it checks from the authenticated request', () => {
@@ -432,6 +458,12 @@ function createController(canRevealSecrets: boolean): {
     // to the `Pick`, so a renamed or re-signatured `hasPermission` stops it.
     rbacService as RbacService,
     { summary: async () => [] } as never,
+    {
+      check: async (gatewayId: string) => {
+        calls.push(['check-keys', gatewayId]);
+        return { verdict: 'OK', code: null, httpStatus: 200, failure: null };
+      },
+    } as never,
   );
   return { controller, calls, permissionChecks };
 }

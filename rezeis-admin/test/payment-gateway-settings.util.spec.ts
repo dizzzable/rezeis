@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { generateKeyPairSync } from 'node:crypto';
 import { describe, it } from 'node:test';
 
 import { BadRequestException } from '@nestjs/common';
@@ -210,11 +211,18 @@ describe('normalizeGatewaySettingsForStorage — RioPay/Valutix serviceId', () =
 });
 
 describe('normalizeGatewaySettingsForStorage — Antilopay vat', () => {
+  // Real keys: the keys are read when they are saved (`antilopay-keys.util.ts`),
+  // so a stand-in string would be refused before the rate is looked at.
+  const keys = generateKeyPairSync('rsa', {
+    modulusLength: 2048,
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+  });
   const antilopayCredentials = {
     projectIdentificator: 'project-1',
     secretId: 'secret-id-1',
-    privateKey: 'MIIEow==',
-    publicKey: 'MFwwDQ==',
+    privateKey: keys.privateKey,
+    publicKey: keys.publicKey,
   };
 
   it('stores the ОСНО rate as a number from both documented forms', () => {

@@ -359,6 +359,61 @@ describe('PaymentsCheckoutService', () => {
     assert.equal(state.providerCreateCalls, 1)
   })
 
+  it("asks an Antilopay sign-up about the method the payer chose: a switch that is off refuses it, an approved one goes through", async () => {
+    const credentials = { projectIdentificator: 'project-1', secretId: 'secret-1', privateKey: 'k', publicKey: 'p' }
+    const cases = [
+      ['SBP', { autopayCardApproved: true }, false],
+      ['CARD', { autopayCardApproved: true }, true],
+      ['CARD', { autopaySbpApproved: true }, false],
+      ['SBP', { autopaySbpApproved: true }, true],
+      ['CARD', { savePaymentMethod: true }, false],
+    ] as const
+    for (const [method, switches, allowed] of cases) {
+      const { service, state } = createService({
+        gatewayType: PaymentGatewayType.ANTILOPAY,
+        gatewayCurrency: Currency.RUB,
+        gatewaySettings: { ...credentials, ...switches },
+        transactionPlanSnapshot: {
+          providerSubscription: {
+            unit: 'month',
+            count: 1,
+            amount: 299,
+            durationDays: 30,
+            planId: 'plan-1',
+            subscriptionId: null,
+            method,
+          },
+        },
+      })
+      const attempt = service.checkout({
+        userId: 'user-1',
+        purchaseType: PurchaseType.NEW,
+        planId: 'plan-1',
+        durationDays: 30,
+        gatewayType: PaymentGatewayType.ANTILOPAY,
+        channel: PurchaseChannel.WEB,
+        savePaymentMethodConsent: true,
+        autopayMethod: method,
+      })
+      const label = method + ' with ' + JSON.stringify(switches)
+
+      if (allowed) {
+        await attempt
+        assert.deepEqual(state.draftCalls.map((call) => call.options), [{ providerSubscription: true, autopayMethod: method }], label)
+        assert.equal(state.providerCreateCalls, 1, label)
+      } else {
+        await assert.rejects(attempt, (error: BadRequestException) => {
+          const body = error.getResponse() as { code?: string; reason?: string }
+          assert.equal(body.code, 'AUTOPAY_NOT_AVAILABLE_FOR_PURCHASE')
+          assert.equal(body.reason, 'NOT_APPROVED')
+          return true
+        }, label)
+        assert.equal(state.draftCalls.length, 0, label + ': no draft is made')
+        assert.equal(state.providerCreateCalls, 0, label + ': Antilopay is not asked')
+      }
+    }
+  })
+
   it('completes a zero-total checkout without calling the payment provider', async () => {
     const { service, state } = createService({ amount: '0' })
 

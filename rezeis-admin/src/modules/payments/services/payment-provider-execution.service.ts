@@ -20,6 +20,7 @@ import { readGatewaySettings, resolvePlategaPaymentMethod } from '../utils/payme
 import {
   ANTILOPAY_API,
   ANTILOPAY_BAD_RECURRENT_DATA,
+  ANTILOPAY_METHOD_UNAVAILABLE,
   ANTILOPAY_NO_RECURRENT_PERMISSION,
   antilopayHeaders,
   signAntilopayBody,
@@ -983,8 +984,9 @@ export class PaymentProviderExecutionService {
           'Antilopay не разрешила автоплатежи для проекта: покупатели уходят на обычную оплату',
           'Antilopay отвечает ошибкой 30 («Нет разрешения на создание рекуррентных платежей»): для вашего ' +
             'проекта не включены рекуррентные платежи. Попросите Antilopay включить их. Пока этого нет, откройте ' +
-            '«Платёжные шлюзы» → Antilopay → «Открыть настройки» и выключите «Автоплатежи одобрены провайдером»: ' +
-            'тогда пункты «для автоматического списания» перестанут предлагаться покупателям.',
+            '«Платёжные шлюзы» → Antilopay → «Открыть настройки» и выключите «Автосписание картой одобрено ' +
+            'провайдером» и «Автосписание по СБП одобрено провайдером»: тогда пункты «для автоматического ' +
+            'списания» перестанут предлагаться покупателям.',
         );
         throw autopayRefusedByGateway('ANTILOPAY_RECURRENT_NOT_PERMITTED');
       }
@@ -997,9 +999,29 @@ export class PaymentProviderExecutionService {
           'Antilopay отвечает ошибкой 29 («Ошибки в данных для рекуррентного платежа»). Проверьте «Число списаний ' +
             '(вместе с первым)» в настройках шлюза Antilopay («Платёжные шлюзы» → Antilopay → «Открыть настройки»): ' +
             'там нужно целое число не меньше 2 или пустое поле. Если поле пустое или число верное, сообщите код ' +
-            'ошибки Antilopay. Пока это не решено, выключите «Автоплатежи одобрены провайдером».',
+            'ошибки Antilopay. Пока это не решено, выключите «Автосписание картой одобрено провайдером» и ' +
+            '«Автосписание по СБП одобрено провайдером».',
         );
         throw autopayRefusedByGateway('ANTILOPAY_RECURRENT_DATA_REFUSED');
+      }
+      if (recurrent !== null && data.code === ANTILOPAY_METHOD_UNAVAILABLE) {
+        // Недоступный метод оплаты: the sign-up asks for one method (a card for
+        // PAYMENT_TEMPLATE, SBP for SUBSCRIPTION), and the project has not got
+        // it. Told per method, so an SBP refusal does not silence a card one.
+        const method = readProviderSubscriptionTerms(input.transaction.planSnapshot)?.method;
+        const named = method === 'SBP' ? 'по СБП' : 'картой';
+        const switchLabel =
+          method === 'SBP' ? 'Автосписание по СБП одобрено провайдером' : 'Автосписание картой одобрено провайдером';
+        this.tellRecurrentRefused(
+          ANTILOPAY_METHOD_UNAVAILABLE,
+          `Antilopay отклонила автосписание ${named}: покупатели уходят на обычную оплату`,
+          `Antilopay отвечает ошибкой 25 (недоступный метод оплаты) на автосписание ${named}: для вашего проекта ` +
+            'этот способ не подключён. Попросите Antilopay включить его. Пока этого нет, откройте «Платёжные шлюзы» → ' +
+            `Antilopay → «Открыть настройки» и выключите «${switchLabel}»: тогда пункт «для автоматического ` +
+            'списания» этим способом перестанет предлагаться покупателям.',
+          method ?? null,
+        );
+        throw autopayRefusedByGateway('ANTILOPAY_METHOD_UNAVAILABLE');
       }
       const providerError = redactPaymentDiagnosticMessage(String(data.error ?? 'unknown'), 120) ?? 'unknown';
       const reported = typeof data.code === 'number' ? String(data.code) : `HTTP ${response.status ?? '?'}`;
@@ -1021,9 +1043,11 @@ export class PaymentProviderExecutionService {
    * one card that says what to switch and where, not one per buyer who tried.
    * Also in the log, every time: that is the trail of who was refused.
    */
-  private tellRecurrentRefused(code: number, title: string, note: string): void {
+  private tellRecurrentRefused(code: number, title: string, note: string, method: string | null = null): void {
     this.logger.error(`Antilopay refused a recurrent payment with error ${code}: ${note}`);
-    const key = `${PaymentGatewayType.ANTILOPAY}:${code}`;
+    // Per method where the error is about one (25): a refused SBP sign-up must
+    // not spare the operator the card one.
+    const key = `${PaymentGatewayType.ANTILOPAY}:${code}${method === null ? '' : `:${method}`}`;
     const now = Date.now();
     const last = this.refusedAutopayTold.get(key);
     if (last !== undefined && now - last < OPERATOR_TOLD_EVERY_MS) return;
@@ -1031,6 +1055,7 @@ export class PaymentProviderExecutionService {
     this.systemEvents?.warn(EVENT_TYPES.PAYMENT_AUTOPAY_ATTENTION, 'PAYMENT', title, {
       gatewayType: PaymentGatewayType.ANTILOPAY,
       reason: `ANTILOPAY_ERROR_${code}`,
+      ...(method === null ? {} : { method }),
       note,
     });
   }
@@ -1047,11 +1072,14 @@ export class PaymentProviderExecutionService {
   ): AntilopayRecurrentRequest | null {
     const terms = readProviderSubscriptionTerms(transaction.planSnapshot);
     if (terms === null) return null;
-    if (!isAutopayApproved(PaymentGatewayType.ANTILOPAY, settings)) {
-      throw autopayNotAvailable('NOT_APPROVED');
-    }
     if (terms.method === undefined) {
       throw autopayNotAvailable('METHOD');
+    }
+    // A card and SBP are approved apart («Автосписание картой одобрено
+    // провайдером», «Автосписание по СБП одобрено провайдером»): only the
+    // payer's own method is asked about.
+    if (!isAutopayApproved(PaymentGatewayType.ANTILOPAY, settings, terms.method)) {
+      throw autopayNotAvailable('NOT_APPROVED');
     }
     const request = buildAntilopayRecurrent({
       period: { unit: terms.unit, count: terms.count },

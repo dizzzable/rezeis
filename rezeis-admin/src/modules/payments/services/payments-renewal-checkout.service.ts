@@ -901,7 +901,7 @@ function resolveRenewalProviderSubscription(
   if (input.savePaymentMethodConsent !== true || !PROVIDER_SUBSCRIPTION_GATEWAY_TYPES.has(gateway.type)) {
     return null;
   }
-  if (!isAutopayApproved(gateway.type, readGatewaySettings(gateway.settings))) {
+  if (!isAutopayApproved(gateway.type, readGatewaySettings(gateway.settings), input.autopayMethod)) {
     throw autopayNotAvailable('NOT_APPROVED');
   }
   const [item] = priced.items;

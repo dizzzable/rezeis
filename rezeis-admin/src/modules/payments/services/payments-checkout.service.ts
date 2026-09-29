@@ -163,7 +163,12 @@ export class PaymentsCheckoutService {
     // списания» is a provider subscription, not a saved card.
     const providerSubscription =
       input.savePaymentMethodConsent === true && PROVIDER_SUBSCRIPTION_GATEWAY_TYPES.has(gateway.type);
-    if (providerSubscription && !isAutopayApproved(gateway.type, readGatewaySettings(gateway.settings))) {
+    // On Antilopay the approval is per method, so it is asked about the method
+    // the buyer chose: a switch turned off since the list loaded is refused here.
+    if (
+      providerSubscription &&
+      !isAutopayApproved(gateway.type, readGatewaySettings(gateway.settings), input.autopayMethod)
+    ) {
       throw autopayNotAvailable('NOT_APPROVED');
     }
     const createdDraft = await this.paymentsTransactionsService.createCheckoutDraft(

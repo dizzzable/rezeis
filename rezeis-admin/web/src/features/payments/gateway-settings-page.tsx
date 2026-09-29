@@ -93,6 +93,7 @@ import { cn } from '@/lib/utils'
 import { FadeIn, StaggerItem, StaggerList } from '@/lib/motion'
 import { useHasPermission } from '@/features/rbac'
 
+import { AntilopayKeyCheck } from './antilopay-key-check'
 import { CURRENCY_DISPLAY_NAMES, getCurrencyIcon } from './currency-icons'
 import { getPaymentGatewayIcon } from './payment-gateway-icons'
 
@@ -126,10 +127,42 @@ interface GatewayField {
   clearable?: boolean
   /**
    * Only render this field when the referenced boolean field's value is
-   * `'true'`. Used to collapse the whole «Мой Налог» (self-employed) block
-   * behind its enable toggle so it appears only when sync is turned on.
+   * `'true'` — or, given several, when any of them is. Used to collapse the
+   * whole «Мой Налог» (self-employed) block behind its enable toggle so it
+   * appears only when sync is turned on, and Antilopay's count of charges
+   * behind its two approvals (a card and SBP).
    */
-  dependsOn?: string
+  dependsOn?: string | readonly string[]
+}
+
+/**
+ * The operator's approvals of automatic charging. Each reads as OFF when never
+ * set, so an untouched form posts an explicit `'false'` rather than a hole the
+ * server would have to read as one (gateway-autopay.util.ts): ЮKassa, Platega
+ * and RollyPay have the one, Antilopay one per method.
+ */
+const AUTOPAY_APPROVAL_KEYS: ReadonlySet<string> = new Set([
+  'savePaymentMethod',
+  'autopayCardApproved',
+  'autopaySbpApproved',
+])
+
+/**
+ * The panel's refusals of an Antilopay key (`ANTILOPAY_KEY_REFUSAL_CODES`), and
+ * the sentence each has: the field it names and whether the keys look swapped.
+ * A `Map`, not an object: a code that arrives is looked up, and an object would
+ * answer «constructor».
+ */
+const KEY_REFUSAL_MESSAGES: ReadonlyMap<string, string> = new Map([
+  ['ANTILOPAY_PRIVATE_KEY_UNREADABLE', 'paymentGateways.keyRefusals.privateKeyUnreadable'],
+  ['ANTILOPAY_PRIVATE_KEY_IS_PUBLIC', 'paymentGateways.keyRefusals.privateKeyIsPublic'],
+  ['ANTILOPAY_PUBLIC_KEY_UNREADABLE', 'paymentGateways.keyRefusals.publicKeyUnreadable'],
+  ['ANTILOPAY_PUBLIC_KEY_IS_PRIVATE', 'paymentGateways.keyRefusals.publicKeyIsPrivate'],
+])
+
+/** Whether a field's controlling toggle (or any of several) is switched on. */
+function dependencyIsOn(dependsOn: string | readonly string[], values: Record<string, string>): boolean {
+  return (typeof dependsOn === 'string' ? [dependsOn] : dependsOn).some((key) => values[key] === 'true')
 }
 
 interface GatewayMeta {
@@ -415,22 +448,32 @@ const GATEWAY_META: ReadonlyArray<GatewayMeta> = [
         hintKey: 'paymentGateways.hints.antilopayVat',
       },
       {
-        // «Автоплатежи одобрены провайдером»: Antilopay enables recurring
-        // payments per project and answers error 30 until it has. Off until the
-        // operator says so (gateway-autopay.util.ts on the server).
-        key: 'savePaymentMethod',
-        labelKey: 'paymentGateways.fields.savePaymentMethod',
+        // «Автосписание картой одобрено провайдером»: Antilopay enables
+        // recurring payments per project AND per method, and answers error 30
+        // (or 25) until it has. Off until the operator says so
+        // (gateway-autopay.util.ts on the server).
+        key: 'autopayCardApproved',
+        labelKey: 'paymentGateways.fields.antilopayAutopayCard',
         placeholder: '',
         type: 'toggle',
-        hintKey: 'paymentGateways.hints.antilopayAutopay',
+        hintKey: 'paymentGateways.hints.antilopayAutopayCard',
+      },
+      {
+        // «Автосписание по СБП одобрено провайдером»: the same, for SBP.
+        key: 'autopaySbpApproved',
+        labelKey: 'paymentGateways.fields.antilopayAutopaySbp',
+        placeholder: '',
+        type: 'toggle',
+        hintKey: 'paymentGateways.hints.antilopayAutopaySbp',
       },
       {
         // Sent as `recurrent.payment_count` only when filled in; a whole
         // number of at least 2 (antilopay-recurrent.util.ts on the server).
+        // Asked for once either method is approved.
         key: 'recurrentPaymentCount',
         labelKey: 'paymentGateways.fields.antilopayRecurrentPaymentCount',
         placeholder: '12',
-        dependsOn: 'savePaymentMethod',
+        dependsOn: ['autopayCardApproved', 'autopaySbpApproved'],
         hintKey: 'paymentGateways.hints.antilopayRecurrentPaymentCount',
       },
     ],
@@ -1221,9 +1264,9 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
   const initialValues: Record<string, string> = Object.fromEntries(
     (meta?.fields ?? []).map((field) => {
       const raw = gateway.settings?.[field.key]
-      // «Автоплатежи одобрены провайдером» reads as OFF when never set: every
+      // An approval of automatic charging reads as OFF when never set: every
       // provider approves repeat charges per shop (gateway-autopay.util.ts).
-      if (field.key === 'savePaymentMethod' && (raw === undefined || raw === null || raw === '')) {
+      if (AUTOPAY_APPROVAL_KEYS.has(field.key) && (raw === undefined || raw === null || raw === '')) {
         return [field.key, 'false']
       }
       // Numbers have to survive the round-trip: the backend normalizes
@@ -1270,6 +1313,10 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
 
   const supportedCurrencies = supportedMap?.[gateway.type] ?? [gateway.currency]
   const currencyChanged = currency !== gateway.currency
+  // What «Проверить ключи» reads is what is stored, so it is told when the form
+  // has moved off it.
+  const hasUnsavedChanges =
+    currencyChanged || Object.keys(initialValues).some((key) => values[key] !== initialValues[key])
 
   // Whether this caller was handed masks instead of credentials. Explicit
   // `false` only: an older API that does not send the flag is treated as
@@ -1299,9 +1346,14 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
       onClose()
     },
     onError: (err: unknown) => {
-      const message = (err as { response?: { data?: { message?: string } } })
-        ?.response?.data?.message
-      toast.error(message ?? t('paymentGateways.saveFailed'))
+      const data = (err as { response?: { data?: { message?: string; code?: string } } })
+        ?.response?.data
+      // A key refused for what is wrong with it has a sentence of its own; any
+      // other refusal is shown as the panel worded it.
+      const keyRefusal = data?.code === undefined ? undefined : KEY_REFUSAL_MESSAGES.get(data.code)
+      toast.error(
+        keyRefusal === undefined ? (data?.message ?? t('paymentGateways.saveFailed')) : t(keyRefusal),
+      )
     },
   })
 
@@ -1364,6 +1416,9 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
             <Copy className="mr-1 h-3 w-3" /> {t('paymentGateways.copyWebhookUrl')}
           </Button>
         </div>
+        {gateway.type === 'ANTILOPAY' && (
+          <p className="text-xs text-muted-foreground">{t('paymentGateways.hints.antilopayWebhook')}</p>
+        )}
       </div>
 
       <div className="space-y-4">
@@ -1406,7 +1461,7 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
           const isUntouchedMask = isHiddenSecret && value === initialValues[field.key]
           // Collapse dependent fields (the whole «Мой Налог» block) unless
           // their controlling toggle is on.
-          if (field.dependsOn && values[field.dependsOn] !== 'true') {
+          if (field.dependsOn !== undefined && !dependencyIsOn(field.dependsOn, values)) {
             return null
           }
           if (field.type === 'toggle') {
@@ -1421,7 +1476,9 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
                   {field.hintKey && (
                     <p className="text-xs text-muted-foreground">{t(field.hintKey)}</p>
                   )}
-                  {field.key === 'savePaymentMethod' && (gateway.type === 'PLATEGA' || gateway.type === 'ROLLYPAY' || gateway.type === 'ANTILOPAY') && (
+                  {((field.key === 'savePaymentMethod' &&
+                    (gateway.type === 'PLATEGA' || gateway.type === 'ROLLYPAY')) ||
+                    field.key === 'autopayCardApproved') && (
                     <ProviderAutopaySummary gatewayType={gateway.type} />
                   )}
                 </div>
@@ -1540,6 +1597,10 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
           )
         })}
       </div>
+
+      {gateway.type === 'ANTILOPAY' && (
+        <AntilopayKeyCheck gatewayId={gateway.id} hasUnsavedChanges={hasUnsavedChanges} />
+      )}
 
       <div className="flex flex-wrap items-center justify-end gap-2 pt-2">
         <Button

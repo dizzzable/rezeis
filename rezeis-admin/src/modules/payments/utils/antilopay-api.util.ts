@@ -137,6 +137,50 @@ export const ANTILOPAY_RECURRENT_NOT_ACTIVE = 28;
 export const ANTILOPAY_NO_RECURRENT_PERMISSION = 30;
 /** `payment/create`: «Ошибки в данных для рекуррентного платежа». */
 export const ANTILOPAY_BAD_RECURRENT_DATA = 29;
+/**
+ * `payment/create`: the payment method asked for (`prefer_methods`) is not
+ * available to the project. On an autopay sign-up that is the card or SBP the
+ * payer chose, so it is that method's approval that is missing.
+ */
+export const ANTILOPAY_METHOD_UNAVAILABLE = 25;
+/** Any `signature/check` refusal that is about the request's headers or signature. */
+export const ANTILOPAY_SECRET_ID_MISSING = 1;
+export const ANTILOPAY_SECRET_ID_UNKNOWN = 2;
+export const ANTILOPAY_INVALID_SIGNATURE = 3;
+/** «Запрос с IP-адреса, которого нет в списке разрешённых» — the project restricts API access by address. */
+export const ANTILOPAY_IP_NOT_ALLOWED = 22;
+
+/**
+ * `signature/check` (documentation 4.1): Antilopay verifies the signature of
+ * any JSON it is sent and answers `{"status":"ok"}`, or `{"code":3,"error":"Invalid
+ * signature"}`. Signed exactly as every other call is, with the same headers.
+ *
+ * Not `postAntilopay`, which reads Antilopay's `code` and treats an answer
+ * without one as a transport failure: the success of this call carries no
+ * `code`. The caller reads the body itself. A refusal is a JSON body whichever
+ * HTTP status carries it, so the status is never thrown on; a connection
+ * failure or a timeout rejects as axios raised it.
+ */
+export async function postAntilopaySignatureCheck(
+  httpService: HttpService,
+  settings: Record<string, unknown>,
+  options: { readonly timeoutMs?: number } = {},
+): Promise<{ readonly httpStatus: number | null; readonly data: unknown }> {
+  const secretId = requireSetting(settings, 'secretId');
+  const privateKeyPem = toAntilopayPrivateKeyPem(requireSetting(settings, 'privateKey'));
+  const bodyString = JSON.stringify({ check: 'signature' });
+  const response = await firstValueFrom(
+    httpService.post(`${ANTILOPAY_API}/signature/check`, bodyString, {
+      headers: antilopayHeaders(secretId, signAntilopayBody(bodyString, privateKeyPem)),
+      validateStatus: () => true,
+      timeout: options.timeoutMs ?? ANTILOPAY_CALL_TIMEOUT_MS,
+    }),
+  );
+  return {
+    httpStatus: typeof response.status === 'number' ? response.status : null,
+    data: response.data as unknown,
+  };
+}
 
 /**
  * A payment's `status` from `payment/check` (and from a callback), sorted by

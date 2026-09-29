@@ -1,6 +1,6 @@
 import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
 import { SkipThrottle } from '@nestjs/throttler';
-import { PurchaseChannel } from '@prisma/client';
+import { PaymentGatewayType, PurchaseChannel } from '@prisma/client';
 
 import { InternalAdminAuthGuard } from '../../auth/guards/internal-admin-auth.guard';
 import { SettingsService } from '../../settings/services/settings.service';
@@ -23,7 +23,7 @@ import {
   TelegramStarsWebhookService,
   type TelegramStarsPreCheckoutVerdict,
 } from '../services/telegram-stars-webhook.service';
-import { isAutopayApproved } from '../utils/gateway-autopay.util';
+import { approvedAutopayMethods, isAutopayApproved } from '../utils/gateway-autopay.util';
 
 @Controller('internal/payments')
 @UseGuards(InternalAdminAuthGuard)
@@ -113,13 +113,20 @@ export class InternalPaymentsController {
       .filter((gateway) => gateway.isActive)
       .filter((gateway) => gateway.isConfigured)
       .filter((gateway) => isGatewayAvailableForChannel(gateway.type, channel))
-      .map((gateway): InternalPaymentGatewayInterface => ({
-        id: gateway.id,
-        type: gateway.type,
-        currency: gateway.currency,
-        orderIndex: gateway.orderIndex,
-        autopay: isAutopayApproved(gateway.type, gateway.settings),
-      }))
+      .map((gateway): InternalPaymentGatewayInterface => {
+        const base = {
+          id: gateway.id,
+          type: gateway.type,
+          currency: gateway.currency,
+          orderIndex: gateway.orderIndex,
+        };
+        // Antilopay approves automatic charging per method: the list names them
+        // and the boolean stays false (see `autopayMethods`).
+        if (gateway.type === PaymentGatewayType.ANTILOPAY) {
+          return { ...base, autopay: false, autopayMethods: approvedAutopayMethods(gateway.type, gateway.settings) };
+        }
+        return { ...base, autopay: isAutopayApproved(gateway.type, gateway.settings) };
+      })
       .sort((a, b) => {
         // Default-currency gateways first; stable on orderIndex within a group.
         const aDefault = a.currency === defaultCurrency ? 0 : 1;

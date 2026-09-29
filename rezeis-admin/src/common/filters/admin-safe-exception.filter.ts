@@ -426,6 +426,14 @@ export const SAFE_PRODUCT_CODES: ReadonlySet<string> = new Set<string>([
   'PROVIDER_OUTCOME_UNKNOWN',
   // Reiwa ends the session of a blocked customer on it (stale-user-session.ts, since 0.9.7.19); only about the calling account.
   'USER_BLOCKED',
+  // The Antilopay settings are refused because of a KEY, and the settings page says which and how:
+  // a key that cannot be read, or the private and the public key in each other's fields. They
+  // are four codes rather than one code with a reason because a reason must be one of the
+  // provider-subscription refusals (`SAFE_REFUSAL_REASONS`). `antilopay-keys.util.ts` restates them; no key text rides along.
+  'ANTILOPAY_PRIVATE_KEY_UNREADABLE',
+  'ANTILOPAY_PRIVATE_KEY_IS_PUBLIC',
+  'ANTILOPAY_PUBLIC_KEY_UNREADABLE',
+  'ANTILOPAY_PUBLIC_KEY_IS_PRIVATE',
 ]);
 /**
  * Codes whose refusal is meaningless without naming the credential it wants.

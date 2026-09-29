@@ -33,6 +33,7 @@ import { MoyNalogProcessor } from './processors/moy-nalog.processor';
 import { AdminAutopayService } from './services/admin-autopay.service';
 import { AddOnRefundService } from './services/addon-refund.service';
 import { PaymentAutoRetryService } from './services/payment-auto-retry.service';
+import { AntilopayKeyCheckService } from './services/antilopay-key-check.service';
 import { AntilopayStatusService } from './services/antilopay-status.service';
 import { PaymentPendingExpiryService } from './services/payment-pending-expiry.service';
 import { PaymentOpsAlertService } from './services/payment-ops-alert.service';
@@ -139,6 +140,7 @@ import { YookassaPaymentVerificationService } from './services/yookassa-payment-
     PaymentAutoRetryService,
     PaymentPendingExpiryService,
     AntilopayStatusService,
+    AntilopayKeyCheckService,
     AddOnFulfillmentRecoveryService,
     SavedPaymentMethodService,
     PaymentMethodSetupService,

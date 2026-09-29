@@ -87,6 +87,8 @@ export const en = {
       vatCode: 'VAT code',
       savePaymentMethod: 'Autopayments approved by the provider',
       antilopayRecurrentPaymentCount: 'Number of charges (including the first)',
+      antilopayAutopayCard: 'Card autopay approved by the provider',
+      antilopayAutopaySbp: 'SBP autopay approved by the provider',
       selfEmployedEnabled: 'Self-employed (НПД): «Мой Налог» income sync',
       moyNalogAuthMethod: '«Мой Налог» auth method',
       moyNalogInn: 'Self-employed INN',
@@ -104,7 +106,7 @@ export const en = {
       secretId: 'Secret ID (X-Apay-Secret-Id)',
       privateKey: 'Private key (Base64)',
       publicKey: 'Public key (Base64)',
-      antilopayVat: 'Antilopay VAT rate',
+      antilopayVat: 'Antilopay VAT rate (optional)',
       apiToken: 'API Token',
       serviceId: 'Service ID',
       signingSecret: 'Signing Secret',
@@ -129,6 +131,52 @@ export const en = {
       antilopayVat10: '10% — reduced rate',
       antilopayVat22: '22% — standard rate',
     },
+    keyCheck: {
+      title:
+        'Key check',
+      button:
+        'Check keys',
+      publicKeyNote:
+        'The button checks the Secret ID and the private key against the saved settings. It does not check the public key: that one only verifies Antilopay\'s callbacks.',
+      saveFirst:
+        'The form has unsaved changes. Save them, then check the keys: the button checks what is saved.',
+      ok:
+        'Keys are valid: Antilopay accepted the signature',
+      signatureRefused:
+        'Antilopay refused the signature (error 3). Check the Secret ID and the private key.',
+      secretIdRejected:
+        'The Secret ID is missing or wrong (error {{code}}). Check the Secret ID.',
+      ipNotAllowed:
+        'Antilopay does not accept requests from this server\'s IP (error 22). Add the panel server\'s outgoing IP to the project\'s IP restriction in the Antilopay dashboard.',
+      keysMissing:
+        'The Secret ID or the private key is not saved. Fill them in, save the settings and check again.',
+      privateKeyUnreadable:
+        'The saved private key cannot be read. Paste it again and save.',
+      notAnswered:
+        'Antilopay did not answer ({{detail}}).',
+      notAnsweredBare:
+        'Antilopay did not answer.',
+      detailTimeout:
+        'timeout',
+      detailNetwork:
+        'no connection',
+      detailCode:
+        'code {{code}}',
+      detailHttp:
+        'HTTP {{status}}',
+      requestFailed:
+        'The check could not be run: the panel did not answer.',
+    },
+    keyRefusals: {
+      privateKeyUnreadable:
+        'Could not read "Private key (Base64)": paste the whole key as Antilopay\'s dashboard issues it.',
+      privateKeyIsPublic:
+        'The keys look swapped: a public key was pasted into "Private key (Base64)".',
+      publicKeyUnreadable:
+        'Could not read "Public key (Base64)": paste the whole key as Antilopay\'s dashboard issues it.',
+      publicKeyIsPrivate:
+        'The keys look swapped: a private key was pasted into "Public key (Base64)".',
+    },
     selectPlaceholder: 'Select a value',
     hints: {
       paymentNotPayout:
@@ -136,13 +184,19 @@ export const en = {
       antilopayPrivateKey:
         'RSA 2048-bit private key in Base64 (starts with MII). From Antilopay dashboard.',
       antilopayPublicKey:
-        'RSA public key in Base64 (starts with MF). For callback signature verification.',
+        'Antilopay public key in Base64: usually starts with MF, a 2048-bit one with MIIB. Used only to verify callbacks. Do not paste the private key here.',
       antilopayVat:
-        'The VAT rate Antilopay prints on the receipt. Required only when the merchant is on the ОСНО tax regime: without it Antilopay rejects every checkout with error 17 («Не предоставлена ставка НДС или недопустимое значение»). On УСН or НПД leave it empty — no rate is needed.',
+        'Optional. Needed only if your tax system at Antilopay is ОСНО: without it Antilopay refuses every payment with error 17 («Не предоставлена ставка НДС или недопустимое значение»). On УСН, НПД and other regimes leave it empty. It is the rate itself (10 or 22), not a VAT code as in YooKassa.',
       overpayPublicKey:
         'RSA public key from OverPay back office for Content-Signature verification.',
-      antilopayAutopay:
-        'Turn on once Antilopay has enabled recurring payments for your project: without that, creating a payment answers error 30 ("no permission to create recurring payments"). The cabinet then shows two Antilopay options "for automatic charging": by card (the first payment on Antilopay\'s form, then Antilopay charges by itself) and by SBP (the customer subscribes on the form, the first charge is made at activation). Offered only for plans of 7, 30, 90 and 365 days and for a price in whole roubles. Turning it off stops new subscriptions only: existing ones keep charging until the customer turns them off in "Payment methods". Off by default.',
+      antilopayAutopayCard:
+        'Turn on once Antilopay has enabled recurring payments by card for your project: without that, creating a payment answers error 30 ("no permission to create recurring payments") or 25 (payment method not available). The cabinet then shows an Antilopay option "for automatic charging" by card: the first payment on Antilopay\'s form, then Antilopay charges by itself. Offered only for plans of 7, 30, 90 and 365 days and for a price in whole roubles. Turning it off stops new subscriptions only: existing ones keep charging until the customer turns them off in "Payment methods". Off by default.',
+      antilopayAutopaySbp:
+        'Turn on once Antilopay has enabled recurring payments by SBP for your project: without that, creating a payment answers error 30 ("no permission to create recurring payments") or 25 (payment method not available). The cabinet then shows an Antilopay option "for automatic charging" by SBP: the customer subscribes on Antilopay\'s form and the first charge is made at activation. Offered only for plans of 7, 30, 90 and 365 days and for a price in whole roubles. Turning it off stops new subscriptions only: existing ones keep charging until the customer turns them off in "Payment methods". Off by default.',
+      antilopayWebhook:
+        'Enter this address in your project\'s settings in the Antilopay dashboard. It must be https with a valid certificate (full chain) and TLS 1.2 or newer, or Antilopay cannot deliver notifications.',
+      antilopayIp:
+        'If your Antilopay project restricts API access by IP, add the panel server\'s outgoing IP there: otherwise every request fails with error 22.',
       antilopayRecurrentPaymentCount:
         'How many charges in all (the first included) a subscription makes. Optional: left empty, Antilopay is sent no such number. A whole number of at least 2. Once every charge is made, Antilopay completes the subscription and the customer\'s autopay ends.',
       plategaAutopay:

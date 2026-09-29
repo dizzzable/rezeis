@@ -597,7 +597,7 @@ describe('GatewaySettingsPage Antilopay VAT rate', () => {
 
     renderWithProviders(<GatewaySettingsPage />)
     await user.click(await screen.findByRole('button', { name: 'Open settings' }))
-    await user.click(await screen.findByRole('combobox', { name: 'Antilopay VAT rate' }))
+    await user.click(await screen.findByRole('combobox', { name: 'Antilopay VAT rate (optional)' }))
 
     // Antilopay accepts 10 and 22 and nothing else, so those are the only
     // rates offered — but a merchant on УСН/НПД must send no rate at all,
@@ -621,7 +621,7 @@ describe('GatewaySettingsPage Antilopay VAT rate', () => {
 
     renderWithProviders(<GatewaySettingsPage />)
     await user.click(await screen.findByRole('button', { name: 'Open settings' }))
-    await user.click(await screen.findByRole('combobox', { name: 'Antilopay VAT rate' }))
+    await user.click(await screen.findByRole('combobox', { name: 'Antilopay VAT rate (optional)' }))
     await user.click(screen.getByRole('option', { name: '10% — reduced rate' }))
     await user.click(screen.getByRole('button', { name: 'Save' }))
 
@@ -634,9 +634,10 @@ describe('GatewaySettingsPage Antilopay VAT rate', () => {
       // `'10'` is a member of the backend's accepted enum and normalizes to
       // the number 10 on storage; the label the operator read is not sent.
       vat: '10',
-      // The switch is on the form too, and an untouched one is sent as OFF —
-      // the value an absent key already reads as (gateway-autopay.util.ts).
-      savePaymentMethod: 'false',
+      // The two switches are on the form too, and an untouched one is sent as
+      // OFF — the value an absent key already reads as (gateway-autopay.util.ts).
+      autopayCardApproved: 'false',
+      autopaySbpApproved: 'false',
     })
   })
 
@@ -656,7 +657,7 @@ describe('GatewaySettingsPage Antilopay VAT rate', () => {
     // a setting the operator never touched — for a merchant on ОСНО that is
     // every checkout failing with error 17 again.
     expect(
-      await screen.findByRole('combobox', { name: 'Antilopay VAT rate' }),
+      await screen.findByRole('combobox', { name: 'Antilopay VAT rate (optional)' }),
     ).toHaveTextContent('22% — standard rate')
   })
 
@@ -691,7 +692,7 @@ describe('GatewaySettingsPage Antilopay VAT rate', () => {
 
     renderWithProviders(<GatewaySettingsPage />)
     await user.click(await screen.findByRole('button', { name: 'Open settings' }))
-    await user.click(await screen.findByRole('combobox', { name: 'Antilopay VAT rate' }))
+    await user.click(await screen.findByRole('combobox', { name: 'Antilopay VAT rate (optional)' }))
     await user.click(screen.getByRole('option', { name: 'Not set' }))
     await user.click(screen.getByRole('button', { name: 'Save' }))
 
@@ -704,11 +705,12 @@ describe('GatewaySettingsPage Antilopay VAT rate', () => {
       secretId: 'secret-id-1',
       privateKey: 'private-key-1',
       publicKey: 'public-key-1',
-      savePaymentMethod: 'false',
+      autopayCardApproved: 'false',
+      autopaySbpApproved: 'false',
     })
   })
 
-  it('keeps the count of charges out of sight until autopay is approved, and sends it as typed once it is', async () => {
+  it('keeps the count of charges out of sight until a method is approved, and sends it as typed once one is', async () => {
     mockGatewayList([createAntilopay()])
     const patchSpy = vi.spyOn(api, 'patch').mockResolvedValue({ data: {} })
     grantPermissions([
@@ -722,7 +724,7 @@ describe('GatewaySettingsPage Antilopay VAT rate', () => {
     // Off by default: the count belongs to the approval, so it is not asked for yet.
     expect(screen.queryByPlaceholderText('12')).not.toBeInTheDocument()
 
-    await user.click(screen.getByRole('switch', { name: 'Autopayments approved by the provider' }))
+    await user.click(screen.getByRole('switch', { name: 'Card autopay approved by the provider' }))
     await user.type(await screen.findByPlaceholderText('12'), '12')
     await user.click(screen.getByRole('button', { name: 'Save' }))
 
@@ -732,9 +734,50 @@ describe('GatewaySettingsPage Antilopay VAT rate', () => {
       secretId: 'secret-id-1',
       privateKey: 'private-key-1',
       publicKey: 'public-key-1',
-      savePaymentMethod: 'true',
+      autopayCardApproved: 'true',
+      autopaySbpApproved: 'false',
       recurrentPaymentCount: '12',
     })
+  })
+
+  it('asks for the count once SBP alone is approved, too, and sends the two approvals apart', async () => {
+    mockGatewayList([createAntilopay()])
+    const patchSpy = vi.spyOn(api, 'patch').mockResolvedValue({ data: {} })
+    grantPermissions([
+      { resource: 'payment_gateways', action: 'view' },
+      { resource: 'payment_gateways', action: 'edit' },
+    ])
+    const user = userEvent.setup()
+
+    renderWithProviders(<GatewaySettingsPage />)
+    await user.click(await screen.findByRole('button', { name: 'Open settings' }))
+    await user.click(screen.getByRole('switch', { name: 'SBP autopay approved by the provider' }))
+    expect(await screen.findByPlaceholderText('12')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(patchSpy).toHaveBeenCalled())
+    expect(readSavedSettings(patchSpy)).toMatchObject({
+      autopayCardApproved: 'false',
+      autopaySbpApproved: 'true',
+    })
+  })
+
+  it('offers a card and an SBP approval, both off, and no single «approved by the provider» switch', async () => {
+    mockGatewayList([createAntilopay()])
+    grantPermissions([
+      { resource: 'payment_gateways', action: 'view' },
+      { resource: 'payment_gateways', action: 'edit' },
+    ])
+    const user = userEvent.setup()
+
+    renderWithProviders(<GatewaySettingsPage />)
+    await user.click(await screen.findByRole('button', { name: 'Open settings' }))
+
+    expect(screen.getByRole('switch', { name: 'Card autopay approved by the provider' })).not.toBeChecked()
+    expect(screen.getByRole('switch', { name: 'SBP autopay approved by the provider' })).not.toBeChecked()
+    expect(
+      screen.queryByRole('switch', { name: 'Autopayments approved by the provider' }),
+    ).not.toBeInTheDocument()
   })
 
   it('does not offer the VAT selector to other gateways', async () => {
@@ -749,10 +792,320 @@ describe('GatewaySettingsPage Antilopay VAT rate', () => {
     await user.click(await screen.findByRole('button', { name: 'Open settings' }))
 
     expect(await screen.findByText('Merchant ID')).toBeInTheDocument()
-    expect(screen.queryByText('Antilopay VAT rate')).not.toBeInTheDocument()
+    expect(screen.queryByText('Antilopay VAT rate (optional)')).not.toBeInTheDocument()
     expect(
-      screen.queryByRole('combobox', { name: 'Antilopay VAT rate' }),
+      screen.queryByRole('combobox', { name: 'Antilopay VAT rate (optional)' }),
     ).not.toBeInTheDocument()
+  })
+})
+
+/**
+ * The Antilopay card tells the operator what the provider's cabinet needs (the
+ * webhook address, the outgoing IP), refuses keys that are in each other's
+ * fields with a sentence that names the field, and checks the stored keys with
+ * Antilopay itself.
+ */
+describe('GatewaySettingsPage Antilopay keys, hints and «Check keys»', () => {
+  beforeAll(async () => {
+    await loadFeatureBundle('payments')
+  })
+
+  beforeEach(() => {
+    usePermissionStore.getState().reset()
+    vi.restoreAllMocks()
+  })
+
+  async function openAntilopay(settings: Record<string, unknown> = {}) {
+    mockGatewayList([createAntilopay(settings)])
+    grantPermissions([
+      { resource: 'payment_gateways', action: 'view' },
+      { resource: 'payment_gateways', action: 'edit' },
+    ])
+    const user = userEvent.setup()
+    renderWithProviders(<GatewaySettingsPage />)
+    await user.click(await screen.findByRole('button', { name: 'Open settings' }))
+    await screen.findByRole('button', { name: 'Check keys' })
+    return user
+  }
+
+  it('says where the webhook address goes and what it must be', async () => {
+    await openAntilopay()
+
+    expect(
+      screen.getByText(/Enter this address in your project's settings in the Antilopay dashboard/),
+    ).toHaveTextContent('https with a valid certificate (full chain) and TLS 1.2 or newer')
+  })
+
+  it('does not say it, nor offer the key check, on another gateway', async () => {
+    mockGatewayList([createPlatega()])
+    grantPermissions([
+      { resource: 'payment_gateways', action: 'view' },
+      { resource: 'payment_gateways', action: 'edit' },
+    ])
+    const user = userEvent.setup()
+
+    renderWithProviders(<GatewaySettingsPage />)
+    await user.click(await screen.findByRole('button', { name: 'Open settings' }))
+
+    expect(await screen.findByText('Merchant ID')).toBeInTheDocument()
+    expect(screen.queryByText(/Antilopay dashboard/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Check keys' })).not.toBeInTheDocument()
+  })
+
+  it('hints at how a public key starts, the outgoing IP and what the VAT rate is', async () => {
+    await openAntilopay()
+
+    expect(screen.getByText(/usually starts with MF, a 2048-bit one with MIIB/)).toBeInTheDocument()
+    expect(
+      screen.getByText(/add the panel server's outgoing IP there: otherwise every request fails with error 22/),
+    ).toBeInTheDocument()
+    // What the documentation says and no more: optional, ОСНО, error 17, the rate itself.
+    const vat = screen.getByText(/Needed only if your tax system at Antilopay is ОСНО/)
+    expect(vat).toHaveTextContent('Optional.')
+    expect(vat).toHaveTextContent('error 17')
+    expect(vat).toHaveTextContent('On УСН, НПД and other regimes leave it empty.')
+    expect(vat).toHaveTextContent('It is the rate itself (10 or 22), not a VAT code as in YooKassa.')
+    expect(vat).not.toHaveTextContent(/receipt/i)
+  })
+
+  const refusals: ReadonlyArray<readonly [string, string]> = [
+    ['ANTILOPAY_PUBLIC_KEY_IS_PRIVATE', 'The keys look swapped: a private key was pasted into "Public key (Base64)".'],
+    ['ANTILOPAY_PRIVATE_KEY_IS_PUBLIC', 'The keys look swapped: a public key was pasted into "Private key (Base64)".'],
+    [
+      'ANTILOPAY_PRIVATE_KEY_UNREADABLE',
+      'Could not read "Private key (Base64)": paste the whole key as Antilopay\'s dashboard issues it.',
+    ],
+    [
+      'ANTILOPAY_PUBLIC_KEY_UNREADABLE',
+      'Could not read "Public key (Base64)": paste the whole key as Antilopay\'s dashboard issues it.',
+    ],
+  ]
+  for (const [code, sentence] of refusals) {
+    it(`words the refusal ${code} as a sentence that names the field`, async () => {
+      const user = await openAntilopay()
+      vi.spyOn(api, 'patch').mockRejectedValue({ response: { data: { code, message: code } } })
+      const errorToast = vi.spyOn(toast, 'error').mockReturnValue('toast-1')
+
+      await user.click(screen.getByRole('button', { name: 'Save' }))
+
+      await waitFor(() => expect(errorToast).toHaveBeenCalledWith(sentence))
+    })
+  }
+
+  it('shows any other refusal as the panel worded it, and never takes a code from the prototype', async () => {
+    const user = await openAntilopay()
+    const patch = vi.spyOn(api, 'patch')
+    const errorToast = vi.spyOn(toast, 'error').mockReturnValue('toast-1')
+
+    patch.mockRejectedValueOnce({ response: { data: { code: 'constructor', message: 'PAYMENT_GATEWAY_SETTINGS_INVALID' } } })
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(errorToast).toHaveBeenCalledWith('PAYMENT_GATEWAY_SETTINGS_INVALID'))
+  })
+
+  it('checks the stored keys with the panel and reports that Antilopay accepted the signature', async () => {
+    const user = await openAntilopay()
+    const post = vi.spyOn(api, 'post').mockResolvedValue({
+      data: { verdict: 'OK', code: null, httpStatus: 200, failure: null },
+    })
+
+    await user.click(screen.getByRole('button', { name: 'Check keys' }))
+
+    expect(await screen.findByText('Keys are valid: Antilopay accepted the signature')).toBeInTheDocument()
+    expect(post).toHaveBeenCalledTimes(1)
+    expect(post).toHaveBeenCalledWith('/admin/payments/gateways/gateway-1/check-keys')
+  })
+
+  it('says outright that the public key is not what the button checks', async () => {
+    await openAntilopay()
+
+    expect(screen.getByText(/It does not check the public key/)).toBeInTheDocument()
+  })
+
+  const verdicts: ReadonlyArray<readonly [string, Record<string, unknown>, string]> = [
+    [
+      'the signature refused',
+      { verdict: 'SIGNATURE_REFUSED', code: 3, httpStatus: 400, failure: null },
+      'Antilopay refused the signature (error 3). Check the Secret ID and the private key.',
+    ],
+    [
+      'a Secret ID that is missing',
+      { verdict: 'SECRET_ID_REJECTED', code: 1, httpStatus: 400, failure: null },
+      'The Secret ID is missing or wrong (error 1). Check the Secret ID.',
+    ],
+    [
+      'a Secret ID that is wrong',
+      { verdict: 'SECRET_ID_REJECTED', code: 2, httpStatus: 400, failure: null },
+      'The Secret ID is missing or wrong (error 2). Check the Secret ID.',
+    ],
+    [
+      'an address that is not allowed',
+      { verdict: 'IP_NOT_ALLOWED', code: 22, httpStatus: 403, failure: null },
+      "Antilopay does not accept requests from this server's IP (error 22). Add the panel server's outgoing IP to the project's IP restriction in the Antilopay dashboard.",
+    ],
+    [
+      'keys that are not saved',
+      { verdict: 'KEYS_MISSING', code: null, httpStatus: null, failure: null },
+      'The Secret ID or the private key is not saved. Fill them in, save the settings and check again.',
+    ],
+    [
+      'a saved private key that cannot be read',
+      { verdict: 'PRIVATE_KEY_UNREADABLE', code: null, httpStatus: null, failure: null },
+      'The saved private key cannot be read. Paste it again and save.',
+    ],
+    [
+      'no answer in time',
+      { verdict: 'NOT_ANSWERED', code: null, httpStatus: null, failure: 'TIMEOUT' },
+      'Antilopay did not answer (timeout).',
+    ],
+    [
+      'no connection',
+      { verdict: 'NOT_ANSWERED', code: null, httpStatus: null, failure: 'NETWORK' },
+      'Antilopay did not answer (no connection).',
+    ],
+    [
+      'a code nobody expected',
+      { verdict: 'NOT_ANSWERED', code: 5, httpStatus: 200, failure: null },
+      'Antilopay did not answer (code 5).',
+    ],
+    [
+      'a page that is not JSON',
+      { verdict: 'NOT_ANSWERED', code: null, httpStatus: 502, failure: null },
+      'Antilopay did not answer (HTTP 502).',
+    ],
+    [
+      'a verdict this build does not know',
+      { verdict: 'SOMETHING_NEWER', code: null, httpStatus: null, failure: null },
+      'Antilopay did not answer.',
+    ],
+  ]
+  for (const [name, result, sentence] of verdicts) {
+    it(`words ${name}`, async () => {
+      const user = await openAntilopay()
+      vi.spyOn(api, 'post').mockResolvedValue({ data: result })
+
+      await user.click(screen.getByRole('button', { name: 'Check keys' }))
+
+      expect(await screen.findByText(sentence)).toBeInTheDocument()
+      // Never a green sentence for anything but the panel's OK.
+      expect(screen.queryByText('Keys are valid: Antilopay accepted the signature')).not.toBeInTheDocument()
+    })
+  }
+
+  it('reports a check the panel could not run, instead of a verdict', async () => {
+    const user = await openAntilopay()
+    vi.spyOn(api, 'post').mockRejectedValue(new Error('Request failed with status code 404'))
+
+    await user.click(screen.getByRole('button', { name: 'Check keys' }))
+
+    expect(await screen.findByText('The check could not be run: the panel did not answer.')).toBeInTheDocument()
+  })
+
+  it('asks to save first while the form differs from what is stored, and checks nothing then', async () => {
+    const user = await openAntilopay()
+    const post = vi.spyOn(api, 'post').mockResolvedValue({
+      data: { verdict: 'OK', code: null, httpStatus: 200, failure: null },
+    })
+    const checkButton = screen.getByRole('button', { name: 'Check keys' })
+    expect(checkButton).toBeEnabled()
+    await user.click(checkButton)
+    expect(await screen.findByText('Keys are valid: Antilopay accepted the signature')).toBeInTheDocument()
+
+    await user.type(screen.getByPlaceholderText('X-Apay-Secret-Id'), 'x')
+
+    expect(
+      screen.getByText(/The form has unsaved changes\. Save them, then check the keys/),
+    ).toBeInTheDocument()
+    expect(checkButton).toBeDisabled()
+    // An answer about the keys as they were saved is not shown under other ones.
+    expect(screen.queryByText('Keys are valid: Antilopay accepted the signature')).not.toBeInTheDocument()
+    await user.click(checkButton)
+    expect(post).toHaveBeenCalledTimes(1)
+  })
+
+  it('counts a switch as a change too', async () => {
+    const user = await openAntilopay()
+
+    await user.click(screen.getByRole('switch', { name: 'SBP autopay approved by the provider' }))
+
+    expect(screen.getByRole('button', { name: 'Check keys' })).toBeDisabled()
+  })
+})
+
+describe('GatewaySettingsPage Antilopay wording in Russian', () => {
+  beforeAll(async () => {
+    await i18n.changeLanguage('ru')
+    await loadFeatureBundle('payments')
+  })
+
+  afterAll(async () => {
+    await i18n.changeLanguage('en')
+    await loadFeatureBundle('payments')
+  })
+
+  beforeEach(() => {
+    usePermissionStore.getState().reset()
+    vi.restoreAllMocks()
+  })
+
+  async function openAntilopayRu() {
+    mockGatewayList([createAntilopay()])
+    grantPermissions([
+      { resource: 'payment_gateways', action: 'view' },
+      { resource: 'payment_gateways', action: 'edit' },
+    ])
+    const user = userEvent.setup()
+    renderWithProviders(<GatewaySettingsPage />)
+    await user.click(await screen.findByRole('button', { name: 'Открыть настройки' }))
+    await screen.findByRole('button', { name: 'Проверить ключи' })
+    return user
+  }
+
+  it('names the two approvals, the hints and the optional VAT rate as the owner asked', async () => {
+    await openAntilopayRu()
+
+    expect(screen.getByRole('switch', { name: 'Автосписание картой одобрено провайдером' })).toBeInTheDocument()
+    expect(screen.getByRole('switch', { name: 'Автосписание по СБП одобрено провайдером' })).toBeInTheDocument()
+    expect(screen.getByText(/обычно начинается с MF, 2048-битный — с MIIB/)).toBeInTheDocument()
+    expect(screen.getByText(/Этот адрес укажите в настройках проекта в личном кабинете Antilopay/)).toHaveTextContent(
+      'https с действительным сертификатом (полная цепочка) и TLS не ниже 1.2',
+    )
+    expect(
+      screen.getByText(/добавьте туда исходящий IP сервера панели: иначе каждый запрос получит ошибку 22/),
+    ).toBeInTheDocument()
+    expect(await screen.findByRole('combobox', { name: 'Ставка НДС Antilopay (необязательно)' })).toBeInTheDocument()
+    expect(
+      screen.getByText(
+        'Необязательное. Нужна, только если ваша система налогообложения в Antilopay — ОСНО: без неё Antilopay отклоняет каждый платёж с ошибкой 17 («Не предоставлена ставка НДС или недопустимое значение»). На УСН, НПД и других режимах оставьте пустым. Это сама ставка (10 или 22), а не код НДС, как у ЮKassa.',
+      ),
+    ).toBeInTheDocument()
+  })
+
+  it('reports the key check in Russian', async () => {
+    const user = await openAntilopayRu()
+    vi.spyOn(api, 'post').mockResolvedValue({
+      data: { verdict: 'OK', code: null, httpStatus: 200, failure: null },
+    })
+
+    await user.click(screen.getByRole('button', { name: 'Проверить ключи' }))
+
+    expect(await screen.findByText('Ключи верны: Antilopay приняла подпись')).toBeInTheDocument()
+    expect(screen.getByText(/Публичный ключ она не проверяет/)).toBeInTheDocument()
+  })
+
+  it('words a swap of the keys in Russian, quoting the field', async () => {
+    const user = await openAntilopayRu()
+    vi.spyOn(api, 'patch').mockRejectedValue({
+      response: { data: { code: 'ANTILOPAY_PUBLIC_KEY_IS_PRIVATE', message: 'ANTILOPAY_PUBLIC_KEY_IS_PRIVATE' } },
+    })
+    const errorToast = vi.spyOn(toast, 'error').mockReturnValue('toast-1')
+
+    await user.click(screen.getByRole('button', { name: 'Сохранить' }))
+
+    await waitFor(() =>
+      expect(errorToast).toHaveBeenCalledWith(
+        'Похоже, ключи перепутаны: в поле «Публичный ключ (Base64)» вставлен приватный.',
+      ),
+    )
   })
 })
 

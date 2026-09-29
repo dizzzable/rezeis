@@ -20,6 +20,7 @@ import {
   SAFE_PRODUCT_CODES,
   SAFE_REFUSAL_REASONS,
 } from '../src/common/filters/admin-safe-exception.filter';
+import { ANTILOPAY_KEY_REFUSAL_CODES } from '../src/modules/payments/utils/antilopay-keys.util';
 import {
   autopayNotAvailable,
   autopayRefusedByGateway,
@@ -634,7 +635,11 @@ describe('AdminSafeExceptionFilter', () => {
   });
 
   it('lets the refusal of a gateway that would not create the repeat charge through as an approval that is off', () => {
-    for (const cause of ['ANTILOPAY_RECURRENT_NOT_PERMITTED', 'ANTILOPAY_RECURRENT_DATA_REFUSED']) {
+    for (const cause of [
+      'ANTILOPAY_RECURRENT_NOT_PERMITTED',
+      'ANTILOPAY_RECURRENT_DATA_REFUSED',
+      'ANTILOPAY_METHOD_UNAVAILABLE',
+    ]) {
       const captured = runFilter(autopayRefusedByGateway(cause), {
         originalUrl: '/api/internal/payments/checkout',
         headers: {},
@@ -644,6 +649,22 @@ describe('AdminSafeExceptionFilter', () => {
       const body = assertResponseBody(captured.body);
       assert.equal(body.code, 'AUTOPAY_NOT_AVAILABLE_FOR_PURCHASE', cause);
       assert.equal(body.reason, 'NOT_APPROVED', 'the cabinet answers it as «сейчас недоступно»');
+    }
+  });
+
+  it('lets the four Antilopay key refusals through with their code, and only that', () => {
+    assert.deepEqual(Object.keys(ANTILOPAY_KEY_REFUSAL_CODES).length, 4);
+    for (const code of Object.values(ANTILOPAY_KEY_REFUSAL_CODES)) {
+      assert.equal(SAFE_PRODUCT_CODES.has(code), true, `${code} is an allowlisted product code`);
+      const captured = runFilter(new BadRequestException({ code, message: code }), {
+        originalUrl: '/api/admin/payments/gateways/gateway-1',
+        headers: {},
+      });
+
+      assert.equal(captured.statusCode, 400, code);
+      const body = assertResponseBody(captured.body);
+      assert.equal(body.code, code);
+      assert.equal('reason' in body, false, 'no reason rides along: the code says it all');
     }
   });
 

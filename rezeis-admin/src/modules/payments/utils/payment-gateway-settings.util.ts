@@ -2,6 +2,7 @@ import { BadRequestException } from '@nestjs/common';
 import { PaymentGatewayType, Prisma } from '@prisma/client';
 import { z } from 'zod';
 
+import { ANTILOPAY_KEY_REFUSAL_CODES, findAntilopayKeyProblem } from './antilopay-keys.util';
 import {
   decryptSettingValue,
   encryptSettingValue,
@@ -247,14 +248,33 @@ const antilopaySettingsSchema = z
     privateKey: z.string().min(1).optional(),
     publicKey: z.string().min(1).optional(),
     vat: antilopayVatSetting.optional(),
-    // «Автоплатежи одобрены провайдером»: Antilopay enables recurring payments
-    // per project, and answers error 30 until it has (gateway-autopay.util.ts).
-    savePaymentMethod: yookassaBooleanSetting.optional(),
+    // «Автосписание картой одобрено провайдером» and «Автосписание по СБП
+    // одобрено провайдером»: Antilopay enables recurring payments per project
+    // and per method, and answers error 30 (or 25) until it has
+    // (gateway-autopay.util.ts). Both are off until the operator says so.
+    autopayCardApproved: yookassaBooleanSetting.optional(),
+    autopaySbpApproved: yookassaBooleanSetting.optional(),
     // «Число списаний (вместе с первым)»: sent as `recurrent.payment_count` only
     // when set (antilopay-recurrent.util.ts). A whole number of at least 2.
     recurrentPaymentCount: antilopayPaymentCountSetting.optional(),
   })
   .strict();
+
+/**
+ * The keys that are about to be stored, read the way the code that will use
+ * them reads them (`antilopay-keys.util.ts`). A refusal names the field and
+ * whether the keys look swapped, so the operator is not told only that the
+ * settings are «invalid». Thrown with its own code, not the schema's, and
+ * `normalizeGatewaySettingsForStorage` lets it through.
+ */
+function assertAntilopayKeys<T extends { readonly privateKey?: string; readonly publicKey?: string }>(settings: T): T {
+  const problem = findAntilopayKeyProblem(settings);
+  if (problem !== null) {
+    const code = ANTILOPAY_KEY_REFUSAL_CODES[problem];
+    throw new BadRequestException({ code, message: code });
+  }
+  return settings;
+}
 
 const overpaySettingsSchema = z
   .object({
@@ -423,7 +443,7 @@ export function normalizeGatewaySettingsForStorage(
       case PaymentGatewayType.PLATEGA:
         return stripUndefinedEntries(plategaSettingsSchema.parse(rawSettings));
       case PaymentGatewayType.ANTILOPAY:
-        return stripUndefinedEntries(antilopaySettingsSchema.parse(rawSettings));
+        return stripUndefinedEntries(assertAntilopayKeys(antilopaySettingsSchema.parse(rawSettings)));
       case PaymentGatewayType.OVERPAY:
         return stripUndefinedEntries(overpaySettingsSchema.parse(rawSettings));
       case PaymentGatewayType.PAYPALYCH:
@@ -447,7 +467,11 @@ export function normalizeGatewaySettingsForStorage(
       default:
         return stripUndefinedEntries(rawSettings);
     }
-  } catch {
+  } catch (error) {
+    // A refusal that names its own reason (the Antilopay key checks) is the
+    // answer as it stands; anything else is the schema's, and says only that
+    // the settings are invalid.
+    if (error instanceof BadRequestException) throw error;
     throw new BadRequestException('PAYMENT_GATEWAY_SETTINGS_INVALID');
   }
 }

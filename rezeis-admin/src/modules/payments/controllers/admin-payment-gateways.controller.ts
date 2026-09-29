@@ -10,6 +10,10 @@ import { RbacService } from '../../rbac/services/rbac.service';
 import { MovePaymentGatewayDto } from '../dto/move-payment-gateway.dto';
 import { UpdatePaymentGatewayDto } from '../dto/update-payment-gateway.dto';
 import { AdminPaymentGatewayInterface } from '../interfaces/admin-payment-gateway.interface';
+import {
+  AntilopayKeyCheckService,
+  type AntilopayKeyCheckResult,
+} from '../services/antilopay-key-check.service';
 import { PaymentGatewayRegistryService } from '../services/payment-gateway-registry.service';
 import {
   ProviderSubscriptionService,
@@ -24,6 +28,7 @@ export class AdminPaymentGatewaysController {
     private readonly paymentGatewayRegistryService: PaymentGatewayRegistryService,
     private readonly rbacService: RbacService,
     private readonly providerSubscriptionService: ProviderSubscriptionService,
+    private readonly antilopayKeyCheckService: AntilopayKeyCheckService,
   ) {}
 
   /**
@@ -115,6 +120,19 @@ export class AdminPaymentGatewaysController {
       input.direction,
       await this.canRevealSecrets(admin),
     );
+  }
+
+  /**
+   * «Проверить ключи» on the Antilopay card: Antilopay's own `signature/check`
+   * run with the STORED Secret ID and private key. It sends a request signed
+   * with a credential, so it takes the permission that changes the credential
+   * (`edit`), not the one that reads the list. Answers with a verdict, never
+   * with a credential.
+   */
+  @Post(':gatewayId/check-keys')
+  @RequirePermission('payment_gateways', 'edit')
+  public checkGatewayKeys(@Param('gatewayId') gatewayId: string): Promise<AntilopayKeyCheckResult> {
+    return this.antilopayKeyCheckService.check(gatewayId);
   }
 
   @Post('defaults')

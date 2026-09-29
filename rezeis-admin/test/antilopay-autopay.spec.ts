@@ -46,7 +46,7 @@ import {
   parseAntilopayRecurrent,
   readAntilopayPaymentCount,
 } from '../src/modules/payments/utils/antilopay-recurrent.util';
-import { isAutopayApproved } from '../src/modules/payments/utils/gateway-autopay.util';
+import { approvedAutopayMethods, isAutopayApproved } from '../src/modules/payments/utils/gateway-autopay.util';
 import { normalizeGatewaySettingsForStorage } from '../src/modules/payments/utils/payment-gateway-settings.util';
 import {
   antilopayPeriodForDays,
@@ -69,7 +69,8 @@ const GATEWAY_SETTINGS = {
   secretId: 'secret-id-1',
   privateKey: KEY_PAIR.privateKey,
   publicKey: 'MFwwDQYJKoZI',
-  savePaymentMethod: true,
+  autopayCardApproved: true,
+  autopaySbpApproved: true,
 };
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -145,14 +146,21 @@ describe('Antilopay settings', () => {
     assert.equal(readAntilopayPaymentCount({}), null);
   });
 
-  it('stores the switch and the count, refusing a count below 2', () => {
+  it('stores the two switches and the count, refusing a count below 2', () => {
     const stored = normalizeGatewaySettingsForStorage(PaymentGatewayType.ANTILOPAY, {
       projectIdentificator: 'p',
-      savePaymentMethod: 'true',
+      autopayCardApproved: 'true',
+      autopaySbpApproved: 'false',
       recurrentPaymentCount: '12',
     }) as Record<string, unknown>;
-    assert.equal(stored['savePaymentMethod'], true);
+    assert.equal(stored['autopayCardApproved'], true);
+    assert.equal(stored['autopaySbpApproved'], false);
     assert.equal(stored['recurrentPaymentCount'], 12);
+    assert.throws(
+      () => normalizeGatewaySettingsForStorage(PaymentGatewayType.ANTILOPAY, { projectIdentificator: 'p', savePaymentMethod: 'true' }),
+      /PAYMENT_GATEWAY_SETTINGS_INVALID/,
+      'the one switch of the other gateways is not a setting of this one',
+    );
     for (const bad of ['1', 1, '0', 'twelve']) {
       assert.throws(
         () => normalizeGatewaySettingsForStorage(PaymentGatewayType.ANTILOPAY, { recurrentPaymentCount: bad }),
@@ -162,10 +170,21 @@ describe('Antilopay settings', () => {
     }
   });
 
-  it('is off until the operator approves it', () => {
-    assert.equal(isAutopayApproved(PaymentGatewayType.ANTILOPAY, {}), false);
-    assert.equal(isAutopayApproved(PaymentGatewayType.ANTILOPAY, { savePaymentMethod: false }), false);
-    assert.equal(isAutopayApproved(PaymentGatewayType.ANTILOPAY, { savePaymentMethod: true }), true);
+  it('is off until the operator approves it, and is approved a method at a time', () => {
+    const antilopay = PaymentGatewayType.ANTILOPAY;
+    assert.equal(isAutopayApproved(antilopay, {}), false);
+    assert.equal(isAutopayApproved(antilopay, { savePaymentMethod: true }), false, 'ЮKassa\'s key means nothing here');
+    assert.equal(isAutopayApproved(antilopay, { autopayCardApproved: false, autopaySbpApproved: false }), false);
+    assert.equal(isAutopayApproved(antilopay, { autopayCardApproved: true }), true, 'any method, when none is named');
+    assert.equal(isAutopayApproved(antilopay, { autopayCardApproved: true }, 'CARD'), true);
+    assert.equal(isAutopayApproved(antilopay, { autopayCardApproved: true }, 'SBP'), false);
+    assert.equal(isAutopayApproved(antilopay, { autopaySbpApproved: true }, 'SBP'), true);
+    assert.equal(isAutopayApproved(antilopay, { autopaySbpApproved: true }, 'CARD'), false);
+    assert.deepEqual(approvedAutopayMethods(antilopay, {}), []);
+    assert.deepEqual(approvedAutopayMethods(antilopay, { autopaySbpApproved: true }), ['SBP']);
+    assert.deepEqual(approvedAutopayMethods(antilopay, { autopayCardApproved: true, autopaySbpApproved: true }), ['CARD', 'SBP']);
+    assert.deepEqual(approvedAutopayMethods(PaymentGatewayType.PLATEGA, { savePaymentMethod: true }), [], 'only Antilopay has methods');
+    assert.equal(isAutopayApproved(PaymentGatewayType.PLATEGA, { savePaymentMethod: true }, 'SBP'), true, 'the method means nothing on the others');
   });
 });
 
@@ -304,13 +323,39 @@ describe('Antilopay checkout creation', () => {
   it('signs nobody up once the operator has switched approval off, and asks Antilopay nothing', async () => {
     const created = await create({
       snapshot: { [PROVIDER_SUBSCRIPTION_SNAPSHOT_KEY]: terms('CARD') },
-      settings: { ...GATEWAY_SETTINGS, savePaymentMethod: false },
+      settings: { ...GATEWAY_SETTINGS, autopayCardApproved: false, autopaySbpApproved: false },
     });
     await assert.rejects(created.result, (error: { getResponse?: () => unknown }) => {
       assert.equal((error.getResponse?.() as { code?: string }).code, AUTOPAY_NOT_AVAILABLE_CODE);
       return true;
     });
     assert.equal(created.calls.length, 0);
+  });
+
+  it('asks about the payer\'s own method: a card approved does not sign up an SBP payer, nor the reverse', async () => {
+    for (const [method, off] of [
+      ['SBP', { autopayCardApproved: true, autopaySbpApproved: false }],
+      ['CARD', { autopayCardApproved: false, autopaySbpApproved: true }],
+    ] as const) {
+      const refused = await create({
+        snapshot: { [PROVIDER_SUBSCRIPTION_SNAPSHOT_KEY]: terms(method) },
+        settings: { ...GATEWAY_SETTINGS, ...off },
+      });
+      await assert.rejects(refused.result, (error: { getResponse?: () => unknown }) => {
+        const body = error.getResponse?.() as { code?: string; reason?: string };
+        assert.equal(body.code, AUTOPAY_NOT_AVAILABLE_CODE, method);
+        assert.equal(body.reason, 'NOT_APPROVED', method);
+        return true;
+      });
+      assert.equal(refused.calls.length, 0, `${method}: Antilopay is not asked`);
+
+      const allowed = await create({
+        snapshot: { [PROVIDER_SUBSCRIPTION_SNAPSHOT_KEY]: terms(method === 'SBP' ? 'CARD' : 'SBP') },
+        settings: { ...GATEWAY_SETTINGS, ...off },
+      });
+      await allowed.result;
+      assert.equal(allowed.calls.length, 1, 'the approved method goes through');
+    }
   });
 
   it('refuses a sign-up with no method', async () => {
@@ -423,7 +468,8 @@ describe('Antilopay checkout creation', () => {
         assert.equal(card.metadata['gatewayType'], PaymentGatewayType.ANTILOPAY);
         assert.equal(card.metadata['reason'], 'ANTILOPAY_ERROR_30');
         const note = String(card.metadata['note']);
-        assert.match(note, /«Автоплатежи одобрены провайдером»/);
+        assert.match(note, /«Автосписание картой одобрено провайдером»/);
+        assert.match(note, /«Автосписание по СБП одобрено провайдером»/);
         assert.match(note, /«Платёжные шлюзы»/);
         assert.match(note, /«Открыть настройки»/);
       } finally {
@@ -440,7 +486,48 @@ describe('Antilopay checkout creation', () => {
       assert.equal(h.cards.length, 1);
       assert.equal(h.cards[0]?.metadata['reason'], 'ANTILOPAY_ERROR_29');
       assert.match(String(h.cards[0]?.metadata['note']), /«Число списаний \(вместе с первым\)»/);
-      assert.match(String(h.cards[0]?.metadata['note']), /«Автоплатежи одобрены провайдером»/);
+      assert.match(String(h.cards[0]?.metadata['note']), /«Автосписание картой одобрено провайдером»/);
+      assert.match(String(h.cards[0]?.metadata['note']), /«Автосписание по СБП одобрено провайдером»/);
+    });
+
+    it('answers error 25 as an approval that is off, and names the switch of the method that was refused', async () => {
+      const h = refusing({ data: { code: 25, error: 'Payment method is not available' } });
+      const sbp = await refused(() => h.attempt({ [PROVIDER_SUBSCRIPTION_SNAPSHOT_KEY]: terms('SBP') }));
+
+      assert.equal(sbp?.message, 'ANTILOPAY_METHOD_UNAVAILABLE');
+      const body = (sbp as { getResponse?: () => { code?: string; reason?: string } }).getResponse?.();
+      assert.equal(body?.code, AUTOPAY_NOT_AVAILABLE_CODE);
+      assert.equal(body?.reason, 'NOT_APPROVED', 'the buyer is told «сейчас недоступно» and offered the ordinary payment');
+      assert.equal(h.cards.length, 1);
+      const card = h.cards[0]!;
+      assert.equal(card.type, 'payment.autopay_attention');
+      assert.equal(card.metadata['reason'], 'ANTILOPAY_ERROR_25');
+      assert.equal(card.metadata['method'], 'SBP');
+      const note = String(card.metadata['note']);
+      assert.match(note, /«Автосписание по СБП одобрено провайдером»/);
+      assert.doesNotMatch(note, /«Автосписание картой одобрено провайдером»/, 'only the method that was refused');
+      assert.match(note, /«Платёжные шлюзы»/);
+      assert.match(note, /«Открыть настройки»/);
+    });
+
+    it('tells error 25 once per method, so a refused SBP sign-up does not spare the card one', async () => {
+      const h = refusing({ data: { code: 25, error: 'Payment method is not available' } });
+
+      await refused(() => h.attempt({ [PROVIDER_SUBSCRIPTION_SNAPSHOT_KEY]: terms('SBP') }));
+      await refused(() => h.attempt({ [PROVIDER_SUBSCRIPTION_SNAPSHOT_KEY]: terms('SBP') }));
+      assert.equal(h.cards.length, 1, 'many buyers, one card');
+
+      await refused(() => h.attempt({ [PROVIDER_SUBSCRIPTION_SNAPSHOT_KEY]: terms('CARD') }));
+      assert.equal(h.cards.length, 2);
+      assert.match(String(h.cards[1]?.metadata['note']), /«Автосписание картой одобрено провайдером»/);
+    });
+
+    it('leaves error 25 on an ordinary payment as the provider\'s own error', async () => {
+      const h = refusing({ data: { code: 25, error: 'Payment method is not available' } });
+      const error = await refused(() => h.attempt({ id: 'plan-1' }));
+
+      assert.match(String(error?.message), /^Antilopay error 25: /);
+      assert.equal(h.cards.length, 0);
     });
 
     it('says nothing to the operator of an ordinary payment, and reads an answer that is not JSON', async () => {
