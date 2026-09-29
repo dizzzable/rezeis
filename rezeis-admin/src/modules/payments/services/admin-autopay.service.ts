@@ -330,6 +330,7 @@ export class AdminAutopayService implements OnModuleDestroy {
 function providerName(gatewayType: string): string {
   if (gatewayType === PaymentGatewayType.PLATEGA) return 'Platega';
   if (gatewayType === PaymentGatewayType.ROLLYPAY) return 'RollyPay';
+  if (gatewayType === PaymentGatewayType.ANTILOPAY) return 'Antilopay';
   return gatewayType;
 }
 

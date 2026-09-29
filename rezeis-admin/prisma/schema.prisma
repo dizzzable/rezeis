@@ -2725,6 +2725,18 @@ model ProviderSubscription {
   /// CUSTOMER, OPERATOR or SYSTEM when the panel cancelled it; PROVIDER when it
   /// learned of a cancellation it did not make (the payer's own link).
   cancelledBy            String?                    @map("cancelled_by")
+  /// Antilopay only: its `recurrent_id`. The row is keyed by the initiating payment's id
+  /// (`providerSubscriptionId`, which `payment/create` returns and which Antilopay
+  /// accepts as `transaction_id` to cancel) because the recurrent's own id is not in
+  /// that answer: it arrives in the first callback or in `payment/check`. Every later
+  /// callback names the recurrent, so it is found by this column.
+  providerRecurrentId    String?                    @map("provider_recurrent_id")
+  /// When the provider's plan of charges ends (Antilopay `end_date`); null when it does not say.
+  endsAt                 DateTime?                  @map("ends_at") @db.Timestamptz(3)
+  /// How many charges the provider plans in all, the first included (Antilopay `count`).
+  plannedChargeCount     Int?                       @map("planned_charge_count")
+  /// CARD or SBP where the gateway offers both (Antilopay); null for the others.
+  method                 String?                    @map("method")
   consentVersion         String                     @map("consent_version")
   createdAt              DateTime                   @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt              DateTime                   @updatedAt @map("updated_at") @db.Timestamptz(3)
@@ -2732,6 +2744,7 @@ model ProviderSubscription {
   user User? @relation("UserProviderSubscriptions", fields: [userId], references: [id], onDelete: SetNull)
 
   @@unique([gatewayType, providerSubscriptionId])
+  @@unique([gatewayType, providerRecurrentId], map: "provider_subscriptions_gateway_type_provider_recurrent_id_key")
   @@index([userId, status])
   @@index([status, nextChargeAt])
   @@map("provider_subscriptions")

@@ -634,6 +634,9 @@ describe('GatewaySettingsPage Antilopay VAT rate', () => {
       // `'10'` is a member of the backend's accepted enum and normalizes to
       // the number 10 on storage; the label the operator read is not sent.
       vat: '10',
+      // The switch is on the form too, and an untouched one is sent as OFF —
+      // the value an absent key already reads as (gateway-autopay.util.ts).
+      savePaymentMethod: 'false',
     })
   })
 
@@ -701,6 +704,36 @@ describe('GatewaySettingsPage Antilopay VAT rate', () => {
       secretId: 'secret-id-1',
       privateKey: 'private-key-1',
       publicKey: 'public-key-1',
+      savePaymentMethod: 'false',
+    })
+  })
+
+  it('keeps the count of charges out of sight until autopay is approved, and sends it as typed once it is', async () => {
+    mockGatewayList([createAntilopay()])
+    const patchSpy = vi.spyOn(api, 'patch').mockResolvedValue({ data: {} })
+    grantPermissions([
+      { resource: 'payment_gateways', action: 'view' },
+      { resource: 'payment_gateways', action: 'edit' },
+    ])
+    const user = userEvent.setup()
+
+    renderWithProviders(<GatewaySettingsPage />)
+    await user.click(await screen.findByRole('button', { name: 'Open settings' }))
+    // Off by default: the count belongs to the approval, so it is not asked for yet.
+    expect(screen.queryByPlaceholderText('12')).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('switch', { name: 'Autopayments approved by the provider' }))
+    await user.type(await screen.findByPlaceholderText('12'), '12')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(patchSpy).toHaveBeenCalled())
+    expect(readSavedSettings(patchSpy)).toEqual({
+      projectIdentificator: 'project-1',
+      secretId: 'secret-id-1',
+      privateKey: 'private-key-1',
+      publicKey: 'public-key-1',
+      savePaymentMethod: 'true',
+      recurrentPaymentCount: '12',
     })
   })
 

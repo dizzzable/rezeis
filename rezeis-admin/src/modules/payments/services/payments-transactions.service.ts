@@ -224,15 +224,18 @@ export class PaymentsTransactionsService {
        * field so the admin draft endpoint can never create one.
        */
       readonly providerSubscription?: boolean;
+      /** Antilopay: CARD or SBP, the payer's choice for that subscription. */
+      readonly autopayMethod?: unknown;
     } = {},
   ): Promise<AdminPaymentTransactionInterface> {
-    return this.createDraftInternal(input, true, options.providerSubscription === true);
+    return this.createDraftInternal(input, true, options.providerSubscription === true, options.autopayMethod);
   }
 
   private async createDraftInternal(
     input: CreateTransactionDraftDto,
     allowPaidTrialReservation: boolean,
     providerSubscription = false,
+    autopayMethod: unknown = undefined,
   ): Promise<AdminPaymentTransactionInterface> {
     if ((input.purchaseType as unknown as string) === 'TRIAL') {
       throw new BadRequestException({
@@ -412,6 +415,7 @@ export class PaymentsTransactionsService {
         // on the trial's plan — `strandedReason` knows (`trialConversion`).
         subscriptionId:
           input.purchaseType === PurchaseType.RENEW || convertsTrial ? sourceSubscriptionId : null,
+        method: autopayMethod,
       });
       if ('refusal' in resolved) {
         throw autopayNotAvailable(resolved.refusal);

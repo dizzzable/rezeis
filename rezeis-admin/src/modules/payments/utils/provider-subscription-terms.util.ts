@@ -2,7 +2,9 @@ import { BadRequestException } from '@nestjs/common';
 import { PaymentGatewayType, Prisma } from '@prisma/client';
 
 import type { CatalogDiscountSource } from '../../plans/interfaces/plan-catalog.interface';
+import { type AntilopayAutopayMethod, isAntilopayAutopayMethod } from './antilopay-recurrent.util';
 import {
+  antilopayPeriodForDays,
   plategaPeriodForDays,
   type ProviderIntervalUnit,
   type ProviderPeriod,
@@ -19,6 +21,7 @@ import {
 export const PROVIDER_SUBSCRIPTION_GATEWAY_TYPES: ReadonlySet<PaymentGatewayType> = new Set([
   PaymentGatewayType.PLATEGA,
   PaymentGatewayType.ROLLYPAY,
+  PaymentGatewayType.ANTILOPAY,
 ]);
 
 function providerPeriodForDays(gatewayType: PaymentGatewayType, durationDays: number): ProviderPeriod | null {
@@ -27,6 +30,8 @@ function providerPeriodForDays(gatewayType: PaymentGatewayType, durationDays: nu
       return plategaPeriodForDays(durationDays);
     case PaymentGatewayType.ROLLYPAY:
       return rollypayPeriodForDays(durationDays);
+    case PaymentGatewayType.ANTILOPAY:
+      return antilopayPeriodForDays(durationDays);
     default:
       return null;
   }
@@ -50,6 +55,12 @@ export interface ProviderSubscriptionTerms {
   readonly planId: string;
   /** The subscription each charge renews; null for a new purchase until its first charge creates one. */
   readonly subscriptionId: string | null;
+  /**
+   * Antilopay only: how the payer signs up, CARD or SBP. Chosen before the
+   * payment form opens, because the two are different categories of recurrent
+   * payment (`antilopay-recurrent.util.ts`). Absent for every other gateway.
+   */
+  readonly method?: AntilopayAutopayMethod;
 }
 
 /**
@@ -75,6 +86,8 @@ export const PROVIDER_SUBSCRIPTION_REFUSALS = [
   'PLAN',
   // A renewal onto a plan the subscription is not on (see `renewsOntoAnotherPlan`).
   'PLAN_CHANGE',
+  // Antilopay: the sign-up names neither CARD nor SBP.
+  'METHOD',
 ] as const;
 
 export type ProviderSubscriptionRefusal = (typeof PROVIDER_SUBSCRIPTION_REFUSALS)[number];
@@ -102,6 +115,8 @@ export function resolveProviderSubscriptionTerms(input: {
   readonly discountSource: CatalogDiscountSource;
   readonly planId: string;
   readonly subscriptionId: string | null;
+  /** The payer's choice where a gateway offers two (Antilopay: CARD or SBP). */
+  readonly method?: unknown;
 }): ProviderSubscriptionTermsResult {
   if (!PROVIDER_SUBSCRIPTION_GATEWAY_TYPES.has(input.gatewayType)) return { refusal: 'GATEWAY' };
   if (input.currency !== 'RUB') return { refusal: 'CURRENCY' };
@@ -110,6 +125,12 @@ export function resolveProviderSubscriptionTerms(input: {
   if (period === null) return { refusal: 'DURATION' };
   const amount = wholeRoubles(input.amount);
   if (amount === null) return { refusal: 'AMOUNT' };
+  // Antilopay repeats a charge either on a card or over SBP, and the payer
+  // must have said which before the payment form opened.
+  const method = input.gatewayType === PaymentGatewayType.ANTILOPAY ? input.method : undefined;
+  if (input.gatewayType === PaymentGatewayType.ANTILOPAY && !isAntilopayAutopayMethod(method)) {
+    return { refusal: 'METHOD' };
+  }
   return {
     terms: {
       unit: period.unit,
@@ -118,6 +139,7 @@ export function resolveProviderSubscriptionTerms(input: {
       durationDays: input.durationDays,
       planId: input.planId,
       subscriptionId: input.subscriptionId,
+      ...(isAntilopayAutopayMethod(method) ? { method } : {}),
     },
   };
 }
@@ -168,6 +190,7 @@ export function readProviderSubscriptionTerms(planSnapshot: unknown): ProviderSu
   const durationDays = terms['durationDays'];
   const planId = terms['planId'];
   const subscriptionId = terms['subscriptionId'];
+  const method = terms['method'];
   if (
     (unit !== 'day' && unit !== 'week' && unit !== 'month' && unit !== 'year') ||
     !isPositiveInteger(count) ||
@@ -179,7 +202,7 @@ export function readProviderSubscriptionTerms(planSnapshot: unknown): ProviderSu
   ) {
     return null;
   }
-  return { unit, count, amount, durationDays, planId, subscriptionId };
+  return { unit, count, amount, durationDays, planId, subscriptionId, ...(isAntilopayAutopayMethod(method) ? { method } : {}) };
 }
 
 function isPositiveInteger(value: unknown): value is number {

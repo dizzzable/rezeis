@@ -18,14 +18,21 @@ import {
 import { readGatewaySettings, resolvePlategaPaymentMethod } from '../utils/payment-gateway-settings.util';
 import {
   ANTILOPAY_API,
+  ANTILOPAY_NO_RECURRENT_PERMISSION,
   antilopayHeaders,
   signAntilopayBody,
   toAntilopayPrivateKeyPem,
 } from '../utils/antilopay-api.util';
+import {
+  type AntilopayRecurrentRequest,
+  buildAntilopayRecurrent,
+  readAntilopayPaymentCount,
+} from '../utils/antilopay-recurrent.util';
 import { isAutopayApproved } from '../utils/gateway-autopay.util';
 import { normalizePaymentProviderError, redactPaymentDiagnosticMessage } from '../utils/payment-provider-error.util';
 import { PLATEGA_INTERVAL_CODE } from '../utils/provider-subscription-period.util';
 import {
+  AUTOPAY_NOT_AVAILABLE_CODE,
   autopayNotAvailable,
   type ProviderSubscriptionTerms,
   readProviderSubscriptionTerms,
@@ -894,6 +901,7 @@ export class PaymentProviderExecutionService {
 
     const successUrl = await this.resolveSuccessUrl(input.transaction.paymentId, input.successUrl);
     const failUrl = await this.resolveFailUrl(input.transaction.paymentId, input.failUrl, input.successUrl);
+    const recurrent = this.buildAntilopayRecurrentRequest(input.transaction, settings);
 
     const payload = {
       project_identificator: projectIdentificator,
@@ -909,6 +917,13 @@ export class PaymentProviderExecutionService {
       description: input.description.slice(0, 255),
       success_url: successUrl,
       fail_url: failUrl,
+      // «для автоматического списания»: this payment is the start of a
+      // subscription Antilopay then charges on its own schedule. `prefer_methods`
+      // keeps the form on the method the category works with (cards for
+      // PAYMENT_TEMPLATE, SBP for SUBSCRIPTION).
+      ...(recurrent === null
+        ? {}
+        : { recurrent: recurrent.recurrent, prefer_methods: [...recurrent.preferMethods] }),
       customer: {
         // `customer` is mandatory here and must carry an email or a phone —
         // error 11. The callback echoes the block straight back to us, so this
@@ -935,6 +950,23 @@ export class PaymentProviderExecutionService {
 
     const data = response.data as Record<string, unknown>;
     if (data.code !== 0) {
+      if (recurrent !== null && data.code === ANTILOPAY_NO_RECURRENT_PERMISSION) {
+        // «Нет разрешения на создание рекуррентных платежей»: Antilopay has not
+        // enabled repeat charges for this project. It is the operator's to fix,
+        // so it is said in words on the operator's side, and the payer is only
+        // told automatic charging is unavailable (the cabinet offers the
+        // ordinary payment).
+        this.logger.error(
+          'Antilopay refused a recurrent payment with error 30 («Нет разрешения на создание рекуррентных ' +
+            'платежей»): the project has no approval for repeat charges. Ask Antilopay to enable them, ' +
+            'and switch «Автоплатежи одобрены провайдером» off for the gateway until they do.',
+        );
+        throw new BadRequestException({
+          code: AUTOPAY_NOT_AVAILABLE_CODE,
+          message: 'ANTILOPAY_RECURRENT_NOT_PERMITTED',
+          reason: 'NOT_APPROVED',
+        });
+      }
       const providerError = redactPaymentDiagnosticMessage(String(data.error ?? 'unknown'), 120) ?? 'unknown';
       throw new BadRequestException(`Antilopay error ${data.code}: ${providerError}`);
     }
@@ -946,6 +978,35 @@ export class PaymentProviderExecutionService {
       providerStatus: 'PENDING',
       gatewayData: { provider: 'ANTILOPAY', providerResponse: this.redactProviderResponse(data), checkoutUrl: readOptionalString(data, ['payment_url']) },
     };
+  }
+
+  /**
+   * The `recurrent` object of a sign-up, or null for an ordinary payment.
+   * Re-checked here, not only when the draft was made: a draft outlives the
+   * operator's switch, and nothing may sign a payer up the project is not
+   * approved for.
+   */
+  private buildAntilopayRecurrentRequest(
+    transaction: Transaction,
+    settings: Record<string, unknown>,
+  ): AntilopayRecurrentRequest | null {
+    const terms = readProviderSubscriptionTerms(transaction.planSnapshot);
+    if (terms === null) return null;
+    if (!isAutopayApproved(PaymentGatewayType.ANTILOPAY, settings)) {
+      throw autopayNotAvailable('NOT_APPROVED');
+    }
+    if (terms.method === undefined) {
+      throw autopayNotAvailable('METHOD');
+    }
+    const request = buildAntilopayRecurrent({
+      period: { unit: terms.unit, count: terms.count },
+      method: terms.method,
+      paymentCount: readAntilopayPaymentCount(settings),
+    });
+    if (request === null) {
+      throw autopayNotAvailable('DURATION');
+    }
+    return request;
   }
 
   /**

@@ -177,7 +177,7 @@ export class PaymentsCheckoutService {
         channel,
         deviceType: input.deviceType,
       },
-      { providerSubscription },
+      { providerSubscription, autopayMethod: input.autopayMethod },
     );
     const transaction = await this.prismaService.transaction.findUnique({
       where: { paymentId: createdDraft.paymentId },

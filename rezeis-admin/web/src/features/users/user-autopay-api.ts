@@ -16,6 +16,12 @@ export interface AutopayProviderSubscription {
   readonly planName: string | null
   readonly subscriptionId: string | null
   readonly nextChargeAt: string | null
+  /** When the provider's plan of charges ends (Antilopay); null when it names no end. */
+  readonly endsAt: string | null
+  /** How many charges the provider plans in all, the first included (Antilopay). */
+  readonly plannedChargeCount: number | null
+  /** CARD or SBP where the gateway offers both (Antilopay). */
+  readonly method: string | null
   /** A cancel asked for and still waiting for the provider. */
   readonly cancelRequestedBy: 'OPERATOR' | 'REFUND' | null
 }

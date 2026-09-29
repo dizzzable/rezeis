@@ -184,6 +184,7 @@ export class InternalPaymentsController {
       savedPaymentMethodId: input.savedPaymentMethodId,
       savePaymentMethod: input.savePaymentMethod,
       savePaymentMethodConsent: input.savePaymentMethodConsent,
+      autopayMethod: input.autopayMethod,
     });
   }
 

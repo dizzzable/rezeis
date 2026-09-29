@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { PaymentGatewayType } from '@prisma/client';
 import { Queue } from 'bullmq';
@@ -34,6 +34,8 @@ interface IngestWebhookInput {
 
 @Injectable()
 export class PaymentWebhookIngressService {
+  private readonly logger = new Logger(PaymentWebhookIngressService.name);
+
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly paymentWebhookNormalizerService: PaymentWebhookNormalizerService,
@@ -208,6 +210,46 @@ export class PaymentWebhookIngressService {
       return { accepted: true, duplicate: false, lifecycleStatus: PAYMENT_WEBHOOK_STATUS_ENQUEUED };
     }
 
+    // Antilopay puts `recurrent_id` on a payment that is part of a repeat-charge
+    // subscription: the sign-up's own first payment, and every charge after it.
+    // A charge's `order_id` is not one of ours (Antilopay makes it up when it
+    // charges on its schedule), so the pipeline below would look for a payment
+    // that does not exist and fail. Such a callback is only a reason to look:
+    // the subscription is read with our own keys, and each charge it lists is
+    // delivered once, under its own payment id. The first payment carries OUR
+    // order and goes down the ordinary pipeline too — it completes the checkout
+    // — with the same look queued after it, which is what links the sign-up to
+    // its recurrent.
+    const antilopayRecurrent = readAntilopayCallbackReferences(input.gatewayType, input.rawBody);
+    let recurrentFollowUp: AntilopayCallbackReferences | null = null;
+    if (antilopayRecurrent !== null) {
+      const ours =
+        antilopayRecurrent.orderId === null
+          ? null
+          : await this.prismaService.transaction.findUnique({
+              where: { paymentId: antilopayRecurrent.orderId },
+              select: { id: true },
+            });
+      if (ours === null) {
+        if (input.verifySignature) {
+          this.paymentWebhookNormalizerService.verifyWebhookSignature({
+            gatewayType: input.gatewayType,
+            rawBody: input.rawBody,
+            headers: input.headers,
+            clientIp: input.clientIp,
+            gatewaySettings: gateway.settings,
+          });
+        }
+        this.announceWebhook(input.gatewayType, 'subscription-charge', {
+          providerRecurrentId: antilopayRecurrent.recurrentId,
+          ...(antilopayRecurrent.paymentId === null ? {} : { providerPaymentId: antilopayRecurrent.paymentId }),
+        });
+        await this.providerSubscriptionService.enqueueRecurrentSync(input.gatewayType, antilopayRecurrent.recurrentId);
+        return { accepted: true, duplicate: false, lifecycleStatus: PAYMENT_WEBHOOK_STATUS_ENQUEUED };
+      }
+      recurrentFollowUp = antilopayRecurrent;
+    }
+
     const envelope = this.paymentWebhookNormalizerService.normalizeWebhook({
       gatewayType: input.gatewayType,
       rawBody: input.rawBody,
@@ -247,6 +289,24 @@ export class PaymentWebhookIngressService {
           PAYMENT_RECONCILIATION_ENQUEUE_FAILED,
         );
         throw error;
+      }
+    }
+
+    if (recurrentFollowUp !== null) {
+      // After the payment's own work is queued, and never at its cost: a look
+      // that could not be queued is found by the sweep (a sign-up not yet
+      // linked is looked at every ten minutes), and the callback must answer 200.
+      try {
+        await this.providerSubscriptionService.enqueueRecurrentSync(
+          input.gatewayType,
+          recurrentFollowUp.recurrentId,
+          recurrentFollowUp.orderId,
+        );
+      } catch (error: unknown) {
+        this.logger.warn(
+          `Could not queue the look at Antilopay recurrent ${recurrentFollowUp.recurrentId}: ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+        );
       }
     }
 
@@ -306,6 +366,48 @@ export function readRollypayCallbackReferences(
   if (typeof orderId !== 'string' || orderId.trim().length === 0) return null;
   if (typeof paymentId !== 'string' || paymentId.trim().length === 0) return null;
   return { orderId: orderId.trim(), paymentId: paymentId.trim() };
+}
+
+/** What an Antilopay callback of a repeat-charge subscription's payment names. */
+export interface AntilopayCallbackReferences {
+  readonly orderId: string | null;
+  /** `recurrent_id`: the subscription the payment belongs to. */
+  readonly recurrentId: string;
+  readonly paymentId: string | null;
+}
+
+/**
+ * An Antilopay payment callback's references, or null when it is not a payment
+ * of a repeat-charge subscription (no `recurrent_id`), is not a payment
+ * callback at all (a refund's or a payout's names a different `type`), or is
+ * another gateway's.
+ */
+export function readAntilopayCallbackReferences(
+  gatewayType: PaymentGatewayType,
+  rawBody: Buffer,
+): AntilopayCallbackReferences | null {
+  if (gatewayType !== PaymentGatewayType.ANTILOPAY) {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawBody.toString('utf8'));
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return null;
+  }
+  const root = parsed as Record<string, unknown>;
+  const type = root['type'];
+  if (type !== undefined && type !== 'payment') return null;
+  const read = (key: string): string | null => {
+    const value = root[key];
+    return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+  };
+  const recurrentId = read('recurrent_id');
+  if (recurrentId === null) return null;
+  return { orderId: read('order_id'), recurrentId, paymentId: read('payment_id') };
 }
 
 /**

@@ -124,4 +124,15 @@ export class InternalPaymentCheckoutDto {
   @IsOptional()
   @IsBoolean()
   public savePaymentMethodConsent?: boolean;
+
+  /**
+   * Antilopay only: how the payer signs up for «для автоматического списания»,
+   * CARD or SBP. The two are different categories of recurrent payment and the
+   * payer chooses before the payment form opens. Read only with
+   * `savePaymentMethodConsent`, and only on Antilopay; refused there when
+   * absent (`METHOD`).
+   */
+  @IsOptional()
+  @IsIn(['CARD', 'SBP'])
+  public autopayMethod?: 'CARD' | 'SBP';
 }

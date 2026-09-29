@@ -233,6 +233,13 @@ const antilopayVatSetting = z
   .union([z.literal([10, 22]), z.enum(['10', '22'])])
   .transform((value) => (typeof value === 'number' ? value : Number(value)));
 
+const antilopayPaymentCountSetting = z
+  .union([z.number().int().min(2), z.string().trim().regex(/^\d+$/)])
+  .transform((value) => (typeof value === 'number' ? value : Number(value)))
+  .refine((value) => Number.isSafeInteger(value) && value >= 2, {
+    message: 'recurrentPaymentCount must be a whole number of at least 2',
+  });
+
 const antilopaySettingsSchema = z
   .object({
     projectIdentificator: z.string().min(1).optional(),
@@ -240,6 +247,12 @@ const antilopaySettingsSchema = z
     privateKey: z.string().min(1).optional(),
     publicKey: z.string().min(1).optional(),
     vat: antilopayVatSetting.optional(),
+    // «Автоплатежи одобрены провайдером»: Antilopay enables recurring payments
+    // per project, and answers error 30 until it has (gateway-autopay.util.ts).
+    savePaymentMethod: yookassaBooleanSetting.optional(),
+    // «Число списаний (вместе с первым)»: sent as `recurrent.payment_count` only
+    // when set (antilopay-recurrent.util.ts). A whole number of at least 2.
+    recurrentPaymentCount: antilopayPaymentCountSetting.optional(),
   })
   .strict();
 

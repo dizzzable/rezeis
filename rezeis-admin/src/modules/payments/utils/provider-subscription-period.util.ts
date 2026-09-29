@@ -73,6 +73,39 @@ export function rollypayIntervalFor(period: ProviderPeriod): RollypayInterval | 
   );
 }
 
+/** Antilopay's `recurrent.type` codes. */
+export type AntilopayRecurrentType = 'WEEK' | 'MONTH' | 'QUARTER' | 'YEAR';
+
+/**
+ * Antilopay's periods (`recurrent.type`: WEEK, MONTH, QUARTER, YEAR — «дней
+ * нет»), counted as its fixed ones are on Platega and RollyPay: a week of 7
+ * days, a month of 30, a quarter of 90, a year of 365. The provider charges on
+ * its own calendar, so a real month is a day or two longer than 30 days; the
+ * renewal a charge delivers is stretched over that gap (`chargeCoverDays`).
+ * Nothing else is offered: Antilopay has no half-year and no day.
+ */
+const ANTILOPAY_PERIODS: ReadonlyArray<{
+  readonly days: number;
+  readonly type: AntilopayRecurrentType;
+  readonly period: ProviderPeriod;
+}> = [
+  { days: 7, type: 'WEEK', period: { unit: 'week', count: 1 } },
+  { days: 30, type: 'MONTH', period: { unit: 'month', count: 1 } },
+  { days: 90, type: 'QUARTER', period: { unit: 'month', count: 3 } },
+  { days: 365, type: 'YEAR', period: { unit: 'year', count: 1 } },
+];
+
+export function antilopayPeriodForDays(durationDays: number): ProviderPeriod | null {
+  return ANTILOPAY_PERIODS.find((entry) => entry.days === durationDays)?.period ?? null;
+}
+
+export function antilopayRecurrentTypeFor(period: ProviderPeriod): AntilopayRecurrentType | null {
+  return (
+    ANTILOPAY_PERIODS.find((entry) => entry.period.unit === period.unit && entry.period.count === period.count)
+      ?.type ?? null
+  );
+}
+
 /**
  * Platega takes the amount of one charge as an integer number of roubles, so a
  * price with kopecks cannot be charged as it is. Rounding would charge a price

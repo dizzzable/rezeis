@@ -414,6 +414,25 @@ const GATEWAY_META: ReadonlyArray<GatewayMeta> = [
         ],
         hintKey: 'paymentGateways.hints.antilopayVat',
       },
+      {
+        // «Автоплатежи одобрены провайдером»: Antilopay enables recurring
+        // payments per project and answers error 30 until it has. Off until the
+        // operator says so (gateway-autopay.util.ts on the server).
+        key: 'savePaymentMethod',
+        labelKey: 'paymentGateways.fields.savePaymentMethod',
+        placeholder: '',
+        type: 'toggle',
+        hintKey: 'paymentGateways.hints.antilopayAutopay',
+      },
+      {
+        // Sent as `recurrent.payment_count` only when filled in; a whole
+        // number of at least 2 (antilopay-recurrent.util.ts on the server).
+        key: 'recurrentPaymentCount',
+        labelKey: 'paymentGateways.fields.antilopayRecurrentPaymentCount',
+        placeholder: '12',
+        dependsOn: 'savePaymentMethod',
+        hintKey: 'paymentGateways.hints.antilopayRecurrentPaymentCount',
+      },
     ],
   },
   {
@@ -1402,7 +1421,7 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
                   {field.hintKey && (
                     <p className="text-xs text-muted-foreground">{t(field.hintKey)}</p>
                   )}
-                  {field.key === 'savePaymentMethod' && (gateway.type === 'PLATEGA' || gateway.type === 'ROLLYPAY') && (
+                  {field.key === 'savePaymentMethod' && (gateway.type === 'PLATEGA' || gateway.type === 'ROLLYPAY' || gateway.type === 'ANTILOPAY') && (
                     <ProviderAutopaySummary gatewayType={gateway.type} />
                   )}
                 </div>

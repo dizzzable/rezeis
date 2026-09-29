@@ -86,6 +86,7 @@ export const en = {
       customerEmail: 'Customer email (for receipts)',
       vatCode: 'VAT code',
       savePaymentMethod: 'Autopayments approved by the provider',
+      antilopayRecurrentPaymentCount: 'Number of charges (including the first)',
       selfEmployedEnabled: 'Self-employed (НПД): «Мой Налог» income sync',
       moyNalogAuthMethod: '«Мой Налог» auth method',
       moyNalogInn: 'Self-employed INN',
@@ -140,6 +141,10 @@ export const en = {
         'The VAT rate Antilopay prints on the receipt. Required only when the merchant is on the ОСНО tax regime: without it Antilopay rejects every checkout with error 17 («Не предоставлена ставка НДС или недопустимое значение»). On УСН or НПД leave it empty — no rate is needed.',
       overpayPublicKey:
         'RSA public key from OverPay back office for Content-Signature verification.',
+      antilopayAutopay:
+        'Turn on once Antilopay has enabled recurring payments for your project: without that, creating a payment answers error 30 ("no permission to create recurring payments"). The cabinet then shows two Antilopay options "for automatic charging": by card (the first payment on Antilopay\'s form, then Antilopay charges by itself) and by SBP (the customer subscribes on the form, the first charge is made at activation). Offered only for plans of 7, 30, 90 and 365 days and for a price in whole roubles. Turning it off stops new subscriptions only: existing ones keep charging until the customer turns them off in "Payment methods". Off by default.',
+      antilopayRecurrentPaymentCount:
+        'How many charges in all (the first included) a subscription makes. Optional: left empty, Antilopay is sent no such number. A whole number of at least 2. Once every charge is made, Antilopay completes the subscription and the customer\'s autopay ends.',
       plategaAutopay:
         'Turn on once Platega has approved recurring SBP subscriptions for your account. The cabinet then shows a second Platega option, "for automatic charging": the customer confirms the subscription in their bank, Platega charges the first payment at once and then charges every period by itself. Offered only for plans whose duration equals a Platega period (up to 31 days, up to 4 weeks, a 30-day month up to 12, a year up to 3) and for a price in whole roubles. Turning it off stops new subscriptions only: existing ones keep charging until the customer turns them off under Payment methods. Off by default.',
       plategaPaymentMethod:
@@ -396,7 +401,7 @@ export const en = {
       consequenceNew: 'the subscription this payment created is switched off, if nothing else paid for it;',
       consequenceOther: 'the subscription does not change: adjust a renewal or a plan change by hand if needed; an add-on this payment bought ends at once;',
       consequenceAutopay:
-        'the customer’s autopay ends: at Platega and RollyPay for the subscription this payment paid for, through YooKassa on every saved payment method;',
+        'the customer’s autopay ends: at Platega, RollyPay and Antilopay for the subscription this payment paid for, through YooKassa on every saved payment method;',
       consequenceMoney:
         'the partner commission, the referral reward and the cashback of this payment are taken back. The panel files «Мой налог» receipts for YooKassa payments only, so it has none for this one: if you declared this income in «Мой налог» yourself, cancel that receipt there.',
       confirmAfter:

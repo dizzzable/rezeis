@@ -396,7 +396,7 @@ export const ru = {
         payments_transaction_refund: 'Возврат платежа',
         payments_transaction_withheld_refund_recorded: 'Отмечен возврат неприменённого платежа',
         payments_transaction_provider_refund_recorded: 'Отмечен возврат платежа у провайдера',
-        payments_autopay_provider_subscription_cancelled: 'Отменено автосписание клиента (Platega или RollyPay)',
+        payments_autopay_provider_subscription_cancelled: 'Отменено автосписание клиента (Platega, RollyPay или Antilopay)',
         payments_autopay_yookassa_disabled: 'Выключено автосписание клиента через ЮKassa',
         payments_webhook_replay_requested: 'Повторно обработан вебхук платежа',
         payments_webhook_payload_revealed: 'Просмотрено содержимое вебхука',

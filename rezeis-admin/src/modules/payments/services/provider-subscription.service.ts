@@ -30,8 +30,21 @@ import {
   runPaymentReconciliationEnqueueWithTimeout,
 } from '../constants/payment-reconciliation.constant';
 import { PaymentWebhookEnvelopeInterface } from '../interfaces/payment-webhook-envelope.interface';
+import {
+  ANTILOPAY_NOT_FOUND,
+  ANTILOPAY_RECURRENT_NOT_ACTIVE,
+  classifyAntilopayPaymentStatus,
+  postAntilopay,
+} from '../utils/antilopay-api.util';
+import {
+  type AntilopayCharge,
+  isAntilopayRecurrentEnded,
+  isAntilopayRecurrentNotActiveYet,
+  parseAntilopayRecurrent,
+} from '../utils/antilopay-recurrent.util';
 import { isLifetimeSubscription } from '../utils/lifetime-renewal.util';
 import { readGatewaySettings } from '../utils/payment-gateway-settings.util';
+import { redactPaymentDiagnosticMessage } from '../utils/payment-provider-error.util';
 import { DISPUTE_EVENT_KEY_MARKER } from '../utils/payment-webhook-auto-retry.util';
 import {
   type AutopayRefundOutcome,
@@ -141,6 +154,20 @@ export interface ProviderSubscriptionState {
   readonly chargesSuccess: number | null;
   readonly nextChargeAt: Date | null;
   readonly lastChargeAt: Date | null;
+  /**
+   * The end of the provider's plan of charges, and how many charges it plans
+   * in all (Antilopay). Undefined where the provider says nothing of either.
+   */
+  readonly endsAt?: Date | null;
+  readonly plannedChargeCount?: number | null;
+  /**
+   * Every payment money moved for, oldest first, each keyed by the provider's
+   * own payment id (Antilopay). Where this is given it IS the ledger, in place
+   * of the count above: a charge is delivered under its payment's key, so a
+   * list that changes shape between two looks can neither skip a charge nor
+   * deliver one twice.
+   */
+  readonly charges?: readonly AntilopayCharge[];
 }
 
 export interface CustomerProviderSubscriptionInterface {
@@ -156,6 +183,12 @@ export interface CustomerProviderSubscriptionInterface {
   readonly subscriptionId: string | null;
   readonly nextChargeAt: string | null;
   readonly lastChargeAt: string | null;
+  /** When the provider's plan of charges ends (Antilopay); null when it names no end. */
+  readonly endsAt: string | null;
+  /** How many charges the provider plans in all, the first included (Antilopay). */
+  readonly plannedChargeCount: number | null;
+  /** CARD or SBP where the gateway offers both (Antilopay). */
+  readonly method: string | null;
 }
 
 /**
@@ -290,6 +323,191 @@ export class ProviderSubscriptionService {
     await this.sync(gatewayType, subscriptionId);
   }
 
+  /**
+   * Queues a look at the Antilopay subscription a callback names by its
+   * `recurrent_id`. The callback of a charge names the recurrent and an
+   * `order_id` Antilopay made up; the first callback of a sign-up names the
+   * recurrent and OUR order, which is what links the two (`findAntilopayRow`).
+   */
+  public async enqueueRecurrentSync(
+    gatewayType: PaymentGatewayType,
+    providerRecurrentId: string,
+    orderId: string | null = null,
+  ): Promise<void> {
+    await runPaymentReconciliationEnqueueWithTimeout(() =>
+      this.paymentReconciliationQueue.add(
+        PROVIDER_SUBSCRIPTION_SYNC_JOB,
+        { gatewayType, providerRecurrentId, ...(orderId === null ? {} : { orderId }) },
+        {
+          attempts: 5,
+          backoff: { type: 'exponential', delay: 30_000 },
+          removeOnComplete: 100,
+          removeOnFail: 100,
+        },
+      ),
+    );
+  }
+
+  public async syncByRecurrent(
+    gatewayType: PaymentGatewayType,
+    providerRecurrentId: string,
+    orderId: string | null,
+  ): Promise<void> {
+    if (gatewayType !== PaymentGatewayType.ANTILOPAY) {
+      throw new Error(`No recurrent lookup for ${gatewayType}`);
+    }
+    const row = await this.findAntilopayRow(providerRecurrentId, orderId);
+    if (row === null) {
+      // Not one of ours: another integration on the same Antilopay project, or
+      // a sign-up whose checkout is gone. Nothing here may charge for it.
+      this.logger.warn(`Callback for unknown ${gatewayType} recurrent ${providerRecurrentId}; ignored`);
+      return;
+    }
+    await this.syncRow(row);
+  }
+
+  /**
+   * The row an Antilopay recurrent belongs to.
+   *
+   *  1. by the recurrent's id, once a look has linked it;
+   *  2. by OUR order, for the first callback of a sign-up: it names both, and
+   *     the row is the one whose first payment that order is;
+   *  3. by asking Antilopay about each sign-up not yet linked (`payment/check`
+   *     by its first payment names its recurrent), for a callback whose order
+   *     is Antilopay's own — an SBP subscription's first charge, or a first
+   *     callback that was lost.
+   *
+   * Null for a recurrent that is none of ours.
+   */
+  private async findAntilopayRow(providerRecurrentId: string, orderId: string | null): Promise<ProviderSubscription | null> {
+    const gatewayType = PaymentGatewayType.ANTILOPAY;
+    const known = await this.prismaService.providerSubscription.findUnique({
+      where: { gatewayType_providerRecurrentId: { gatewayType, providerRecurrentId } },
+    });
+    if (known !== null) return known;
+    if (orderId !== null) {
+      const transaction = await this.prismaService.transaction.findUnique({ where: { paymentId: orderId } });
+      if (transaction !== null && transaction.gatewayType === gatewayType) {
+        const linked = await this.linkAntilopayCheckout(transaction, providerRecurrentId);
+        if (linked !== null) return linked;
+      }
+    }
+    const gateway = await this.prismaService.paymentGateway.findUnique({ where: { type: gatewayType } });
+    if (gateway === null) return null;
+    const settings = readGatewaySettings(gateway.settings);
+    const candidates = await this.prismaService.providerSubscription.findMany({
+      where: {
+        gatewayType,
+        providerRecurrentId: null,
+        status: { in: [ProviderSubscriptionStatus.PENDING, ...LIVE_STATUSES] },
+        createdAt: { gt: new Date(Date.now() - 3 * DAY_MS) },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 20,
+    });
+    for (const candidate of candidates) {
+      if ((await this.resolveAntilopayRecurrentId(candidate, settings)) === providerRecurrentId) {
+        return (
+          (await this.prismaService.providerSubscription.findUnique({ where: { id: candidate.id } })) ?? {
+            ...candidate,
+            providerRecurrentId,
+          }
+        );
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Links a checkout's sign-up to the recurrent its callback named. The row is
+   * adopted from the checkout's own terms when `recordCheckout` lost its write.
+   * Never over a recurrent already linked to another id: two ids for one
+   * sign-up is a mix-up to look at, not to settle.
+   */
+  private async linkAntilopayCheckout(
+    transaction: Transaction,
+    providerRecurrentId: string,
+  ): Promise<ProviderSubscription | null> {
+    let row = await this.prismaService.providerSubscription.findUnique({
+      where: { firstTransactionId: transaction.id },
+    });
+    if (row === null) {
+      const terms = readProviderSubscriptionTerms(transaction.planSnapshot);
+      const gatewayId = transaction.gatewayId;
+      if (terms === null || gatewayId === null || gatewayId.length === 0 || CREATION_CLAIM_PLACEHOLDER.test(gatewayId)) {
+        return null;
+      }
+      try {
+        row = await this.createRow(transaction, gatewayId, terms);
+      } catch (error: unknown) {
+        if (!(error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002')) throw error;
+        row = await this.prismaService.providerSubscription.findUnique({ where: { firstTransactionId: transaction.id } });
+      }
+      if (row === null) return null;
+    }
+    if (row.providerRecurrentId === providerRecurrentId) return row;
+    if (row.providerRecurrentId !== null) {
+      this.logger.error(
+        `Antilopay callback names recurrent ${providerRecurrentId} for order ${transaction.paymentId}, ` +
+          `but its sign-up ${row.id} is linked to ${row.providerRecurrentId}; left alone`,
+      );
+      return null;
+    }
+    return this.linkAntilopayRecurrent(row, providerRecurrentId);
+  }
+
+  /** Writes `providerRecurrentId` once; the row as it is after. Null when another row holds that id. */
+  private async linkAntilopayRecurrent(
+    row: ProviderSubscription,
+    providerRecurrentId: string,
+  ): Promise<ProviderSubscription | null> {
+    try {
+      await this.prismaService.providerSubscription.updateMany({
+        where: { id: row.id, providerRecurrentId: null },
+        data: { providerRecurrentId },
+      });
+    } catch (error: unknown) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        this.logger.error(`Antilopay recurrent ${providerRecurrentId} is linked to another sign-up already; ${row.id} left alone`);
+        return null;
+      }
+      throw error;
+    }
+    return (
+      (await this.prismaService.providerSubscription.findUnique({ where: { id: row.id } })) ?? {
+        ...row,
+        providerRecurrentId,
+      }
+    );
+  }
+
+  /**
+   * The Antilopay recurrent of a sign-up, asked of Antilopay when no callback
+   * has told us yet: the sign-up's first payment (by our order id) names it in
+   * `payment/check`. Null while it does not — the payer has not paid, or
+   * Antilopay has no recurrent to name for that payment yet.
+   */
+  private async resolveAntilopayRecurrentId(
+    row: ProviderSubscription,
+    settings: Record<string, unknown>,
+  ): Promise<string | null> {
+    if (row.providerRecurrentId !== null) return row.providerRecurrentId;
+    const first = await this.prismaService.transaction.findUnique({
+      where: { id: row.firstTransactionId },
+      select: { paymentId: true },
+    });
+    if (first === null) return null;
+    const reply = await postAntilopay(this.httpService, settings, 'payment/check', { order_id: first.paymentId });
+    if (reply.code === ANTILOPAY_NOT_FOUND) return null;
+    if (reply.code !== 0) {
+      throw new Error(`Antilopay payment/check error ${reply.code}: ${antilopayErrorText(reply.data)}`);
+    }
+    const recurrentId = reply.data['recurrent_id'];
+    if (typeof recurrentId !== 'string' || recurrentId.trim().length === 0) return null;
+    const linked = await this.linkAntilopayRecurrent(row, recurrentId.trim());
+    return linked === null ? null : recurrentId.trim();
+  }
+
   public async sync(gatewayType: PaymentGatewayType, providerSubscriptionId: string): Promise<void> {
     const row =
       (await this.prismaService.providerSubscription.findUnique({
@@ -316,7 +534,10 @@ export class ProviderSubscriptionService {
 
     let applied = row.appliedChargeCount;
     let subscriptionId = row.subscriptionId;
-    if (row.userId === null && state.chargesSuccess !== null && state.chargesSuccess > applied) {
+    if (state.charges !== undefined) {
+      // Antilopay: each charge is delivered under its own payment's id.
+      subscriptionId = await this.applyKeyedCharges(row, state.charges, state.nextChargeAt);
+    } else if (row.userId === null && state.chargesSuccess !== null && state.chargesSuccess > applied) {
       // Charged after the account was deleted: there is nobody to deliver to,
       // and only an operator can return the money. The sweep cancels the row.
       this.logger.error(
@@ -360,16 +581,23 @@ export class ProviderSubscriptionService {
     }
 
     subscriptionId ??= await this.resolveSubscriptionId(row);
+    // Where charges were delivered one by one (Antilopay), a refunded one may
+    // have cancelled this row during the look (`handleKeyedDispute`): the row is
+    // read again, so that cancel is the state this look decides on, not undone.
+    const current =
+      state.charges === undefined
+        ? row
+        : ((await this.prismaService.providerSubscription.findUnique({ where: { id: row.id } })) ?? row);
     // A cancellation the panel made, or a failure the provider reported, is
     // final here: a provider still answering «Active» a moment after a cancel
     // must not bring the row back. A charge it takes anyway was still applied
     // above — money taken is always delivered.
     const status =
-      row.status === ProviderSubscriptionStatus.CANCELLED || row.status === ProviderSubscriptionStatus.FAILED
-        ? row.status
-        : (state.status ?? row.status);
+      current.status === ProviderSubscriptionStatus.CANCELLED || current.status === ProviderSubscriptionStatus.FAILED
+        ? current.status
+        : (state.status ?? current.status);
     const providerCancelled =
-      status === ProviderSubscriptionStatus.CANCELLED && row.cancelledAt === null;
+      status === ProviderSubscriptionStatus.CANCELLED && current.cancelledAt === null;
     await this.prismaService.providerSubscription.update({
       where: { id: row.id },
       data: {
@@ -378,6 +606,8 @@ export class ProviderSubscriptionService {
         nextChargeAt: state.nextChargeAt,
         lastChargeAt: state.lastChargeAt,
         lastSyncedAt: new Date(),
+        ...(state.endsAt === undefined ? {} : { endsAt: state.endsAt }),
+        ...(state.plannedChargeCount === undefined ? {} : { plannedChargeCount: state.plannedChargeCount }),
         ...(subscriptionId !== null && row.subscriptionId === null ? { subscriptionId } : {}),
         ...(providerCancelled ? { cancelledAt: new Date() } : {}),
       },
@@ -388,8 +618,113 @@ export class ProviderSubscriptionService {
       // cancel the provider could not be reached for, which the operator then
       // finished in the provider's dashboard as the card told them to: that
       // row keeps the refund's mark (`recordCancelledBy`).
-      await this.recordCancelledBy(row, 'PROVIDER');
+      await this.recordCancelledBy(current, 'PROVIDER');
     }
+  }
+
+  /**
+   * Delivers every charge an Antilopay recurrent lists, each under the id of
+   * ITS payment: the RENEW payment made for it and the paid notice for that
+   * payment are keyed by `payment_id`, never by the charge's position. The
+   * count above the row's `appliedChargeCount` is not what decides what is
+   * new, so a list that a look reads differently from the last — a payment
+   * that was pending and succeeded, a retry after a failure — can neither skip
+   * a charge nor pay one twice: a look that has nothing new finds every
+   * payment's row and notice already there and settles nothing.
+   *
+   * The first charge completes the checkout the payer started. A charge given
+   * back afterwards (CHARGEBACK, REVERSED) is not delivered, and its refund
+   * ends the autopay (`handleKeyedDispute`).
+   *
+   * Returns the subscription the charges renew, once the first has made one.
+   */
+  private async applyKeyedCharges(
+    row: ProviderSubscription,
+    charges: readonly AntilopayCharge[],
+    nextChargeAt: Date | null,
+  ): Promise<string | null> {
+    let applied = row.appliedChargeCount;
+    let subscriptionId = row.subscriptionId;
+    for (const [index, charge] of charges.entries()) {
+      const chargeNumber = index + 1;
+      if (charge.disputed) {
+        await this.handleKeyedDispute(row, charge, chargeNumber);
+        continue;
+      }
+      if (row.userId === null) {
+        // Charged after the account was deleted: there is nobody to deliver to,
+        // and only an operator can return the money. The sweep cancels the row.
+        if (chargeNumber > applied) {
+          this.logger.error(
+            `Subscription ${row.id} (${row.gatewayType} ${row.providerSubscriptionId}) was charged after its ` +
+              `account was deleted (payment ${charge.id}); refund at the provider`,
+          );
+        }
+        continue;
+      }
+      if (charge.amount !== null && !new Prisma.Decimal(charge.amount).equals(row.amount)) {
+        this.logger.warn(
+          `Antilopay charge ${charge.id} of ${row.id} was made for ${charge.amount}, not the ${row.amount.toString()} ` +
+            'the payer agreed to; delivered as a renewal all the same, the money is taken',
+        );
+      }
+      const transaction =
+        chargeNumber === 1
+          ? await this.prismaService.transaction.findUnique({ where: { id: row.firstTransactionId } })
+          : await this.findOrCreateChargeTransaction(
+              { ...row, subscriptionId: (subscriptionId ??= await this.resolveSubscriptionId(row)) },
+              chargeNumber,
+              nextChargeAt,
+              charge.id,
+            );
+      if (transaction === null) {
+        // A later charge renews the subscription the first one created; until
+        // that first delivery lands there is nothing to renew.
+        this.logger.warn(`Charge ${charge.id} of subscription ${row.id} is waiting for its first delivery`);
+        await this.enqueueSync(row.gatewayType, row.providerSubscriptionId, 60_000);
+        break;
+      }
+      await this.enqueueSettlement(row, chargeNumber, transaction, charge.id);
+      if (chargeNumber > applied) {
+        await this.prismaService.providerSubscription.updateMany({
+          where: { id: row.id, appliedChargeCount: { lt: chargeNumber } },
+          data: { appliedChargeCount: chargeNumber },
+        });
+        applied = chargeNumber;
+      }
+    }
+    return subscriptionId;
+  }
+
+  /**
+   * A charge Antilopay reports as given back (CHARGEBACK, REVERSED): the refund
+   * of one of the recurrent's payments. A payment delivered goes through the
+   * refund reversal every other refund takes — a notice in the inbox for its
+   * own payment, which also ends the autopay (`refundEndsAutopay`). One that was
+   * never delivered has nothing to reverse, but its refund ends the autopay all
+   * the same, so the row is cancelled with a refund's mark.
+   */
+  private async handleKeyedDispute(
+    row: ProviderSubscription,
+    charge: AntilopayCharge,
+    chargeNumber: number,
+  ): Promise<void> {
+    const transaction =
+      chargeNumber === 1
+        ? await this.prismaService.transaction.findUnique({ where: { id: row.firstTransactionId } })
+        : row.userId === null
+          ? null
+          : await this.prismaService.transaction.findUnique({
+              where: { userId_idempotencyKey: { userId: row.userId, idempotencyKey: keyedChargeKey(row.id, charge.id) } },
+            });
+    if (transaction !== null && transaction.status === TransactionStatus.COMPLETED && transaction.fulfilledAt !== null) {
+      await this.enqueueRefundNotice(row, transaction, {
+        providerPaymentId: charge.id,
+        providerStatus: charge.providerStatus,
+      });
+      return;
+    }
+    await this.cancelLive({ ids: [row.id] }, REFUND_CANCELLED_BY);
   }
 
   /**
@@ -453,6 +788,9 @@ export class ProviderSubscriptionService {
       subscriptionId: row.subscriptionId,
       nextChargeAt: row.nextChargeAt?.toISOString() ?? null,
       lastChargeAt: row.lastChargeAt?.toISOString() ?? null,
+      endsAt: row.endsAt?.toISOString() ?? null,
+      plannedChargeCount: row.plannedChargeCount,
+      method: row.method,
     }));
   }
 
@@ -1167,7 +1505,7 @@ export class ProviderSubscriptionService {
     if (gateway === null) {
       throw new NotFoundException('Payment gateway not found');
     }
-    await this.cancelAtProvider(row.gatewayType, gateway.settings, row.providerSubscriptionId);
+    await this.cancelAtProvider(row, gateway.settings);
     await this.prismaService.providerSubscription.update({
       where: { id: row.id },
       data: {
@@ -1265,6 +1603,7 @@ export class ProviderSubscriptionService {
         intervalUnit: terms.unit,
         intervalCount: terms.count,
         firstTransactionId: transaction.id,
+        method: terms.method ?? null,
         consentVersion: PROVIDER_SUBSCRIPTION_CONSENT_VERSION,
       },
     });
@@ -1317,10 +1656,15 @@ export class ProviderSubscriptionService {
     row: ProviderSubscription,
     chargeNumber: number,
     nextChargeAt: Date | null,
+    /** The provider's payment id, where the charge is keyed by it rather than by its number (Antilopay). */
+    providerChargeId?: string,
   ): Promise<Transaction | null> {
     const userId = row.userId;
     if (userId === null) return null;
-    const idempotencyKey = `provider-subscription:${row.id}:charge:${chargeNumber}`;
+    const idempotencyKey =
+      providerChargeId === undefined
+        ? `provider-subscription:${row.id}:charge:${chargeNumber}`
+        : keyedChargeKey(row.id, providerChargeId);
     const existing = await this.prismaService.transaction.findUnique({
       where: { userId_idempotencyKey: { userId, idempotencyKey } },
     });
@@ -1340,6 +1684,7 @@ export class ProviderSubscriptionService {
       snapshotSource: 'PROVIDER_SUBSCRIPTION_CHARGE',
       providerSubscriptionId: row.providerSubscriptionId,
       chargeNumber,
+      ...(providerChargeId === undefined ? {} : { providerChargeId }),
     };
     try {
       return await this.prismaService.$transaction(async (tx) => {
@@ -1364,6 +1709,7 @@ export class ProviderSubscriptionService {
               snapshotSource: marker.snapshotSource,
               providerSubscriptionId: marker.providerSubscriptionId,
               chargeNumber: marker.chargeNumber,
+              ...(providerChargeId === undefined ? {} : { providerChargeId }),
             } as Prisma.InputJsonValue,
             deviceTypes: [],
             idempotencyKey,
@@ -1403,6 +1749,8 @@ export class ProviderSubscriptionService {
     row: ProviderSubscription,
     chargeNumber: number,
     transaction: Transaction,
+    /** The provider's payment id, where the charge is keyed by it rather than by its number (Antilopay). */
+    providerChargeId?: string,
   ): Promise<void> {
     const rawPayload = {
       source: 'PROVIDER_SUBSCRIPTION',
@@ -1410,11 +1758,15 @@ export class ProviderSubscriptionService {
       subscriptionId: row.providerSubscriptionId,
       chargeNumber,
       paymentId: transaction.paymentId,
+      ...(providerChargeId === undefined ? {} : { providerChargeId }),
     };
     const envelope: PaymentWebhookEnvelopeInterface = {
       gatewayType: row.gatewayType,
       paymentId: transaction.paymentId,
-      providerEventId: `subscription:${row.providerSubscriptionId}:charge:${chargeNumber}`,
+      providerEventId:
+        providerChargeId === undefined
+          ? `subscription:${row.providerSubscriptionId}:charge:${chargeNumber}`
+          : `subscription:${row.providerSubscriptionId}:payment:${providerChargeId}`,
       eventStatus: 'CONFIRMED',
       receivedAt: new Date().toISOString(),
       payloadHash: createHash('sha256').update(JSON.stringify(rawPayload)).digest('hex'),
@@ -1473,9 +1825,61 @@ export class ProviderSubscriptionService {
       }
       case PaymentGatewayType.ROLLYPAY:
         return this.fetchRollypayState(row, requireSetting(settings, 'apiKey'));
+      case PaymentGatewayType.ANTILOPAY:
+        return this.fetchAntilopayState(row, settings);
       default:
         throw new Error(`No provider subscription API for ${row.gatewayType}`);
     }
+  }
+
+  /**
+   * Antilopay's `payment/recurrent/check`, read with our own keys. The
+   * recurrent's id is found first when no callback has named it yet. An
+   * unlinked sign-up (its payer has not paid) has nothing to read: no status,
+   * no charges, so the row is left as it is.
+   */
+  private async fetchAntilopayState(
+    row: ProviderSubscription,
+    settings: Record<string, unknown>,
+  ): Promise<ProviderSubscriptionState> {
+    const nothingYet: ProviderSubscriptionState = {
+      status: null,
+      providerStatus: null,
+      chargesSuccess: null,
+      nextChargeAt: null,
+      lastChargeAt: null,
+      charges: [],
+    };
+    const recurrentId = await this.resolveAntilopayRecurrentId(row, settings);
+    if (recurrentId === null) return nothingYet;
+    const reply = await postAntilopay(this.httpService, settings, 'payment/recurrent/check', {
+      recurrent_id: recurrentId,
+    });
+    if (reply.code === ANTILOPAY_NOT_FOUND) {
+      this.logger.warn(`Antilopay has no recurrent ${recurrentId} (subscription ${row.id})`);
+      return nothingYet;
+    }
+    if (reply.code !== 0) {
+      throw new Error(`Antilopay payment/recurrent/check error ${reply.code}: ${antilopayErrorText(reply.data)}`);
+    }
+    const parsed = parseAntilopayRecurrent(reply.data);
+    if (parsed.status === null) {
+      // An unknown word is logged and read as nothing: never as a cancellation.
+      this.logger.warn(
+        `Antilopay recurrent ${recurrentId} has a status this build does not know: ${parsed.providerStatus ?? 'none'}`,
+      );
+    }
+    const delivered = parsed.charges.filter((charge) => !charge.disputed);
+    return {
+      status: parsed.status,
+      providerStatus: parsed.providerStatus,
+      chargesSuccess: delivered.length,
+      nextChargeAt: parsed.nextChargeAt,
+      lastChargeAt: delivered[delivered.length - 1]?.at ?? null,
+      endsAt: parsed.endsAt,
+      plannedChargeCount: parsed.plannedChargeCount,
+      charges: parsed.charges,
+    };
   }
 
   /**
@@ -1558,11 +1962,15 @@ export class ProviderSubscriptionService {
   }
 
   private async cancelAtProvider(
-    gatewayType: PaymentGatewayType,
+    row: Pick<ProviderSubscription, 'gatewayType' | 'providerSubscriptionId' | 'providerRecurrentId' | 'firstTransactionId'>,
     settingsJson: Prisma.JsonValue,
-    providerSubscriptionId: string,
   ): Promise<void> {
+    const { gatewayType, providerSubscriptionId } = row;
     const settings = readGatewaySettings(settingsJson);
+    if (gatewayType === PaymentGatewayType.ANTILOPAY) {
+      await this.cancelAntilopayAtProvider(row, settings);
+      return;
+    }
     if (gatewayType === PaymentGatewayType.PLATEGA) {
       // Idempotent at Platega: cancelling a cancelled subscription answers the same.
       await firstValueFrom(
@@ -1589,6 +1997,75 @@ export class ProviderSubscriptionService {
     }
     throw new Error(`No provider subscription API for ${gatewayType}`);
   }
+
+  /**
+   * `payment/recurrent/cancel`, and only then a cancelled row: «перечитайте» —
+   * the recurrent's own status after the call is the proof, not the answer to
+   * it. A recurrent that is not active yet (its payer has not paid) answers 28
+   * and cannot be cancelled while its first payment can still be paid, so that
+   * is settled by asking about the payment: dead, and nothing can be charged;
+   * open, and the cancel fails and the sweep tries again.
+   */
+  private async cancelAntilopayAtProvider(
+    row: Pick<ProviderSubscription, 'providerSubscriptionId' | 'providerRecurrentId' | 'firstTransactionId'>,
+    settings: Record<string, unknown>,
+  ): Promise<void> {
+    const recurrentId =
+      row.providerRecurrentId ??
+      (await this.resolveAntilopayRecurrentId(row as ProviderSubscription, settings));
+    const reply = await postAntilopay(
+      this.httpService,
+      settings,
+      'payment/recurrent/cancel',
+      // The initiating payment's id is a handle Antilopay takes for a recurrent
+      // whose own id is not known here yet.
+      recurrentId === null ? { transaction_id: row.providerSubscriptionId } : { recurrent_id: recurrentId },
+    );
+    if (reply.code !== 0 && reply.code !== ANTILOPAY_RECURRENT_NOT_ACTIVE) {
+      throw new Error(`Antilopay payment/recurrent/cancel error ${reply.code}: ${antilopayErrorText(reply.data)}`);
+    }
+    if (recurrentId === null) {
+      if (await this.isAntilopaySignUpDead(row, settings)) return;
+      throw new Error(`Antilopay sign-up ${row.providerSubscriptionId} is not readable yet and its payer may still pay`);
+    }
+    const after = await postAntilopay(this.httpService, settings, 'payment/recurrent/check', {
+      recurrent_id: recurrentId,
+    });
+    if (after.code !== 0) {
+      throw new Error(`Antilopay payment/recurrent/check error ${after.code}: ${antilopayErrorText(after.data)}`);
+    }
+    const status = typeof after.data['status'] === 'string' ? after.data['status'] : null;
+    if (isAntilopayRecurrentEnded(status)) return;
+    if (isAntilopayRecurrentNotActiveYet(status) && (await this.isAntilopaySignUpDead(row, settings))) return;
+    throw new Error(`Antilopay did not cancel recurrent ${recurrentId} (status ${status ?? 'unreadable'})`);
+  }
+
+  /** Whether a sign-up's first payment can never be paid any more (FAIL, CANCEL, EXPIRED). */
+  private async isAntilopaySignUpDead(
+    row: Pick<ProviderSubscription, 'firstTransactionId'>,
+    settings: Record<string, unknown>,
+  ): Promise<boolean> {
+    const first = await this.prismaService.transaction.findUnique({
+      where: { id: row.firstTransactionId },
+      select: { paymentId: true },
+    });
+    if (first === null) return false;
+    const reply = await postAntilopay(this.httpService, settings, 'payment/check', { order_id: first.paymentId });
+    if (reply.code === ANTILOPAY_NOT_FOUND) return true;
+    return reply.code === 0 && classifyAntilopayPaymentStatus(String(reply.data['status'] ?? '')) === 'DEAD';
+  }
+}
+
+/** A `gatewayId` that is a placeholder held while a provider checkout is being created, not a provider handle. */
+const CREATION_CLAIM_PLACEHOLDER = /^(?:__CHECKOUT_PROVIDER_CREATE__:|__RENEWAL_PROVIDER_CREATE__:|claim:)/;
+
+/** `Transaction.idempotencyKey` of the RENEW payment made for one Antilopay charge. */
+export function keyedChargeKey(rowId: string, providerChargeId: string): string {
+  return `provider-subscription:${rowId}:payment:${providerChargeId}`;
+}
+
+function antilopayErrorText(data: Record<string, unknown>): string {
+  return redactPaymentDiagnosticMessage(String(data['error'] ?? 'unknown'), 120) ?? 'unknown';
 }
 
 /**
@@ -1665,7 +2142,9 @@ export function unmatchedChargebackNote(
       ? 'Platega'
       : gatewayType === PaymentGatewayType.ROLLYPAY
         ? 'RollyPay'
-        : String(gatewayType);
+        : gatewayType === PaymentGatewayType.ANTILOPAY
+          ? 'Antilopay'
+          : String(gatewayType);
   return (
     `Провайдер сообщил об оспаривании одного из ${chargeCount} списаний по автоплатежу, но не сказал, какого: ` +
     'оно пока не отменено в панели (комиссия и кешбэк остались). ' +

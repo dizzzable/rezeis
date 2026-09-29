@@ -108,6 +108,9 @@ is_auto_recoverable_migration() {
     20260925120000_subscription_remnawave_reset_facts)
       return 0
       ;;
+    20260929140000_provider_subscription_antilopay)
+      return 0
+      ;;
     *)
       return 1
       ;;

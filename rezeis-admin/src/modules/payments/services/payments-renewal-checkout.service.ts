@@ -80,6 +80,8 @@ export interface RenewalCheckoutInput {
   readonly savePaymentMethod?: boolean;
   /** Explicit consent to save method for autopay. */
   readonly savePaymentMethodConsent?: boolean;
+  /** Antilopay: CARD or SBP, the payer's choice for the provider subscription. */
+  readonly autopayMethod?: 'CARD' | 'SBP';
 }
 
 /**
@@ -220,6 +222,7 @@ export class PaymentsRenewalCheckoutService {
       currency: priced.currency,
       savedPaymentMethodId: input.savedPaymentMethodId ?? null,
       providerSubscription: providerSubscriptionTerms !== null,
+      providerSubscriptionMethod: providerSubscriptionTerms?.method ?? null,
       lines: priced.items.map((item) => ({
         subscriptionId: item.subscriptionId,
         planId: item.planId,
@@ -913,6 +916,7 @@ function resolveRenewalProviderSubscription(
     discountSource: item.discountSource,
     planId: item.planId,
     subscriptionId: item.subscriptionId,
+    method: input.autopayMethod,
   });
   if ('refusal' in resolved) {
     throw autopayNotAvailable(resolved.refusal);
@@ -936,7 +940,7 @@ function buildRenewalRequestFingerprint(input: {
     // keeps the fingerprint its persisted drafts were stored under.
     ...(input.input.savePaymentMethodConsent === true &&
     PROVIDER_SUBSCRIPTION_GATEWAY_TYPES.has(input.input.gatewayType)
-      ? { providerSubscription: true }
+      ? { providerSubscription: true, ...(input.input.autopayMethod === undefined ? {} : { autopayMethod: input.input.autopayMethod }) }
       : {}),
     subscriptionIds: [...new Set(input.input.subscriptionIds)].sort(),
     durations: [...(input.input.durations?.entries() ?? [])]

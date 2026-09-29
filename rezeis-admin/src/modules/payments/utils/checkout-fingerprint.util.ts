@@ -98,6 +98,12 @@ export interface RenewalCheckoutFingerprintInput {
    * fingerprint it had, and a draft of one kind is never reused for the other.
    */
   readonly providerSubscription?: boolean;
+  /**
+   * Antilopay's CARD or SBP, where the subscription is one of theirs: two
+   * different recurrent categories, so a link made for one is never handed to
+   * a buyer who chose the other. Hashed only when set.
+   */
+  readonly providerSubscriptionMethod?: string | null;
   readonly lines: readonly RenewalLineFingerprintInput[];
 }
 
@@ -136,6 +142,7 @@ export function buildRenewalCheckoutFingerprint(input: RenewalCheckoutFingerprin
     currency: input.currency,
     savedPaymentMethodId: input.savedPaymentMethodId ?? null,
     ...(input.providerSubscription === true ? { providerSubscription: true } : {}),
+    ...(input.providerSubscriptionMethod ? { providerSubscriptionMethod: input.providerSubscriptionMethod } : {}),
     lines,
   });
 }

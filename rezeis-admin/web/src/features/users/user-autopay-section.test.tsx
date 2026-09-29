@@ -3,7 +3,7 @@
  * without a refund.
  *
  * The panel had no button that stopped a customer's autopay short of a refund.
- * Now the «Подписки» tab lists each Platega or RollyPay subscription and the
+ * Now the «Подписки» tab lists each Platega, RollyPay or Antilopay subscription and the
  * saved ЮKassa methods with autopay on; `payments:edit` gets «Отменить
  * автосписание» per provider subscription and «Выключить автосписание ЮKassa»
  * for the methods. Each dialog says no money goes back, the customer is told
@@ -50,6 +50,9 @@ const AUTOPAY: UserAutopay = {
       planName: 'Pro',
       subscriptionId: 'sub-1',
       nextChargeAt: '2026-10-01T10:00:00.000Z',
+      endsAt: null,
+      plannedChargeCount: null,
+      method: null,
       cancelRequestedBy: null,
     },
     {
@@ -63,6 +66,9 @@ const AUTOPAY: UserAutopay = {
       planName: null,
       subscriptionId: 'sub-2',
       nextChargeAt: null,
+      endsAt: null,
+      plannedChargeCount: null,
+      method: null,
       cancelRequestedBy: 'OPERATOR',
     },
     {
@@ -76,6 +82,9 @@ const AUTOPAY: UserAutopay = {
       planName: 'Lite',
       subscriptionId: 'sub-3',
       nextChargeAt: '2026-10-02T10:00:00.000Z',
+      endsAt: null,
+      plannedChargeCount: null,
+      method: null,
       cancelRequestedBy: 'REFUND',
     },
   ],
@@ -163,6 +172,36 @@ describe('what the section lists', () => {
     expect(within(yookassaRow()).getByRole('button', { name: 'Turn off YooKassa autopay' })).toBeInTheDocument()
   })
 
+  it('an Antilopay subscription shows where its plan of charges ends beside the next charge', async () => {
+    grant([VIEW, EDIT])
+    serve({
+      providerSubscriptions: [
+        {
+          id: 'psub-antilopay',
+          gatewayType: 'ANTILOPAY',
+          status: 'ACTIVE',
+          amount: '299',
+          currency: 'RUB',
+          intervalUnit: 'MONTH',
+          intervalCount: 1,
+          planName: 'Pro',
+          subscriptionId: 'sub-4',
+          nextChargeAt: '2026-10-01T00:00:00.000Z',
+          endsAt: '2027-08-01T00:00:00.000Z',
+          plannedChargeCount: 12,
+          method: 'CARD',
+          cancelRequestedBy: null,
+        },
+      ],
+      yookassaMethods: [],
+    })
+    renderSection()
+
+    await screen.findByText('Antilopay · Pro')
+    expect(row('psub-antilopay')).toHaveTextContent(/299.*next charge.*charges end/)
+    expect(within(row('psub-antilopay')).getByRole('button', { name: 'Cancel autopay' })).toBeInTheDocument()
+  })
+
   it('without payments:edit: the same list, no button, and who may', async () => {
     grant([VIEW])
     serve()
@@ -196,7 +235,7 @@ describe('what the section lists', () => {
     grant([VIEW, EDIT])
     serve({ providerSubscriptions: [], yookassaMethods: [] })
     const { unmount } = renderWithProviders(<UserAutopaySection userId={USER_ID} />)
-    expect(await screen.findByText(/^No autopay: no Platega or RollyPay subscription/)).toBeInTheDocument()
+    expect(await screen.findByText(/^No autopay: no Platega, RollyPay or Antilopay subscription/)).toBeInTheDocument()
     unmount()
 
     vi.restoreAllMocks()
@@ -207,7 +246,7 @@ describe('what the section lists', () => {
   })
 })
 
-describe('«Отменить автосписание» of a Platega or RollyPay subscription', () => {
+describe('«Отменить автосписание» of a Platega, RollyPay or Antilopay subscription', () => {
   it('says no money goes back and what the customer sees, and posts nothing before the confirmation', async () => {
     grant([VIEW, EDIT])
     serve()
@@ -417,14 +456,14 @@ describe('the operator’s switch in the dashboard’s audit timeline', () => {
   it('names both actions in both languages, not by their codes', async () => {
     await loadFeatureBundle('dashboard')
     const { unmount } = renderWithProviders(<DashboardTimelinesSection summary={summary} />)
-    expect(screen.getByText('Customer autopay cancelled (Platega or RollyPay)')).toBeInTheDocument()
+    expect(screen.getByText('Customer autopay cancelled (Platega, RollyPay or Antilopay)')).toBeInTheDocument()
     expect(screen.getByText('Customer autopay through YooKassa turned off')).toBeInTheDocument()
     unmount()
 
     await i18n.changeLanguage('ru')
     await loadFeatureBundle('dashboard')
     renderWithProviders(<DashboardTimelinesSection summary={summary} />)
-    expect(screen.getByText('Отменено автосписание клиента (Platega или RollyPay)')).toBeInTheDocument()
+    expect(screen.getByText('Отменено автосписание клиента (Platega, RollyPay или Antilopay)')).toBeInTheDocument()
     expect(screen.getByText('Выключено автосписание клиента через ЮKassa')).toBeInTheDocument()
     expect(screen.queryByText('payments.autopay.yookassa_disabled')).not.toBeInTheDocument()
   })

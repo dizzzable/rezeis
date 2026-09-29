@@ -154,6 +154,9 @@ function ProviderAutopayRow({
           {subscription.nextChargeAt
             ? t('userDetailPanel.autopay.providerCharge', { amount, date: formatDate(subscription.nextChargeAt) })
             : t('userDetailPanel.autopay.providerAmount', { amount })}
+          {subscription.endsAt
+            ? ` · ${t('userDetailPanel.autopay.providerEnds', { date: formatDate(subscription.endsAt) })}`
+            : ''}
         </p>
       </div>
       {canEdit && subscription.cancelRequestedBy === null ? (
