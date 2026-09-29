@@ -2697,7 +2697,12 @@ export function mapProviderStatusToTransactionStatus(providerStatus: string | nu
     // `isRefundProviderStatus` so the status change and the side-effect
     // reversal always agree on what a chargeback is.
     normalizedStatus === 'CHARGEBACK' ||
-    normalizedStatus === 'CHARGEBACKED'
+    normalizedStatus === 'CHARGEBACKED' ||
+    // Antilopay: «Платеж был отменен Мерчантом в день оплаты». Refund-shaped
+    // like a chargeback (`isRefundProviderStatus` knew it already), and it
+    // used to fall through to PENDING: a REVERSED payment the panel never
+    // completed stayed PENDING for ever. No other gateway sends the word.
+    normalizedStatus === 'REVERSED'
   ) {
     return TransactionStatus.CANCELED;
   }

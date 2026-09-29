@@ -122,12 +122,18 @@ export function isEventTelegramAllowed(
  * `payment.autopay_stopped_by_operator` is new as well: an operator ended a
  * customer's autopay from the user's card. It is autopay news, so whoever
  * ticked the customer's own switch (`payment.method_autopay_updated`) gets it.
+ *
+ * `payment.autopay_attention` is new too: a gateway that refused repeat charges,
+ * or money taken for a subscription the panel cannot place. Both are payments
+ * gone wrong, so whoever ticked `payment.failed` or `payment.amount_mismatch`
+ * gets it.
  */
 export const DELIVERED_WITH: ReadonlyMap<string, readonly string[]> = new Map([
   ['payment.withheld', ['payment.completed']],
   ['payment.withheld_refunded', ['payment.refunded', 'payment.refund_partial', 'payment.withheld']],
   ['payment.chargeback_unmatched', ['payment.refunded', 'payment.refund_partial']],
   ['payment.autopay_stopped_by_operator', ['payment.method_autopay_updated']],
+  ['payment.autopay_attention', ['payment.failed', 'payment.amount_mismatch']],
 ]);
 
 /**

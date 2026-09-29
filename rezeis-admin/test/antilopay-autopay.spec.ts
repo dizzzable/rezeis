@@ -32,6 +32,8 @@ import {
 } from '../src/modules/payments/services/provider-subscription.service';
 import { PaymentReconciliationProcessor } from '../src/modules/payments/processors/payment-reconciliation.processor';
 import {
+  type AntilopayCharge,
+  assignAntilopayChargeRoles,
   buildAntilopayRecurrent,
   mapAntilopayRecurrentStatus,
   parseAntilopayRecurrent,
@@ -402,7 +404,7 @@ describe('an Antilopay callback of a repeat-charge payment', () => {
         PaymentGatewayType.ANTILOPAY,
         body({ type: 'payment', payment_id: 'p-9', order_id: 'made-up', recurrent_id: 'rec-1', status: 'SUCCESS' }),
       ),
-      { orderId: 'made-up', recurrentId: 'rec-1', paymentId: 'p-9' },
+      { orderId: 'made-up', recurrentId: 'rec-1', paymentId: 'p-9', status: 'SUCCESS' },
     );
   });
 
@@ -422,7 +424,7 @@ describe('an Antilopay callback of a repeat-charge payment', () => {
 
 describe('the ingress of an Antilopay callback of a repeat-charge payment', () => {
   function ingress(ownedOrders: string[]) {
-    const recurrentJobs: Array<{ recurrentId: string; orderId: string | null }> = [];
+    const recurrentJobs: Array<{ recurrentId: string; orderId: string | null; hints?: unknown }> = [];
     const recorded: unknown[] = [];
     const queued: unknown[] = [];
     const service = new PaymentWebhookIngressService(
@@ -460,8 +462,13 @@ describe('the ingress of an Antilopay callback of a repeat-charge payment', () =
         },
       } as never,
       {
-        enqueueRecurrentSync: async (_gateway: unknown, recurrentId: string, orderId: string | null = null) => {
-          recurrentJobs.push({ recurrentId, orderId });
+        enqueueRecurrentSync: async (
+          _gateway: unknown,
+          recurrentId: string,
+          orderId: string | null = null,
+          hints: unknown = null,
+        ) => {
+          recurrentJobs.push({ recurrentId, orderId, hints });
         },
       } as never,
       { info: () => undefined } as never,
@@ -487,7 +494,9 @@ describe('the ingress of an Antilopay callback of a repeat-charge payment', () =
       status: 'SUCCESS',
     });
     assert.equal(result.accepted, true);
-    assert.deepEqual(h.recurrentJobs, [{ recurrentId: 'rec-1', orderId: null }]);
+    assert.deepEqual(h.recurrentJobs, [
+      { recurrentId: 'rec-1', orderId: null, hints: { paymentId: 'p-2', status: 'SUCCESS' } },
+    ]);
     assert.equal(h.recorded.length, 0, 'no payment of ours is looked for');
     assert.equal(h.queued.length, 0);
   });
@@ -504,7 +513,9 @@ describe('the ingress of an Antilopay callback of a repeat-charge payment', () =
     assert.equal(h.recorded.length, 1);
     assert.equal(h.queued.length, 1);
     assert.deepEqual((h.queued[0] as { name: string }).name, PAYMENT_RECONCILIATION_JOB);
-    assert.deepEqual(h.recurrentJobs, [{ recurrentId: 'rec-1', orderId: 'ours-1' }]);
+    assert.deepEqual(h.recurrentJobs, [
+      { recurrentId: 'rec-1', orderId: 'ours-1', hints: { paymentId: 'p-1', status: 'SUCCESS' } },
+    ]);
   });
 
   it('leaves an ordinary payment of ours alone', async () => {
@@ -528,15 +539,21 @@ describe('the reconciliation worker', () => {
     );
     await processor.process({
       name: PROVIDER_SUBSCRIPTION_SYNC_JOB,
-      data: { gatewayType: PaymentGatewayType.ANTILOPAY, providerRecurrentId: 'rec-1', orderId: 'ours-1' },
+      data: {
+        gatewayType: PaymentGatewayType.ANTILOPAY,
+        providerRecurrentId: 'rec-1',
+        orderId: 'ours-1',
+        paymentId: 'p-1',
+        status: 'SUCCESS',
+      },
     } as never);
     await processor.process({
       name: PROVIDER_SUBSCRIPTION_SYNC_JOB,
       data: { gatewayType: PaymentGatewayType.ANTILOPAY, providerRecurrentId: 'rec-2' },
     } as never);
     assert.deepEqual(seen, [
-      [PaymentGatewayType.ANTILOPAY, 'rec-1', 'ours-1'],
-      [PaymentGatewayType.ANTILOPAY, 'rec-2', null],
+      [PaymentGatewayType.ANTILOPAY, 'rec-1', 'ours-1', { paymentId: 'p-1', status: 'SUCCESS' }],
+      [PaymentGatewayType.ANTILOPAY, 'rec-2', null, { paymentId: null, status: null }],
     ]);
   });
 });
@@ -723,9 +740,23 @@ function harness(initial: Partial<ProviderSubscription> = {}) {
       return of({ data: answers(post) });
     },
   };
-  const service = new ProviderSubscriptionService(prisma as never, http as never, inbox as never, queue as never);
+  const cards: Array<{ type: string; message: string; metadata: Record<string, unknown> }> = [];
+  const systemEvents = {
+    warn: (type: string, _category: string, message: string, metadata: Record<string, unknown> = {}) => {
+      cards.push({ type, message, metadata });
+    },
+    info: () => undefined,
+  };
+  const service = new ProviderSubscriptionService(
+    prisma as never,
+    http as never,
+    inbox as never,
+    queue as never,
+    systemEvents as never,
+  );
   return {
     service,
+    cards,
     row: () => row,
     transactions,
     events,
@@ -757,10 +788,17 @@ function recurrentAnswer(overrides: Record<string, unknown> = {}, payments: Arra
     ...overrides,
   };
 }
-const payment = (id: string, ctime: string, status = 'SUCCESS', amount: number | null = 299) => ({
+const payment = (
+  id: string,
+  ctime: string,
+  status = 'SUCCESS',
+  amount: number | null = 299,
+  orderId: string | null = null,
+) => ({
   payment_id: id,
   ctime,
   status,
+  ...(orderId === null ? {} : { order_id: orderId }),
   ...(amount === null ? {} : { original_amount: amount }),
 });
 
@@ -926,6 +964,231 @@ describe('delivering Antilopay charges, each under its own payment id', () => {
     h.answer(() => recurrentAnswer({}, [payment('APAY-first', '2026-09-01 09:00:00')]));
     await h.service.sync(PaymentGatewayType.ANTILOPAY, 'APAY-first');
     assert.equal(h.events.length, 0);
+  });
+});
+
+describe('which charge completes the first payment: by what it is, never by where it stands', () => {
+  it('renews a scheduled charge when the list does not carry the initiating payment', async () => {
+    // The first payment was completed by its own callback; the recurrent lists
+    // only what it charged since. By position that charge was «#1», given to the
+    // checkout already delivered: charged, and nothing renewed.
+    const h = harness({ providerRecurrentId: 'rec-1', status: ProviderSubscriptionStatus.ACTIVE });
+    h.deliverFirst();
+    h.answer(() => recurrentAnswer({}, [payment('APAY-scheduled', '2026-10-01 09:00:00', 'SUCCESS', 299, 'made-up-by-antilopay')]));
+
+    await h.service.sync(PaymentGatewayType.ANTILOPAY, 'APAY-first');
+
+    const renewal = h.transactions.find((t) => t.idempotencyKey === keyedChargeKey('ps-1', 'APAY-scheduled'));
+    assert.ok(renewal, 'the scheduled charge renews under its own payment id');
+    assert.deepEqual(h.events.map((event) => event.providerEventId), ['subscription:APAY-first:payment:APAY-scheduled']);
+  });
+
+  it('gives the first payment to the payment of OUR order, whatever its id and place', async () => {
+    const h = harness({ providerRecurrentId: 'rec-1', status: ProviderSubscriptionStatus.ACTIVE });
+    h.deliverFirst();
+    // Listed second, under an id that is not the one payment/create answered with.
+    h.answer(() =>
+      recurrentAnswer({}, [
+        payment('APAY-scheduled', '2026-09-01 08:00:00', 'SUCCESS', 299, 'made-up-by-antilopay'),
+        payment('APAY-our-order', '2026-09-01 09:00:00', 'SUCCESS', 299, 'ours-1'),
+      ]),
+    );
+
+    await h.service.sync(PaymentGatewayType.ANTILOPAY, 'APAY-first');
+
+    const renewals = h.transactions.filter((t) => t.idempotencyKey !== null).map((t) => t.idempotencyKey);
+    assert.deepEqual(renewals, [keyedChargeKey('ps-1', 'APAY-scheduled')], 'only the other charge renews');
+    assert.ok(h.events.some((event) => event.providerEventId === 'subscription:APAY-first:payment:APAY-our-order'));
+  });
+
+  describe('SBP, where the start of the subscription is not a charge', () => {
+    const signedUp = new Date('2026-09-01T09:00:00.000Z');
+    const sbp = () => harness({
+      providerRecurrentId: 'rec-1',
+      status: ProviderSubscriptionStatus.ACTIVE,
+      method: 'SBP',
+      createdAt: signedUp,
+    });
+
+    it('does not buy a second term with the charge made at activation', async () => {
+      const h = sbp();
+      // The ordinary pipeline completed the checkout from the start's own callback.
+      h.deliverFirst();
+      h.answer(() =>
+        recurrentAnswer({}, [
+          payment('APAY-first', '2026-09-01 09:00:00', 'SUCCESS', 299, 'ours-1'),
+          payment('APAY-activation', '2026-09-01 09:02:00', 'SUCCESS', 299, 'made-up-by-antilopay'),
+        ]),
+      );
+
+      await h.service.sync(PaymentGatewayType.ANTILOPAY, 'APAY-first');
+
+      assert.equal(h.transactions.some((t) => t.idempotencyKey !== null), false, 'one charge, one term');
+      assert.deepEqual(h.events.map((event) => event.providerEventId), ['subscription:APAY-first:payment:APAY-activation']);
+    });
+
+    it('completes the checkout from the charge at activation when nothing else did', async () => {
+      const h = sbp();
+      h.answer(() =>
+        recurrentAnswer({}, [
+          payment('APAY-first', '2026-09-01 09:00:00', 'SUCCESS', 299, 'ours-1'),
+          payment('APAY-activation', '2026-09-01 09:02:00', 'SUCCESS', 299, 'made-up-by-antilopay'),
+        ]),
+      );
+
+      await h.service.sync(PaymentGatewayType.ANTILOPAY, 'APAY-first');
+
+      // The notice carries the first transaction's payment, with the charge's id.
+      assert.deepEqual(h.events.map((event) => [event.providerEventId, event.paymentId]), [
+        ['subscription:APAY-first:payment:APAY-activation', 'ours-1'],
+      ]);
+      assert.equal(h.transactions.some((t) => t.idempotencyKey !== null), false);
+    });
+
+    it('still renews the next scheduled charge, a period later, under its own id', async () => {
+      const h = sbp();
+      h.deliverFirst();
+      h.answer(() =>
+        recurrentAnswer({}, [
+          payment('APAY-first', '2026-09-01 09:00:00', 'SUCCESS', 299, 'ours-1'),
+          payment('APAY-activation', '2026-09-01 09:02:00', 'SUCCESS', 299, 'made-up-by-antilopay'),
+          payment('APAY-second', '2026-10-01 09:00:00', 'SUCCESS', 299, 'made-up-too'),
+        ]),
+      );
+
+      await h.service.sync(PaymentGatewayType.ANTILOPAY, 'APAY-first');
+
+      assert.deepEqual(
+        h.transactions.filter((t) => t.idempotencyKey !== null).map((t) => t.idempotencyKey),
+        [keyedChargeKey('ps-1', 'APAY-second')],
+      );
+    });
+
+    it('takes the start for the first charge when it is the only one', async () => {
+      const h = sbp();
+      h.answer(() => recurrentAnswer({}, [payment('APAY-first', '2026-09-01 09:00:00', 'SUCCESS', 299, 'ours-1')]));
+
+      await h.service.sync(PaymentGatewayType.ANTILOPAY, 'APAY-first');
+
+      assert.deepEqual(h.events.map((event) => event.providerEventId), ['subscription:APAY-first:payment:APAY-first']);
+    });
+  });
+
+  it('gives the earliest charge to a checkout nothing else can deliver, instead of waiting for ever', async () => {
+    const h = harness({ providerRecurrentId: 'rec-1', status: ProviderSubscriptionStatus.ACTIVE });
+    h.answer(() => recurrentAnswer({}, [payment('APAY-scheduled', '2026-10-01 09:00:00', 'SUCCESS', 299, 'made-up')]));
+
+    await h.service.sync(PaymentGatewayType.ANTILOPAY, 'APAY-first');
+
+    assert.deepEqual(h.events.map((event) => [event.providerEventId, event.paymentId]), [
+      ['subscription:APAY-first:payment:APAY-scheduled', 'ours-1'],
+    ]);
+    assert.equal(h.jobs.some((job) => job.options['delay'] === 60_000), false, 'no look booked to wait');
+  });
+});
+
+describe('assignAntilopayChargeRoles', () => {
+  const charge = (id: string, at: string | null, extra: Partial<AntilopayCharge> = {}): AntilopayCharge => ({
+    id,
+    orderId: null,
+    at: at === null ? null : new Date(at),
+    providerStatus: 'SUCCESS',
+    disputed: false,
+    amount: '299',
+    ...extra,
+  });
+  const roles = (
+    charges: AntilopayCharge[],
+    overrides: Partial<Parameters<typeof assignAntilopayChargeRoles>[0]> = {},
+  ) =>
+    Object.fromEntries(
+      assignAntilopayChargeRoles({
+        charges,
+        providerSubscriptionId: 'APAY-first',
+        firstOrderId: 'ours-1',
+        method: 'CARD',
+        signedUpAt: new Date('2026-09-01T09:00:00.000Z'),
+        firstDelivered: true,
+        ...overrides,
+      }),
+    );
+
+  it('never lets a card charge close to the start take its place', () => {
+    assert.deepEqual(
+      roles([charge('APAY-first', '2026-09-01T09:00:00Z'), charge('c2', '2026-09-01T09:05:00Z')]),
+      { 'APAY-first': 'FIRST', c2: 'RENEW' },
+    );
+  });
+
+  it('names no first charge when the start is not listed and the checkout is delivered', () => {
+    assert.deepEqual(roles([charge('c2', '2026-10-01T09:00:00Z')]), { c2: 'RENEW' });
+  });
+
+  it('holds an SBP activation charge to the window after the start, and to the sign-up when the start is not listed', () => {
+    const inWindow = charge('a', '2026-09-03T08:00:00Z');
+    const outside = charge('b', '2026-09-05T09:00:01Z');
+    assert.deepEqual(roles([charge('APAY-first', '2026-09-01T09:00:00Z'), inWindow], { method: 'SBP' }), {
+      'APAY-first': 'START',
+      a: 'FIRST',
+    });
+    assert.deepEqual(roles([charge('APAY-first', '2026-09-01T09:00:00Z'), outside], { method: 'SBP' }), {
+      'APAY-first': 'FIRST',
+      b: 'RENEW',
+    });
+    assert.deepEqual(roles([inWindow], { method: 'SBP' }), { a: 'FIRST' });
+    assert.deepEqual(roles([outside], { method: 'SBP' }), { b: 'RENEW' });
+  });
+
+  it('does not take a given-back or undated charge for the one at activation', () => {
+    const start = charge('APAY-first', '2026-09-01T09:00:00Z');
+    assert.deepEqual(
+      roles([start, charge('a', '2026-09-01T09:02:00Z', { disputed: true, providerStatus: 'REVERSED' })], { method: 'SBP' }),
+      { 'APAY-first': 'FIRST', a: 'RENEW' },
+    );
+    assert.deepEqual(roles([start, charge('a', null)], { method: 'SBP' }), { 'APAY-first': 'FIRST', a: 'RENEW' });
+  });
+
+  it('gives the earliest charge to an undelivered checkout as a last resort, and only then', () => {
+    assert.deepEqual(roles([charge('c2', '2026-10-01T09:00:00Z')], { firstDelivered: false }), { c2: 'FIRST' });
+    assert.deepEqual(roles([charge('c2', '2026-10-01T09:00:00Z')], { firstDelivered: true }), { c2: 'RENEW' });
+  });
+});
+
+describe('a paid charge whose recurrent no sign-up holds', () => {
+  const paid = { paymentId: 'APAY-x', status: 'SUCCESS' };
+
+  it('reaches the operator once per recurrent, with the recurrent and the payment named', async () => {
+    const h = harness();
+    h.answer((post) => ({ code: 0, order_id: post.body['order_id'], status: 'PENDING' }));
+
+    await h.service.syncByRecurrent(PaymentGatewayType.ANTILOPAY, 'rec-lost', 'foreign', paid);
+    await h.service.syncByRecurrent(PaymentGatewayType.ANTILOPAY, 'rec-lost', 'foreign', paid);
+    await h.service.syncByRecurrent(PaymentGatewayType.ANTILOPAY, 'rec-other', 'foreign', { paymentId: 'APAY-y', status: 'SUCCESS' });
+
+    assert.equal(h.cards.length, 2, 'one card per recurrent');
+    assert.equal(h.cards[0]?.type, 'payment.autopay_attention');
+    assert.equal(h.cards[0]?.metadata['providerRecurrentId'], 'rec-lost');
+    assert.equal(h.cards[0]?.metadata['providerPaymentId'], 'APAY-x');
+    assert.equal(h.cards[0]?.metadata['needsManualReview'], true);
+    assert.match(String(h.cards[0]?.metadata['note']), /rec-lost/);
+    assert.match(String(h.cards[0]?.metadata['note']), /APAY-x/);
+  });
+
+  it('says nothing of a failed attempt, or of a callback that names a sign-up of ours', async () => {
+    const h = harness();
+    h.answer((post) => ({ code: 0, order_id: post.body['order_id'], status: 'PENDING' }));
+
+    await h.service.syncByRecurrent(PaymentGatewayType.ANTILOPAY, 'rec-1', 'foreign', { paymentId: 'APAY-z', status: 'FAIL' });
+    await h.service.syncByRecurrent(PaymentGatewayType.ANTILOPAY, 'rec-2', 'foreign');
+    assert.equal(h.cards.length, 0);
+
+    h.answer((post) =>
+      post.path === 'payment/recurrent/check'
+        ? recurrentAnswer({}, [payment('APAY-first', '2026-09-01 09:00:00', 'SUCCESS', 299, 'ours-1')])
+        : { code: 0 },
+    );
+    await h.service.syncByRecurrent(PaymentGatewayType.ANTILOPAY, 'rec-1', 'ours-1', paid);
+    assert.equal(h.cards.length, 0, 'placed by our order: nothing to tell');
   });
 });
 

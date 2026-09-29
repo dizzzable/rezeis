@@ -38,6 +38,8 @@ import {
 } from '../utils/antilopay-api.util';
 import {
   type AntilopayCharge,
+  assignAntilopayChargeRoles,
+  type AntilopayChargeRole,
   isAntilopayRecurrentEnded,
   isAntilopayRecurrentNotActiveYet,
   parseAntilopayRecurrent,
@@ -105,6 +107,14 @@ const RECENT_REFUND_CANCEL_MS = 60 * 60 * 1000;
 
 /** How many told unmatched disputes a process remembers. */
 const UNMATCHED_DISPUTES_REMEMBERED = 1000;
+
+/** What an Antilopay callback says beside the recurrent it names: its payment and its status. */
+export interface RecurrentCallbackHints {
+  readonly paymentId: string | null;
+  readonly status: string | null;
+}
+
+const NO_CALLBACK_HINTS: RecurrentCallbackHints = { paymentId: null, status: null };
 
 /** `rawPayload.source` of a Platega subscription dispute in the inbox (`recordDispute`). */
 export const PROVIDER_SUBSCRIPTION_DISPUTE = 'PROVIDER_SUBSCRIPTION_DISPUTE';
@@ -217,6 +227,8 @@ export class ProviderSubscriptionService {
   private readonly logger = new Logger(ProviderSubscriptionService.name);
   /** Unmatched disputes this process has told the operator about; see {@link handleChargeback}. */
   private readonly unmatchedDisputesTold = new Set<string>();
+  /** Antilopay recurrents whose paid charge nothing could place, told once; see {@link tellUnplacedRecurrentCharge}. */
+  private readonly unplacedRecurrentsTold = new Set<string>();
 
   public constructor(
     private readonly prismaService: PrismaService,
@@ -333,11 +345,18 @@ export class ProviderSubscriptionService {
     gatewayType: PaymentGatewayType,
     providerRecurrentId: string,
     orderId: string | null = null,
+    hints: RecurrentCallbackHints = NO_CALLBACK_HINTS,
   ): Promise<void> {
     await runPaymentReconciliationEnqueueWithTimeout(() =>
       this.paymentReconciliationQueue.add(
         PROVIDER_SUBSCRIPTION_SYNC_JOB,
-        { gatewayType, providerRecurrentId, ...(orderId === null ? {} : { orderId }) },
+        {
+          gatewayType,
+          providerRecurrentId,
+          ...(orderId === null ? {} : { orderId }),
+          ...(hints.paymentId === null ? {} : { paymentId: hints.paymentId }),
+          ...(hints.status === null ? {} : { status: hints.status }),
+        },
         {
           attempts: 5,
           backoff: { type: 'exponential', delay: 30_000 },
@@ -352,6 +371,7 @@ export class ProviderSubscriptionService {
     gatewayType: PaymentGatewayType,
     providerRecurrentId: string,
     orderId: string | null,
+    hints: RecurrentCallbackHints = NO_CALLBACK_HINTS,
   ): Promise<void> {
     if (gatewayType !== PaymentGatewayType.ANTILOPAY) {
       throw new Error(`No recurrent lookup for ${gatewayType}`);
@@ -359,11 +379,48 @@ export class ProviderSubscriptionService {
     const row = await this.findAntilopayRow(providerRecurrentId, orderId);
     if (row === null) {
       // Not one of ours: another integration on the same Antilopay project, or
-      // a sign-up whose checkout is gone. Nothing here may charge for it.
+      // a sign-up whose checkout is gone. Nothing here may charge for it — but a
+      // charge that was TAKEN is money nobody delivered, and the log line alone
+      // never reached anyone: it is one card, once per recurrent.
       this.logger.warn(`Callback for unknown ${gatewayType} recurrent ${providerRecurrentId}; ignored`);
+      if (hints.status === 'SUCCESS') this.tellUnplacedRecurrentCharge(providerRecurrentId, hints.paymentId);
       return;
     }
     await this.syncRow(row);
+  }
+
+  /**
+   * One operator card for a paid Antilopay charge that names a recurrent no
+   * sign-up of ours holds (`payment.autopay_attention`). Once per recurrent per
+   * process: Antilopay repeats a callback for an hour, and every later charge of
+   * the same subscription would only repeat the card.
+   */
+  private tellUnplacedRecurrentCharge(providerRecurrentId: string, providerPaymentId: string | null): void {
+    if (this.unplacedRecurrentsTold.has(providerRecurrentId)) return;
+    this.unplacedRecurrentsTold.add(providerRecurrentId);
+    if (this.unplacedRecurrentsTold.size > UNMATCHED_DISPUTES_REMEMBERED) {
+      const oldest = this.unplacedRecurrentsTold.values().next().value;
+      if (oldest !== undefined) this.unplacedRecurrentsTold.delete(oldest);
+    }
+    this.systemEvents?.warn(
+      EVENT_TYPES.PAYMENT_AUTOPAY_ATTENTION,
+      'PAYMENT',
+      'Списание по автоплатежу Antilopay принято, но подписка не найдена: выдачи не было',
+      {
+        gatewayType: PaymentGatewayType.ANTILOPAY,
+        reason: 'UNPLACED_RECURRENT_CHARGE',
+        providerRecurrentId,
+        ...(providerPaymentId === null ? {} : { providerPaymentId }),
+        needsManualReview: true,
+        note:
+          'Antilopay сообщила об успешном списании по подписке, которой нет в панели, и ничего не выдано. ' +
+          `Найдите подписку ${providerRecurrentId}` +
+          (providerPaymentId === null ? '' : ` и платёж ${providerPaymentId}`) +
+          ' в личном кабинете Antilopay. Если это ваш подписчик, откройте «Пользователи» → этот клиент → ' +
+          'вкладка «Операции», продлите подписку вручную и при необходимости верните деньги в Antilopay. ' +
+          'Если подписка оформлена не через панель (другая интеграция на том же проекте), карточку можно не учитывать.',
+      },
+    );
   }
 
   /**
@@ -664,9 +721,13 @@ export class ProviderSubscriptionService {
    * a charge nor pay one twice: a look that has nothing new finds every
    * payment's row and notice already there and settles nothing.
    *
-   * The first charge completes the checkout the payer started. A charge given
-   * back afterwards (CHARGEBACK, REVERSED) is not delivered, and its refund
-   * ends the autopay (`handleKeyedDispute`).
+   * WHICH charge completes the checkout the payer started is decided by what
+   * each charge is (`assignAntilopayChargeRoles`): the initiating payment, or
+   * the payment of our order, and for SBP the charge made at activation — never
+   * by position, which gave the first scheduled charge to a checkout already
+   * delivered, or two terms to one charge. Every other charge renews under its
+   * own payment id. A charge given back afterwards (CHARGEBACK, REVERSED) is not
+   * delivered, and its refund ends the autopay (`handleKeyedDispute`).
    *
    * Returns the subscription the charges renew, once the first has made one.
    */
@@ -677,10 +738,29 @@ export class ProviderSubscriptionService {
   ): Promise<string | null> {
     let applied = row.appliedChargeCount;
     let subscriptionId = row.subscriptionId;
-    for (const [index, charge] of charges.entries()) {
-      const chargeNumber = index + 1;
+    const firstTransaction = await this.prismaService.transaction.findUnique({
+      where: { id: row.firstTransactionId },
+    });
+    const roles = assignAntilopayChargeRoles({
+      charges,
+      providerSubscriptionId: row.providerSubscriptionId,
+      firstOrderId: firstTransaction?.paymentId ?? null,
+      method: row.method,
+      signedUpAt: row.createdAt,
+      firstDelivered:
+        firstTransaction !== null &&
+        firstTransaction.status === TransactionStatus.COMPLETED &&
+        firstTransaction.fulfilledAt !== null,
+    });
+    // The number a charge carries on its renewal and its notice is informational
+    // (the keys are payment ids): the start of an SBP subscription takes none.
+    let chargeNumber = 0;
+    for (const charge of charges) {
+      const role = roles.get(charge.id) ?? 'RENEW';
+      if (role === 'START' && !charge.disputed) continue;
+      if (role !== 'START') chargeNumber += 1;
       if (charge.disputed) {
-        await this.handleKeyedDispute(row, charge, chargeNumber);
+        await this.handleKeyedDispute(row, charge, role);
         continue;
       }
       if (row.userId === null) {
@@ -701,14 +781,20 @@ export class ProviderSubscriptionService {
         );
       }
       const transaction =
-        chargeNumber === 1
-          ? await this.prismaService.transaction.findUnique({ where: { id: row.firstTransactionId } })
+        role === 'FIRST'
+          ? firstTransaction
           : await this.findOrCreateChargeTransaction(
               { ...row, subscriptionId: (subscriptionId ??= await this.resolveSubscriptionId(row)) },
               chargeNumber,
               nextChargeAt,
               charge.id,
             );
+      if (transaction === null && role === 'FIRST') {
+        // The checkout this charge belongs to is gone: nothing to deliver, and
+        // nothing that another look would change.
+        this.logger.warn(`Charge ${charge.id} of subscription ${row.id} has no checkout to complete`);
+        continue;
+      }
       if (transaction === null) {
         // A later charge renews the subscription the first one created; until
         // that first delivery lands there is nothing to renew.
@@ -739,10 +825,11 @@ export class ProviderSubscriptionService {
   private async handleKeyedDispute(
     row: ProviderSubscription,
     charge: AntilopayCharge,
-    chargeNumber: number,
+    role: AntilopayChargeRole,
   ): Promise<void> {
+    // The start of a subscription is the first transaction's payment too.
     const transaction =
-      chargeNumber === 1
+      role !== 'RENEW'
         ? await this.prismaService.transaction.findUnique({ where: { id: row.firstTransactionId } })
         : row.userId === null
           ? null

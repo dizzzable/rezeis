@@ -30,6 +30,7 @@ export class PaymentReconciliationProcessor extends WorkerHost {
           target.gatewayType,
           target.providerRecurrentId,
           target.orderId,
+          { paymentId: target.paymentId, status: target.status },
         );
       } else {
         await this.providerSubscriptionService.sync(target.gatewayType, target.providerSubscriptionId);
@@ -54,7 +55,13 @@ function readSyncTarget(
 ):
   | { readonly gatewayType: PaymentGatewayType; readonly providerSubscriptionId: string }
   | { readonly gatewayType: PaymentGatewayType; readonly providerPaymentId: string }
-  | { readonly gatewayType: PaymentGatewayType; readonly providerRecurrentId: string; readonly orderId: string | null } {
+  | {
+      readonly gatewayType: PaymentGatewayType;
+      readonly providerRecurrentId: string;
+      readonly orderId: string | null;
+      readonly paymentId: string | null;
+      readonly status: string | null;
+    } {
   const record =
     typeof data === 'object' && data !== null && !Array.isArray(data) ? (data as Record<string, unknown>) : {};
   const gatewayType = record.gatewayType;
@@ -71,11 +78,13 @@ function readSyncTarget(
   }
   const providerRecurrentId = record.providerRecurrentId;
   if (typeof providerRecurrentId === 'string' && providerRecurrentId.length > 0) {
-    const orderId = record.orderId;
+    const text = (value: unknown): string | null => (typeof value === 'string' && value.length > 0 ? value : null);
     return {
       gatewayType: gatewayType as PaymentGatewayType,
       providerRecurrentId,
-      orderId: typeof orderId === 'string' && orderId.length > 0 ? orderId : null,
+      orderId: text(record.orderId),
+      paymentId: text(record.paymentId),
+      status: text(record.status),
     };
   }
   throw new Error('Provider subscription sync job payload is invalid');

@@ -291,6 +291,19 @@ export const EVENT_TYPES = {
    * providerSubscriptionId?, subscriptionId?, amount?, currency?, note }`.
    */
   PAYMENT_AUTOPAY_STOPPED_BY_OPERATOR: 'payment.autopay_stopped_by_operator',
+  /**
+   * An autopay the operator must look at, raised by the panel itself and
+   * throttled so it is one card, not a stream: Antilopay refused to create a
+   * repeat charge (error 30 — the project has no approval for them — or 29 —
+   * the data was refused), so every buyer who chose «для автоматического
+   * списания» is sent to the ordinary payment until it is fixed; or Antilopay
+   * took a charge of a subscription the panel cannot place, so money arrived and
+   * nothing was delivered. The `note` says which, and what to do. Operator-only
+   * (`OPERATOR_ONLY_EVENT_TYPES`), and delivered to whoever ticked the failed
+   * and the mismatched payments (`DELIVERED_WITH`). Metadata: `{ gatewayType,
+   * reason, note, needsManualReview?, providerRecurrentId?, providerPaymentId? }`.
+   */
+  PAYMENT_AUTOPAY_ATTENTION: 'payment.autopay_attention',
   PAYMENT_EXPIRED: 'payment.expired',
   PAYMENT_WEBHOOK_RECEIVED: 'payment.webhook_received',
   PAYMENT_FULFILLMENT_RECOVERED: 'payment.fulfillment_recovered',
@@ -554,6 +567,9 @@ export const OPERATOR_ONLY_EVENT_TYPES: ReadonlySet<string> = new Set<string>([
   // An operator's own action. A rule or letter bound to an autopay change
   // would tell the customer they turned it off.
   EVENT_TYPES.PAYMENT_AUTOPAY_STOPPED_BY_OPERATOR,
+  // A gateway setting to fix, or a charge to place by hand: not news for a
+  // customer, and not a payment for any rule or integration to read.
+  EVENT_TYPES.PAYMENT_AUTOPAY_ATTENTION,
 ]);
 
 // ── Service ─────────────────────────────────────────────────────────────────
@@ -3844,6 +3860,8 @@ export const EVENT_PRESENTATION: Record<string, EventPresentation> = {
   'payment.method_autopay_updated': { emoji: '🔁', title: 'Изменено автосписание' },
   // The operator's own switch, from the user's card; the note says what the provider did.
   'payment.autopay_stopped_by_operator': { emoji: '⏹', title: 'Автосписание отключено в панели' },
+  // A task for the operator on an autopay; the note says which and what to do.
+  'payment.autopay_attention': { emoji: '🔔', title: 'Автоплатёж: нужно внимание оператора' },
   // Not an error and not a completion: the charge is parked until the customer
   // passes 3DS. Titled as a wait, so it does not read like `payment.failed`.
   'payment.autopay_confirmation_required': {

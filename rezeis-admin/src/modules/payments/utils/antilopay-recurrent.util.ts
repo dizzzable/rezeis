@@ -125,6 +125,12 @@ export function isAntilopayRecurrentNotActiveYet(value: string | null): boolean 
 export interface AntilopayCharge {
   /** Antilopay's `payment_id`: the key of the charge, never its position. */
   readonly id: string;
+  /**
+   * The payment's `order_id`: OUR order for the sign-up's own first payment,
+   * Antilopay's own for a charge it makes on schedule. What tells the two apart,
+   * where the position in the list cannot.
+   */
+  readonly orderId: string | null;
   readonly at: Date | null;
   /** SUCCESS, or CHARGEBACK / REVERSED: taken, and then given back. */
   readonly providerStatus: string;
@@ -168,6 +174,7 @@ export function parseAntilopayRecurrent(data: Record<string, unknown>): Antilopa
     taken.push({
       charge: {
         id,
+        orderId: readText(payment['order_id']),
         at: readTimestamp(payment['ctime']),
         providerStatus: status,
         disputed: DISPUTED_PAYMENT_STATUSES.has(status),
@@ -192,6 +199,91 @@ export function parseAntilopayRecurrent(data: Record<string, unknown>): Antilopa
     endsAt: readDay(data['end_date']),
     charges: taken.map((entry) => entry.charge),
   };
+}
+
+/**
+ * What a charge of a recurrent IS to the panel: the payment that completes the
+ * sign-up's checkout, one that renews a term, or the start of an SBP
+ * subscription that is not a charge at all.
+ */
+export type AntilopayChargeRole = 'FIRST' | 'START' | 'RENEW';
+
+/**
+ * How far after the start of an SBP subscription the charge made at activation
+ * may come and still be that charge. Its shortest period is a week, so no
+ * scheduled charge is ever this close to the start.
+ */
+export const ANTILOPAY_ACTIVATION_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
+
+/** `ctime` names no zone: a sign-up's own time is compared with it only this loosely. */
+const ANTILOPAY_CLOCK_SLACK_MS = 12 * 60 * 60 * 1000;
+
+/**
+ * Which charge completes the first payment of a sign-up, and which renew — by
+ * WHAT each charge is, never by where it stands in the list.
+ *
+ * A charge is the sign-up's START when it is the initiating payment
+ * (`payment_id` is the id `payment/create` answered with) or the payment of
+ * OUR order (`order_id` is the first transaction's payment id). By position the
+ * first listed charge was taken for it, and two lists broke that: one without
+ * the initiating payment gave the first SCHEDULED charge to the checkout that
+ * was already delivered (charged, and nothing renewed), and, for SBP, one with
+ * the start listed as SUCCESS bought the first term with a start and the second
+ * with the charge made at activation.
+ *
+ *  - CARD (`PAYMENT_TEMPLATE`): the start is the first payment, money moved.
+ *    It is FIRST; every other charge, however close, renews under its own id.
+ *  - SBP (`SUBSCRIPTION`): the start may be no more than the start of the
+ *    subscription («Нельзя сделать возврат у начала подписки»), and the first
+ *    charge is a separate payment made at activation (`delay: 0`). A charge
+ *    within {@link ANTILOPAY_ACTIVATION_WINDOW_MS} of the start (of the
+ *    sign-up, when the start is not listed) is that charge: it is FIRST and
+ *    the start is not counted. When there is none, the start is FIRST.
+ *
+ * Last resort: with no FIRST and the first transaction not yet delivered, the
+ * earliest charge is given to it — money was taken and nothing else can
+ * deliver it, and a renewal would wait for a delivery that never comes.
+ */
+export function assignAntilopayChargeRoles(input: {
+  readonly charges: readonly AntilopayCharge[];
+  readonly providerSubscriptionId: string;
+  readonly firstOrderId: string | null;
+  readonly method: string | null;
+  readonly signedUpAt: Date;
+  readonly firstDelivered: boolean;
+}): ReadonlyMap<string, AntilopayChargeRole> {
+  const isStart = (charge: AntilopayCharge): boolean =>
+    charge.id === input.providerSubscriptionId ||
+    (input.firstOrderId !== null && charge.orderId === input.firstOrderId);
+  const start = input.charges.find(isStart) ?? null;
+  let first: AntilopayCharge | null = start;
+  let startIsNotACharge = false;
+  if (input.method === 'SBP') {
+    const anchor = (start?.at ?? input.signedUpAt).getTime();
+    const activation = input.charges.find(
+      (charge) =>
+        !isStart(charge) &&
+        !charge.disputed &&
+        charge.at !== null &&
+        charge.at.getTime() >= anchor - ANTILOPAY_CLOCK_SLACK_MS &&
+        charge.at.getTime() <= anchor + ANTILOPAY_ACTIVATION_WINDOW_MS,
+    );
+    if (activation !== undefined) {
+      first = activation;
+      startIsNotACharge = start !== null;
+    }
+  }
+  if (first === null && !input.firstDelivered) {
+    first = input.charges.find((charge) => !charge.disputed) ?? null;
+  }
+  const roles = new Map<string, AntilopayChargeRole>();
+  for (const charge of input.charges) {
+    roles.set(
+      charge.id,
+      charge.id === first?.id ? 'FIRST' : startIsNotACharge && charge.id === start?.id ? 'START' : 'RENEW',
+    );
+  }
+  return roles;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

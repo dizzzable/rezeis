@@ -87,6 +87,9 @@ interface Harness {
   readonly failed: string[];
   readonly rows: Row[];
   readonly findManyArgs: Array<Record<string, unknown>>;
+  /** The ended subscriptions the daily run asked to read again, by id. */
+  readonly synced: string[];
+  readonly endedFindManyArgs: Array<Record<string, unknown>>;
 }
 
 function createHarness(input: {
@@ -95,7 +98,13 @@ function createHarness(input: {
   readonly duplicateEvents?: boolean;
   readonly gateway?: boolean;
   readonly queueFails?: boolean;
+  /** Antilopay subscriptions that ended within the month. */
+  readonly endedRows?: Array<{ id: string }>;
+  /** Reading these again fails. */
+  readonly syncFails?: readonly string[];
 }): Harness {
+  const synced: string[] = [];
+  const endedFindManyArgs: Array<Record<string, unknown>> = [];
   const posts: Harness['posts'] = [];
   const recorded: Harness['recorded'] = [];
   const queued: Harness['queued'] = [];
@@ -109,6 +118,12 @@ function createHarness(input: {
   const prisma = {
     paymentGateway: {
       findUnique: async () => (input.gateway === false ? null : { settings: SETTINGS }),
+    },
+    providerSubscription: {
+      findMany: async (args: Record<string, unknown>) => {
+        endedFindManyArgs.push(args);
+        return input.endedRows ?? [];
+      },
     },
     transaction: {
       findMany: async (args: Record<string, unknown>) => {
@@ -172,14 +187,21 @@ function createHarness(input: {
       queued.push({ name, data });
     },
   };
+  const providerSubscriptions = {
+    syncRow: async (row: { id: string }) => {
+      if (input.syncFails?.includes(row.id) === true) throw new Error('Antilopay is down');
+      synced.push(row.id);
+    },
+  };
   const service = new AntilopayStatusService(
     prisma as never,
     http as never,
     new PaymentWebhookNormalizerService(),
     inbox as never,
     queue as never,
+    providerSubscriptions as never,
   );
-  return { service, posts, recorded, queued, failed, rows: input.rows, findManyArgs };
+  return { service, posts, recorded, queued, failed, rows: input.rows, findManyArgs, synced, endedFindManyArgs };
 }
 
 describe('Antilopay payment/check', () => {
@@ -471,5 +493,59 @@ describe('Antilopay statuses in the existing reconciliation', () => {
       assert.equal(mapProviderStatusToTransactionStatus(dead), TransactionStatus.CANCELED, dead);
     }
     assert.equal(mapProviderStatusToTransactionStatus('PENDING'), TransactionStatus.PENDING);
+  });
+
+  it('cancels a payment REVERSED before it was ever completed, as a chargeback would, instead of holding it PENDING', () => {
+    for (const word of ['REVERSED', 'reversed', 'CHARGEBACK']) {
+      assert.equal(mapProviderStatusToTransactionStatus(word), TransactionStatus.CANCELED, word);
+    }
+  });
+});
+
+describe('Antilopay: the daily re-read of subscriptions that ended', () => {
+  const ended = (...ids: string[]) => ids.map((id) => ({ id }));
+
+  it('reads again each subscription that ended or was charged within the month, the one read longest ago first', async () => {
+    const h = createHarness({ rows: [], answer: (id) => checkReply(id, 'SUCCESS'), endedRows: ended('ps-a', 'ps-b') });
+
+    const read = await h.service.recheckEndedSubscriptions(NOW, { throttleMs: 0 });
+
+    assert.equal(read, 2);
+    assert.deepEqual(h.synced, ['ps-a', 'ps-b']);
+    const args = h.endedFindManyArgs[0] as {
+      where: { gatewayType: string; status: string; providerRecurrentId: unknown; OR: Array<Record<string, { gte: Date }>> };
+      orderBy: unknown;
+    };
+    assert.equal(args.where.gatewayType, PaymentGatewayType.ANTILOPAY);
+    assert.equal(args.where.status, 'CANCELLED');
+    assert.deepEqual(args.where.providerRecurrentId, { not: null });
+    const since = NOW.getTime() - ANTILOPAY_COMPLETED_WINDOW_MS;
+    assert.deepEqual(
+      args.where.OR.map((clause) => Object.keys(clause)[0]),
+      ['cancelledAt', 'lastChargeAt'],
+      'ended within the month, or charged within it: a chargeback comes weeks after the charge',
+    );
+    for (const clause of args.where.OR) assert.equal(Object.values(clause)[0]?.gte.getTime(), since);
+    assert.deepEqual(args.orderBy, { lastSyncedAt: { sort: 'asc', nulls: 'first' } });
+  });
+
+  it('stops after three failures in a row, and counts only what it read', async () => {
+    const h = createHarness({
+      rows: [],
+      answer: (id) => checkReply(id, 'SUCCESS'),
+      endedRows: ended('ps-1', 'ps-2', 'ps-3', 'ps-4', 'ps-5'),
+      syncFails: ['ps-2', 'ps-3', 'ps-4'],
+    });
+
+    const read = await h.service.recheckEndedSubscriptions(NOW, { throttleMs: 0 });
+
+    assert.equal(read, 1);
+    assert.deepEqual(h.synced, ['ps-1']);
+  });
+
+  it('is part of the daily run, beside the completed payments', async () => {
+    const h = createHarness({ rows: [], answer: (id) => checkReply(id, 'SUCCESS'), endedRows: ended('ps-a') });
+    await h.service.sweepCompleted();
+    assert.deepEqual(h.synced, ['ps-a']);
   });
 });

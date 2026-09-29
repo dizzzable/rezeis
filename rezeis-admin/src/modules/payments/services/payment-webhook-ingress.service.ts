@@ -244,7 +244,12 @@ export class PaymentWebhookIngressService {
           providerRecurrentId: antilopayRecurrent.recurrentId,
           ...(antilopayRecurrent.paymentId === null ? {} : { providerPaymentId: antilopayRecurrent.paymentId }),
         });
-        await this.providerSubscriptionService.enqueueRecurrentSync(input.gatewayType, antilopayRecurrent.recurrentId);
+        await this.providerSubscriptionService.enqueueRecurrentSync(
+          input.gatewayType,
+          antilopayRecurrent.recurrentId,
+          null,
+          { paymentId: antilopayRecurrent.paymentId, status: antilopayRecurrent.status },
+        );
         return { accepted: true, duplicate: false, lifecycleStatus: PAYMENT_WEBHOOK_STATUS_ENQUEUED };
       }
       recurrentFollowUp = antilopayRecurrent;
@@ -301,6 +306,7 @@ export class PaymentWebhookIngressService {
           input.gatewayType,
           recurrentFollowUp.recurrentId,
           recurrentFollowUp.orderId,
+          { paymentId: recurrentFollowUp.paymentId, status: recurrentFollowUp.status },
         );
       } catch (error: unknown) {
         this.logger.warn(
@@ -374,6 +380,8 @@ export interface AntilopayCallbackReferences {
   /** `recurrent_id`: the subscription the payment belongs to. */
   readonly recurrentId: string;
   readonly paymentId: string | null;
+  /** The callback's own `status` (SUCCESS, FAIL), upper-cased. */
+  readonly status: string | null;
 }
 
 /**
@@ -407,7 +415,12 @@ export function readAntilopayCallbackReferences(
   };
   const recurrentId = read('recurrent_id');
   if (recurrentId === null) return null;
-  return { orderId: read('order_id'), recurrentId, paymentId: read('payment_id') };
+  return {
+    orderId: read('order_id'),
+    recurrentId,
+    paymentId: read('payment_id'),
+    status: read('status')?.toUpperCase() ?? null,
+  };
 }
 
 /**

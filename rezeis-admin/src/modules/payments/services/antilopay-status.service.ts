@@ -2,9 +2,9 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 import { HttpService } from '@nestjs/axios';
 import { InjectQueue } from '@nestjs/bullmq';
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
-import { PaymentGatewayType, Prisma, TransactionStatus } from '@prisma/client';
+import { PaymentGatewayType, Prisma, ProviderSubscriptionStatus, TransactionStatus } from '@prisma/client';
 import { Queue } from 'bullmq';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
@@ -28,6 +28,7 @@ import { writeTransactionGatewayData } from '../utils/transaction-gateway-data.u
 import { readOptionalString } from './payment-provider-execution.helpers';
 import { PaymentWebhookInboxService } from './payment-webhook-inbox.service';
 import { PaymentWebhookNormalizerService } from './payment-webhook-normalizer.service';
+import { ProviderSubscriptionService } from './provider-subscription.service';
 
 const MINUTE_MS = 60 * 1000;
 const DAY_MS = 24 * 60 * MINUTE_MS;
@@ -75,6 +76,8 @@ const COMPLETED_MAX_PER_RUN = 3000;
 const PENDING_MAX_PER_SWEEP = 200;
 /** A sweep stops after this many failed questions in a row: Antilopay is not answering. */
 const MAX_CONSECUTIVE_FAILURES = 3;
+/** Ended subscriptions the daily run reads again at most. */
+const ENDED_MAX_PER_RUN = 500;
 
 /** `rawPayload.source` of a notice this service made from a status check. */
 export const ANTILOPAY_PAYMENT_CHECK_SOURCE = 'ANTILOPAY_PAYMENT_CHECK';
@@ -136,6 +139,12 @@ export class AntilopayStatusService {
     private readonly paymentWebhookInboxService: PaymentWebhookInboxService,
     @InjectQueue(PAYMENT_RECONCILIATION_QUEUE)
     private readonly paymentReconciliationQueue: Queue,
+    /**
+     * Reads a subscription's charges again (`syncRow`), for the ended ones the
+     * daily run looks after. Last and optional: specs build this positionally.
+     */
+    @Optional()
+    private readonly providerSubscriptionService?: ProviderSubscriptionService,
   ) {}
 
   /**
@@ -313,9 +322,60 @@ export class AntilopayStatusService {
       await this.recheckCompletedPayments(new Date());
     } catch (error: unknown) {
       this.logger.error(`Antilopay daily re-check failed: ${errorText(error)}`);
+    }
+    try {
+      await this.recheckEndedSubscriptions(new Date());
+    } catch (error: unknown) {
+      this.logger.error(`Antilopay daily re-check of ended subscriptions failed: ${errorText(error)}`);
     } finally {
       this.completedSweepRunning = false;
     }
+  }
+
+  /**
+   * Reads again the Antilopay subscriptions that ended, or were charged, within
+   * the month: a chargeback or a refund of one of their charges comes weeks
+   * after it, and a row that is no longer live is nobody's sweep. The charges
+   * of a live one are read by the subscription sweep (once a day), and a
+   * scheduled charge is a payment under an order id Antilopay made up, so the
+   * payment check above cannot ask about it; only its recurrent lists it, with
+   * its status, and `syncRow` reads that — delivering what is new, sending a
+   * given-back charge through the refund reversal, ending the autopay by it.
+   * The row that was read longest ago goes first, so a month with more rows
+   * than one run reads them all over a few days. Returns how many it read.
+   */
+  public async recheckEndedSubscriptions(now: Date, options: { readonly throttleMs?: number } = {}): Promise<number> {
+    if (this.providerSubscriptionService === undefined) return 0;
+    const throttleMs = options.throttleMs ?? COMPLETED_THROTTLE_MS;
+    const since = new Date(now.getTime() - ANTILOPAY_COMPLETED_WINDOW_MS);
+    const rows = await this.prismaService.providerSubscription.findMany({
+      where: {
+        gatewayType: PaymentGatewayType.ANTILOPAY,
+        status: ProviderSubscriptionStatus.CANCELLED,
+        providerRecurrentId: { not: null },
+        OR: [{ cancelledAt: { gte: since } }, { lastChargeAt: { gte: since } }],
+      },
+      orderBy: { lastSyncedAt: { sort: 'asc', nulls: 'first' } },
+      take: ENDED_MAX_PER_RUN,
+    });
+    let read = 0;
+    let failures = 0;
+    for (const row of rows) {
+      try {
+        await this.providerSubscriptionService.syncRow(row);
+        read += 1;
+        failures = 0;
+      } catch (error: unknown) {
+        failures += 1;
+        this.logger.warn(`Ended Antilopay subscription ${row.id} could not be read again: ${errorText(error)}`);
+        if (failures >= MAX_CONSECUTIVE_FAILURES) {
+          this.logger.warn('Antilopay is not answering; the ended subscriptions wait until tomorrow');
+          break;
+        }
+      }
+      if (throttleMs > 0) await sleep(throttleMs);
+    }
+    return read;
   }
 
   /**

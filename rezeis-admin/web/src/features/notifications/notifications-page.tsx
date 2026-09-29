@@ -191,6 +191,10 @@ const EVENT_TYPE_CATALOG: Readonly<Record<string, readonly string[]>> = {
     // refund. Operator-only; also delivered to whoever ticked
     // payment.method_autopay_updated.
     'payment.autopay_stopped_by_operator',
+    // Antilopay refused repeat charges (errors 29, 30), or took a charge of a
+    // subscription the panel cannot place. Operator-only; also delivered to
+    // whoever ticked payment.failed or payment.amount_mismatch.
+    'payment.autopay_attention',
     'payment.autopay_confirmation_required',
     // Grouped here, not under SUBSCRIPTION, because its emit site passes
     // category PAYMENT — which is what picks the Telegram topic it lands in.
