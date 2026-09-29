@@ -16,6 +16,12 @@ import {
   checkoutExpiresAt,
 } from '../constants/checkout-lifetime.constant';
 import { readGatewaySettings, resolvePlategaPaymentMethod } from '../utils/payment-gateway-settings.util';
+import {
+  ANTILOPAY_API,
+  antilopayHeaders,
+  signAntilopayBody,
+  toAntilopayPrivateKeyPem,
+} from '../utils/antilopay-api.util';
 import { isAutopayApproved } from '../utils/gateway-autopay.util';
 import { normalizePaymentProviderError, redactPaymentDiagnosticMessage } from '../utils/payment-provider-error.util';
 import { PLATEGA_INTERVAL_CODE } from '../utils/provider-subscription-period.util';
@@ -879,11 +885,10 @@ export class PaymentProviderExecutionService {
     readonly customerEmail?: string | null;
     readonly customerIp?: string | null;
   }): Promise<ProviderCheckoutResult> {
-    const crypto = await import('crypto');
     const settings = readGatewaySettings(input.gateway.settings);
     const projectIdentificator = requireSetting(settings, 'projectIdentificator');
     const secretId = requireSetting(settings, 'secretId');
-    const privateKeyPem = this.toAntilopayPrivateKeyPem(requireSetting(settings, 'privateKey'));
+    const privateKeyPem = toAntilopayPrivateKeyPem(requireSetting(settings, 'privateKey'));
     const vat = this.readAntilopayVat(settings);
     const customerIp = this.readAntilopayCustomerIp(input.customerIp);
 
@@ -920,18 +925,11 @@ export class PaymentProviderExecutionService {
     };
 
     const bodyString = JSON.stringify(payload);
-    const sign = crypto.createSign('RSA-SHA256');
-    sign.update(bodyString);
-    const signature = sign.sign(privateKeyPem, 'base64');
+    const signature = signAntilopayBody(bodyString, privateKeyPem);
 
     const response = await firstValueFrom(
-      this.httpService.post('https://lk.antilopay.com/api/v1/payment/create', bodyString, {
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Apay-Secret-Id': secretId,
-          'X-Apay-Sign': signature,
-          'X-Apay-Sign-Version': '1',
-        },
+      this.httpService.post(`${ANTILOPAY_API}/payment/create`, bodyString, {
+        headers: antilopayHeaders(secretId, signature),
       }),
     );
 
@@ -948,34 +946,6 @@ export class PaymentProviderExecutionService {
       providerStatus: 'PENDING',
       gatewayData: { provider: 'ANTILOPAY', providerResponse: this.redactProviderResponse(data), checkoutUrl: readOptionalString(data, ['payment_url']) },
     };
-  }
-
-  /**
-   * Re-armors the stored Antilopay signing key before OpenSSL sees it.
-   *
-   * The value arrives through the admin form as whatever the operator had on
-   * the clipboard, and OpenSSL 3 is unforgiving about the difference. Measured
-   * on Node 24 / OpenSSL 3.5.5, wrapping the setting directly in armor signs
-   * correctly for raw base64, for 64-column-wrapped base64 and even with
-   * embedded spaces — but a value carrying a **trailing newline**, or one that
-   * is **already a complete PEM** with its own `-----BEGIN…` lines, throws
-   * `ERR_OSSL_UNSUPPORTED`. Both are precisely what copying a key out of a
-   * cabinet or a `.pem` file produces, and both were rethrown upstream as a
-   * bare 503: the gateway went dark with no diagnostic naming the key.
-   *
-   * So the setting is reduced to its base64 body and re-wrapped at 64 columns.
-   * The `RSA PRIVATE KEY` label is deliberately kept — Antilopay issues a
-   * PKCS#8 key (its own Java, Go and C# samples read it with
-   * `PKCS8EncodedKeySpec` / `ParsePKCS8PrivateKey` / `ImportPkcs8PrivateKey`),
-   * and OpenSSL 3 signs that body under this label exactly as the provider's
-   * own PHP and Node samples do. The armor was never the defect.
-   */
-  private toAntilopayPrivateKeyPem(privateKey: string): string {
-    const base64Body = privateKey
-      .replace(/-----(?:BEGIN|END)[^-]*-----/g, '')
-      .replace(/\s+/g, '');
-    const wrappedBody = base64Body.match(/.{1,64}/g)?.join('\n') ?? '';
-    return `-----BEGIN RSA PRIVATE KEY-----\n${wrappedBody}\n-----END RSA PRIVATE KEY-----\n`;
   }
 
   /**

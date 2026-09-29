@@ -1,5 +1,5 @@
 import { HttpService } from '@nestjs/axios';
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { PaymentGatewayType, Prisma, TransactionStatus } from '@prisma/client';
 import { firstValueFrom } from 'rxjs';
@@ -20,6 +20,7 @@ import { requireSetting, requireYookassaSecretKey } from './payment-provider-exe
 import { releasePaidTrialClaim } from '../../subscriptions/services/trial-claim-ledger.util';
 import { CHECKOUT_LIFETIME_MS } from '../constants/checkout-lifetime.constant';
 import { isProviderCreationClaim } from './payments-checkout.service';
+import { AntilopayStatusService } from './antilopay-status.service';
 import { importedPaymentSource, PaymentReconciliationService } from './payment-reconciliation.service';
 import { PaymentSubscriptionMutationService } from './payment-subscription-mutation.service';
 
@@ -68,6 +69,13 @@ export class PaymentPendingExpiryService {
     private readonly paymentSubscriptionMutationService: PaymentSubscriptionMutationService,
     private readonly profileSyncQueueService: ProfileSyncQueueService,
     private readonly paymentReconciliationService: PaymentReconciliationService,
+    /**
+     * Asks Antilopay what became of a payment before it is cancelled. Last and
+     * optional: a dozen specs build this service positionally. The module
+     * always provides it.
+     */
+    @Optional()
+    private readonly antilopayStatusService?: AntilopayStatusService,
   ) {}
 
   @Cron(CronExpression.EVERY_5_MINUTES, { name: 'payment-pending-expiry' })
@@ -88,6 +96,7 @@ export class PaymentPendingExpiryService {
         planSnapshot: true,
         amount: true,
         currency: true,
+        createdAt: true,
       },
       take: MAX_PER_TICK,
     });
@@ -191,6 +200,12 @@ export class PaymentPendingExpiryService {
    * `consumePaidTrialClaim` revives the released claim with it.
    */
   private async isProviderTerminal(tx: StalePendingRow): Promise<'keep' | 'provider-terminal' | 'local-ttl'> {
+    // Antilopay is asked by OUR payment id, so a row with no provider id yet is
+    // still asked: its invoice may exist, and its callback may be the one that
+    // was lost. What it says decides; see `AntilopayStatusService`.
+    if (tx.gatewayType === PaymentGatewayType.ANTILOPAY && this.antilopayStatusService !== undefined) {
+      return this.antilopayStatusService.verdictBeforeExpiry(tx);
+    }
     if (tx.gatewayType !== PaymentGatewayType.YOOKASSA || tx.gatewayId === null) {
       return 'local-ttl';
     }
@@ -390,6 +405,7 @@ interface StalePendingRow {
   readonly planSnapshot: Prisma.JsonValue;
   readonly amount: { toString(): string };
   readonly currency: string;
+  readonly createdAt: Date;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
