@@ -37,11 +37,13 @@ export function readAntilopayRefunds(value: unknown): readonly AntilopayRefund[]
     if (id.length === 0 || status.length === 0 || seen.has(id)) continue;
     seen.add(id);
     const rawAmount = record['amount'];
+    // A comma decimal («100,50») is the same sum. Left unread it would become
+    // `null`, which the refund path takes for a FULL refund.
     const amount =
       typeof rawAmount === 'number' && Number.isFinite(rawAmount)
         ? String(rawAmount)
-        : typeof rawAmount === 'string' && /^\d+(\.\d+)?$/.test(rawAmount.trim())
-          ? rawAmount.trim()
+        : typeof rawAmount === 'string' && /^\d+([.,]\d+)?$/.test(rawAmount.trim())
+          ? rawAmount.trim().replace(',', '.')
           : null;
     refunds.push({ id, amount, status });
   }

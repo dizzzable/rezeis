@@ -811,6 +811,7 @@ describe('the refunds Antilopay lists', () => {
       { refund_id: 'RF-1', amount: 100, status: 'COMPLETE' },
       { refund_id: 'RF-2', amount: '49.50', status: 'complete' },
       { refund_id: 'RF-3', amount: 10, status: 'FAIL' },
+      { refund_id: 'RF-4', amount: '100,50', status: 'COMPLETE' },
       { amount: 5, status: 'COMPLETE' },
       'nonsense',
     ]);
@@ -818,8 +819,10 @@ describe('the refunds Antilopay lists', () => {
       { id: 'RF-1', amount: '100', status: 'COMPLETE' },
       { id: 'RF-2', amount: '49.50', status: 'COMPLETE' },
       { id: 'RF-3', amount: '10', status: 'FAIL' },
+      // A partial refund written with a comma is still partial, not a full one.
+      { id: 'RF-4', amount: '100.50', status: 'COMPLETE' },
     ]);
-    assert.deepEqual(completedAntilopayRefunds(refunds).map((refund) => refund.id), ['RF-1', 'RF-2']);
+    assert.deepEqual(completedAntilopayRefunds(refunds).map((refund) => refund.id), ['RF-1', 'RF-2', 'RF-4']);
     assert.deepEqual(readAntilopayRefunds(undefined), []);
   });
 
