@@ -926,7 +926,12 @@ export class PaymentProviderExecutionService {
       project_identificator: projectIdentificator,
       amount: Number(input.transaction.amount),
       order_id: input.transaction.paymentId,
-      currency: 'rub',
+      // Upper-case: the field is an enum of `RUB` («Валюта. Только RUB»), and
+      // the documentation's own lower-case example is refused on a live project
+      // with code 15 «Invalid request param: currency - validator.enum» — every
+      // checkout failed with it before this (checked against a real project on
+      // 30.09.2026).
+      currency: 'RUB',
       product_name: input.description.slice(0, 128),
       product_type: 'services',
       // Left out entirely unless the operator configured a rate — see

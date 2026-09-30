@@ -920,6 +920,14 @@ describe('PaymentProviderExecutionService — Antilopay vat', () => {
     });
   }
 
+  it('sends the currency upper-case, as the RUB enum a live project accepts', async () => {
+    // A live project refused the documentation's lower-case example on every
+    // checkout: code 15 «Invalid request param: currency - validator.enum».
+    const { payload } = await createAntilopayCheckout({ privateKey: TEST_RSA_PRIVATE_KEY_BASE64 });
+
+    assert.equal(payload.currency, 'RUB');
+  });
+
   it('omits vat entirely for a merchant that is not on ОСНО', async () => {
     const { payload } = await createAntilopayCheckout({ privateKey: TEST_RSA_PRIVATE_KEY_BASE64 });
 
