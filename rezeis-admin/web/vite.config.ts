@@ -340,6 +340,30 @@ export default defineConfig({
     globals: true,
     environment: 'jsdom',
     setupFiles: ['./src/test/setup-tests.ts'],
+    // ── Node's own Web Storage must not shadow jsdom's ──────────────────────
+    //
+    // Node 25 turned `localStorage` and `sessionStorage` on by default. On
+    // Node 26 they are accessors on `globalThis`, and vitest's jsdom
+    // environment copies a jsdom property onto the global only when the global
+    // does not already have it (`getWindowKeys` skips every `k in global` that
+    // is not on its short list of DOM class names — `Storage` is on it,
+    // `localStorage` and `sessionStorage` are not). So under Node 26 a spec
+    // saw NODE's storage: `localStorage` was `undefined` without
+    // `--localstorage-file`, and `sessionStorage` was Node's own object, a
+    // different class from jsdom's `Storage`. Everything a spec does to
+    // `Storage.prototype` — the «storage that throws» specs in
+    // `lib/lazy-chunk.test.ts` and
+    // `features/dashboard/dashboard-online-trend.test.tsx` — then touched a
+    // prototype the instance the code reads does not inherit from, and the
+    // stub never fired. Node 24 had neither global, which is why CI passed.
+    //
+    // Switching Node's storage off in the test workers puts the world back as
+    // the specs were written for it: the only `localStorage` is jsdom's, per
+    // test file, and it can be stubbed. It is a worker flag and not a setup
+    // file on purpose — the setup file runs after the environment has decided
+    // which storage to expose. Browsers are untouched; this is the test
+    // process only.
+    execArgv: ['--no-experimental-webstorage'],
     // ── Worker cap. The problem here is OVERSUBSCRIPTION, not parallelism. ──
     //
     // Uncapped, vitest takes one worker per core (16 here) and each one pays
