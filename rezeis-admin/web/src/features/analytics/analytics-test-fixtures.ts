@@ -193,9 +193,12 @@ export function revenueReport(money: MoneyView = ROUBLES): RevenueReport {
       { kind: 'withheld', figure: { value: 0, byCurrency: [] }, payments: 0 },
     ],
     byPlan: [
-      { key: 'plan:p1', kind: 'plan', planId: 'p1', name: 'Pro', figure: { value: 6000, byCurrency: [{ currency: 'RUB', amount: 6000 }] }, payments: 12 },
-      { key: 'plan:p2', kind: 'plan', planId: 'p2', name: 'Basic', figure: { value: 3300, byCurrency: [{ currency: 'RUB', amount: 3300 }] }, payments: 10 },
-      { key: 'addon', kind: 'addon', planId: null, name: '+50 GB', figure: { value: 400, byCurrency: [{ currency: 'RUB', amount: 400 }] }, payments: 1 },
+      { key: 'plan:p1:30', kind: 'plan', planId: 'p1', name: 'Pro', days: 30, addOnType: null, figure: { value: 3500, byCurrency: [{ currency: 'RUB', amount: 3500 }] }, payments: 7 },
+      { key: 'plan:p2:30', kind: 'plan', planId: 'p2', name: 'Basic', days: 30, addOnType: null, figure: { value: 2800, byCurrency: [{ currency: 'RUB', amount: 2800 }] }, payments: 8 },
+      { key: 'plan:p1:90', kind: 'plan', planId: 'p1', name: 'Pro', days: 90, addOnType: null, figure: { value: 2000, byCurrency: [{ currency: 'RUB', amount: 2000 }] }, payments: 4 },
+      { key: 'plan:p2:45', kind: 'plan', planId: 'p2', name: 'Basic', days: 45, addOnType: null, figure: { value: 500, byCurrency: [{ currency: 'RUB', amount: 500 }] }, payments: 2 },
+      { key: 'other', kind: 'other', planId: null, name: null, days: null, addOnType: null, figure: { value: 500, byCurrency: [{ currency: 'RUB', amount: 500 }] }, payments: 1 },
+      { key: 'addon:EXTRA_TRAFFIC', kind: 'addon', planId: null, name: null, days: null, addOnType: 'EXTRA_TRAFFIC', figure: { value: 400, byCurrency: [{ currency: 'RUB', amount: 400 }] }, payments: 1 },
     ],
     byGateway: [
       { gatewayType: 'YOOKASSA', figure: { value: 9700, byCurrency: [{ currency: 'RUB', amount: 9700 }] }, payments: 23 },

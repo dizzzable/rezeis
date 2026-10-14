@@ -117,6 +117,16 @@ export function formatPercent(ratio: number, options: { readonly digits?: number
   return new Intl.NumberFormat(locale, { style: 'percent', maximumFractionDigits: digits }).format(ratio)
 }
 
+/**
+ * A plan's term as the plan list names it: whole months («1 мес», «3 мес») when the days are a
+ * whole number of 30-day months, else days («45 дн.»); `-1` is a lifetime plan.
+ */
+export function formatTerm(t: TFunction, days: number): string {
+  if (days === -1) return t('analyticsPage.revenue.byPlan.termLifetime')
+  if (days > 0 && days % 30 === 0) return t('analyticsPage.revenue.byPlan.termMonths', { count: days / 30 })
+  return t('analyticsPage.revenue.byPlan.termDays', { count: days })
+}
+
 /** A number of days with at most one decimal: «4,5». */
 export function formatDays(days: number, locale: string = activeLocale()): string {
   return new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(days)

@@ -58,7 +58,7 @@ import {
   useChartEntrance,
   withRule,
 } from './analytics-chart-support'
-import { formatBucket, formatCount, formatMoney, formatPercent, gatewayName, partnerBalanceText } from './analytics-format'
+import { formatBucket, formatCount, formatMoney, formatPercent, formatTerm, gatewayName, partnerBalanceText } from './analytics-format'
 import { ACCENT, CURRENCY_ORDER, currencyColor, OTHER_COLOR, PURCHASE_KIND_COLORS } from './analytics-palette'
 import { DiscountsCard } from './analytics-discounts-card'
 import { PaymentHoursCard } from './analytics-payment-hours-card'
@@ -562,10 +562,32 @@ function GatewaysCard({ report, played }: { readonly report: RevenueReport; read
   )
 }
 
+/** The name of a plan row's plan, or of what the row stands for; the term is said apart ({@link planTerm}). */
 function planLabel(t: TFunction, plan: RevenuePlan): string {
-  if (plan.kind === 'addon') return t('analyticsPage.revenue.byPlan.addons')
-  if (plan.kind === 'none') return t('analyticsPage.revenue.byPlan.none')
-  return plan.name ?? t('analyticsPage.revenue.byPlan.unnamed')
+  switch (plan.kind) {
+    case 'addon':
+      switch (plan.addOnType) {
+        case 'EXTRA_TRAFFIC':
+          return t('analyticsPage.revenue.byPlan.addonTraffic')
+        case 'EXTRA_DEVICES':
+          return t('analyticsPage.revenue.byPlan.addonDevices')
+        case 'RESET_TRAFFIC':
+          return t('analyticsPage.revenue.byPlan.addonReset')
+        default:
+          return t('analyticsPage.revenue.byPlan.addons')
+      }
+    case 'other':
+      return t('analyticsPage.revenue.byPlan.other')
+    case 'none':
+      return t('analyticsPage.revenue.byPlan.none')
+    default:
+      return plan.name ?? t('analyticsPage.revenue.byPlan.unnamed')
+  }
+}
+
+/** The term of a plan row, or `null` for a row with none (an add-on, «Прочее», a payment that records no term). */
+function planTerm(t: TFunction, plan: RevenuePlan): string | null {
+  return plan.kind === 'plan' && plan.days !== null && plan.days !== undefined ? formatTerm(t, plan.days) : null
 }
 
 function PlansRevenueCard({ report, played }: { readonly report: RevenueReport; readonly played: Set<string> }): JSX.Element {
@@ -583,6 +605,26 @@ function PlansRevenueCard({ report, played }: { readonly report: RevenueReport; 
       info={t('analyticsPage.revenue.byPlan.info')}
       rule="money"
       description={t('analyticsPage.revenue.byPlan.description')}
+      table={
+        rows.length === 0 ? undefined : (
+          <DataTable
+            caption={t('analyticsPage.revenue.byPlan.title')}
+            columns={[
+              { key: 'plan', label: t('analyticsPage.revenue.byPlan.planColumn') },
+              { key: 'term', label: t('analyticsPage.revenue.byPlan.termColumn') },
+              { key: 'payments', label: t('analyticsPage.revenue.byPlan.paymentsColumn'), numeric: true },
+              { key: 'revenue', label: t('analyticsPage.revenue.byPlan.revenueColumn'), numeric: true },
+            ]}
+            rows={rows.map((plan) => ({
+              key: plan.key,
+              plan: planLabel(t, plan),
+              term: planTerm(t, plan) ?? '—',
+              payments: formatCount(plan.payments),
+              revenue: `${approx(money, plan.figure.byCurrency.map((slice) => slice.currency))}${formatMoney(plan.figure.value, money.currency)}`,
+            }))}
+          />
+        )
+      }
     >
       {rows.length === 0 ? (
         <EmptyState className="h-48">{t('analyticsPage.revenue.empty')}</EmptyState>
@@ -593,7 +635,7 @@ function PlansRevenueCard({ report, played }: { readonly report: RevenueReport; 
             limit={10}
             rows={rows.map((plan) => ({
               key: plan.key,
-              label: planLabel(t, plan),
+              label: planTerm(t, plan) === null ? planLabel(t, plan) : `${planLabel(t, plan)} · ${planTerm(t, plan)}`,
               detail: t('analyticsPage.revenue.summary.paymentsCount', { count: plan.payments }),
               value: plan.figure.value,
               valueText: `${approx(money, plan.figure.byCurrency.map((slice) => slice.currency))}${formatMoney(plan.figure.value, money.currency, { compact: true })}`,

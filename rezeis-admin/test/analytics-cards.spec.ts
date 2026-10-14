@@ -22,6 +22,7 @@ import {
   AUTOPAY_IDEMPOTENCY_PREFIX,
   PAYMENT_HOURS_TOP,
 } from '../src/modules/business-analytics/utils/analytics-payment-hours.util';
+import { assembleRevenue, type RevenuePlanRow } from '../src/modules/business-analytics/utils/analytics-revenue.util';
 import {
   assemblePaidCohorts,
   PAID_COHORT_OFFSETS,
@@ -278,5 +279,77 @@ describe('when they pay (assembly)', () => {
     assert.equal(report.timeZone, 'UTC');
     assert.equal(report.windowDays, 30);
     assert.equal(AUTOPAY_IDEMPOTENCY_PREFIX, 'auto-renew:');
+  });
+});
+
+describe('revenue by plan and term (assembly)', () => {
+  const NOW = at('2026-10-14T09:00:00Z');
+  const window = planAnalyticsWindow(30, NOW, UTC_ZONE);
+  const FX = { base: 'RUB', rates: new Map() };
+  const plan = (row: Partial<RevenuePlanRow> & Pick<RevenuePlanRow, 'kind' | 'amount' | 'payments'>): RevenuePlanRow => ({
+    planId: null,
+    name: null,
+    days: null,
+    addOnType: null,
+    currency: 'RUB',
+    ...row,
+  });
+  const byPlan = (plans: readonly RevenuePlanRow[]) =>
+    assembleRevenue(window, { slices: [], plans, gateways: [], partnerBalance: [], viewCurrencies: [{ currency: 'RUB' }] }, FX).byPlan;
+
+  it('keeps a row for each plan and term, and sums a plan-term across currencies of one view', () => {
+    const rows = byPlan([
+      plan({ kind: 'plan', planId: 'pro', name: 'Pro', days: 30, amount: 100, payments: 1 }),
+      plan({ kind: 'plan', planId: 'pro', name: 'Pro', days: 30, amount: 50, payments: 2 }),
+      plan({ kind: 'plan', planId: 'pro', name: 'Pro', days: 90, amount: 270, payments: 1 }),
+      plan({ kind: 'plan', planId: 'pro', name: 'Pro', days: null, amount: 10, payments: 1 }),
+    ]);
+    assert.deepEqual(
+      rows.map((row) => [row.key, row.days, row.figure.value, row.payments]),
+      [
+        ['plan:pro:90', 90, 270, 1],
+        ['plan:pro:30', 30, 150, 3],
+        ['plan:pro:', null, 10, 1],
+      ],
+    );
+  });
+
+  it('knows add-on kinds by a fixed list and files an unknown kind with the ones that name none', () => {
+    const rows = byPlan([
+      plan({ kind: 'addon', addOnType: 'EXTRA_TRAFFIC', amount: 50, payments: 1 }),
+      plan({ kind: 'addon', addOnType: 'EXTRA_DEVICES', amount: 40, payments: 1 }),
+      plan({ kind: 'addon', addOnType: 'RESET_TRAFFIC', amount: 30, payments: 1 }),
+      plan({ kind: 'addon', addOnType: 'SOMETHING_NEW', amount: 5, payments: 1 }),
+      plan({ kind: 'addon', addOnType: null, amount: 5, payments: 1 }),
+    ]);
+    assert.deepEqual(
+      rows.map((row) => [row.key, row.addOnType, row.figure.value]),
+      [
+        ['addon:EXTRA_TRAFFIC', 'EXTRA_TRAFFIC', 50],
+        ['addon:EXTRA_DEVICES', 'EXTRA_DEVICES', 40],
+        ['addon:RESET_TRAFFIC', 'RESET_TRAFFIC', 30],
+        ['addon:', null, 10],
+      ],
+    );
+  });
+
+  it('keeps «Прочее» and «Без тарифа» as one row each, with no term and no plan id', () => {
+    const rows = byPlan([
+      plan({ kind: 'other', planId: 'vip', days: 30, amount: 500, payments: 1 }),
+      plan({ kind: 'other', planId: 'vip', days: 90, amount: 1200, payments: 1 }),
+      plan({ kind: 'none', amount: 70, payments: 1 }),
+    ]);
+    assert.deepEqual(
+      rows.map((row) => [row.key, row.kind, row.planId, row.days, row.figure.value, row.payments]),
+      [
+        ['other', 'other', null, null, 1700, 2],
+        ['none', 'none', null, null, 70, 1],
+      ],
+    );
+  });
+
+  it('reads a term that arrives as text from the driver', () => {
+    const rows = byPlan([plan({ kind: 'plan', planId: 'pro', name: 'Pro', days: '30' as unknown as number, amount: 1, payments: 1 })]);
+    assert.equal(rows[0]?.days, 30);
   });
 });

@@ -277,6 +277,71 @@ describe('the retention tab', () => {
   })
 })
 
+describe('revenue by plan and term', () => {
+  async function card(): Promise<HTMLElement> {
+    renderWithProviders(<AnalyticsPage />)
+    await openTab('revenue')
+    return waitFor(() => {
+      const found = document.querySelector<HTMLElement>('[data-analytics-card="revenue-plans"]')
+      if (found === null || found.querySelector('[data-ranked-row]') === null) throw new Error('no plans card')
+      return found
+    })
+  }
+
+  it('names each row by its plan and its term: whole months as «1 мес», other terms in days', async () => {
+    const found = await card()
+    const rows = [...found.querySelectorAll('[data-ranked-row]')].map((row) => [row.getAttribute('data-ranked-row'), plain(row.querySelector('.break-words')?.textContent)])
+    expect(rows).toEqual([
+      ['plan:p1:30', 'Pro · 1 мес'],
+      ['plan:p2:30', 'Basic · 1 мес'],
+      ['plan:p1:90', 'Pro · 3 мес'],
+      ['plan:p2:45', 'Basic · 45 дн.'],
+      ['other', 'Прочее'],
+      ['addon:EXTRA_TRAFFIC', 'Дополнения: трафик'],
+    ])
+  })
+
+  it('names every kind of add-on and a lifetime term in the list', async () => {
+    const base = revenueReport()
+    const money = (value: number) => ({ value, byCurrency: [{ currency: 'RUB', amount: value }] })
+    api.getRevenueReport.mockResolvedValue({
+      ...base,
+      byPlan: [
+        { key: 'plan:p1:-1', kind: 'plan', planId: 'p1', name: 'Pro', days: -1, addOnType: null, figure: money(900), payments: 1 },
+        { key: 'addon:EXTRA_DEVICES', kind: 'addon', planId: null, name: null, days: null, addOnType: 'EXTRA_DEVICES', figure: money(80), payments: 1 },
+        { key: 'addon:RESET_TRAFFIC', kind: 'addon', planId: null, name: null, days: null, addOnType: 'RESET_TRAFFIC', figure: money(60), payments: 1 },
+        { key: 'addon:', kind: 'addon', planId: null, name: null, days: null, addOnType: null, figure: money(40), payments: 1 },
+        { key: 'none', kind: 'none', planId: null, name: null, days: null, addOnType: null, figure: money(20), payments: 1 },
+      ],
+    })
+    const found = await card()
+    const labels = [...found.querySelectorAll('[data-ranked-row] .break-words')].map((label) => plain(label.textContent))
+    expect(labels).toEqual(['Pro · Бессрочно', 'Дополнения: устройства', 'Дополнения: сброс трафика', 'Дополнения', 'Без тарифа'])
+  })
+
+  it('shows a table of every row with plan, term, payments and revenue', async () => {
+    const user = userEvent.setup()
+    const found = await card()
+    await user.click(within(found).getByRole('button', { name: i18n.t('analyticsPage.common.showTable') }))
+    const rows = [...found.querySelectorAll('[data-analytics-table] tbody tr')].map((row) => [...row.querySelectorAll('td')].map((cell) => plain(cell.textContent)))
+    expect(rows[0]).toEqual(['Pro', '1 мес', '7', '3 500 ₽'])
+    expect(rows[3]).toEqual(['Basic', '45 дн.', '2', '500 ₽'])
+    expect(rows[4]).toEqual(['Прочее', '—', '1', '500 ₽'])
+    expect(rows).toHaveLength(6)
+  })
+
+  it('tells in the (i) what a row is, what «Прочее» holds and how an add-on is split', async () => {
+    const user = userEvent.setup()
+    renderWithProviders(<AnalyticsPage />)
+    await openTab('revenue')
+    await user.hover(await screen.findByRole('button', { name: i18n.t('analyticsPage.common.aboutLabel', { title: 'Выручка по тарифам' }) }))
+    const tip = await screen.findByRole('tooltip')
+    expect(tip).toHaveTextContent('строка — тариф и срок')
+    expect(tip).toHaveTextContent('трафик, устройства, сброс трафика')
+    expect(tip).toHaveTextContent('«Прочее» — тарифы вне общего каталога, с доступностью «Разрешённые»')
+  })
+})
+
 describe('the payment hours card', () => {
   async function card(): Promise<HTMLElement> {
     renderWithProviders(<AnalyticsPage />)

@@ -195,9 +195,14 @@ export interface RevenueKind {
 
 export interface RevenuePlan {
   key: string
-  kind: 'plan' | 'addon' | 'none'
+  /** `other`: «Прочее» — plans outside the common catalogue (availability «Разрешённые»), whatever their terms. */
+  kind: 'plan' | 'addon' | 'other' | 'none'
   planId: string | null
   name: string | null
+  /** The term bought, in days (`-1`: lifetime); `null` for anything but a plan, or a payment that records no term. */
+  days: number | null
+  /** The kind of add-on bought: `EXTRA_TRAFFIC`, `EXTRA_DEVICES` or `RESET_TRAFFIC`; `null` for anything but an add-on, or one that names none. */
+  addOnType: 'EXTRA_TRAFFIC' | 'EXTRA_DEVICES' | 'RESET_TRAFFIC' | null
   figure: MoneyFigure
   payments: number
 }

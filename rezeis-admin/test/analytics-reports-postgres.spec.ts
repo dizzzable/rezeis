@@ -535,11 +535,15 @@ run('business analytics on PostgreSQL', () => {
     );
     assert.deepEqual(
       report.byPlan.map((plan) => [plan.key, plan.name, plan.figure.value, plan.payments]),
+      // A plan and the term it was bought for are one row: the combined renewal's lines name 30 days,
+      // these payments record none (`plan:p1:`).
       [
-        ['plan:p1', 'Pro', 650, 3],
-        ['plan:p2', 'Max (renamed)', 400, 2],
+        ['plan:p1:30', 'Pro', 540, 1],
+        ['plan:p2:30', 'Max (renamed)', 360, 1],
+        ['plan:p1:', 'Pro', 110, 2],
         ['none', null, 70, 1],
-        ['addon', '+50 GB', 50, 1],
+        ['addon:', '+50 GB', 50, 1],
+        ['plan:p2:', 'Max', 40, 1],
       ],
     );
     assert.equal(report.byPlan.reduce((sum, plan) => sum + plan.figure.value, 0), report.total.value);

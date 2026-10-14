@@ -76,21 +76,35 @@ export function revenueSlicesSql(window: AnalyticsWindowInterface): Prisma.Sql {
 }
 
 export interface RevenuePlanRow {
-  readonly kind: 'plan' | 'addon' | 'none';
+  readonly kind: 'plan' | 'addon' | 'other' | 'none';
   readonly planId: string | null;
   readonly name: string | null;
+  /** The term the payment bought, in days (`-1`: lifetime); `null` for an add-on, «Прочее», a payment with no plan, or one that records no term. */
+  readonly days: number | null;
+  /** What kind of add-on an add-on payment bought, as its snapshot names it; `null` when it names none. */
+  readonly addOnType: string | null;
   readonly currency: string;
   readonly amount: SqlNumeric;
   readonly payments: number;
 }
 
+/** The add-on kinds a payment's snapshot may name (`AddOnType`), the only values a row of «Дополнения» is split by. */
+export const REVENUE_ADDON_TYPES = ['EXTRA_TRAFFIC', 'EXTRA_DEVICES', 'RESET_TRAFFIC'] as const;
+
 /**
- * Revenue per plan. A payment names its plan in its snapshot — except a
+ * Revenue per plan AND TERM. A payment names its plan in its snapshot — except a
  * combined renewal, whose plans are its `transaction_items`: its total is
  * shared among the items in proportion to their prices (add-ons bought with a
  * renewal ride with the plan they were bought for), so the rows still add up
  * to the window's total. A plan is keyed by its id and shown under the latest
- * name a payment recorded for it.
+ * name a payment recorded for it; its term is the days the payment bought
+ * (`selectedDurationDays`, or the item's `duration_days`).
+ *
+ * An add-on payment is a row of its own kind (`addOnType`: traffic, devices,
+ * traffic reset). A plan that is not in the common catalogue — one whose
+ * availability is «Разрешённые», visible only to the users listed on it — goes
+ * under «Прочее» whatever its term: its customers are few and named, and a row
+ * for each of its terms would only list who they are.
  */
 export function revenueByPlanSql(window: AnalyticsWindowInterface): Prisma.Sql {
   return Prisma.sql`
@@ -101,6 +115,7 @@ export function revenueByPlanSql(window: AnalyticsWindowInterface): Prisma.Sql {
     ),
     "line" AS (
       SELECT p."id" AS "tx", 'plan' AS "kind", i."plan_id" AS "plan_id", i."plan_snapshot"->>'name' AS "name",
+             NULL::text AS "addon_type", i."duration_days" AS "days",
              p."currency", p."created_at",
              CASE WHEN SUM(i."amount") OVER "per_tx" > 0
                   THEN p."amount" * i."amount" / SUM(i."amount") OVER "per_tx"
@@ -117,16 +132,29 @@ export function revenueByPlanSql(window: AnalyticsWindowInterface): Prisma.Sql {
              CASE WHEN p."purchase_type" = 'ADDITIONAL' AND p."plan_snapshot"->>'snapshotSource' = 'ADDON_PURCHASE' THEN NULL
                   ELSE NULLIF(p."plan_snapshot"->>'id', '') END,
              p."plan_snapshot"->>'name',
+             CASE WHEN p."purchase_type" = 'ADDITIONAL' AND p."plan_snapshot"->>'snapshotSource' = 'ADDON_PURCHASE'
+                  THEN NULLIF(p."plan_snapshot"->>'addOnType', '') END,
+             CASE WHEN p."purchase_type" = 'ADDITIONAL' AND p."plan_snapshot"->>'snapshotSource' = 'ADDON_PURCHASE' THEN NULL
+                  WHEN p."plan_snapshot"->>'selectedDurationDays' ~ '^(-1|[1-9][0-9]{0,4})$'
+                  THEN (p."plan_snapshot"->>'selectedDurationDays')::int END,
              p."currency", p."created_at", p."amount"
         FROM "paid" p
        WHERE NOT EXISTS (SELECT 1 FROM "transaction_items" i WHERE i."transaction_id" = p."id")
+    ),
+    "row" AS (
+      SELECT l."tx", l."currency", l."created_at", l."amount", l."name", l."addon_type",
+             CASE WHEN l."kind" = 'plan' AND pl."availability" = 'ALLOWED' THEN 'other' ELSE l."kind" END AS "kind",
+             CASE WHEN l."kind" = 'plan' AND pl."availability" = 'ALLOWED' THEN NULL ELSE l."plan_id" END AS "plan_id",
+             CASE WHEN l."kind" = 'plan' AND pl."availability" = 'ALLOWED' THEN NULL ELSE l."days" END AS "days"
+        FROM "line" l
+        LEFT JOIN "plans" pl ON pl."id" = l."plan_id"
     )
-    SELECT "kind", "plan_id" AS "planId", "currency",
-           (ARRAY_AGG("name" ORDER BY "created_at" DESC) FILTER (WHERE NULLIF("name", '') IS NOT NULL))[1] AS "name",
+    SELECT "kind", "plan_id" AS "planId", "addon_type" AS "addOnType", "days", "currency",
+           (ARRAY_AGG("name" ORDER BY "created_at" DESC) FILTER (WHERE NULLIF("name", '') IS NOT NULL AND "kind" <> 'other'))[1] AS "name",
            SUM("amount") AS "amount",
            COUNT(DISTINCT "tx")::int AS "payments"
-      FROM "line"
-     GROUP BY "kind", "plan_id", "currency"`;
+      FROM "row"
+     GROUP BY "kind", "plan_id", "addon_type", "days", "currency"`;
 }
 
 export interface RevenueGatewayRow {
@@ -205,13 +233,22 @@ export function assembleRevenue(
 
   const planGroups = new Map<string, { row: RevenuePlanInterface; sums: Map<string, number>; payments: number }>();
   for (const row of rows.plans) {
-    const key = row.kind === 'plan' ? `plan:${row.planId ?? ''}` : row.kind;
+    const days = row.kind === 'plan' && row.days !== null && row.days !== undefined ? Number(row.days) : null;
+    const addOnType = row.kind === 'addon' ? (REVENUE_ADDON_TYPES.find((type) => type === row.addOnType) ?? null) : null;
+    const key =
+      row.kind === 'plan'
+        ? `plan:${row.planId ?? ''}:${days ?? ''}`
+        : row.kind === 'addon'
+          ? `addon:${addOnType ?? ''}`
+          : row.kind;
     const group = planGroups.get(key) ?? {
       row: {
         key,
         kind: row.kind,
         planId: row.kind === 'plan' ? row.planId : null,
         name: null,
+        days,
+        addOnType,
         figure: { value: 0, byCurrency: [] },
         payments: 0,
       },

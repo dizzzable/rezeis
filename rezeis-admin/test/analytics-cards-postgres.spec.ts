@@ -685,4 +685,102 @@ run('business analytics cards on PostgreSQL', { concurrency: false }, () => {
       assert.deepEqual(report.topHours, []);
     });
   });
+
+  // ── «Выручка по тарифам»: тариф × срок ───────────────────────────────────
+
+  describe('revenue by plan and term', () => {
+    it('makes a row of each plan and term, keeps the proportional split of a shared renewal, and the rows add up to the total', async () => {
+      const report = await onCleanSlate(async (tx, service) => {
+        await customer(tx, 'buyer');
+        const plan = (days: number, extra: Prisma.InputJsonObject = {}): Prisma.InputJsonObject => ({ id: 'pro', name: 'Pro', selectedDurationDays: days, ...extra });
+        await pay(tx, { userId: 'buyer', amount: '100', createdAt: daysAgo(5), planSnapshot: plan(30) });
+        await pay(tx, { userId: 'buyer', amount: '100', purchaseType: 'RENEW', createdAt: daysAgo(4), planSnapshot: plan(30, { name: 'Pro (new name)' }) });
+        await pay(tx, { userId: 'buyer', amount: '270', createdAt: daysAgo(4), planSnapshot: plan(90) });
+        await pay(tx, { userId: 'buyer', amount: '150', createdAt: daysAgo(3), planSnapshot: plan(45) });
+        await pay(tx, { userId: 'buyer', amount: '1000', createdAt: daysAgo(3), planSnapshot: plan(-1) });
+        const one = await tx.subscription.create({ data: { userId: 'buyer' } });
+        const two = await tx.subscription.create({ data: { userId: 'buyer' } });
+        const combined = await pay(tx, { userId: 'buyer', amount: '900', purchaseType: 'RENEW', createdAt: daysAgo(2), planSnapshot: { combinedRenewal: true } });
+        await tx.transactionItem.createMany({
+          data: [
+            { transactionId: combined.id, subscriptionId: one.id, planId: 'pro', planSnapshot: { id: 'pro', name: 'Pro' }, durationDays: 30, amount: '600', currency: 'RUB' },
+            { transactionId: combined.id, subscriptionId: two.id, planId: 'pro', planSnapshot: { id: 'pro', name: 'Pro' }, durationDays: 90, amount: '400', currency: 'RUB' },
+          ],
+        });
+        return service.getRevenueReport(30);
+      });
+      assert.deepEqual(
+        report.byPlan.map((row) => [row.key, row.days, row.figure.value, row.payments]),
+        [
+          ['plan:pro:-1', -1, 1000, 1],
+          ['plan:pro:30', 30, 740, 3],
+          ['plan:pro:90', 90, 630, 2],
+          ['plan:pro:45', 45, 150, 1],
+        ],
+      );
+      assert.equal(report.byPlan.reduce((sum, row) => sum + row.figure.value, 0), report.total.value);
+      assert.equal(report.byPlan[1]?.name, 'Pro');
+    });
+
+    it('splits add-ons by what they added: traffic, devices, traffic reset, and the ones that name no kind', async () => {
+      const report = await onCleanSlate(async (tx, service) => {
+        await customer(tx, 'buyer');
+        const addon = (amount: string, addOnType?: string): Parameters<typeof pay>[1] => ({
+          userId: 'buyer',
+          purchaseType: 'ADDITIONAL',
+          amount,
+          createdAt: daysAgo(3),
+          planSnapshot: { snapshotSource: 'ADDON_PURCHASE', name: 'Add-on', ...(addOnType === undefined ? {} : { addOnType }) },
+        });
+        await pay(tx, addon('50', 'EXTRA_TRAFFIC'));
+        await pay(tx, addon('70', 'EXTRA_TRAFFIC'));
+        await pay(tx, addon('40', 'EXTRA_DEVICES'));
+        await pay(tx, addon('30', 'RESET_TRAFFIC'));
+        await pay(tx, addon('20'));
+        await pay(tx, addon('10', 'SOMETHING_NEW'));
+        return service.getRevenueReport(30);
+      });
+      assert.deepEqual(
+        report.byPlan.map((row) => [row.key, row.kind, row.addOnType, row.figure.value, row.payments]),
+        [
+          ['addon:EXTRA_TRAFFIC', 'addon', 'EXTRA_TRAFFIC', 120, 2],
+          ['addon:EXTRA_DEVICES', 'addon', 'EXTRA_DEVICES', 40, 1],
+          // 30 each: the one with more payments first.
+          ['addon:', 'addon', null, 30, 2],
+          ['addon:RESET_TRAFFIC', 'addon', 'RESET_TRAFFIC', 30, 1],
+        ],
+      );
+    });
+
+    it('puts plans outside the common catalogue under «Прочее», whatever their terms, and leaves the catalogue plans alone', async () => {
+      const report = await onCleanSlate(async (tx, service) => {
+        await customer(tx, 'buyer');
+        await tx.plan.create({ data: { id: 'pro', name: 'Pro' } });
+        await tx.plan.create({ data: { id: 'vip', name: 'VIP', availability: 'ALLOWED', allowedUserIds: ['buyer'] } });
+        await tx.plan.create({ data: { id: 'gift', name: 'Invited', availability: 'INVITED' } });
+        await pay(tx, { userId: 'buyer', amount: '100', createdAt: daysAgo(3), planSnapshot: { id: 'pro', name: 'Pro', selectedDurationDays: 30 } });
+        await pay(tx, { userId: 'buyer', amount: '500', createdAt: daysAgo(3), planSnapshot: { id: 'vip', name: 'VIP', selectedDurationDays: 30 } });
+        await pay(tx, { userId: 'buyer', amount: '1200', createdAt: daysAgo(2), planSnapshot: { id: 'vip', name: 'VIP', selectedDurationDays: 90 } });
+        await pay(tx, { userId: 'buyer', amount: '60', createdAt: daysAgo(2), planSnapshot: { id: 'gift', name: 'Invited', selectedDurationDays: 30 } });
+        return service.getRevenueReport(30);
+      });
+      assert.deepEqual(
+        report.byPlan.map((row) => [row.key, row.kind, row.planId, row.days, row.name, row.figure.value, row.payments]),
+        [
+          ['other', 'other', null, null, null, 1700, 2],
+          ['plan:pro:30', 'plan', 'pro', 30, 'Pro', 100, 1],
+          ['plan:gift:30', 'plan', 'gift', 30, 'Invited', 60, 1],
+        ],
+      );
+    });
+
+    it('keeps a payment with no recorded term as a plan row without one', async () => {
+      const report = await onCleanSlate(async (tx, service) => {
+        await customer(tx, 'buyer');
+        await pay(tx, { userId: 'buyer', amount: '80', createdAt: daysAgo(3), planSnapshot: { id: 'pro', name: 'Pro' } });
+        return service.getRevenueReport(30);
+      });
+      assert.deepEqual(report.byPlan.map((row) => [row.key, row.days]), [['plan:pro:', null]]);
+    });
+  });
 });

@@ -464,9 +464,14 @@ export interface RevenueKindInterface {
  */
 export interface RevenuePlanInterface {
   readonly key: string;
-  readonly kind: 'plan' | 'addon' | 'none';
+  /** `other`: «Прочее» — plans outside the common catalogue (availability «Разрешённые»), whatever their terms. */
+  readonly kind: 'plan' | 'addon' | 'other' | 'none';
   readonly planId: string | null;
   readonly name: string | null;
+  /** The term bought, in days (`-1`: lifetime); `null` for anything but a plan, or a payment that records no term. */
+  readonly days: number | null;
+  /** The kind of add-on bought: `EXTRA_TRAFFIC`, `EXTRA_DEVICES` or `RESET_TRAFFIC`; `null` for anything but an add-on, or one that names none. */
+  readonly addOnType: 'EXTRA_TRAFFIC' | 'EXTRA_DEVICES' | 'RESET_TRAFFIC' | null;
   readonly figure: MoneyFigureInterface;
   readonly payments: number;
 }
