@@ -640,6 +640,7 @@ export const en = {
       planUnnamed: 'subscription',
       providerTitle: '{{provider}} · {{plan}}',
       providerCharge: '{{amount}}, next charge {{date}}',
+      providerDelay: '{{amount}}, delayed until {{date}}: the plan was granted unpaid, the first charge comes that day',
       providerAmount: '{{amount}} per period',
       providerEnds: 'charges end {{date}}',
       pastDue: 'The last charge failed',

@@ -69,6 +69,7 @@ import { MoyNalogQueueService } from './moy-nalog-queue.service';
 import { AdConversionService } from '../../advertising/services/ad-conversion.service';
 import { SavedPaymentMethodService } from './saved-payment-method.service';
 import { YookassaPaymentVerificationService } from './yookassa-payment-verification.service';
+import { isDelayedCheckout, isDelayGrant } from '../utils/antilopay-delay-grant.util';
 import { ProviderSubscriptionService, readProviderSubscriptionDispute } from './provider-subscription.service';
 import { releasePaidTrialClaim } from '../../subscriptions/services/trial-claim-ledger.util';
 import { findDaysConvertedFromPayment } from '../../subscriptions/services/paid-remainder-conversion.util';
@@ -525,6 +526,17 @@ export class PaymentReconciliationService implements OnModuleDestroy {
         this.alertNotifiedAmountShortfall(transaction, event.eventStatus, notifiedAmountShortfall);
       }
 
+      // The checkout of an Antilopay SBP sign-up with a delayed first charge is
+      // the plan GRANTED for the delay, never a paid term: whatever made this
+      // notice complete it (Antilopay calling the payment of OUR order paid, the
+      // status sweep, the grant's own settlement), it is rewritten into the grant
+      // before anything is fulfilled — by the same claim a look at the recurrent
+      // makes, so the first to arrive grants and the other finds it done. It
+      // throws when it cannot, which fails the notice for a retry, because the
+      // alternative is a full term delivered for a payment that moved no money.
+      if (nextStatus === TransactionStatus.COMPLETED && this.providerSubscriptions !== undefined && isDelayedCheckout(transaction)) {
+        await this.providerSubscriptions.prepareDelayedCheckout(transaction);
+      }
       if (nextStatus === TransactionStatus.COMPLETED) {
         const refreshedTransaction = await this.prismaService.transaction.findUnique({
           where: { id: transaction.id },
@@ -713,6 +725,16 @@ export class PaymentReconciliationService implements OnModuleDestroy {
     if (await this.isWithheldConversionNow(transaction)) {
       this.logger.warn(
         `Post-fulfilment hooks not run for transaction ${transaction.id}: withheld for refund`,
+      );
+      return;
+    }
+    // Nor for the plan granted for the delay of a first SBP charge: no money moved,
+    // so no commission, no referral reward, no cashback, no «Мой налог» income and
+    // no ad conversion — the last of which is one per user, and a free grant would
+    // take the slot the payer's first real charge is owed.
+    if (isDelayGrant(transaction.gatewayData)) {
+      this.logger.log(
+        `Post-fulfilment hooks not run for transaction ${transaction.id}: the plan granted for a delayed first charge`,
       );
       return;
     }

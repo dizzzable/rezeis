@@ -202,6 +202,77 @@ describe('what the section lists', () => {
     expect(within(row('psub-antilopay')).getByRole('button', { name: 'Cancel autopay' })).toBeInTheDocument()
   })
 
+  it('an SBP subscription in its delay says «delayed until» the date of the first charge, and the next charge once it has come', async () => {
+    grant([VIEW, EDIT])
+    const sbp = {
+      id: 'psub-delayed',
+      gatewayType: 'ANTILOPAY',
+      status: 'ACTIVE',
+      amount: '299',
+      currency: 'RUB',
+      intervalUnit: 'MONTH',
+      intervalCount: 1,
+      planName: 'Pro',
+      subscriptionId: 'sub-5',
+      nextChargeAt: '2026-10-21T00:00:00.000Z',
+      endsAt: null,
+      plannedChargeCount: null,
+      method: 'SBP',
+      cancelRequestedBy: null,
+    } as const
+    serve({
+      providerSubscriptions: [
+        { ...sbp, delayEndsAt: '2026-10-21T00:00:00.000Z' },
+        { ...sbp, id: 'psub-after', delayEndsAt: null },
+        { ...sbp, id: 'psub-old-panel' },
+      ],
+      yookassaMethods: [],
+    })
+    renderSection()
+
+    await screen.findAllByText('Antilopay · Pro')
+    expect(row('psub-delayed')).toHaveTextContent(/299.*delayed until.*2026.*the plan was granted unpaid/)
+    expect(row('psub-delayed')).not.toHaveTextContent(/next charge/)
+    // Past its delay, or from a panel that does not name one: the ordinary line.
+    expect(row('psub-after')).toHaveTextContent(/299.*next charge/)
+    expect(row('psub-after')).not.toHaveTextContent(/delayed until/)
+    expect(row('psub-old-panel')).toHaveTextContent(/299.*next charge/)
+    // And the operator can still end it.
+    expect(within(row('psub-delayed')).getByRole('button', { name: 'Cancel autopay' })).toBeInTheDocument()
+  })
+
+  it('in Russian it reads «отсрочка до <дата>»', async () => {
+    await i18n.changeLanguage('ru')
+    await loadFeatureBundle('userDetail')
+    grant([VIEW, EDIT])
+    serve({
+      providerSubscriptions: [
+        {
+          id: 'psub-delayed',
+          gatewayType: 'ANTILOPAY',
+          status: 'ACTIVE',
+          amount: '299',
+          currency: 'RUB',
+          intervalUnit: 'MONTH',
+          intervalCount: 1,
+          planName: 'Pro',
+          subscriptionId: 'sub-5',
+          nextChargeAt: '2026-10-21T00:00:00.000Z',
+          endsAt: null,
+          plannedChargeCount: null,
+          method: 'SBP',
+          cancelRequestedBy: null,
+          delayEndsAt: '2026-10-21T00:00:00.000Z',
+        },
+      ],
+      yookassaMethods: [],
+    })
+    renderSection()
+
+    await waitFor(() => expect(document.querySelector('[data-autopay-provider="psub-delayed"]')).not.toBeNull())
+    expect(row('psub-delayed')).toHaveTextContent(/отсрочка до .*2026.*тариф выдан без оплаты/)
+  })
+
   it('without payments:edit: the same list, no button, and who may', async () => {
     grant([VIEW])
     serve()

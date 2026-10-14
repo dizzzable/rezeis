@@ -22,6 +22,12 @@ export interface AutopayProviderSubscription {
   readonly plannedChargeCount: number | null
   /** CARD or SBP where the gateway offers both (Antilopay). */
   readonly method: string | null
+  /**
+   * While an SBP subscription with a delayed first charge is in its delay (the
+   * plan is granted, nothing was charged yet): when the delay ends and the first
+   * charge comes. Null otherwise, and from a panel older than the delay.
+   */
+  readonly delayEndsAt?: string | null
   /** A cancel asked for and still waiting for the provider. */
   readonly cancelRequestedBy: 'OPERATOR' | 'REFUND' | null
 }

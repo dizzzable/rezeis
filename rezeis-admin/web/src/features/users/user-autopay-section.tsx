@@ -151,9 +151,11 @@ function ProviderAutopayRow({
           ) : null}
         </p>
         <p className="text-xs text-muted-foreground">
-          {subscription.nextChargeAt
-            ? t('userDetailPanel.autopay.providerCharge', { amount, date: formatDate(subscription.nextChargeAt) })
-            : t('userDetailPanel.autopay.providerAmount', { amount })}
+          {subscription.delayEndsAt
+            ? t('userDetailPanel.autopay.providerDelay', { amount, date: formatDate(subscription.delayEndsAt) })
+            : subscription.nextChargeAt
+              ? t('userDetailPanel.autopay.providerCharge', { amount, date: formatDate(subscription.nextChargeAt) })
+              : t('userDetailPanel.autopay.providerAmount', { amount })}
           {subscription.endsAt
             ? ` · ${t('userDetailPanel.autopay.providerEnds', { date: formatDate(subscription.endsAt) })}`
             : ''}

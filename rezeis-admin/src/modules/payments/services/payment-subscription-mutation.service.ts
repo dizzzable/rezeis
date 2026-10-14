@@ -117,6 +117,7 @@ import {
   type LifetimeRenewalNotApplied,
   subscriptionIsLifetime,
 } from '../utils/lifetime-renewal.util';
+import { delayGrantMetadata } from '../utils/antilopay-delay-grant.util';
 import { readProviderSubscriptionTerms } from '../utils/provider-subscription-terms.util';
 import {
   AUTOPAY_AFTER_REFUND,
@@ -520,6 +521,9 @@ export class PaymentSubscriptionMutationService {
       channel: transaction.channel,
       subscriptionId: result.subscription.id,
       remnawaveId: result.subscription.remnawaveId ?? undefined,
+      // The plan granted for the delay of a first SBP charge is no payment: the
+      // card says so (`delayGrant`), instead of a receipt for 0.
+      ...delayGrantMetadata(transaction.gatewayData),
       ...(latePlanMigrationRenewal === null
         ? {}
         : latePlanMigrationRenewalMetadata(latePlanMigrationRenewal)),
@@ -1520,6 +1524,7 @@ export class PaymentSubscriptionMutationService {
       amount: transaction.amount.toString(),
       currency: transaction.currency,
       gatewayType: transaction.gatewayType,
+      ...delayGrantMetadata(transaction.gatewayData),
     };
     const lifetime = committed.lifetimeRenewals;
     // Every line met a subscription with no end date: withheld, and told as

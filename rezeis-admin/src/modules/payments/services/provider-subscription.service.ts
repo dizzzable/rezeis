@@ -50,6 +50,13 @@ import {
   parseAntilopayRecurrent,
 } from '../utils/antilopay-recurrent.util';
 import { decideAntilopayDelay, settleDelayWithConsent, type ShownDelay } from '../utils/antilopay-delay-policy.util';
+import {
+  DELAY_GRANT_KEY,
+  type DelayGrantMark,
+  isDelayGrant,
+  rewriteItemSnapshotForGrant,
+  rewritePlanSnapshotForGrant,
+} from '../utils/antilopay-delay-grant.util';
 import { isLifetimeSubscription } from '../utils/lifetime-renewal.util';
 import { readGatewaySettings } from '../utils/payment-gateway-settings.util';
 import { redactPaymentDiagnosticMessage } from '../utils/payment-provider-error.util';
@@ -81,6 +88,7 @@ import {
   rollypayHeaders,
   rollypayPaidCycles,
 } from '../utils/rollypay-subscription.util';
+import { writeTransactionGatewayData } from '../utils/transaction-gateway-data.util';
 import { requireSetting } from './payment-provider-execution.helpers';
 import { PaymentWebhookInboxService } from './payment-webhook-inbox.service';
 import { SavedPaymentMethodService } from './saved-payment-method.service';
@@ -211,6 +219,12 @@ export interface CustomerProviderSubscriptionInterface {
   readonly plannedChargeCount: number | null;
   /** CARD or SBP where the gateway offers both (Antilopay). */
   readonly method: string | null;
+  /**
+   * While an SBP subscription with a delayed first charge is in its delay (the
+   * plan is granted, nothing was charged yet): when the delay ends and the first
+   * charge comes, the provider's date when it names one. Null otherwise.
+   */
+  readonly delayEndsAt: string | null;
 }
 
 /**
@@ -642,6 +656,11 @@ export class ProviderSubscriptionService {
 
     let applied = row.appliedChargeCount;
     let subscriptionId = row.subscriptionId;
+    // A subscription signed up with a delay is given its plan the moment it is
+    // active — before any charge, which renews what the grant created.
+    if (state.charges !== undefined && (await this.grantsDelayNow(row, state))) {
+      await this.ensureDelayGrant(row, state.nextChargeAt);
+    }
     if (state.charges !== undefined) {
       // Antilopay: each charge is delivered under its own payment's id.
       subscriptionId = await this.applyKeyedCharges(row, state.charges, state.nextChargeAt);
@@ -770,6 +789,9 @@ export class ProviderSubscriptionService {
         firstTransaction !== null &&
         firstTransaction.status === TransactionStatus.COMPLETED &&
         firstTransaction.fulfilledAt !== null,
+      // No charge is made at activation of a delayed subscription: the checkout
+      // is the grant, and every charge there is renews it.
+      delayed: (row.delayDays ?? 0) > 0,
     });
     // The number a charge carries on its renewal and its notice is informational
     // (the keys are payment ids): the start of an SBP subscription takes none.
@@ -872,6 +894,13 @@ export class ProviderSubscriptionService {
           : await this.prismaService.transaction.findUnique({
               where: { userId_idempotencyKey: { userId: row.userId, idempotencyKey: keyedChargeKey(row.id, charge.id) } },
             });
+    // The checkout of a delayed subscription is a free grant, not a payment: there
+    // is nothing in it to give back, and reversing it would take the payer's days
+    // away. Their start being disputed still ends the autopay, like any refund.
+    if (transaction !== null && isDelayGrant(transaction.gatewayData)) {
+      await this.cancelLive({ ids: [row.id] }, REFUND_CANCELLED_BY);
+      return;
+    }
     if (transaction !== null && transaction.status === TransactionStatus.COMPLETED && transaction.fulfilledAt !== null) {
       await this.enqueueRefundNotice(row, transaction, {
         providerPaymentId: charge.id,
@@ -946,6 +975,7 @@ export class ProviderSubscriptionService {
       endsAt: row.endsAt?.toISOString() ?? null,
       plannedChargeCount: row.plannedChargeCount,
       method: row.method,
+      delayEndsAt: delayEndsAtOf(row)?.toISOString() ?? null,
     }));
   }
 
@@ -987,6 +1017,222 @@ export class ProviderSubscriptionService {
     if (pending !== null) {
       throw autopayNotAvailable('PENDING_SIGN_UP');
     }
+  }
+
+  /**
+   * Whether this look is the moment to give a delayed subscription its plan: the
+   * subscription is active at Antilopay, or money has been taken on it (which
+   * only an active one can have), and nobody is left to give it to or has asked
+   * for it back. The checkout's expiry, cancel or failure play no part: it is the
+   * RECURRENT that says the payer subscribed, and the checkout is revived by the
+   * grant if it had lapsed.
+   */
+  private async grantsDelayNow(row: ProviderSubscription, state: ProviderSubscriptionState): Promise<boolean> {
+    if ((row.delayDays ?? 0) <= 0 || row.userId === null) return false;
+    // A refund asked for this autopay to end: nothing is given on its way out.
+    if (row.cancelledBy === REFUND_CANCELLED_BY) return false;
+    const active = state.status === ProviderSubscriptionStatus.ACTIVE || state.status === ProviderSubscriptionStatus.PAST_DUE;
+    return active || (state.charges ?? []).some((charge) => !charge.disputed);
+  }
+
+  /**
+   * Gives a delayed subscription its plan, exactly once however often it is seen
+   * active (the callback is repeated every three minutes for an hour, the sweep
+   * and the payer's return look too): the checkout is rewritten into a free grant
+   * in ONE database transaction with the claim on the row
+   * (`delay_granted_at`), and its settlement is queued under a key of its own,
+   * so a second look finds the claim taken and the settlement already in the
+   * inbox. A crash between the two is mended by the next look, which queues the
+   * settlement again under the same key.
+   */
+  private async ensureDelayGrant(row: ProviderSubscription, nextChargeAt: Date | null): Promise<void> {
+    // Only a sign-up whose claim is not taken yet opens a transaction for it: the
+    // claim, once taken, stays for the life of the row, and every look at a
+    // subscription long past its delay would otherwise ask for it again.
+    const outcome = row.delayGrantedAt === null ? await this.convertCheckoutToDelayGrant(row, nextChargeAt) : 'ALREADY';
+    const first = await this.prismaService.transaction.findUnique({ where: { id: row.firstTransactionId } });
+    if (first === null) return;
+    if (isDelayGrant(first.gatewayData)) {
+      if (!(first.status === TransactionStatus.COMPLETED && first.fulfilledAt !== null)) {
+        await this.enqueueDelayGrantSettlement(row, first);
+      }
+      return;
+    }
+    if (outcome === 'FULFILLED' && row.delayGrantedAt === null) {
+      // The checkout was fulfilled in full before it could be rewritten. The payer
+      // has been given their days; the row is marked so that nothing grants again.
+      await this.prismaService.providerSubscription.updateMany({
+        where: { id: row.id, delayGrantedAt: null },
+        data: { delayGrantedAt: new Date() },
+      });
+    }
+  }
+
+  /**
+   * Rewrites the checkout of a delayed sign-up into the grant: its sum 0, its
+   * term the delay's days (stretched like a renewal's, to reach the provider's
+   * first charge), marked `delayGrant`. The claim on the row and every write of
+   * the rewrite are one database transaction, so there is never a claim without
+   * a grant, nor a grant a second look could write again.
+   *
+   * 'ALREADY': the claim was taken by an earlier look; 'FULFILLED': the checkout
+   * had been fulfilled before the rewrite (nothing is changed, claim included).
+   */
+  private async convertCheckoutToDelayGrant(
+    row: ProviderSubscription,
+    nextChargeAt: Date | null,
+  ): Promise<'GRANTED' | 'ALREADY' | 'FULFILLED'> {
+    const delayDays = row.delayDays ?? 0;
+    if (delayDays <= 0) return 'ALREADY';
+    const subscription =
+      row.subscriptionId === null
+        ? null
+        : await this.prismaService.subscription.findUnique({
+            where: { id: row.subscriptionId },
+            select: { expiresAt: true },
+          });
+    const now = new Date();
+    const days = chargeCoverDays({
+      durationDays: delayDays,
+      expiresAt: subscription?.expiresAt ?? null,
+      nextChargeAt,
+      now,
+    });
+    try {
+      return await this.prismaService.$transaction(async (db) => {
+        const claim = await db.providerSubscription.updateMany({
+          where: { id: row.id, delayGrantedAt: null },
+          data: { delayGrantedAt: now },
+        });
+        if (claim.count !== 1) return 'ALREADY' as const;
+        const first = await db.transaction.findUnique({ where: { id: row.firstTransactionId } });
+        if (first === null) throw new DelayGrantUndone('the checkout of the sign-up is gone');
+        if (first.fulfilledAt !== null) {
+          throw new DelayGrantUndone(`checkout ${first.paymentId} was fulfilled in full before it could be made the grant`);
+        }
+        // Read before the sum is rewritten: it is what every later charge will be.
+        const originalAmount = first.amount.toString();
+        const items = await db.transactionItem.findMany({ where: { transactionId: first.id } });
+        if (items.some((item) => item.appliedAt !== null)) {
+          throw new DelayGrantUndone(`a line of checkout ${first.paymentId} was applied before it could be made the grant`);
+        }
+        for (const item of items) {
+          await db.transactionItem.update({
+            where: { id: item.id },
+            data: {
+              durationDays: days,
+              amount: new Prisma.Decimal(0),
+              planSnapshot: rewriteItemSnapshotForGrant(item.planSnapshot, days),
+            },
+          });
+        }
+        await db.transaction.update({
+          where: { id: first.id },
+          data: { amount: new Prisma.Decimal(0), planSnapshot: rewritePlanSnapshotForGrant(first.planSnapshot, days) },
+        });
+        const mark: DelayGrantMark = {
+          providerSubscriptionId: row.providerSubscriptionId,
+          delayDays,
+          days,
+          originalAmount,
+          at: now.toISOString(),
+        };
+        await writeTransactionGatewayData(db, first.id, { merge: { [DELAY_GRANT_KEY]: mark } });
+        return 'GRANTED' as const;
+      });
+    } catch (error: unknown) {
+      if (error instanceof DelayGrantUndone) {
+        this.logger.error(`Delayed sign-up ${row.id} (${row.providerSubscriptionId}) was not made a grant: ${error.message}`);
+        return 'FULFILLED';
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * The ordinary pipeline is about to fulfil the checkout of a delayed sign-up —
+   * Antilopay told the panel the payment of OUR order is paid (a callback, the
+   * status sweep): whatever that notice means for money, this checkout is the
+   * grant, never the full term. It is rewritten first, by the same claim as a
+   * look at the recurrent makes, so whichever arrives first grants and the other
+   * finds it done. A row that cannot be found or made holds the fulfilment back
+   * (the notice fails and is retried), because the alternative is a full term
+   * delivered for a payment that moved no money.
+   */
+  public async prepareDelayedCheckout(transaction: Transaction): Promise<void> {
+    if (transaction.gatewayType !== PaymentGatewayType.ANTILOPAY) return;
+    const terms = readProviderSubscriptionTerms(transaction.planSnapshot);
+    if (terms === null || terms.delay === undefined) return;
+    if (isDelayGrant(transaction.gatewayData)) return;
+    let row = await this.prismaService.providerSubscription.findUnique({ where: { firstTransactionId: transaction.id } });
+    if (row === null) {
+      const gatewayId = transaction.gatewayId;
+      if (gatewayId === null || gatewayId.length === 0 || CREATION_CLAIM_PLACEHOLDER.test(gatewayId)) {
+        throw new Error(`Delayed checkout ${transaction.paymentId} has no sign-up to grant for yet; retried`);
+      }
+      try {
+        row = await this.createRow(transaction, gatewayId, terms);
+      } catch (error: unknown) {
+        if (!(error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002')) throw error;
+        row = await this.prismaService.providerSubscription.findUnique({ where: { firstTransactionId: transaction.id } });
+      }
+      if (row === null) throw new Error(`Delayed checkout ${transaction.paymentId} has no sign-up to grant for`);
+    }
+    if (row.userId === null) return;
+    await this.convertCheckoutToDelayGrant(row, row.nextChargeAt);
+  }
+
+  /**
+   * Queues a look at the sign-up of a delayed checkout the payer is waiting on.
+   * The payer returns from the bank to a page that asks how the payment stands,
+   * and nothing is paid with a delay for Antilopay to call back about, so the
+   * ask is what starts the look. At most one look every 30 seconds per
+   * checkout: the job's id carries the half-minute, and BullMQ adds a job id
+   * once (three parts, because a custom id with a colon must have exactly three).
+   */
+  public async pokeDelayedSignUp(transaction: Pick<Transaction, 'id' | 'gatewayId' | 'planSnapshot'>, now: Date = new Date()): Promise<void> {
+    const terms = readProviderSubscriptionTerms(transaction.planSnapshot);
+    const gatewayId = transaction.gatewayId;
+    if (terms === null || terms.delay === undefined) return;
+    if (gatewayId === null || gatewayId.length === 0 || CREATION_CLAIM_PLACEHOLDER.test(gatewayId)) return;
+    await runPaymentReconciliationEnqueueWithTimeout(() =>
+      this.paymentReconciliationQueue.add(
+        PROVIDER_SUBSCRIPTION_SYNC_JOB,
+        { gatewayType: PaymentGatewayType.ANTILOPAY, providerSubscriptionId: gatewayId },
+        {
+          jobId: `delay-poke:${transaction.id}:${Math.floor(now.getTime() / 30_000)}`,
+          attempts: 3,
+          backoff: { type: 'exponential', delay: 30_000 },
+          removeOnComplete: 100,
+          removeOnFail: 100,
+        },
+      ),
+    );
+  }
+
+  /**
+   * The grant's settlement, as the ordinary pipeline takes it: a paid notice for
+   * the checkout, keyed by the subscription and nothing else, with a payload that
+   * never changes between looks, so every look after the first is recognised as
+   * the same notice and settles nothing twice.
+   */
+  private async enqueueDelayGrantSettlement(row: ProviderSubscription, transaction: Transaction): Promise<void> {
+    const rawPayload = {
+      source: 'PROVIDER_SUBSCRIPTION',
+      status: 'CONFIRMED',
+      subscriptionId: row.providerSubscriptionId,
+      delayGrant: true,
+      paymentId: transaction.paymentId,
+    };
+    await this.enqueueNotice({
+      gatewayType: row.gatewayType,
+      paymentId: transaction.paymentId,
+      providerEventId: `subscription:${row.providerSubscriptionId}:delay-grant`,
+      eventStatus: 'CONFIRMED',
+      receivedAt: new Date().toISOString(),
+      payloadHash: createHash('sha256').update(JSON.stringify(rawPayload)).digest('hex'),
+      rawPayload,
+    });
   }
 
   /**
@@ -2284,6 +2530,29 @@ export class ProviderSubscriptionService {
     if (reply.code === ANTILOPAY_NOT_FOUND) return true;
     return reply.code === 0 && classifyAntilopayPaymentStatus(String(reply.data['status'] ?? '')) === 'DEAD';
   }
+}
+
+/**
+ * A rewrite of the checkout into the grant that must not stand: thrown inside
+ * its database transaction so the claim on the row is undone with it.
+ */
+class DelayGrantUndone extends Error {}
+
+/**
+ * When the delay of a subscription still in it ends: the date Antilopay names for
+ * the first charge, or the end of the days that were granted. Null for a
+ * subscription without a delay, one whose access was not granted yet, and one
+ * whose first charge has come — it is past its delay then, and the charge shows
+ * on the card as any other.
+ */
+export function delayEndsAtOf(
+  row: Pick<ProviderSubscription, 'delayDays' | 'delayGrantedAt' | 'appliedChargeCount' | 'nextChargeAt'>,
+): Date | null {
+  if (row.delayDays === null || row.delayDays <= 0 || row.delayGrantedAt === null) return null;
+  // Counted by charges delivered, not by `lastChargeAt`: the start of the
+  // subscription may be listed as a payment and is no charge.
+  if (row.appliedChargeCount > 0) return null;
+  return row.nextChargeAt ?? new Date(row.delayGrantedAt.getTime() + row.delayDays * DAY_MS);
 }
 
 /** A `gatewayId` that is a placeholder held while a provider checkout is being created, not a provider handle. */

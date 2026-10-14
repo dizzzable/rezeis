@@ -27,6 +27,7 @@ import {
   completedAntilopayRefunds,
   readAntilopayRefunds,
 } from '../utils/antilopay-refund.util';
+import { isDelayGrant } from '../utils/antilopay-delay-grant.util';
 import { readGatewaySettings } from '../utils/payment-gateway-settings.util';
 import { redactPaymentDiagnosticMessage } from '../utils/payment-provider-error.util';
 import { writeTransactionGatewayData } from '../utils/transaction-gateway-data.util';
@@ -668,7 +669,11 @@ function wasCheckedWithin(gatewayData: Prisma.JsonValue | null, windowMs: number
   return Number.isFinite(checkedAt) && now.getTime() - checkedAt < windowMs;
 }
 
-/** A payment the panel made for a charge of an autopay (`PROVIDER_SUBSCRIPTION_CHARGE`). */
+/**
+ * A payment the panel made for a charge of an autopay (`PROVIDER_SUBSCRIPTION_CHARGE`),
+ * or the plan it granted for the delay of a first SBP charge: Antilopay never
+ * heard of the first, and was never paid for the second.
+ */
 function isProviderSubscriptionCharge(gatewayData: Prisma.JsonValue | null): boolean {
-  return asRecord(gatewayData)?.['snapshotSource'] === 'PROVIDER_SUBSCRIPTION_CHARGE';
+  return asRecord(gatewayData)?.['snapshotSource'] === 'PROVIDER_SUBSCRIPTION_CHARGE' || isDelayGrant(gatewayData);
 }

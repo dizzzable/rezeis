@@ -649,6 +649,7 @@ export const ru = {
       planUnnamed: 'подписка',
       providerTitle: '{{provider}} · {{plan}}',
       providerCharge: '{{amount}}, следующее списание {{date}}',
+      providerDelay: '{{amount}}, отсрочка до {{date}}: тариф выдан без оплаты, первое списание придёт в этот день',
       providerAmount: '{{amount}} за период',
       providerEnds: 'списания заканчиваются {{date}}',
       pastDue: 'Последнее списание не прошло',
