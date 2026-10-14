@@ -20,6 +20,14 @@ import {
   LinkTelegramGenerateResultInterface,
 } from '../interfaces/linking.interface';
 
+/** What `emailInitiate` needs to know about the account the challenge hangs off. */
+interface LinkableWebAccount {
+  readonly id: string;
+  readonly emailVerifiedAt: Date | null;
+  readonly login: string | null;
+  readonly passwordHash: string | null;
+}
+
 /**
  * LinkingService
  * ──────────────
@@ -36,7 +44,11 @@ import {
  *    hash. `verify` consumes the challenge and stamps
  *    `WebAccount.email` + `emailVerifiedAt`. We deliberately do NOT
  *    migrate the email onto `User.email` — keeping it on `WebAccount`
- *    matches the recovery / login lookup paths.
+ *    matches the recovery / login lookup paths. A customer who came through
+ *    the bot or the Mini App has no `WebAccount` at all; the first attempt
+ *    makes a credential-less shell for the challenge to hang off (see
+ *    `ensureWebAccount`). Login and password are chosen later, and only then
+ *    does "forgot password" find the account by that address.
  *
  * Storage:
  *   We reuse the `AuthChallenge` table (`auth_challenges`) for both
@@ -222,14 +234,20 @@ export class LinkingService {
   public async emailInitiate(
     input: LinkEmailInitiateDto,
   ): Promise<LinkEmailInitiateResultInterface> {
-    const webAccount = await this.prismaService.webAccount.findUnique({
-      where: { userId: input.userId },
-      select: { id: true, emailVerifiedAt: true },
-    });
-    if (webAccount === null) {
-      throw new NotFoundException('Web account not found for this userId');
-    }
+    // Most customers came through the bot or the Mini App and have only a
+    // `User`: bootstrap never creates a `WebAccount`. The challenge hangs off
+    // one, so the first link attempt makes the credential-less shell.
+    const webAccount = await this.ensureWebAccount(input.userId);
     const emailNormalized = input.email.trim().toLowerCase();
+    // A shell has no login and no password: it is not an account anybody signs
+    // in to, and the address typed here is not yet theirs. It is kept in the
+    // challenge (`destination`) and written to the row only when the code is
+    // confirmed (`emailVerify`). Stashing it first, as accounts with
+    // credentials do, would let anyone with a Telegram account park any
+    // address on a shell without owning it — the address would then be refused
+    // to its real owner (`ConflictException` above) and would receive the
+    // operator's broadcasts, which read `WebAccount.email` verified or not.
+    const deferAddress = webAccount.login === null && webAccount.passwordHash === null;
     const existingEmailOwner = await this.prismaService.webAccount.findFirst({
       where: {
         emailNormalized,
@@ -266,14 +284,16 @@ export class LinkingService {
       });
       // Stash the candidate email on the WebAccount but leave
       // `emailVerifiedAt` untouched until `verify` succeeds.
-      await tx.webAccount.update({
-        where: { id: webAccount.id },
-        data: {
-          email: input.email,
-          emailNormalized,
-          emailVerifiedAt: null,
-        },
-      });
+      if (!deferAddress) {
+        await tx.webAccount.update({
+          where: { id: webAccount.id },
+          data: {
+            email: input.email,
+            emailNormalized,
+            emailVerifiedAt: null,
+          },
+        });
+      }
     });
 
     try {
@@ -296,10 +316,11 @@ export class LinkingService {
   ): Promise<LinkEmailVerifyResultInterface> {
     const codeHash = this.hash(input.code);
     let verifiedEmail: string | null = null;
+    let addressTakenMeanwhile = false;
     const result = await this.prismaService.$transaction(async (tx) => {
       const webAccount = await tx.webAccount.findUnique({
         where: { userId: input.userId },
-        select: { id: true },
+        select: { id: true, emailNormalized: true },
       });
       if (webAccount === null) {
         return { success: false, verified: false };
@@ -334,13 +355,36 @@ export class LinkingService {
         where: { id: challenge.id },
         data: { consumedAt: now },
       });
+      // The address was not stashed on the row at `initiate` (a shell, see
+      // there): it goes on now, that it is proven. Somebody may have taken it in
+      // the meantime — then this code can never succeed, so it is spent.
+      const addressWritten = webAccount.emailNormalized === challenge.destination;
+      if (!addressWritten) {
+        const taken = await tx.webAccount.findFirst({
+          where: { emailNormalized: challenge.destination, id: { not: webAccount.id } },
+          select: { id: true },
+        });
+        if (taken !== null) {
+          addressTakenMeanwhile = true;
+          return { success: false, verified: false };
+        }
+      }
       await tx.webAccount.update({
         where: { id: webAccount.id },
-        data: { emailVerifiedAt: now },
+        data: addressWritten
+          ? { emailVerifiedAt: now }
+          : {
+              email: challenge.destination,
+              emailNormalized: challenge.destination,
+              emailVerifiedAt: now,
+            },
       });
       verifiedEmail = challenge.destination;
       return { success: true, verified: true };
     });
+    if (addressTakenMeanwhile) {
+      throw new ConflictException('Email is already linked to another web account');
+    }
 
     if (result.verified && verifiedEmail !== null) {
       this.events?.info(
@@ -358,6 +402,41 @@ export class LinkingService {
   }
 
   // ── Helpers ──────────────────────────────────────────────────────────
+
+  /**
+   * The user's `WebAccount`, made when there is none: the shell
+   * `ExternalAuthService.createShellAccount` makes, with `userId` and nothing
+   * else — no login, no password, no address.
+   *
+   * Two first attempts at once (a double tap, two tabs) race on the unique
+   * `userId`; the loser reads the winner's row instead of failing.
+   */
+  private async ensureWebAccount(userId: string): Promise<LinkableWebAccount> {
+    const select = { id: true, emailVerifiedAt: true, login: true, passwordHash: true } as const;
+    const existing = await this.prismaService.webAccount.findUnique({ where: { userId }, select });
+    if (existing !== null) {
+      return existing;
+    }
+    const user = await this.prismaService.user.findUnique({
+      where: { id: userId },
+      select: { id: true },
+    });
+    if (user === null) {
+      throw new NotFoundException('User not found');
+    }
+    try {
+      return await this.prismaService.webAccount.create({ data: { userId }, select });
+    } catch (error: unknown) {
+      if ((error as { code?: unknown } | null)?.code !== 'P2002') {
+        throw error;
+      }
+      const winner = await this.prismaService.webAccount.findUnique({ where: { userId }, select });
+      if (winner === null) {
+        throw error;
+      }
+      return winner;
+    }
+  }
 
   private makeNumericCode(length: number): string {
     const buf = randomBytes(length);

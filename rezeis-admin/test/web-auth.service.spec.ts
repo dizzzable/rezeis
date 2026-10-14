@@ -179,6 +179,81 @@ describe('WebAuthService', () => {
     );
   });
 
+  it('fills a credential-less shell instead of refusing the claim', async () => {
+    // The row linking an e-mail from the Mini App leaves: a userId and perhaps a
+    // verified address, no login and no password.
+    const prisma = createPrismaMock({
+      usersById: new Map([['user-1', { id: 'user-1' }]]),
+      existingWebAccountByUserId: new Map([['user-1', { id: 'shell-1', login: null, passwordHash: null }]]),
+    });
+    const passwordHashService = createPasswordHashServiceMock();
+    const service = createService({ prisma, passwordHashService });
+
+    const result = await service.claim({ userId: 'user-1', login: '  Claim.Login  ', password: 'plain-password' });
+
+    assert.deepStrictEqual(result, { userId: 'user-1', webAccountId: 'shell-1' });
+    assert.equal(prisma.createdWebAccounts.length, 0, 'the shell is filled in, not duplicated');
+    assert.equal(prisma.webAccountUpdatesInTransaction.length, 1);
+    const [write] = prisma.webAccountUpdatesInTransaction as Array<{
+      where: Record<string, unknown>;
+      data: Record<string, unknown>;
+    }>;
+    // Compare-and-set: only a row that still has neither login nor password.
+    assert.deepStrictEqual(write.where, { id: 'shell-1', login: null, passwordHash: null });
+    assert.equal(write.data.login, 'Claim.Login');
+    assert.equal(write.data.loginNormalized, 'claim.login');
+    assert.equal(write.data.passwordHash, 'hashed:plain-password');
+    assert.equal(write.data.requiresPasswordChange, false);
+    assert.ok(write.data.credentialsBootstrappedAt instanceof Date);
+  });
+
+  it('still refuses a claim on an account that already has a login or a password', async () => {
+    for (const existing of [
+      { id: 'web-1', login: 'someone', passwordHash: 'hash' },
+      { id: 'web-1', login: 'someone', passwordHash: null },
+      { id: 'web-1', login: null, passwordHash: 'hash' },
+    ]) {
+      const prisma = createPrismaMock({
+        usersById: new Map([['user-1', { id: 'user-1' }]]),
+        existingWebAccountByUserId: new Map([['user-1', existing]]),
+      });
+      const service = createService({ prisma });
+
+      await assert.rejects(
+        () => service.claim({ userId: 'user-1', login: 'claim-login', password: 'plain-password' }),
+        (error: unknown) => error instanceof ConflictException && error.message === 'User already has a web account',
+      );
+      assert.equal(prisma.webAccountUpdatesInTransaction.length, 0);
+    }
+  });
+
+  it('does not overwrite the credentials a concurrent claim just set on the shell', async () => {
+    const prisma = createPrismaMock({
+      usersById: new Map([['user-1', { id: 'user-1' }]]),
+      existingWebAccountByUserId: new Map([['user-1', { id: 'shell-1', login: null, passwordHash: null }]]),
+      webAccountUpdateManyCount: 0,
+    });
+    const service = createService({ prisma });
+
+    await assert.rejects(
+      () => service.claim({ userId: 'user-1', login: 'claim-login', password: 'plain-password' }),
+      (error: unknown) => error instanceof ConflictException && error.message === 'User already has a web account',
+    );
+  });
+
+  it('answers a login taken between the check and the write as a conflict, not a 500', async () => {
+    const prisma = createPrismaMock({
+      usersById: new Map([['user-1', { id: 'user-1' }]]),
+      webAccountCreateError: Object.assign(new Error('Unique constraint failed'), { code: 'P2002' }),
+    });
+    const service = createService({ prisma });
+
+    await assert.rejects(
+      () => service.claim({ userId: 'user-1', login: 'claim-login', password: 'plain-password' }),
+      (error: unknown) => error instanceof ConflictException && error.message === 'login is already taken',
+    );
+  });
+
   it('rejects a claim when the login is already taken case-insensitively', async () => {
     const service = createService({
       prisma: createPrismaMock({
@@ -731,6 +806,51 @@ describe('WebAuthService', () => {
     ]);
   });
 
+  it('telegramClaim still retires a shell whose only web account is the bare row e-mail linking leaves', async () => {
+    // A customer started «Привязать Email» from the Mini App and never finished:
+    // the shell row exists, with nothing in it.
+    const { prisma, userDeletes } = createTelegramClaimPrismaMock({
+      loginNormalized: 'web-user',
+      account: { userId: 'A', passwordHash: 'hashed:plain-password' },
+      targetUser: { id: 'A', telegramId: null },
+      telegramOwner: { id: 'B' },
+      shellWebAccount: { login: null, passwordHash: null, emailVerifiedAt: null },
+    });
+    const service = createService({ prisma });
+
+    const result = await service.telegramClaim({ telegramId: '123', login: 'web-user', password: 'plain-password' });
+
+    assert.deepStrictEqual(result, { status: 'linked', userId: 'A' });
+    assert.deepStrictEqual(userDeletes, ['B']);
+  });
+
+  it('telegramClaim keeps a shell whose web account holds a verified e-mail, a login, a password or a social sign-in', async () => {
+    const holdsSomething: ReadonlyArray<{
+      readonly shellWebAccount: { login: string | null; passwordHash: string | null; emailVerifiedAt: Date | null };
+      readonly shellOAuthLinkCount?: number;
+    }> = [
+      { shellWebAccount: { login: null, passwordHash: null, emailVerifiedAt: new Date() } },
+      { shellWebAccount: { login: 'someone', passwordHash: null, emailVerifiedAt: null } },
+      { shellWebAccount: { login: null, passwordHash: 'hash', emailVerifiedAt: null } },
+      { shellWebAccount: { login: null, passwordHash: null, emailVerifiedAt: null }, shellOAuthLinkCount: 1 },
+    ];
+    for (const shell of holdsSomething) {
+      const { prisma, userDeletes } = createTelegramClaimPrismaMock({
+        loginNormalized: 'web-user',
+        account: { userId: 'A', passwordHash: 'hashed:plain-password' },
+        targetUser: { id: 'A', telegramId: null },
+        telegramOwner: { id: 'B' },
+        ...shell,
+      });
+      const service = createService({ prisma });
+
+      const result = await service.telegramClaim({ telegramId: '123', login: 'web-user', password: 'plain-password' });
+
+      assert.deepStrictEqual(result, { status: 'needs_admin_merge' }, JSON.stringify(shell));
+      assert.equal(userDeletes.length, 0);
+    }
+  });
+
   it('telegramClaim refuses to merge a Telegram account that has material data', async () => {
     const { prisma, userDeletes } = createTelegramClaimPrismaMock({
       loginNormalized: 'web-user',
@@ -811,7 +931,14 @@ describe('WebAuthService', () => {
 interface CreatePrismaMockOptions {
   readonly usersByTelegramId?: Map<bigint, { readonly id: string }>;
   readonly usersById?: Map<string, { readonly id: string }>;
-  readonly existingWebAccountByUserId?: Map<string, { readonly id: string }>;
+  readonly existingWebAccountByUserId?: Map<
+    string,
+    { readonly id: string; readonly login?: string | null; readonly passwordHash?: string | null }
+  >;
+  /** How many rows a compare-and-set `updateMany` on a web account matches. */
+  readonly webAccountUpdateManyCount?: number;
+  /** `webAccount.create` fails with this error (a lost unique-index race). */
+  readonly webAccountCreateError?: unknown;
   readonly existingWebAccountByLoginNormalized?: Map<string, { readonly id: string }>;
   readonly loginAccounts?: Map<string, LoginAccountRecord>;
   readonly recoveryAccounts?: Map<string, RecoveryAccountRecord>;
@@ -1004,12 +1131,17 @@ function createPrismaMock(options: CreatePrismaMockOptions = {}): PrismaMock {
         return null;
       },
       create: async (args: { readonly data: CreatedWebAccountRecord }) => {
+        if (options.webAccountCreateError !== undefined) throw options.webAccountCreateError;
         createdWebAccounts.push(args.data);
         return { id: `web-account-${createdWebAccounts.length}` };
       },
       update: async (args: { readonly where: unknown; readonly data: unknown }) => {
         webAccountUpdatesInTransaction.push(args);
         return { id: 'web-account-1' };
+      },
+      updateMany: async (args: { readonly where: unknown; readonly data: unknown }) => {
+        webAccountUpdatesInTransaction.push(args);
+        return { count: options.webAccountUpdateManyCount ?? 1 };
       },
     },
     // The one raw statement a writer of the sign-out moment runs, as
@@ -1239,6 +1371,13 @@ function createTelegramClaimPrismaMock(opts: {
   readonly targetUser?: { readonly id: string; readonly telegramId: bigint | null };
   readonly telegramOwner?: { readonly id: string } | null;
   readonly shellEmpty?: boolean;
+  /** The `WebAccount` row the retiring shell owns, when it owns one. */
+  readonly shellWebAccount?: {
+    readonly login: string | null;
+    readonly passwordHash: string | null;
+    readonly emailVerifiedAt: Date | null;
+  } | null;
+  readonly shellOAuthLinkCount?: number;
   readonly referralPointsExchangeCount?: number;
   readonly trialClaimCount?: number;
 }): {
@@ -1257,9 +1396,11 @@ function createTelegramClaimPrismaMock(opts: {
             ? opts.account
             : null;
         }
-        return null; // isEmptyShell: a shell has no web account
+        // isEmptyShell: the row the shell owns, if any.
+        return opts.shellWebAccount ?? null;
       },
     },
+    userOAuthLink: { count: async () => opts.shellOAuthLinkCount ?? 0 },
     user: {
       findUnique: async (args: { readonly where: { readonly id?: string; readonly telegramId?: bigint } }) => {
         if (args.where.id !== undefined) {

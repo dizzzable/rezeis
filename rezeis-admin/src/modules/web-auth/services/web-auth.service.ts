@@ -326,6 +326,11 @@ export class WebAuthService {
    * never creates a new `User` and never resolves by Telegram id — the caller
    * (reiwa BFF) passes the userId from the authenticated WebSession, so it can
    * only ever attach credentials to the caller's own account.
+   *
+   * A `WebAccount` row with no login and no password (the shell linking an
+   * e-mail from the Mini App makes) counts as "no account yet": it is filled
+   * in, keeping the e-mail it holds, so the customer can set a login and
+   * password after linking an address. A row with either is refused.
    */
   public async claim(input: WebAuthClaimDto): Promise<WebAuthRegisterResultInterface> {
     if (!loginPolicy.isValidLogin(input.login)) {
@@ -349,9 +354,19 @@ export class WebAuthService {
 
       const existingWebAccount = await tx.webAccount.findUnique({
         where: { userId: user.id },
-        select: { id: true },
+        select: { id: true, login: true, passwordHash: true },
       });
-      if (existingWebAccount !== null) {
+      // A shell — the row linking an e-mail from the Mini App makes, or a social
+      // sign-up's — has no login and no password. It is the same state as no
+      // row at all as far as credentials go, so it is filled in rather than
+      // refused; anything with a login or a password is somebody's account.
+      const shell =
+        existingWebAccount !== null &&
+        existingWebAccount.login === null &&
+        existingWebAccount.passwordHash === null
+          ? existingWebAccount
+          : null;
+      if (existingWebAccount !== null && shell === null) {
         throw new ConflictException('User already has a web account');
       }
 
@@ -363,19 +378,40 @@ export class WebAuthService {
         throw new ConflictException('login is already taken');
       }
 
-      const webAccount = await tx.webAccount.create({
-        data: {
-          userId: user.id,
-          login,
-          loginNormalized,
-          passwordHash,
-          requiresPasswordChange: false,
-          credentialsBootstrappedAt: new Date(),
-        },
-        select: { id: true },
-      });
-
-      return { userId: user.id, webAccountId: webAccount.id };
+      const credentials = {
+        login,
+        loginNormalized,
+        passwordHash,
+        requiresPasswordChange: false,
+        credentialsBootstrappedAt: new Date(),
+      };
+      try {
+        if (shell !== null) {
+          // Compare-and-set: two taps of the button, or a tab and a Mini App,
+          // both read the shell empty; the second must not overwrite the
+          // password the first just chose.
+          const filled = await tx.webAccount.updateMany({
+            where: { id: shell.id, login: null, passwordHash: null },
+            data: credentials,
+          });
+          if (filled.count === 0) {
+            throw new ConflictException('User already has a web account');
+          }
+          return { userId: user.id, webAccountId: shell.id };
+        }
+        const webAccount = await tx.webAccount.create({
+          data: { userId: user.id, ...credentials },
+          select: { id: true },
+        });
+        return { userId: user.id, webAccountId: webAccount.id };
+      } catch (error: unknown) {
+        // The login (or a row for this user) taken between the reads above and
+        // the write: the same answers as the checks give, not a 500.
+        if ((error as { code?: unknown } | null)?.code === 'P2002') {
+          throw new ConflictException('login is already taken');
+        }
+        throw error;
+      }
     });
   }
 
@@ -518,6 +554,11 @@ export class WebAuthService {
    * trial-only shell is no longer empty. Anything that would block the `User`
    * delete (`onDelete: Restrict` rows) or that belongs to someone else's ledger
    * (partner chain) makes it non-empty → the operator must merge instead.
+   *
+   * A `WebAccount` row no longer settles it by existing: linking an e-mail from
+   * the Mini App makes one for a customer who has never chosen a login. A row
+   * with no login, no password, no verified address and no social sign-in
+   * behind it holds nothing the customer would lose, so it is still a shell.
    */
   private async isEmptyShell(
     tx: Prisma.TransactionClient,
@@ -525,6 +566,7 @@ export class WebAuthService {
   ): Promise<boolean> {
     const [
       webAccount,
+      oauthLinks,
       transactions,
       partner,
       nonTrialSubscriptions,
@@ -536,7 +578,11 @@ export class WebAuthService {
       referralsGiven,
       trialClaims,
     ] = await Promise.all([
-      tx.webAccount.findUnique({ where: { userId }, select: { id: true } }),
+      tx.webAccount.findUnique({
+        where: { userId },
+        select: { login: true, passwordHash: true, emailVerifiedAt: true },
+      }),
+      tx.userOAuthLink.count({ where: { userId } }),
       tx.transaction.count({ where: { userId } }),
       tx.partner.findUnique({ where: { userId }, select: { id: true } }),
       tx.subscription.count({ where: { userId, isTrial: false } }),
@@ -548,8 +594,14 @@ export class WebAuthService {
       tx.referral.count({ where: { referrerId: userId } }),
       tx.trialClaim.count({ where: { userId } }),
     ]);
+    const bareAccount =
+      webAccount === null ||
+      (webAccount.login === null &&
+        webAccount.passwordHash === null &&
+        webAccount.emailVerifiedAt === null &&
+        oauthLinks === 0);
     return (
-      webAccount === null &&
+      bareAccount &&
       transactions === 0 &&
       partner === null &&
       nonTrialSubscriptions === 0 &&

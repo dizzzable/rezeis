@@ -1178,6 +1178,49 @@ describe('password reset: request from the cabinet', () => {
     assert.equal((await h.service.request({ identifier: 'frank', cabinetUrl: CABINET })).method, 'telegram');
   });
 
+  it('recovers by the e-mail a Telegram customer linked once they have chosen a login — and not before', async () => {
+    // The customer came through the bot, linked an address from the Mini App
+    // (a shell web account: userId and a verified e-mail, no login, no
+    // password), and was then offered a login and password.
+    const state = fixtures();
+    state.users.push({ id: 'u-shell', telegramId: null, isBlocked: false, language: Locale.RU });
+    const shell = account({
+      id: 'wa-shell',
+      userId: 'u-shell',
+      email: 'Shell@Example.com',
+      emailNormalized: 'shell@example.com',
+      emailVerifiedAt: new Date(),
+      passwordHash: null,
+      credentialsBootstrappedAt: null,
+    });
+    state.accounts.push(shell);
+    const h = harness({ state });
+
+    // No login yet: the address names nobody, and nothing is sent.
+    assert.deepEqual(await h.service.request({ identifier: 'shell@example.com', cabinetUrl: CABINET }), {
+      method: 'none',
+      resetLinks: true,
+    });
+    assert.equal(h.tasks.length, 0);
+
+    // What `WebAuthService.claim` writes onto the shell.
+    Object.assign(shell, {
+      login: 'shell.user',
+      loginNormalized: 'shell.user',
+      passwordHash: 'scrypt$chosen',
+      credentialsBootstrappedAt: new Date(),
+    });
+
+    assert.deepEqual(await h.service.request({ identifier: ' SHELL@example.com ', cabinetUrl: CABINET }), {
+      method: 'email',
+      resetLinks: true,
+    });
+    await h.runTasks();
+    assert.equal(h.mails.length, 1);
+    assert.equal(h.mails[0].to, 'Shell@Example.com');
+    assert.equal(h.mails[0].login, 'shell.user');
+  });
+
   it('answers unknown, blocked and login-less accounts exactly like an account with nowhere to send', async () => {
     const h = harness();
     const answers = await Promise.all(

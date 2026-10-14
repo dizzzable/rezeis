@@ -30,13 +30,28 @@ interface ChallengeRecord {
   createdAt: Date;
 }
 
+interface MockWebAccountOptions {
+  readonly id?: string;
+  readonly userId?: string;
+  readonly emailVerifiedAt?: Date | null;
+  readonly telegramId?: bigint | null;
+  /** Default: an account with credentials. null + null is a shell. */
+  readonly login?: string | null;
+  readonly passwordHash?: string | null;
+  readonly email?: string | null;
+  readonly emailNormalized?: string | null;
+}
+
 interface MockPrismaOptions {
-  readonly webAccount?: {
-    readonly id?: string;
-    readonly userId?: string;
-    readonly emailVerifiedAt?: Date | null;
-    readonly telegramId?: bigint | null;
-  } | null;
+  readonly webAccount?: MockWebAccountOptions | null;
+  /** The User exists (default) - matters only when there is no web account. */
+  readonly userExists?: boolean;
+  /** The first webAccount.create fails with this (a lost race on the unique userId). */
+  readonly createWebAccountError?: unknown;
+  /** The row that won that race, and is there on the re-read. */
+  readonly racedWebAccount?: MockWebAccountOptions;
+  /** Another web account holds this normalized address by the time the code is confirmed. */
+  readonly addressTakenAtVerify?: string;
   readonly existingEmailOwner?: boolean;
   readonly challenge?: ChallengeRecord;
   readonly conflictingTelegramUserId?: string | null;
@@ -80,14 +95,23 @@ function createChallenge(input: Partial<ChallengeRecord> = {}): ChallengeRecord 
 }
 
 function createMockPrisma(options: MockPrismaOptions = {}) {
-  const webAccount = options.webAccount === undefined
-    ? {
-        id: 'web-account-1',
-        userId: 'user-1',
-        emailVerifiedAt: null,
-        telegramId: null,
-      }
-    : options.webAccount;
+  // Mutable: update and create write to it, as the database would.
+  let webAccount: Required<MockWebAccountOptions> | null =
+    options.webAccount === null
+      ? null
+      : {
+          id: 'web-account-1',
+          userId: 'user-1',
+          emailVerifiedAt: null,
+          telegramId: null,
+          login: 'alice',
+          passwordHash: 'hash',
+          email: null,
+          emailNormalized: null,
+          ...options.webAccount,
+        };
+  const createdWebAccounts: Array<Record<string, unknown>> = [];
+  let createFailureSpent = false;
   const challenges: ChallengeRecord[] = options.challenge === undefined ? [] : [options.challenge];
   const authChallengeUpdateManyCalls: MockAuthChallengeUpdateManyCall[] = [];
   const authChallengeUpdates: MockUpdateCall[] = [];
@@ -168,11 +192,25 @@ function createMockPrisma(options: MockPrismaOptions = {}) {
           id: webAccount.id,
           userId: webAccount.userId,
           emailVerifiedAt: webAccount.emailVerifiedAt,
+          login: webAccount.login,
+          passwordHash: webAccount.passwordHash,
+          emailNormalized: webAccount.emailNormalized,
         };
       },
+      findFirst: async (...args: readonly unknown[]): Promise<unknown> => {
+        // The check emailVerify makes before it writes an address that is not
+        // yet on the row.
+        const where = (args[0] as { readonly where: Record<string, unknown> }).where;
+        return options.addressTakenAtVerify !== undefined &&
+          where.emailNormalized === options.addressTakenAtVerify
+          ? { id: 'other-web-account' }
+          : null;
+      },
       update: async (...args: readonly unknown[]): Promise<unknown> => {
-        webAccountUpdates.push(args[0] as MockUpdateCall);
-        return { id: webAccount?.id ?? 'web-account-1', ...(args[0] as { readonly data: object }).data };
+        const input = args[0] as MockUpdateCall;
+        webAccountUpdates.push(input);
+        if (webAccount !== null) webAccount = { ...webAccount, ...(input.data as object) };
+        return { id: webAccount?.id ?? 'web-account-1', ...(input.data as object) };
       },
     },
     user: {
@@ -193,8 +231,48 @@ function createMockPrisma(options: MockPrismaOptions = {}) {
   };
 
   const prisma = {
+    user: {
+      findUnique: async (): Promise<unknown> =>
+        options.userExists === false ? null : { id: webAccount?.userId ?? 'user-1' },
+    },
     webAccount: {
       findUnique: tx.webAccount.findUnique,
+      create: async (...args: readonly unknown[]): Promise<unknown> => {
+        const input = args[0] as { readonly data: { readonly userId: string } };
+        createdWebAccounts.push(input.data);
+        if (options.createWebAccountError !== undefined && !createFailureSpent) {
+          createFailureSpent = true;
+          // The winner's row is there for the re-read.
+          webAccount = {
+            id: 'web-account-raced',
+            userId: input.data.userId,
+            emailVerifiedAt: null,
+            telegramId: null,
+            login: null,
+            passwordHash: null,
+            email: null,
+            emailNormalized: null,
+            ...options.racedWebAccount,
+          };
+          throw options.createWebAccountError;
+        }
+        webAccount = {
+          id: 'web-account-new',
+          userId: input.data.userId,
+          emailVerifiedAt: null,
+          telegramId: null,
+          login: null,
+          passwordHash: null,
+          email: null,
+          emailNormalized: null,
+        };
+        return {
+          id: webAccount.id,
+          emailVerifiedAt: null,
+          login: null,
+          passwordHash: null,
+        };
+      },
       findFirst: async (...args: readonly unknown[]): Promise<unknown> => {
         if (!options.existingEmailOwner) return null;
         const where = (args[0] as { readonly where: Record<string, unknown> }).where;
@@ -209,7 +287,9 @@ function createMockPrisma(options: MockPrismaOptions = {}) {
     _authChallengeUpdates: authChallengeUpdates,
     _createdChallenges: createdChallenges,
     _webAccountUpdates: webAccountUpdates,
+    _createdWebAccounts: createdWebAccounts,
     _userUpdates: userUpdates,
+    _currentWebAccount: () => webAccount,
   };
   return prisma;
 }
@@ -420,6 +500,160 @@ describe('LinkingService', () => {
     assert.equal(prisma._webAccountUpdates.length, 1);
     assert.deepStrictEqual(prisma._webAccountUpdates[0]?.where, { id: 'web-account-1' });
     assert.ok(prisma._webAccountUpdates[0]?.data?.emailVerifiedAt instanceof Date);
+  });
+
+  describe('a customer who came through the bot and has no web account', () => {
+    it('makes the shell, hangs the challenge off it and sends the code instead of answering 404', async () => {
+      const prisma = createMockPrisma({ webAccount: null });
+      const emailService = createEmailServiceMock();
+      const service = new LinkingService(prisma as never, emailService as never);
+
+      const actual = await service.emailInitiate({ userId: 'user-1', email: 'User@Example.COM' });
+
+      assert.deepStrictEqual(actual, { success: true, message: 'Verification code sent' });
+      // The shell is the userId and nothing else: no login, password or address.
+      assert.deepStrictEqual(prisma._createdWebAccounts, [{ userId: 'user-1' }]);
+      assert.equal(prisma._createdChallenges.length, 1);
+      assert.equal(prisma._createdChallenges[0].webAccountId, 'web-account-new');
+      assert.equal(prisma._createdChallenges[0].destination, 'user@example.com');
+      assert.equal(emailService.sentEmails.length, 1);
+      assert.equal(emailService.sentEmails[0]?.emailAddress, 'User@Example.COM');
+    });
+
+    it('keeps the unconfirmed address off the shell until the code is entered', async () => {
+      const prisma = createMockPrisma({ webAccount: null });
+      const service = new LinkingService(prisma as never, createEmailServiceMock() as never);
+
+      await service.emailInitiate({ userId: 'user-1', email: 'user@example.com' });
+
+      // An address nobody has proved is theirs would otherwise be refused to its
+      // real owner and receive the operator's broadcasts.
+      assert.deepStrictEqual(prisma._webAccountUpdates, []);
+      assert.equal(prisma._currentWebAccount()?.emailNormalized, null);
+    });
+
+    it('does not make a shell for a user that does not exist', async () => {
+      const prisma = createMockPrisma({ webAccount: null, userExists: false });
+      const emailService = createEmailServiceMock();
+      const service = new LinkingService(prisma as never, emailService as never);
+
+      await assert.rejects(
+        () => service.emailInitiate({ userId: 'ghost', email: 'user@example.com' }),
+        (error: unknown) => error instanceof NotFoundException,
+      );
+      assert.deepStrictEqual(prisma._createdWebAccounts, []);
+      assert.equal(prisma._createdChallenges.length, 0);
+      assert.deepStrictEqual(emailService.sentEmails, []);
+    });
+
+    it('reads the winner instead of failing when two first attempts race on the unique userId', async () => {
+      const prisma = createMockPrisma({
+        webAccount: null,
+        createWebAccountError: Object.assign(new Error('Unique constraint failed'), { code: 'P2002' }),
+      });
+      const emailService = createEmailServiceMock();
+      const service = new LinkingService(prisma as never, emailService as never);
+
+      const actual = await service.emailInitiate({ userId: 'user-1', email: 'user@example.com' });
+
+      assert.deepStrictEqual(actual, { success: true, message: 'Verification code sent' });
+      assert.equal(prisma._createdChallenges.length, 1);
+      assert.equal(prisma._createdChallenges[0].webAccountId, 'web-account-raced');
+      assert.equal(emailService.sentEmails.length, 1);
+    });
+
+    it('lets any other failure to make the shell through', async () => {
+      const prisma = createMockPrisma({
+        webAccount: null,
+        createWebAccountError: Object.assign(new Error('connection lost'), { code: 'P1001' }),
+      });
+      const service = new LinkingService(prisma as never, createEmailServiceMock() as never);
+
+      await assert.rejects(
+        () => service.emailInitiate({ userId: 'user-1', email: 'user@example.com' }),
+        /connection lost/,
+      );
+    });
+
+    it('writes the address, its normalized form and the verification together once the code is right', async () => {
+      const prisma = createMockPrisma({ webAccount: null });
+      const emailService = createEmailServiceMock();
+      const service = new LinkingService(prisma as never, emailService as never);
+      await service.emailInitiate({ userId: 'user-1', email: 'User@Example.COM' });
+      const code = emailService.sentEmails[0]?.code ?? '';
+
+      const actual = await service.emailVerify({ userId: 'user-1', code });
+
+      assert.deepStrictEqual(actual, { success: true, verified: true });
+      assert.equal(prisma._webAccountUpdates.length, 1);
+      const data = prisma._webAccountUpdates[0]?.data ?? {};
+      assert.equal(data.email, 'user@example.com');
+      assert.equal(data.emailNormalized, 'user@example.com');
+      assert.ok(data.emailVerifiedAt instanceof Date);
+      // Still a shell: confirming an address chooses no login.
+      assert.equal(prisma._currentWebAccount()?.login, null);
+      assert.equal(prisma._currentWebAccount()?.passwordHash, null);
+    });
+
+    it('spends the code and says so when somebody took the address in the meantime', async () => {
+      const prisma = createMockPrisma({ webAccount: null, addressTakenAtVerify: 'user@example.com' });
+      const emailService = createEmailServiceMock();
+      const service = new LinkingService(prisma as never, emailService as never);
+      await service.emailInitiate({ userId: 'user-1', email: 'user@example.com' });
+      const code = emailService.sentEmails[0]?.code ?? '';
+
+      await assert.rejects(
+        () => service.emailVerify({ userId: 'user-1', code }),
+        (error: unknown) => error instanceof ConflictException,
+      );
+
+      assert.deepStrictEqual(prisma._webAccountUpdates, []);
+      assert.ok(prisma._authChallengeUpdates.some((update) => update.data.consumedAt instanceof Date));
+    });
+
+    it('answers a verify with no shell and no challenge as an ordinary failure', async () => {
+      const prisma = createMockPrisma({ webAccount: null });
+      const service = new LinkingService(prisma as never, createEmailServiceMock() as never);
+
+      const actual = await service.emailVerify({ userId: 'user-1', code: '123456' });
+
+      assert.deepStrictEqual(actual, { success: false, verified: false });
+      assert.deepStrictEqual(prisma._createdWebAccounts, []);
+    });
+
+    it('leaves an account that has a login and a password to the stash-then-verify flow it always had', async () => {
+      const prisma = createMockPrisma({ webAccount: { login: 'alice', passwordHash: 'hash' } });
+      const service = new LinkingService(prisma as never, createEmailServiceMock() as never);
+
+      await service.emailInitiate({ userId: 'user-1', email: 'User@Example.COM' });
+
+      assert.deepStrictEqual(prisma._createdWebAccounts, []);
+      assert.deepStrictEqual(prisma._webAccountUpdates, [
+        {
+          where: { id: 'web-account-1' },
+          data: { email: 'User@Example.COM', emailNormalized: 'user@example.com', emailVerifiedAt: null },
+        },
+      ]);
+    });
+
+    it('does not touch a shell that already holds a verified address until the new one is proven', async () => {
+      const prisma = createMockPrisma({
+        webAccount: {
+          login: null,
+          passwordHash: null,
+          email: 'old@example.com',
+          emailNormalized: 'old@example.com',
+          emailVerifiedAt: new Date('2026-09-01T00:00:00.000Z'),
+        },
+      });
+      const service = new LinkingService(prisma as never, createEmailServiceMock() as never);
+
+      await service.emailInitiate({ userId: 'user-1', email: 'new@example.com' });
+
+      assert.deepStrictEqual(prisma._webAccountUpdates, []);
+      assert.equal(prisma._currentWebAccount()?.emailNormalized, 'old@example.com');
+      assert.ok(prisma._currentWebAccount()?.emailVerifiedAt instanceof Date);
+    });
   });
 
   it('validates the current DTO class contracts', async () => {
