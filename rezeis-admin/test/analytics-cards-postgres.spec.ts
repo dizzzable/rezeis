@@ -522,4 +522,86 @@ run('business analytics cards on PostgreSQL', { concurrency: false }, () => {
       assert.deepEqual(report.repeat.withDiscount, { clients: 1, boughtAgain: 0 });
     });
   });
+
+  // ── Ценность клиента по месяцу первой оплаты ─────────────────────────────
+
+  describe('lifetime value by month of first payment', () => {
+    it('takes the mean and the median of everything each client has paid, net of refunds, in one currency', async () => {
+      const report = await onCleanSlate(async (tx, service) => {
+        await tx.fxRate.create({ data: { base: 'RUB', quote: 'USDT', rate: '80', source: 'TEST', fetchedAt: daysAgo(0.5) } });
+        const first = midMonth(5);
+        for (const id of ['a', 'b', 'c', 'd', 'later']) await customer(tx, id);
+        // a: 100, 100, and an add-on of 200 — add-ons are money too.
+        await pay(tx, { userId: 'a', createdAt: first, amount: '100', planSnapshot: bought(30) });
+        await pay(tx, { userId: 'a', purchaseType: 'RENEW', createdAt: plusDays(first, 30), amount: '100', planSnapshot: bought(30) });
+        await pay(tx, { userId: 'a', purchaseType: 'ADDITIONAL', createdAt: plusDays(first, 40), amount: '200', planSnapshot: bought(30, { snapshotSource: 'ADDON_PURCHASE' }) });
+        await pay(tx, { userId: 'b', createdAt: first, amount: '100', planSnapshot: bought(30) });
+        // c: 100 less a partial refund of 40.
+        await pay(tx, { userId: 'c', createdAt: first, amount: '100', gatewayData: { refundedAmountTotal: '40' }, planSnapshot: bought(30) });
+        // d: 10 USDT, at 80.
+        await pay(tx, { userId: 'd', createdAt: first, amount: '10', currency: 'USDT', planSnapshot: bought(30) });
+        // A partner's balance is not money received; a refunded payment is not either.
+        await pay(tx, { userId: 'b', gatewayType: 'PARTNER_BALANCE', createdAt: plusDays(first, 5), amount: '999', planSnapshot: bought(30) });
+        await pay(tx, { userId: 'b', status: 'CANCELED', createdAt: plusDays(first, 6), amount: '500', gatewayData: { refundReversedAt: first.toISOString() }, planSnapshot: bought(30) });
+        // A client of a later month.
+        await pay(tx, { userId: 'later', createdAt: midMonth(2), amount: '300', planSnapshot: bought(30) });
+        return service.getPaidLtv();
+      });
+      const cohort = (monthsBack: number): { cohort: string; clients: number; mean: number | null; median: number | null } => {
+        const row = report.rows[report.rows.length - 1 - monthsBack];
+        assert.ok(row !== undefined);
+        return row;
+      };
+      assert.equal(report.rows.length, 12);
+      assert.deepEqual([cohort(5).clients, cohort(5).mean, cohort(5).median], [4, 340, 250]);
+      assert.deepEqual([cohort(2).clients, cohort(2).mean, cohort(2).median], [1, 300, 300]);
+      assert.deepEqual([cohort(0).clients, cohort(0).mean, cohort(0).median], [0, null, null]);
+      // Over all five: 400, 100, 60, 800, 300.
+      assert.equal(report.clients, 5);
+      assert.equal(report.mean, 332);
+      assert.equal(report.median, 300);
+      assert.equal(report.money.currency, 'RUB');
+    });
+
+    it('leaves out money paid before the client registered, and does not take it for a first payment', async () => {
+      const report = await onCleanSlate(async (tx, service) => {
+        await customer(tx, 'moved', { createdAt: midMonth(3) });
+        // The donor’s payment, dated long before the registration, then one in this panel.
+        await pay(tx, { userId: 'moved', createdAt: midMonth(8), amount: '700', planSnapshot: bought(30) });
+        await pay(tx, { userId: 'moved', createdAt: plusDays(midMonth(3), 2), amount: '100', planSnapshot: bought(30) });
+        return service.getPaidLtv();
+      });
+      const withClients = report.rows.filter((row) => row.clients > 0);
+      assert.equal(withClients.length, 1);
+      assert.equal(withClients[0]?.mean, 100);
+      assert.equal(report.mean, 100);
+    });
+
+    it('answers with no figures when nobody has paid', async () => {
+      const report = await onCleanSlate((_tx, service) => service.getPaidLtv());
+      assert.equal(report.clients, 0);
+      assert.equal(report.mean, null);
+      assert.equal(report.median, null);
+      assert.equal(report.rows.every((row) => row.clients === 0 && row.mean === null), true);
+    });
+
+    it('files a first payment in the panel zone', async () => {
+      const now = new Date();
+      const edge = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 4, 0, 21, 0, 0));
+      const monthOf = async (timezone: string): Promise<string | undefined> => {
+        const report = await onCleanSlate(
+          async (tx, service) => {
+            await customer(tx, 'edge');
+            await pay(tx, { userId: 'edge', createdAt: edge, amount: '100', planSnapshot: bought(30) });
+            return service.getPaidLtv();
+          },
+          { timezone },
+        );
+        return report.rows.find((row) => row.clients > 0)?.cohort;
+      };
+      const utc = await monthOf('UTC');
+      const tokyo = await monthOf('Asia/Tokyo');
+      assert.notEqual(utc, tokyo);
+    });
+  });
 });

@@ -51,6 +51,7 @@ import {
   SWEEP_MS,
   useChartEntrance,
 } from './analytics-chart-support'
+import { FirstPaymentLtvCard } from './analytics-first-payment-ltv-card'
 import { formatCohortMonth, formatCount, formatDay, formatMoney, formatPercent } from './analytics-format'
 import { ACCENT, EXPIRING_COLORS, GHOST, heatColor } from './analytics-palette'
 
@@ -73,6 +74,7 @@ export function RetentionTab({ played }: { readonly played: Set<string> }): JSX.
       <CohortCard query={cohorts} />
       <PaidCohortCard query={paidCohorts} />
       <LtvCard query={ltv} played={played} />
+      <FirstPaymentLtvCard played={played} />
     </div>
   )
 }

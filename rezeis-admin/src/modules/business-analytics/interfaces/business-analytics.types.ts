@@ -244,6 +244,28 @@ export interface AutopayReportInterface {
   readonly generatedAt: string;
 }
 
+export interface FirstPaymentLtvRowInterface {
+  /** `YYYY-MM` — the local month of the cohort's first payment. */
+  readonly cohort: string;
+  readonly clients: number;
+  /** Mean and median of everything the cohort's clients have paid to date, in the view currency; `null` for a month with no clients. */
+  readonly mean: number | null;
+  readonly median: number | null;
+}
+
+export interface FirstPaymentLtvReportInterface {
+  /** The last twelve months, oldest first; a month with no first payments has no clients. */
+  readonly rows: readonly FirstPaymentLtvRowInterface[];
+  /** All clients of those months together. */
+  readonly clients: number;
+  readonly mean: number | null;
+  readonly median: number | null;
+  readonly money: MoneyViewInterface;
+  readonly generatedAt: string;
+  readonly timeZone: string;
+  readonly timeZoneFallback: boolean;
+}
+
 export interface DiscountBucketInterface {
   /** Whole per cent, the bucket's lower end (included). */
   readonly from: number;

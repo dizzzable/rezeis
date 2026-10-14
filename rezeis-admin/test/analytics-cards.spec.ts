@@ -13,6 +13,7 @@ import {
   DISCOUNT_BUCKETS,
   DISCOUNT_REPEAT_AFTER_DAYS,
 } from '../src/modules/business-analytics/utils/analytics-discount.util';
+import { assembleFirstPaymentLtv } from '../src/modules/business-analytics/utils/analytics-first-payment-ltv.util';
 import {
   assemblePaidCohorts,
   PAID_COHORT_OFFSETS,
@@ -180,5 +181,39 @@ describe('discounts (assembly)', () => {
   it('reads a pg numeric sum that arrives as text', () => {
     const report = assembleDiscounts(window, [purchases('b10', 2, '31.0000000000000000' as unknown as number)]);
     assert.equal(report.averageDiscount, 15.5);
+  });
+});
+
+describe('value by month of first payment (assembly)', () => {
+  const NOW = at('2026-10-14T09:00:00Z');
+  const ROUBLES = { currency: 'RUB', converted: false, rates: [], unconverted: [] } as const;
+
+  it('lists the last twelve months, oldest first, with no figures for a month nobody first paid in', () => {
+    const report = assembleFirstPaymentLtv(NOW, UTC_ZONE, ROUBLES, [
+      { cohort: '2026-08', clients: 4, mean: '340.5', median: 250 },
+      { cohort: 'all', clients: 4, mean: '340.5', median: 250 },
+    ]);
+    assert.equal(report.rows.length, 12);
+    assert.equal(report.rows[0]?.cohort, '2025-11');
+    assert.equal(report.rows[11]?.cohort, '2026-10');
+    const august = report.rows.find((row) => row.cohort === '2026-08');
+    assert.deepEqual(august, { cohort: '2026-08', clients: 4, mean: 340.5, median: 250 });
+    assert.deepEqual(report.rows[11], { cohort: '2026-10', clients: 0, mean: null, median: null });
+  });
+
+  it('takes the header from the row over all clients, not from the months', () => {
+    const report = assembleFirstPaymentLtv(NOW, UTC_ZONE, ROUBLES, [
+      { cohort: '2026-07', clients: 1, mean: 100, median: 100 },
+      { cohort: '2026-08', clients: 3, mean: 300, median: 200 },
+      { cohort: 'all', clients: 4, mean: 250, median: 150 },
+    ]);
+    assert.deepEqual([report.clients, report.mean, report.median], [4, 250, 150]);
+    assert.equal(report.money.currency, 'RUB');
+  });
+
+  it('has an empty header when nobody paid', () => {
+    const report = assembleFirstPaymentLtv(NOW, UTC_ZONE, ROUBLES, [{ cohort: 'all', clients: 0, mean: null, median: null }]);
+    assert.deepEqual([report.clients, report.mean, report.median], [0, null, null]);
+    assert.equal(report.timeZone, 'UTC');
   });
 });

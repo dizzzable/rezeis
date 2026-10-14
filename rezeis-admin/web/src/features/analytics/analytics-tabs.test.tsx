@@ -21,6 +21,7 @@ import {
   conversionReport,
   discountReport,
   expiringReport,
+  firstPaymentLtvReport,
   ltvReport,
   overviewReport,
   paidCohortReport,
@@ -339,6 +340,54 @@ describe('the discounts card', () => {
     expect(tip).toHaveTextContent('Скидка — разница между прайсом и уплаченной суммой')
     expect(tip).toHaveTextContent('Комиссия платёжной системы и пересчёт валюты скидкой не считаются')
     expect(tip).toHaveTextContent('«по старой цене»')
+  })
+})
+
+describe('the value of customers by month of first payment', () => {
+  async function card(): Promise<HTMLElement> {
+    renderWithProviders(<AnalyticsPage />)
+    await openTab('retention')
+    return waitFor(() => {
+      const found = document.querySelector<HTMLElement>('[data-analytics-card="retention-paid-ltv"]')
+      if (found === null || found.querySelector('[data-paid-ltv-stats]') === null) throw new Error('no paid LTV card')
+      return found
+    })
+  }
+
+  it('states the mean and median over all of those customers, in the currency of the report', async () => {
+    const found = await card()
+    expect(plain(found.querySelector('[data-paid-ltv-stats]')?.textContent)).toBe('Клиентов160В среднем1 231 ₽Медиана950 ₽')
+  })
+
+  it('draws a pair of bars per month, one for the mean and one for the median, and names both in a legend', async () => {
+    const found = await card()
+    await waitFor(() => expect(found.querySelectorAll('.recharts-bar').length).toBe(2))
+    expect([...found.querySelectorAll('[data-analytics-legend] li')].map((item) => plain(item.textContent))).toEqual(['В среднем', 'Медиана'])
+    expect(found.querySelectorAll('.recharts-bar-rectangle').length).toBe(6)
+  })
+
+  it('says under the chart that the newest months have not had time to pay', async () => {
+    const found = await card()
+    expect(plain(found.querySelector('[data-paid-ltv-footnote]')?.textContent)).toBe('Клиенты свежих месяцев ещё не успели накопить сумму.')
+  })
+
+  it('has a table of the months with their customers, mean and median', async () => {
+    const user = userEvent.setup()
+    const found = await card()
+    await user.click(within(found).getByRole('button', { name: i18n.t('analyticsPage.common.showTable') }))
+    const rows = [...found.querySelectorAll('[data-analytics-table] tbody tr')].map((row) => [...row.querySelectorAll('td')].map((cell) => plain(cell.textContent)))
+    expect(rows).toEqual([
+      ['июль 2026 г.', '50', '1 800 ₽', '1 200 ₽'],
+      ['авг. 2026 г.', '80', '1 100 ₽', '900 ₽'],
+      ['сент. 2026 г.', '30', '450 ₽', '400 ₽'],
+    ])
+  })
+
+  it('says nobody paid for the first time when nobody did', async () => {
+    api.getPaidLtv.mockResolvedValue({ ...firstPaymentLtvReport(), clients: 0, mean: null, median: null, rows: [] })
+    renderWithProviders(<AnalyticsPage />)
+    await openTab('retention')
+    expect(await screen.findByText('За последние 12 месяцев никто не оплатил впервые.')).toBeTruthy()
   })
 })
 

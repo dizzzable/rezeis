@@ -275,6 +275,28 @@ export interface AutopayReport {
   generatedAt: string
 }
 
+export interface FirstPaymentLtvRow {
+  /** `YYYY-MM` — the local month of the cohort's first payment. */
+  cohort: string
+  clients: number
+  /** Mean and median of everything the cohort's clients have paid to date, in the view currency; `null` for a month with no clients. */
+  mean: number | null
+  median: number | null
+}
+
+export interface FirstPaymentLtvReport {
+  /** The last twelve months, oldest first; a month with no first payments has no clients. */
+  rows: readonly FirstPaymentLtvRow[]
+  /** All clients of those months together. */
+  clients: number
+  mean: number | null
+  median: number | null
+  money: MoneyView
+  generatedAt: string
+  timeZone: string
+  timeZoneFallback: boolean
+}
+
 export interface DiscountBucket {
   /** Whole per cent, the bucket's lower end (included). */
   from: number
@@ -452,6 +474,12 @@ export async function getTrialConversion(days: number): Promise<TrialConversionR
 export async function getAnalyticsCohorts(): Promise<readonly CohortRow[]> {
   const response = await api.get('/admin/analytics/cohorts')
   return expectArray<CohortRow>(unwrapPayload(response.data).cohorts)
+}
+
+export async function getPaidLtv(): Promise<FirstPaymentLtvReport> {
+  const response = await api.get('/admin/analytics/ltv-by-first-payment')
+  const body = recordWith(response.data, ['rows', 'clients', 'money'])
+  return { ...(body as unknown as FirstPaymentLtvReport), rows: expectArray<FirstPaymentLtvRow>(body.rows) }
 }
 
 export async function getDiscountReport(days: number): Promise<DiscountReport> {

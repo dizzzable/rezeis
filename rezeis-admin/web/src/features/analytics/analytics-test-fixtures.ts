@@ -10,6 +10,7 @@ import type {
   CohortRow,
   DiscountReport,
   ExpiringReport,
+  FirstPaymentLtvReport,
   LtvReport,
   MoneyView,
   PaidCohortReport,
@@ -291,6 +292,24 @@ export function paidCohortReport(): PaidCohortReport {
   }
 }
 
+/** Three first-payment months: older clients have paid more; the newest has paid once. */
+export function firstPaymentLtvReport(): FirstPaymentLtvReport {
+  return {
+    rows: [
+      { cohort: '2026-07', clients: 50, mean: 1800, median: 1200 },
+      { cohort: '2026-08', clients: 80, mean: 1100, median: 900 },
+      { cohort: '2026-09', clients: 30, mean: 450, median: 400 },
+    ],
+    clients: 160,
+    mean: 1230.5,
+    median: 950,
+    money: ROUBLES,
+    generatedAt: '2026-09-18T12:00:00.000Z',
+    timeZone: 'UTC',
+    timeZoneFallback: false,
+  }
+}
+
 /** 30 purchases with a known price, 12 of them discounted (average 25 %); the clients with a discounted first purchase come back less. */
 export function discountReport(): DiscountReport {
   return {
@@ -342,10 +361,12 @@ export function installNewCardMocks(api: {
   readonly getPaidCohorts: { mockResolvedValue: (value: PaidCohortReport) => unknown }
   readonly getAutopayReport: { mockResolvedValue: (value: AutopayReport) => unknown }
   readonly getDiscountReport: { mockResolvedValue: (value: DiscountReport) => unknown }
+  readonly getPaidLtv: { mockResolvedValue: (value: FirstPaymentLtvReport) => unknown }
 }): void {
   api.getPaidCohorts.mockResolvedValue(paidCohortReport())
   api.getAutopayReport.mockResolvedValue(autopayReport())
   api.getDiscountReport.mockResolvedValue(discountReport())
+  api.getPaidLtv.mockResolvedValue(firstPaymentLtvReport())
 }
 
 export function ltvReport(): LtvReport {

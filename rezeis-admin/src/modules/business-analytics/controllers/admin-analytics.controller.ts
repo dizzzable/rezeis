@@ -80,6 +80,13 @@ export class AdminAnalyticsController {
     return this.analyticsService.getExpiring();
   }
 
+  @Get('admin/analytics/ltv-by-first-payment')
+  @RequirePermission('analytics', 'view')
+  @ApiOperation({ summary: 'Mean and median lifetime value of the clients of each month of first payment' })
+  public getPaidLtv() {
+    return this.analyticsService.getPaidLtv();
+  }
+
   @Get('admin/analytics/top-payers')
   @RequirePermission('analytics', 'view')
   @ApiOperation({ summary: 'Leaderboard of users by lifetime spend' })

@@ -10,6 +10,7 @@ import {
   CohortRowInterface,
   DiscountReportInterface,
   ExpiringReportInterface,
+  FirstPaymentLtvReportInterface,
   PaidCohortReportInterface,
   LtvReportInterface,
   MoneyViewInterface,
@@ -50,6 +51,11 @@ import {
 } from '../utils/analytics-date.util';
 import { assembleAutopay, autopaySql, type AutopaySqlRow } from '../utils/analytics-autopay.util';
 import { assembleDiscounts, discountSql, type DiscountSqlRow } from '../utils/analytics-discount.util';
+import {
+  assembleFirstPaymentLtv,
+  firstPaymentLtvSql,
+  type FirstPaymentLtvSqlRow,
+} from '../utils/analytics-first-payment-ltv.util';
 import {
   assemblePaidCohorts,
   paidCohortSql,
@@ -344,6 +350,21 @@ export class BusinessAnalyticsService {
     const bins = chooseLtvBins(p95);
     const rows = (stats?.payers ?? 0) === 0 ? [] : await this.prismaService.$queryRaw<LtvBinRow[]>(ltvBinsSql(view, bins));
     return assembleLtv(view, stats, bins, rows);
+  }
+
+  /**
+   * The mean and the median of what the clients of each month of first payment
+   * have paid to date, in the lifetime money view. See
+   * `analytics-first-payment-ltv.util.ts`.
+   */
+  public async getPaidLtv(): Promise<FirstPaymentLtvReportInterface> {
+    const now = new Date();
+    const zone = await this.readZone();
+    const view = await this.lifetimeMoneyView();
+    const rows = await this.prismaService.$queryRaw<FirstPaymentLtvSqlRow[]>(
+      firstPaymentLtvSql(zonedMonthStart(now, zone, ANALYTICS_COHORT_MONTHS - 1), zone, view),
+    );
+    return assembleFirstPaymentLtv(now, zone, view, rows);
   }
 
   // ── «Лидеры» ───────────────────────────────────────────────────────────
