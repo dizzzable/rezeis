@@ -7,7 +7,7 @@
 | Назначение | Админ-панель VPN | Пользователи, подписки, платежи (15 шлюзов), антифрод, реферальная система, Telegram-бот |
 | Версия | 0.7.3 | Активная разработка, 34 миграции БД |
 | Архитектура | ⭐⭐⭐⭐ | Монорепо, NestJS + React SPA, 40+ feature-модулей |
-| Backend | NestJS 11 / Node 24 | Prisma 7, PostgreSQL, BullMQ, Socket.IO, JWT + WebAuthn |
+| Backend | NestJS 11 / Node 26 | Prisma 7, PostgreSQL, BullMQ, Socket.IO, JWT + WebAuthn |
 | Frontend | React 19 / Vite 8 | TanStack Query 5, Zustand 5, shadcn/ui, Tailwind 4 |
 | Масштаб | Крупный | 597 backend-файлов, 472 frontend-файлов, 60 моделей Prisma |
 | Тесты backend | ⭐⭐⭐⭐⭐ | 145 spec-файлов, property-based тесты (fast-check) |

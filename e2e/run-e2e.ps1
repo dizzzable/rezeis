@@ -38,8 +38,8 @@ $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 $nodeVersion = (& node --version) 2>$null
-if (-not $nodeVersion) { throw 'node is not on PATH; the suite needs Node 24.' }
-if ($nodeVersion -notmatch '^v24\.') { Write-Host "  warning: the suite is written for Node 24, found $nodeVersion" -ForegroundColor Yellow }
+if (-not $nodeVersion) { throw 'node is not on PATH; the suite needs Node 26.' }
+if ($nodeVersion -notmatch '^v26\.') { Write-Host "  warning: the suite is written for Node 26, found $nodeVersion" -ForegroundColor Yellow }
 
 Push-Location $here
 try {

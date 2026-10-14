@@ -6,7 +6,7 @@ import { firstValueFrom } from 'rxjs';
 import { shouldRunSchedules } from '../../../common/runtime/process-role.util';
 import { ReiwaPeerRegistry } from '../../reiwa-peers/reiwa-peer-registry.service';
 
-// CommonJS interop: Node 24 still loads JSON modules via `require()` more
+// CommonJS interop: Node 24 and 26 still load JSON modules via `require()` more
 // reliably than via `import attributes`, and `package.json` lives outside
 // the TS source root so an `import` would require additional tsconfig
 // gymnastics. The explicit disable is intentional.

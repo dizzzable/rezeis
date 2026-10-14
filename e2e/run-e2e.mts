@@ -1,6 +1,6 @@
 /**
  * THE ENTRY POINT OF THE PAIR'S END-TO-END SUITE — Linux CI and a Windows box
- * alike. Node 24 runs this file as it is (type stripping), so it needs nothing
+ * alike. Node 26 runs this file as it is (type stripping), so it needs nothing
  * installed to start; it installs the scenario runner's own dependencies when
  * they are missing.
  *

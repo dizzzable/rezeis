@@ -4,7 +4,7 @@
   "private": true,
   "description": "End-to-end smoke test for the rezeis-admin <-> reiwa pair",
   "engines": {
-    "node": "^24.0.0"
+    "node": "^26.0.0"
   },
   "scripts": {
     "e2e": "node run-e2e.mts",

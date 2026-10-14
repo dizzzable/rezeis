@@ -1010,7 +1010,7 @@ const AUDIENCE_RUN_BUDGET_MS = 60_000;
 
 /**
  * `Error` with ES2022's `cause`. `target` is ES2021 here, so the two-argument
- * constructor is not in the type library — the runtime (Node 24) has had it
+ * constructor is not in the type library — the runtime (Node 26) has had it
  * for years, and the chain is worth keeping for whoever reads a stack.
  */
 const ErrorWithCause = Error as unknown as new (

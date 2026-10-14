@@ -159,7 +159,7 @@ rezeis/
 
 ### Prerequisites
 - Docker + Docker Compose (for PostgreSQL + Redis)
-- Node.js 24 LTS
+- Node.js 26
 
 ### Quick start
 ```bash

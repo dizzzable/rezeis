@@ -10,7 +10,7 @@
 # ══════════════════════════════════════════════════════════════════════════════
 
 # ── Stage 1: install production deps ─────────────────────────────────────────
-FROM node:24-alpine AS dependencies
+FROM node:26-alpine AS dependencies
 
 WORKDIR /app
 # Build tools for the optional native addon `msgpackr-extract` (BullMQ's msgpack
@@ -24,7 +24,7 @@ ENV HUSKY=0
 RUN npm ci --omit=dev
 
 # ── Stage 2: build backend ───────────────────────────────────────────────────
-FROM node:24-alpine AS build-backend
+FROM node:26-alpine AS build-backend
 
 WORKDIR /app
 # Same build tools as the `dependencies` stage, for the same optional addon.
@@ -38,7 +38,7 @@ COPY src ./src
 RUN npx prisma generate && npm run build
 
 # ── Stage 3: build frontend ──────────────────────────────────────────────────
-FROM node:24-alpine AS build-frontend
+FROM node:26-alpine AS build-frontend
 
 WORKDIR /app
 COPY web/package.json web/package-lock.json web/.npmrc ./
@@ -47,10 +47,10 @@ COPY web/ .
 RUN npm run build
 
 # ── Stage 4: runtime ─────────────────────────────────────────────────────────
-FROM node:24-alpine AS runtime
+FROM node:26-alpine AS runtime
 # ── OS packages, patched at build time ─────────────────────────────────────
 #
-# `node:24-alpine` is rebuilt on its own schedule, so between two of its
+# `node:26-alpine` is rebuilt on its own schedule, so between two of its
 # rebuilds this image inherits whatever OpenSSL that snapshot happened to ship.
 # Trivy found ten CVEs that way — `libssl3` 3.5.7-r0 against a fixed 3.5.8-r0 —
 # and every one of them was already patched in Alpine's repository at the time.
