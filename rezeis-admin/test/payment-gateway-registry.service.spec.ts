@@ -208,6 +208,31 @@ describe('PaymentGatewayRegistryService', () => {
     assert.equal(wata.webhookUrl, 'https://panel.example.com/api/v1/payments/webhooks/WATA');
   });
 
+  it('shows an absolute «Webhook URL» whether or not REZEIS_DOMAIN was written with a scheme', async () => {
+    for (const written of ['panel.example.com', 'panel.example.com/', 'https://panel.example.com/', 'https://panel.example.com']) {
+      const { service } = createService(
+        [
+          createGateway({
+            id: 'gateway-1',
+            type: PaymentGatewayType.AURAPAY,
+            currency: Currency.RUB,
+            isActive: false,
+            orderIndex: 1,
+          }),
+        ],
+        written,
+      );
+
+      const gateway = await service.getGateway('gateway-1');
+
+      assert.equal(
+        gateway.webhookUrl,
+        'https://panel.example.com/api/v1/payments/webhooks/AURAPAY',
+        `REZEIS_DOMAIN=${written}`,
+      );
+    }
+  });
+
   it('falls back to the relative webhook path when the public domain is unset', async () => {
     const { service } = createService(
       [

@@ -12,6 +12,7 @@ import {
   Prisma,
 } from '@prisma/client';
 
+import { normalizePanelBaseUrl } from '../../../common/config/public-site-url.util';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { shouldRunSchedules } from '../../../common/runtime/process-role.util';
 import {
@@ -1986,10 +1987,14 @@ export class AntiFraudService {
         payload.fraudUserBlocked = user.isBlocked;
         payload.fraudHasWebAccount = user.webAccount !== null;
         payload.fraudSubscriptions = user._count.subscriptions;
-        const domain = process.env.REZEIS_DOMAIN;
-        if (domain && domain !== 'localhost' && user.telegramId !== null) {
-          const scheme = domain.includes('.') ? 'https' : 'http';
-          payload.fraudProfileUrl = `${scheme}://${domain}/users/${user.telegramId.toString()}`;
+        // `REZEIS_DOMAIN` may or may not carry a scheme: a bare host gets one
+        // (https, or http for a name with no dot), a written one is kept —
+        // the old `${scheme}://${domain}` made `https://https://host/…`.
+        const rawDomain = process.env.REZEIS_DOMAIN?.trim() ?? '';
+        const base = normalizePanelBaseUrl(rawDomain, rawDomain.includes('.') ? 'https' : 'http');
+        const isLocalhost = base !== null && /^https?:\/\/localhost(?::\d+)?(?:\/|$)/i.test(base);
+        if (base !== null && !isLocalhost && user.telegramId !== null) {
+          payload.fraudProfileUrl = `${base}/users/${user.telegramId.toString()}`;
         }
       } else {
         payload.fraudHasRezeisAccount = false;

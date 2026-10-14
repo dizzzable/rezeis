@@ -3,6 +3,7 @@ import { ConfigType } from '@nestjs/config';
 import { Currency, PaymentGateway, PaymentGatewayType, Prisma } from '@prisma/client';
 
 import { paymentsConfig } from '../../../common/config/payments.config';
+import { normalizePanelBaseUrl } from '../../../common/config/public-site-url.util';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { MovePaymentGatewayDto, PaymentGatewayMoveDirection } from '../dto/move-payment-gateway.dto';
 import { UpdatePaymentGatewayDto } from '../dto/update-payment-gateway.dto';
@@ -381,7 +382,7 @@ export class PaymentGatewayRegistryService {
    * whole gateway list.
    */
   private resolveWebhookUrl(gatewayType: PaymentGatewayType): string {
-    const domain = this.configuration.domain;
+    const domain = normalizePanelBaseUrl(this.configuration.domain);
     return domain === null
       ? `/api/v1/payments/webhooks/${gatewayType}`
       : buildWebhookUrl(domain, gatewayType);

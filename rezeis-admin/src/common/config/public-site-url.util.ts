@@ -1,4 +1,33 @@
 /**
+ * `REZEIS_DOMAIN` as an absolute base URL: an `http://` or `https://` scheme
+ * the operator wrote is kept, a bare `panel.example.com` (which
+ * `docs/environment.md` allows) gets `https://`, and trailing slashes go. A
+ * path stays (`https://host/panel`); `null` for an empty value.
+ *
+ * Everything that appends to the panel's address — a provider's callback, the
+ * return page, the admin "Webhook URL" display — goes through this, so none of
+ * them hands a provider `panel.example.com/api/v1/…`, which no provider
+ * accepts. Idempotent: normalizing a normalized value changes nothing.
+ *
+ * `bareScheme` is only for a host the operator wrote WITHOUT a scheme.
+ */
+export function normalizePanelBaseUrl(
+  value: string | null | undefined,
+  bareScheme: 'https' | 'http' = 'https',
+): string | null {
+  const trimmed = value?.trim() ?? '';
+  if (trimmed.length === 0) return null;
+  // A scheme-relative `//host` is a host that was meant to have one.
+  const withoutSlashes = trimmed.replace(/^\/\/+/, '');
+  const base = /^https?:\/\//i.test(withoutSlashes)
+    ? withoutSlashes
+    : `${bareScheme}://${withoutSlashes}`;
+  const stripped = base.replace(/\/+$/, '');
+  // A bare scheme, or a value that was only slashes, is no address.
+  return /^https?:$/i.test(stripped) ? null : stripped;
+}
+
+/**
  * The PANEL's public origin (`REZEIS_DOMAIN`), as an absolute URL — or `null`
  * when there is not one to speak of.
  *

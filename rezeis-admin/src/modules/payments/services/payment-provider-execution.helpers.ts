@@ -3,6 +3,8 @@ import { createHash } from 'node:crypto';
 import { ServiceUnavailableException } from '@nestjs/common';
 import { PaymentGatewayType } from '@prisma/client';
 
+import { normalizePanelBaseUrl } from '../../../common/config/public-site-url.util';
+
 /**
  * Reads a JSON-ish blob into a `Record<string, unknown>`. Accepts plain
  * objects only — arrays and null collapse to `{}` so downstream
@@ -146,10 +148,10 @@ export function buildResultUrl(site: PayerFacingSite, paymentId: string): string
   if (site.kind === 'CABINET') {
     return `${site.baseUrl.replace(/\/+$/, '')}/payment-return?paymentId=${encodeURIComponent(paymentId)}`;
   }
-  if (site.domain === null) {
+  const normalizedBaseUrl = normalizePanelBaseUrl(site.domain);
+  if (normalizedBaseUrl === null) {
     throw new ServiceUnavailableException('RUID public web URL is not configured');
   }
-  const normalizedBaseUrl = site.domain.replace(/\/$/, '');
   return `${normalizedBaseUrl}/payments/result?paymentId=${encodeURIComponent(paymentId)}`;
 }
 
@@ -171,10 +173,16 @@ export function payerMailHost(site: PayerFacingSite): string {
   return host;
 }
 
+/**
+ * Where a provider calls the panel back: the panel's public base URL plus the
+ * gateway's webhook path. The base is made absolute here as well as in
+ * `paymentsConfig` — an operator may write `REZEIS_DOMAIN=panel.example.com`,
+ * and `callback_url=panel.example.com/api/…` is a URL no provider accepts.
+ */
 export function buildWebhookUrl(domain: string | null, gatewayType: PaymentGatewayType): string {
-  if (domain === null) {
+  const normalizedBaseUrl = normalizePanelBaseUrl(domain);
+  if (normalizedBaseUrl === null) {
     throw new ServiceUnavailableException('Admin public base URL is not configured');
   }
-  const normalizedBaseUrl = domain.replace(/\/$/, '');
   return `${normalizedBaseUrl}/api/v1/payments/webhooks/${gatewayType}`;
 }
