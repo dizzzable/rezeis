@@ -2737,6 +2737,13 @@ model ProviderSubscription {
   plannedChargeCount     Int?                       @map("planned_charge_count")
   /// CARD or SBP where the gateway offers both (Antilopay); null for the others.
   method                 String?                    @map("method")
+  /// Antilopay SBP only: the days of «Отсрочка первого списания по СБП» the payer
+  /// was promised at sign-up. Null when the first charge is made at activation.
+  delayDays              Int?                       @map("delay_days")
+  /// When the panel gave the plan for those days (the checkout is rewritten into a
+  /// free grant, once). Null until then; set for good, which makes it the marker of
+  /// a customer who has used the delay: it is given once per customer.
+  delayGrantedAt         DateTime?                  @map("delay_granted_at") @db.Timestamptz(3)
   consentVersion         String                     @map("consent_version")
   createdAt              DateTime                   @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt              DateTime                   @updatedAt @map("updated_at") @db.Timestamptz(3)

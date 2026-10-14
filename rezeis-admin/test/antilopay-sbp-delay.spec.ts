@@ -1,6 +1,8 @@
 import 'reflect-metadata';
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
 import {
@@ -255,5 +257,33 @@ describe('which charge is which when the first charge is delayed', () => {
     assert.equal(roles.get('APAY-second'), 'RENEW');
     const lone = assignAntilopayChargeRoles({ ...base, charges: [charge('APAY-late', '2026-10-08T09:00:00Z')], delayed: true });
     assert.equal(lone.get('APAY-late'), 'RENEW', 'the checkout is the grant, not a charge');
+  });
+});
+
+describe('the delay migration', () => {
+  const migrationName = '20261014120000_provider_subscription_sbp_delay';
+  const sql = readFileSync(join(process.cwd(), 'prisma', 'migrations', migrationName, 'migration.sql'), 'utf8');
+  const entrypoint = readFileSync(join(process.cwd(), 'docker-entrypoint.sh'), 'utf8');
+  const schema = readFileSync(join(process.cwd(), 'prisma', 'schema.prisma'), 'utf8');
+
+  it('adds two nullable columns, each guarded so a replay changes nothing', () => {
+    assert.match(sql, /SET lock_timeout = '5s';/);
+    assert.match(sql, /RESET lock_timeout;/);
+    assert.match(sql, /ALTER TABLE "provider_subscriptions" ADD COLUMN IF NOT EXISTS "delay_days" INTEGER;/);
+    assert.match(sql, /ALTER TABLE "provider_subscriptions" ADD COLUMN IF NOT EXISTS "delay_granted_at" TIMESTAMPTZ\(3\);/);
+    const executable = sql.replace(/^\s*--.*$/gm, '');
+    assert.doesNotMatch(executable, /NOT NULL|DEFAULT|DROP|UPDATE|INSERT|CREATE INDEX/);
+    for (const statement of executable.match(/ALTER TABLE[^;]+;/g) ?? []) {
+      assert.match(statement, /ADD COLUMN IF NOT EXISTS/, statement);
+    }
+  });
+
+  it('is what the schema says', () => {
+    assert.match(schema, /delayDays\s+Int\?\s+@map\("delay_days"\)/);
+    assert.match(schema, /delayGrantedAt\s+DateTime\?\s+@map\("delay_granted_at"\) @db\.Timestamptz\(3\)/);
+  });
+
+  it('is listed as auto-recoverable in the entrypoint', () => {
+    assert.ok(entrypoint.includes(migrationName), `${migrationName} must be listed in is_auto_recoverable_migration`);
   });
 });

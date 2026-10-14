@@ -111,6 +111,9 @@ is_auto_recoverable_migration() {
     20260929140000_provider_subscription_antilopay)
       return 0
       ;;
+    20261014120000_provider_subscription_sbp_delay)
+      return 0
+      ;;
     *)
       return 1
       ;;
