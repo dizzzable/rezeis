@@ -29,6 +29,7 @@ import {
   AdminPaymentTransactionInterface,
   AdminPaymentTransactionListItemInterface,
 } from '../interfaces/admin-payment-transaction.interface';
+import type { AntilopayDelay } from '../utils/antilopay-recurrent.util';
 import {
   autopayNotAvailable,
   PROVIDER_SUBSCRIPTION_SNAPSHOT_KEY,
@@ -226,9 +227,22 @@ export class PaymentsTransactionsService {
       readonly providerSubscription?: boolean;
       /** Antilopay: CARD or SBP, the payer's choice for that subscription. */
       readonly autopayMethod?: unknown;
+      /**
+       * Antilopay SBP: the delay of the first charge this sign-up is made with,
+       * settled with what the payer was shown (`settleDelayWithConsent`). It
+       * goes into the terms, so a draft with a delay is never reused for one
+       * without, nor the reverse.
+       */
+      readonly delay?: AntilopayDelay | null;
     } = {},
   ): Promise<AdminPaymentTransactionInterface> {
-    return this.createDraftInternal(input, true, options.providerSubscription === true, options.autopayMethod);
+    return this.createDraftInternal(
+      input,
+      true,
+      options.providerSubscription === true,
+      options.autopayMethod,
+      options.delay ?? null,
+    );
   }
 
   private async createDraftInternal(
@@ -236,6 +250,7 @@ export class PaymentsTransactionsService {
     allowPaidTrialReservation: boolean,
     providerSubscription = false,
     autopayMethod: unknown = undefined,
+    delay: AntilopayDelay | null = null,
   ): Promise<AdminPaymentTransactionInterface> {
     if ((input.purchaseType as unknown as string) === 'TRIAL') {
       throw new BadRequestException({
@@ -416,6 +431,7 @@ export class PaymentsTransactionsService {
         subscriptionId:
           input.purchaseType === PurchaseType.RENEW || convertsTrial ? sourceSubscriptionId : null,
         method: autopayMethod,
+        delay,
       });
       if ('refusal' in resolved) {
         throw autopayNotAvailable(resolved.refusal);

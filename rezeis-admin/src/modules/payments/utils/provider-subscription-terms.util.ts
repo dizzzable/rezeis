@@ -2,7 +2,12 @@ import { BadRequestException } from '@nestjs/common';
 import { PaymentGatewayType, Prisma } from '@prisma/client';
 
 import type { CatalogDiscountSource } from '../../plans/interfaces/plan-catalog.interface';
-import { type AntilopayAutopayMethod, isAntilopayAutopayMethod } from './antilopay-recurrent.util';
+import {
+  type AntilopayAutopayMethod,
+  type AntilopayDelay,
+  isAntilopayAutopayMethod,
+  makeAntilopayDelay,
+} from './antilopay-recurrent.util';
 import {
   antilopayPeriodForDays,
   plategaPeriodForDays,
@@ -61,6 +66,14 @@ export interface ProviderSubscriptionTerms {
    * payment (`antilopay-recurrent.util.ts`). Absent for every other gateway.
    */
   readonly method?: AntilopayAutopayMethod;
+  /**
+   * Antilopay SBP only: «Отсрочка первого списания по СБП». The payer holds the
+   * plan for `delay.days` and is charged after them; nothing is charged at
+   * activation. Present only when the cabinet showed it and the panel decided on
+   * it (`antilopay-delay-policy.util.ts`); absent is today's behaviour, the
+   * first charge made at activation.
+   */
+  readonly delay?: AntilopayDelay;
 }
 
 /**
@@ -88,6 +101,8 @@ export const PROVIDER_SUBSCRIPTION_REFUSALS = [
   'PLAN_CHANGE',
   // Antilopay: the sign-up names neither CARD nor SBP.
   'METHOD',
+  // Antilopay SBP: the delay the payer was shown is not the one the panel gives now.
+  'DELAY_CHANGED',
 ] as const;
 
 export type ProviderSubscriptionRefusal = (typeof PROVIDER_SUBSCRIPTION_REFUSALS)[number];
@@ -117,6 +132,8 @@ export function resolveProviderSubscriptionTerms(input: {
   readonly subscriptionId: string | null;
   /** The payer's choice where a gateway offers two (Antilopay: CARD or SBP). */
   readonly method?: unknown;
+  /** Antilopay SBP: the delay the sign-up is made with (`settleDelayWithConsent`); none for a card. */
+  readonly delay?: AntilopayDelay | null;
 }): ProviderSubscriptionTermsResult {
   if (!PROVIDER_SUBSCRIPTION_GATEWAY_TYPES.has(input.gatewayType)) return { refusal: 'GATEWAY' };
   if (input.currency !== 'RUB') return { refusal: 'CURRENCY' };
@@ -140,6 +157,8 @@ export function resolveProviderSubscriptionTerms(input: {
       planId: input.planId,
       subscriptionId: input.subscriptionId,
       ...(isAntilopayAutopayMethod(method) ? { method } : {}),
+      // A delay belongs to SBP alone: a card's first payment is charged on the form.
+      ...(method === 'SBP' && input.delay !== undefined && input.delay !== null ? { delay: input.delay } : {}),
     },
   };
 }
@@ -207,6 +226,7 @@ export function readProviderSubscriptionTerms(planSnapshot: unknown): ProviderSu
   const planId = terms['planId'];
   const subscriptionId = terms['subscriptionId'];
   const method = terms['method'];
+  const delay = readTermsDelay(terms['delay']);
   if (
     (unit !== 'day' && unit !== 'week' && unit !== 'month' && unit !== 'year') ||
     !isPositiveInteger(count) ||
@@ -218,7 +238,24 @@ export function readProviderSubscriptionTerms(planSnapshot: unknown): ProviderSu
   ) {
     return null;
   }
-  return { unit, count, amount, durationDays, planId, subscriptionId, ...(isAntilopayAutopayMethod(method) ? { method } : {}) };
+  return {
+    unit,
+    count,
+    amount,
+    durationDays,
+    planId,
+    subscriptionId,
+    ...(isAntilopayAutopayMethod(method) ? { method } : {}),
+    ...(method === 'SBP' && delay !== null ? { delay } : {}),
+  };
+}
+
+/** The delay a draft's terms hold: a count and one of Antilopay's own words, worth the days written beside them. */
+function readTermsDelay(raw: unknown): AntilopayDelay | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
+  const record = raw as Record<string, unknown>;
+  const delay = makeAntilopayDelay(record['count'], record['unit']);
+  return delay !== null && record['days'] === delay.days ? delay : null;
 }
 
 function isPositiveInteger(value: unknown): value is number {

@@ -13,6 +13,7 @@ import {
 } from '@prisma/client';
 
 import { PaymentsCheckoutService } from '../src/modules/payments/services/payments-checkout.service';
+import { autopayNotAvailable } from '../src/modules/payments/utils/provider-subscription-terms.util';
 import { AccessModeGuard } from '../src/modules/settings/services/access-mode-guard.service';
 
 describe('PaymentsCheckoutService', () => {
@@ -412,6 +413,114 @@ describe('PaymentsCheckoutService', () => {
         assert.equal(state.providerCreateCalls, 0, label + ': Antilopay is not asked')
       }
     }
+  })
+
+  /**
+   * «Отсрочка первого списания по СБП»: the draft is made with the delay the
+   * payer was SHOWN, once the panel has put it beside its own decision
+   * (`ProviderSubscriptionService.settleAntilopayDelay`), and a delay it would
+   * not give now refuses the checkout instead of charging at once.
+   */
+  describe('the delay of the first SBP charge', () => {
+    const credentials = { projectIdentificator: 'project-1', secretId: 'secret-1', privateKey: 'k', publicKey: 'p' }
+    const sbp = {
+      gatewayType: PaymentGatewayType.ANTILOPAY,
+      gatewayCurrency: Currency.RUB,
+      gatewaySettings: { ...credentials, autopaySbpApproved: true, sbpDelayCount: 7, sbpDelayUnit: 'DAY' },
+    } as const
+    const request = (extra: Record<string, unknown> = {}) => ({
+      userId: 'user-1',
+      purchaseType: PurchaseType.NEW,
+      planId: 'plan-1',
+      durationDays: 30,
+      gatewayType: PaymentGatewayType.ANTILOPAY,
+      channel: PurchaseChannel.WEB,
+      savePaymentMethodConsent: true,
+      autopayMethod: 'SBP' as const,
+      ...extra,
+    })
+
+    it('makes the draft with the delay that was shown and is still given, asking about the cabinet that asked', async () => {
+      const settled: Array<Record<string, unknown>> = []
+      const { service, state } = createService({
+        ...sbp,
+        providerSubscriptionService: {
+          recordCheckout: async () => undefined,
+          assertNoLiveSubscriptionFor: async () => undefined,
+          settleAntilopayDelay: async (asked: Record<string, unknown>) => {
+            settled.push(asked)
+            return { count: 7, unit: 'DAY', days: 7 }
+          },
+        },
+      })
+      const audience = { can: () => true } as never
+      await service.checkout(request({ autopayDelayCount: 7, autopayDelayUnit: 'DAY' }) as never, audience)
+      assert.deepEqual(state.draftCalls.map((call) => call.options), [
+        { providerSubscription: true, autopayMethod: 'SBP', delay: { count: 7, unit: 'DAY', days: 7 } },
+      ])
+      assert.equal(settled.length, 1)
+      assert.equal(settled[0]?.['userId'], 'user-1')
+      assert.equal(settled[0]?.['method'], 'SBP')
+      assert.equal(settled[0]?.['audience'], audience)
+      assert.deepEqual(settled[0]?.['shown'], { kind: 'SHOWN', delay: { count: 7, unit: 'DAY', days: 7 } })
+    })
+
+    it('makes the draft with no delay, and asks nothing, when none was shown: the payer was told it is charged now', async () => {
+      let asked = 0
+      const { service, state } = createService({
+        ...sbp,
+        providerSubscriptionService: {
+          recordCheckout: async () => undefined,
+          assertNoLiveSubscriptionFor: async () => undefined,
+          settleAntilopayDelay: async () => {
+            asked += 1
+            return { count: 7, unit: 'DAY', days: 7 }
+          },
+        },
+      })
+      await service.checkout(request() as never, { can: () => true } as never)
+      assert.deepEqual(state.draftCalls.map((call) => call.options), [{ providerSubscription: true, autopayMethod: 'SBP' }])
+      assert.equal(asked, 0)
+    })
+
+    it('refuses the checkout, and makes no draft, when the delay the payer saw is gone', async () => {
+      const { service, state } = createService({
+        ...sbp,
+        providerSubscriptionService: {
+          recordCheckout: async () => undefined,
+          assertNoLiveSubscriptionFor: async () => undefined,
+          settleAntilopayDelay: async () => {
+            throw autopayNotAvailable('DELAY_CHANGED')
+          },
+        },
+      })
+      await assert.rejects(
+        service.checkout(request({ autopayDelayCount: 7, autopayDelayUnit: 'DAY' }) as never, { can: () => true } as never),
+        (error: BadRequestException) => {
+          const body = error.getResponse() as { code?: string; reason?: string }
+          assert.equal(body.code, 'AUTOPAY_NOT_AVAILABLE_FOR_PURCHASE')
+          assert.equal(body.reason, 'DELAY_CHANGED')
+          return true
+        },
+      )
+      assert.equal(state.draftCalls.length, 0)
+      assert.equal(state.providerCreateCalls, 0)
+    })
+
+    it('refuses a delay named on a payment that is not an Antilopay sign-up', async () => {
+      for (const [label, gateway, extra] of [
+        ['a plain Antilopay payment', sbp, { savePaymentMethodConsent: undefined }],
+        ['another gateway', { gatewayType: PaymentGatewayType.PLATEGA, gatewayCurrency: Currency.RUB, gatewaySettings: { merchantId: 'm', secret: 's', savePaymentMethod: true } }, { gatewayType: PaymentGatewayType.PLATEGA }],
+      ] as const) {
+        const { service, state } = createService({ ...gateway })
+        await assert.rejects(
+          service.checkout(request({ autopayDelayCount: 7, autopayDelayUnit: 'DAY', ...extra }) as never, { can: () => true } as never),
+          (error: BadRequestException) => (error.getResponse() as { reason?: string }).reason === 'DELAY_CHANGED',
+          label,
+        )
+        assert.equal(state.draftCalls.length, 0, label)
+      }
+    })
   })
 
   it('completes a zero-total checkout without calling the payment provider', async () => {

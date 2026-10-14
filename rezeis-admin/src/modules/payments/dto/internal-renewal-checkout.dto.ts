@@ -7,11 +7,14 @@ import {
   IsBoolean,
   IsEnum,
   IsIn,
+  IsInt,
   IsOptional,
   IsString,
   IsUrl,
   Matches,
+  Max,
   MaxLength,
+  Min,
   MinLength,
   ValidateNested,
 } from 'class-validator';
@@ -136,4 +139,24 @@ export class InternalRenewalCheckoutDto {
   @IsOptional()
   @IsIn(['CARD', 'SBP'])
   public autopayMethod?: 'CARD' | 'SBP';
+
+  /**
+   * Antilopay SBP only: the delay of the first charge the payer was SHOWN, as
+   * Antilopay's own word (`DAY`, `WEEK`, `MONTH`, `QUARTER`, `YEAR`, upper-case)
+   * and a count. Sent by a cabinet that declares `web.autopay-first-charge-delay`,
+   * and only when the panel's list of gateways offered a delay. The checkout is
+   * made with exactly that delay or refused (`DELAY_CHANGED`); a request that
+   * names none is charged at activation, as it always was. A cabinet older than
+   * this field never sends it, and a panel older than it would refuse the field,
+   * which is why a cabinet sends it only on the panel's own word.
+   */
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(366)
+  public autopayDelayCount?: number;
+
+  @IsOptional()
+  @IsIn(['DAY', 'WEEK', 'MONTH', 'QUARTER', 'YEAR'])
+  public autopayDelayUnit?: 'DAY' | 'WEEK' | 'MONTH' | 'QUARTER' | 'YEAR';
 }

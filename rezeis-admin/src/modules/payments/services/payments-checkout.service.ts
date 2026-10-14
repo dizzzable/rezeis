@@ -24,6 +24,7 @@ import { SystemEventsService } from '../../../common/services/system-events.serv
 import { announceCheckoutCreated } from '../utils/checkout-created-event.util';
 import { PROFILE_SYNC_MAX_ATTEMPTS } from '../../profile-sync/profile-sync.constants';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
+import type { CabinetView } from '../../reiwa-peers/cabinet-capabilities';
 import { AccessModeGate, AccessModeGuard } from '../../settings/services/access-mode-guard.service';
 import { assertPurchaserNotBlocked } from '../utils/blocked-purchaser.util';
 import { SettingsService } from '../../settings/services/settings.service';
@@ -34,6 +35,8 @@ import {
   SubscriptionProvisioningFailureCode,
   SubscriptionProvisioningStatus,
 } from '../interfaces/internal-payment-checkout.interface';
+import { readShownDelay } from '../utils/antilopay-delay-policy.util';
+import type { AntilopayDelay } from '../utils/antilopay-recurrent.util';
 import { isAutopayApproved } from '../utils/gateway-autopay.util';
 import { isGatewayConfigured, readGatewaySettings } from '../utils/payment-gateway-settings.util';
 import { normalizePaymentProviderError } from '../utils/payment-provider-error.util';
@@ -121,8 +124,14 @@ export class PaymentsCheckoutService {
     throw new BadRequestException('A userId or telegramId is required');
   }
 
+  /**
+   * `audience` is the cabinet asking, from the headers of this very request
+   * (`ReiwaPeerRegistry.viewOfRequest`): the delay of an SBP sign-up is given
+   * only to one that can show it. Absent for a caller that is not a cabinet.
+   */
   public async checkout(
     input: InternalPaymentCheckoutDto,
+    audience?: CabinetView,
   ): Promise<InternalPaymentCheckoutInterface> {
     // Two-layer enforcement (Property 2): the reiwa edge runs the same
     // gate, but a direct internal API call would otherwise bypass the
@@ -171,6 +180,23 @@ export class PaymentsCheckoutService {
     ) {
       throw autopayNotAvailable('NOT_APPROVED');
     }
+    // Antilopay SBP: the delay of the first charge, when the payer was shown one
+    // and the panel still gives it (`DELAY_CHANGED` otherwise). A delay named on
+    // anything but an Antilopay sign-up was shown by nobody the panel knows.
+    const shownDelay = readShownDelay(input);
+    let delay: AntilopayDelay | null = null;
+    if (shownDelay.kind !== 'NONE') {
+      if (!providerSubscription || gateway.type !== PaymentGatewayType.ANTILOPAY) {
+        throw autopayNotAvailable('DELAY_CHANGED');
+      }
+      delay = await this.providerSubscriptionService.settleAntilopayDelay({
+        userId,
+        settings: readGatewaySettings(gateway.settings),
+        method: input.autopayMethod,
+        audience,
+        shown: shownDelay,
+      });
+    }
     const createdDraft = await this.paymentsTransactionsService.createCheckoutDraft(
       {
         userId,
@@ -182,7 +208,7 @@ export class PaymentsCheckoutService {
         channel,
         deviceType: input.deviceType,
       },
-      { providerSubscription, autopayMethod: input.autopayMethod },
+      { providerSubscription, autopayMethod: input.autopayMethod, ...(delay === null ? {} : { delay }) },
     );
     const transaction = await this.prismaService.transaction.findUnique({
       where: { paymentId: createdDraft.paymentId },

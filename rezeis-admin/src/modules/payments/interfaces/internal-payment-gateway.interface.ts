@@ -1,6 +1,6 @@
 import { Currency, PaymentGatewayType } from '@prisma/client';
 
-import type { AntilopayAutopayMethod } from '../utils/antilopay-recurrent.util';
+import type { AntilopayAutopayMethod, AntilopayDelay } from '../utils/antilopay-recurrent.util';
 
 /**
  * User-safe view of a payment gateway exposed via
@@ -35,4 +35,14 @@ export interface InternalPaymentGatewayInterface {
    * automatic charging on Antilopay at all.
    */
   readonly autopayMethods?: readonly AntilopayAutopayMethod[];
+  /**
+   * Antilopay only, and only for a customer: the delay of the first charge of an
+   * SBP subscription this customer is offered («Отсрочка первого списания по
+   * СБП») — nothing is charged for `count` × `unit` and the plan is theirs
+   * meanwhile. Absent when none is offered: not set, the cabinet cannot show it
+   * (`web.autopay-first-charge-delay`), the customer already used it, or the
+   * request named no customer. The cabinet writes the consent from it and sends it
+   * back with the checkout (`autopayDelayCount`, `autopayDelayUnit`).
+   */
+  readonly autopayDelay?: AntilopayDelay;
 }

@@ -585,6 +585,7 @@ export const SAFE_REFUSAL_REASONS: ReadonlySet<string> = new Set<string>([
   'PLAN',
   'PLAN_CHANGE',
   'METHOD',
+  'DELAY_CHANGED',
 ]);
 /**
  * Caps on the list, so a refusal cannot become a payload.

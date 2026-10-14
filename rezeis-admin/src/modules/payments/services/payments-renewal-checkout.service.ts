@@ -17,6 +17,7 @@ import {
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
+import type { CabinetView } from '../../reiwa-peers/cabinet-capabilities';
 import { AccessModeGuard } from '../../settings/services/access-mode-guard.service';
 import { SettingsService } from '../../settings/services/settings.service';
 import { SubscriptionRenewalService } from '../../subscriptions/services/subscription-renewal.service';
@@ -28,6 +29,8 @@ import {
 } from '../../../common/utils/plan-snapshot.util';
 import { announceCheckoutCreated } from '../utils/checkout-created-event.util';
 import { InternalPaymentCheckoutInterface } from '../interfaces/internal-payment-checkout.interface';
+import { readShownDelay } from '../utils/antilopay-delay-policy.util';
+import type { AntilopayDelay } from '../utils/antilopay-recurrent.util';
 import { isAutopayApproved } from '../utils/gateway-autopay.util';
 import { isGatewayConfigured, readGatewaySettings } from '../utils/payment-gateway-settings.util';
 import { buildRenewalCheckoutFingerprint, fingerprint } from '../utils/checkout-fingerprint.util';
@@ -82,6 +85,14 @@ export interface RenewalCheckoutInput {
   readonly savePaymentMethodConsent?: boolean;
   /** Antilopay: CARD or SBP, the payer's choice for the provider subscription. */
   readonly autopayMethod?: 'CARD' | 'SBP';
+  /**
+   * The delay of the first charge the payer was shown (Antilopay SBP), and the
+   * cabinet that showed it. The checkout is made with exactly that delay, or
+   * refused (`DELAY_CHANGED`): see `ProviderSubscriptionService.settleAntilopayDelay`.
+   */
+  readonly autopayDelayCount?: number;
+  readonly autopayDelayUnit?: 'DAY' | 'WEEK' | 'MONTH' | 'QUARTER' | 'YEAR';
+  readonly audience?: CabinetView;
 }
 
 /**
@@ -198,7 +209,24 @@ export class PaymentsRenewalCheckoutService {
       durations: input.durations,
       plans: input.plans,
     });
-    const providerSubscriptionTerms = resolveRenewalProviderSubscription(input, gateway, priced);
+    // Antilopay SBP: the delay of the first charge, when the payer was shown one
+    // and the panel still gives it (`DELAY_CHANGED` otherwise). A delay named on
+    // anything but an Antilopay sign-up was shown by nobody the panel knows.
+    const shownDelay = readShownDelay(input);
+    let delay: AntilopayDelay | null = null;
+    if (shownDelay.kind !== 'NONE') {
+      if (input.savePaymentMethodConsent !== true || gateway.type !== PaymentGatewayType.ANTILOPAY) {
+        throw autopayNotAvailable('DELAY_CHANGED');
+      }
+      delay = await this.providerSubscriptionService.settleAntilopayDelay({
+        userId: priced.userId,
+        settings: readGatewaySettings(gateway.settings),
+        method: input.autopayMethod,
+        audience: input.audience,
+        shown: shownDelay,
+      });
+    }
+    const providerSubscriptionTerms = resolveRenewalProviderSubscription(input, gateway, priced, delay);
     if (providerSubscriptionTerms !== null) {
       await this.assertRenewsCurrentPlan(providerSubscriptionTerms);
       await this.providerSubscriptionService.assertNoLiveSubscriptionFor(
@@ -223,6 +251,10 @@ export class PaymentsRenewalCheckoutService {
       savedPaymentMethodId: input.savedPaymentMethodId ?? null,
       providerSubscription: providerSubscriptionTerms !== null,
       providerSubscriptionMethod: providerSubscriptionTerms?.method ?? null,
+      providerSubscriptionDelay:
+        providerSubscriptionTerms?.delay === undefined
+          ? null
+          : `${providerSubscriptionTerms.delay.count}:${providerSubscriptionTerms.delay.unit}`,
       lines: priced.items.map((item) => ({
         subscriptionId: item.subscriptionId,
         planId: item.planId,
@@ -897,6 +929,7 @@ function resolveRenewalProviderSubscription(
   input: RenewalCheckoutInput,
   gateway: { readonly type: PaymentGatewayType; readonly settings: Prisma.JsonValue },
   priced: PricedRenewalInterface,
+  delay: AntilopayDelay | null,
 ): ProviderSubscriptionTerms | null {
   if (input.savePaymentMethodConsent !== true || !PROVIDER_SUBSCRIPTION_GATEWAY_TYPES.has(gateway.type)) {
     return null;
@@ -917,6 +950,7 @@ function resolveRenewalProviderSubscription(
     planId: item.planId,
     subscriptionId: item.subscriptionId,
     method: input.autopayMethod,
+    delay,
   });
   if ('refusal' in resolved) {
     throw autopayNotAvailable(resolved.refusal);

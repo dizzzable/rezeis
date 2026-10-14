@@ -58,13 +58,15 @@ export function readAntilopayPaymentCount(settings: Record<string, unknown>): nu
  * PAYMENT_TEMPLATE - только с картами», and only SUBSCRIPTION takes a delay, so
  * a card's first payment is always charged on the form.
  */
-export interface AntilopayDelay {
+// A type alias, not an interface: it is stored in the draft's JSON snapshot, and
+// only an alias is assignable to what a JSON column takes.
+export type AntilopayDelay = {
   readonly count: number;
   /** The wire word, upper-case: `DAY`, `WEEK`, `MONTH`, `QUARTER` or `YEAR`. */
   readonly unit: AntilopayDelayUnit;
   /** The days the delay is worth: what the payer is given for it (`antilopayDelayUnitDays`). */
   readonly days: number;
-}
+};
 
 /** The operator's two settings that make a delay: a whole number, and a unit. */
 export const ANTILOPAY_DELAY_COUNT_SETTING = 'sbpDelayCount';

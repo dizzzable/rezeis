@@ -74,6 +74,12 @@ export const CABINET_CAPABILITY = {
   bellAddonNotApplied: 'web.bell-addon-not-applied',
   /** Dates are shown in the operator's «Часовой пояс», not by the phone's clock. */
   panelTimezoneDates: 'web.panel-timezone-dates',
+  /**
+   * Antilopay's SBP autopay with a delayed first charge: the consent says that
+   * nothing is charged now, that access for the delay starts at once and when the
+   * first charge comes, and sends back the delay it showed.
+   */
+  autopayFirstChargeDelay: 'web.autopay-first-charge-delay',
   /** Refuses one bad appearance field at a time and reports which (`POST /api/internal/branding/delivery`). */
   appearanceReport: 'api.appearance-report',
   /** reiwa-api polls the settings versions (`POST /api/internal/config-versions`). */
@@ -149,6 +155,21 @@ export const CABINET_CAPABILITY_REGISTRY: readonly CabinetCapabilityRow[] = [
       'даты в кабинете идут по часам телефона, а не в часовом поясе из «Платформа» → «Настройки платформы» → «Часовой пояс»',
     operatorTextEn:
       'dates in the cabinet follow the phone’s clock, not the time zone set in “Platform” → “Platform Settings” → “Time zone”',
+  },
+  {
+    id: CABINET_CAPABILITY.autopayFirstChargeDelay,
+    surface: 'web',
+    since: '0.9.7.56',
+    kind: 'gate',
+    // Reiwa 0.9.7.55 and older would show the autopay consent of a delayed sign-up
+    // as «спишется сразу»: the customer would agree to a charge that does not
+    // come, and be given access for nothing they were told about
+    // (reiwa `web/src/lib/autopay-delay.ts`).
+    operatorText:
+      'отсрочка первого списания по СБП в Antilopay не предлагается: старый кабинет написал бы клиенту «спишется сразу», и списание остаётся сразу',
+    operatorTextEn:
+      'the delay of the first SBP charge at Antilopay is not offered: an older cabinet would tell the customer “charged at once”, so the charge stays at once',
+    gatedIn: ['src/modules/payments/utils/antilopay-delay-policy.util.ts'],
   },
   {
     id: CABINET_CAPABILITY.appearanceReport,

@@ -22,6 +22,7 @@ import { PrismaService } from '../../../common/prisma/prisma.service';
 import { shouldRunSchedules } from '../../../common/runtime/process-role.util';
 import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
 import { CHECKOUT_LIFETIME_MS } from '../constants/checkout-lifetime.constant';
+import type { CabinetView } from '../../reiwa-peers/cabinet-capabilities';
 import {
   PAYMENT_RECONCILIATION_ENQUEUE_FAILED,
   PAYMENT_RECONCILIATION_JOB,
@@ -39,13 +40,16 @@ import {
 } from '../utils/antilopay-api.util';
 import { antilopayRefundEnvelope, completedAntilopayRefunds } from '../utils/antilopay-refund.util';
 import {
+  type AntilopayAutopayMethod,
   type AntilopayCharge,
+  type AntilopayDelay,
   assignAntilopayChargeRoles,
   type AntilopayChargeRole,
   isAntilopayRecurrentEnded,
   isAntilopayRecurrentNotActiveYet,
   parseAntilopayRecurrent,
 } from '../utils/antilopay-recurrent.util';
+import { decideAntilopayDelay, settleDelayWithConsent, type ShownDelay } from '../utils/antilopay-delay-policy.util';
 import { isLifetimeSubscription } from '../utils/lifetime-renewal.util';
 import { readGatewaySettings } from '../utils/payment-gateway-settings.util';
 import { redactPaymentDiagnosticMessage } from '../utils/payment-provider-error.util';
@@ -985,6 +989,57 @@ export class ProviderSubscriptionService {
     }
   }
 
+  /**
+   * Whether this customer has used «Отсрочка первого списания по СБП», or holds
+   * one that is being granted: the delay is given once per customer, whatever
+   * became of the subscription (cancelled, ended, refunded) — a customer who
+   * cancelled during their delay keeps the days and does not get another delay.
+   *
+   * A sign-up still waiting for its payer does not count: nothing was given, and
+   * counting it would refuse the delay to a customer who taps the same link
+   * twice. The window this leaves is two links opened and paid together, each
+   * granted on its own — a few days of access, which the owner accepted.
+   */
+  public async hasUsedDelay(userId: string): Promise<boolean> {
+    const used = await this.prismaService.providerSubscription.findFirst({
+      where: {
+        userId,
+        gatewayType: PaymentGatewayType.ANTILOPAY,
+        delayDays: { gt: 0 },
+        OR: [{ delayGrantedAt: { not: null } }, { status: { in: [...LIVE_STATUSES] } }],
+      },
+      select: { id: true },
+    });
+    return used !== null;
+  }
+
+  /**
+   * The delay an Antilopay SBP sign-up is made with: what the panel decides now
+   * (`decideAntilopayDelay`) put beside what the payer was shown
+   * (`settleDelayWithConsent`). Null when none was shown — the payer was told the
+   * charge is made now, and no query is made for it. Refused with
+   * `DELAY_CHANGED` when the payer was shown a delay the panel would not give
+   * now, so nobody is charged at once after being told they would not be.
+   */
+  public async settleAntilopayDelay(input: {
+    readonly userId: string;
+    readonly settings: Record<string, unknown>;
+    readonly method: AntilopayAutopayMethod | undefined;
+    readonly audience: CabinetView | undefined;
+    readonly shown: ShownDelay;
+  }): Promise<AntilopayDelay | null> {
+    if (input.shown.kind === 'NONE') return null;
+    const decided = decideAntilopayDelay({
+      settings: input.settings,
+      method: input.method,
+      audience: input.audience,
+      alreadyUsed: await this.hasUsedDelay(input.userId),
+    });
+    const verdict = settleDelayWithConsent(input.shown, decided);
+    if (verdict.kind === 'REFUSE') throw autopayNotAvailable('DELAY_CHANGED');
+    return verdict.delay;
+  }
+
   /** «Отключить автосписание» in the cabinet. */
   public async cancelForCustomer(userId: string, id: string): Promise<void> {
     const row = await this.prismaService.providerSubscription.findFirst({ where: { id, userId } });
@@ -1755,6 +1810,7 @@ export class ProviderSubscriptionService {
         intervalCount: terms.count,
         firstTransactionId: transaction.id,
         method: terms.method ?? null,
+        delayDays: terms.delay?.days ?? null,
         consentVersion: PROVIDER_SUBSCRIPTION_CONSENT_VERSION,
       },
     });

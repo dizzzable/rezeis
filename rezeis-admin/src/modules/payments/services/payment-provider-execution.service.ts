@@ -1090,6 +1090,10 @@ export class PaymentProviderExecutionService {
       period: { unit: terms.unit, count: terms.count },
       method: terms.method,
       paymentCount: readAntilopayPaymentCount(settings),
+      // The delay the payer agreed to, fixed in the terms when the draft was made
+      // (`antilopay-delay-policy.util.ts`): the operator changing the setting
+      // since must not change what this payer was told. A card has none.
+      delay: terms.method === 'SBP' ? (terms.delay ?? null) : null,
     });
     if (request === null) {
       throw autopayNotAvailable('DURATION');

@@ -104,6 +104,12 @@ export interface RenewalCheckoutFingerprintInput {
    * a buyer who chose the other. Hashed only when set.
    */
   readonly providerSubscriptionMethod?: string | null;
+  /**
+   * The delay of an Antilopay SBP subscription's first charge, as `<count>:<unit>`:
+   * a link made for a payer who was told nothing is charged now is never handed
+   * to one who was told it is, nor the reverse. Hashed only when there is one.
+   */
+  readonly providerSubscriptionDelay?: string | null;
   readonly lines: readonly RenewalLineFingerprintInput[];
 }
 
@@ -143,6 +149,7 @@ export function buildRenewalCheckoutFingerprint(input: RenewalCheckoutFingerprin
     savedPaymentMethodId: input.savedPaymentMethodId ?? null,
     ...(input.providerSubscription === true ? { providerSubscription: true } : {}),
     ...(input.providerSubscriptionMethod ? { providerSubscriptionMethod: input.providerSubscriptionMethod } : {}),
+    ...(input.providerSubscriptionDelay ? { providerSubscriptionDelay: input.providerSubscriptionDelay } : {}),
     lines,
   });
 }

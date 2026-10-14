@@ -940,6 +940,8 @@ function harness(initial: Partial<ProviderSubscription> = {}) {
     endsAt: null,
     plannedChargeCount: null,
     method: 'CARD',
+    delayDays: null,
+    delayGrantedAt: null,
     consentVersion: 'provider-subscription-v1',
     createdAt: new Date(),
     updatedAt: new Date(),

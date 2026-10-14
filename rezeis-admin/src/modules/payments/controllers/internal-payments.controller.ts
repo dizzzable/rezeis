@@ -1,8 +1,11 @@
-import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Headers, Optional, Param, Post, Query, UseGuards } from '@nestjs/common';
 import { SkipThrottle } from '@nestjs/throttler';
 import { PaymentGatewayType, PurchaseChannel } from '@prisma/client';
 
 import { InternalAdminAuthGuard } from '../../auth/guards/internal-admin-auth.guard';
+import type { CabinetView } from '../../reiwa-peers/cabinet-capabilities';
+import type { HeaderBag } from '../../reiwa-peers/reiwa-client-headers';
+import { ReiwaPeerRegistry } from '../../reiwa-peers/reiwa-peer-registry.service';
 import { SettingsService } from '../../settings/services/settings.service';
 import { isGatewayAvailableForChannel } from '../../plans/utils/purchase-gateway-policy.util';
 import { InternalPaymentCheckoutDto } from '../dto/internal-payment-checkout.dto';
@@ -19,10 +22,13 @@ import { PaymentGatewayRegistryService } from '../services/payment-gateway-regis
 import { PartnerBalancePaymentService } from '../services/partner-balance-payment.service';
 import { PaymentsCheckoutService } from '../services/payments-checkout.service';
 import { PaymentsRenewalCheckoutService } from '../services/payments-renewal-checkout.service';
+import { ProviderSubscriptionService } from '../services/provider-subscription.service';
 import {
   TelegramStarsWebhookService,
   type TelegramStarsPreCheckoutVerdict,
 } from '../services/telegram-stars-webhook.service';
+import { decideAntilopayDelay } from '../utils/antilopay-delay-policy.util';
+import type { AntilopayDelay } from '../utils/antilopay-recurrent.util';
 import { approvedAutopayMethods, isAutopayApproved } from '../utils/gateway-autopay.util';
 
 @Controller('internal/payments')
@@ -43,7 +49,39 @@ export class InternalPaymentsController {
     private readonly partnerBalancePaymentService: PartnerBalancePaymentService,
     private readonly settingsService: SettingsService,
     private readonly telegramStarsWebhookService: TelegramStarsWebhookService,
+    /**
+     * Who is asking and what they can show (`viewOfRequest`), and whether a
+     * customer has used the delay of the first SBP charge. Last and optional:
+     * specs build this positionally, and without them no delay is offered.
+     */
+    @Optional()
+    private readonly peers?: ReiwaPeerRegistry,
+    @Optional()
+    private readonly providerSubscriptionService?: ProviderSubscriptionService,
   ) {}
+
+  /** The cabinet asking, from the headers of this very request; absent when the registry is not there. */
+  private async audienceOf(headers: HeaderBag | undefined): Promise<CabinetView | undefined> {
+    return this.peers === undefined ? undefined : this.peers.viewOfRequest(headers, 'api');
+  }
+
+  /**
+   * The delay of the first SBP charge this customer would be offered on the
+   * Antilopay gateway, or null: none configured, the cabinet cannot show it, the
+   * customer has used it, or the caller named no customer (nothing is promised to
+   * somebody the panel cannot count). Asks the database only when a delay is
+   * otherwise on offer.
+   */
+  private async antilopayDelayFor(
+    settings: Record<string, unknown>,
+    userId: string | undefined,
+    audience: CabinetView | undefined,
+  ): Promise<AntilopayDelay | null> {
+    if (userId === undefined || userId.length === 0 || this.providerSubscriptionService === undefined) return null;
+    const offered = decideAntilopayDelay({ settings, method: 'SBP', audience, alreadyUsed: false });
+    if (offered === null) return null;
+    return (await this.providerSubscriptionService.hasUsedDelay(userId)) ? null : offered;
+  }
 
   /**
    * Verdict for a Telegram Stars pre-checkout query.
@@ -102,31 +140,47 @@ export class InternalPaymentsController {
   @Get('gateways')
   public async listEnabledGateways(
     @Query('channel') channelRaw?: string,
+    /**
+     * The customer who is looking, when the caller knows one: the Antilopay
+     * entry then carries `autopayDelay` for a customer who may still use it.
+     */
+    @Query('userId') userId?: string,
+    @Headers() headers?: HeaderBag,
   ): Promise<readonly InternalPaymentGatewayInterface[]> {
     const channel = this.parseChannel(channelRaw);
-    const [all, policy] = await Promise.all([
+    const [all, policy, audience] = await Promise.all([
       this.paymentGatewayRegistryService.listGateways(),
       this.settingsService.getInternalPlatformPolicy(),
+      this.audienceOf(headers),
     ]);
     const defaultCurrency = policy.defaultCurrency;
-    return all
-      .filter((gateway) => gateway.isActive)
-      .filter((gateway) => gateway.isConfigured)
-      .filter((gateway) => isGatewayAvailableForChannel(gateway.type, channel))
-      .map((gateway): InternalPaymentGatewayInterface => {
-        const base = {
-          id: gateway.id,
-          type: gateway.type,
-          currency: gateway.currency,
-          orderIndex: gateway.orderIndex,
-        };
-        // Antilopay approves automatic charging per method: the list names them
-        // and the boolean stays false (see `autopayMethods`).
-        if (gateway.type === PaymentGatewayType.ANTILOPAY) {
-          return { ...base, autopay: false, autopayMethods: approvedAutopayMethods(gateway.type, gateway.settings) };
-        }
-        return { ...base, autopay: isAutopayApproved(gateway.type, gateway.settings) };
-      })
+    const offered = await Promise.all(
+      all
+        .filter((gateway) => gateway.isActive)
+        .filter((gateway) => gateway.isConfigured)
+        .filter((gateway) => isGatewayAvailableForChannel(gateway.type, channel))
+        .map(async (gateway): Promise<InternalPaymentGatewayInterface> => {
+          const base = {
+            id: gateway.id,
+            type: gateway.type,
+            currency: gateway.currency,
+            orderIndex: gateway.orderIndex,
+          };
+          // Antilopay approves automatic charging per method: the list names them
+          // and the boolean stays false (see `autopayMethods`).
+          if (gateway.type === PaymentGatewayType.ANTILOPAY) {
+            const autopayDelay = await this.antilopayDelayFor(gateway.settings, userId, audience);
+            return {
+              ...base,
+              autopay: false,
+              autopayMethods: approvedAutopayMethods(gateway.type, gateway.settings),
+              ...(autopayDelay === null ? {} : { autopayDelay }),
+            };
+          }
+          return { ...base, autopay: isAutopayApproved(gateway.type, gateway.settings) };
+        }),
+    );
+    return offered
       .sort((a, b) => {
         // Default-currency gateways first; stable on orderIndex within a group.
         const aDefault = a.currency === defaultCurrency ? 0 : 1;
@@ -147,8 +201,9 @@ export class InternalPaymentsController {
   @Post('checkout')
   public async checkout(
     @Body() input: InternalPaymentCheckoutDto,
+    @Headers() headers?: HeaderBag,
   ): Promise<InternalPaymentCheckoutInterface> {
-    return this.paymentsCheckoutService.checkout(input);
+    return this.paymentsCheckoutService.checkout(input, await this.audienceOf(headers));
   }
 
   /**
@@ -174,6 +229,7 @@ export class InternalPaymentsController {
   @Post('renewal-checkout')
   public async renewalCheckout(
     @Body() input: InternalRenewalCheckoutDto,
+    @Headers() headers?: HeaderBag,
   ): Promise<InternalPaymentCheckoutInterface> {
     return this.paymentsRenewalCheckoutService.renewalCheckout({
       userId: input.userId,
@@ -192,6 +248,9 @@ export class InternalPaymentsController {
       savePaymentMethod: input.savePaymentMethod,
       savePaymentMethodConsent: input.savePaymentMethodConsent,
       autopayMethod: input.autopayMethod,
+      autopayDelayCount: input.autopayDelayCount,
+      autopayDelayUnit: input.autopayDelayUnit,
+      audience: await this.audienceOf(headers),
     });
   }
 

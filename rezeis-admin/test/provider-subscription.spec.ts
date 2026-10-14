@@ -306,6 +306,8 @@ function harness(initial: Partial<ProviderSubscription> = {}): Harness {
     endsAt: null,
     plannedChargeCount: null,
     method: null,
+    delayDays: null,
+    delayGrantedAt: null,
     consentVersion: 'provider-subscription-v1',
     createdAt: new Date(),
     updatedAt: new Date(),
