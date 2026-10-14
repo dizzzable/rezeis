@@ -13,8 +13,11 @@ import { RbacGuard } from '../src/modules/rbac/guards/rbac.guard';
 import { AdminReiwaPeersController } from '../src/modules/reiwa-peers/admin-reiwa-peers.controller';
 import {
   CABINET_CAPABILITY,
+  CABINET_CAPABILITY_REGISTRY,
   CABINET_FLOOR_VERSION,
   capabilityRowsHostedBy,
+  compareCabinetVersions,
+  IMPLIED_CEILING_VERSION,
 } from '../src/modules/reiwa-peers/cabinet-capabilities';
 import { PANEL_VERSION } from '../src/modules/reiwa-peers/panel-capabilities';
 import {
@@ -88,6 +91,16 @@ const BOT_054 = 'surface=bot; version=0.9.7.54; commit=0123456789ab; instance=re
 const EVERYTHING_API = capabilityRowsHostedBy('api').map((row) => row.id).join(',');
 const EVERYTHING_BOT = capabilityRowsHostedBy('bot').map((row) => row.id).join(',');
 const RESET_END = CABINET_CAPABILITY.addonResetEnd;
+/**
+ * What a cabinet that leaves no declaration cannot have: the ids registered after
+ * the frozen ceiling (0.9.7.53). A silent cabinet is placed by its version, and
+ * a version never stands for an id introduced after the ceiling — only a cabinet
+ * that declares it has it. So a 0.9.7.53 cabinet lacks nothing registered UP TO
+ * 0.9.7.53, and exactly these.
+ */
+const AFTER_THE_CEILING = CABINET_CAPABILITY_REGISTRY.filter(
+  (row) => compareCabinetVersions(row.since, IMPLIED_CEILING_VERSION) > 0,
+).map((row) => row.id);
 
 describe('a silent cabinet, placed by the evidence it leaves', () => {
   it('a poll without headers is 0.9.7.53 — which can show «до сброса»', async () => {
@@ -102,7 +115,11 @@ describe('a silent cabinet, placed by the evidence it leaves', () => {
     assert.equal((await peers.viewOfRequest(undefined, 'api', T0)).can(RESET_END), true);
     const status = await peers.surfaceStatus('api', T0);
     assert.equal(status.state, 'live');
-    assert.deepEqual(status.missing, [], 'nothing this panel registered is missing from 0.9.7.53');
+    assert.deepEqual(
+      status.missing.map((row) => row.id),
+      AFTER_THE_CEILING,
+      'nothing registered up to 0.9.7.53 is missing from it — only what came after',
+    );
   });
 
   it('a heartbeat of 0.9.7.52 without headers cannot show it', async () => {
@@ -269,7 +286,7 @@ describe('an update whose boot heartbeat was lost (review R1-05)', () => {
 
     assert.equal((await peers.viewOfRequest(undefined, 'api', T0 + 40 * MINUTE)).can(RESET_END), true);
     const status = await peers.surfaceStatus('api', T0 + 40 * MINUTE);
-    assert.deepEqual([status.version, status.missing.length], ['0.9.7.53', 0]);
+    assert.deepEqual([status.version, status.missing.length], ['0.9.7.53', AFTER_THE_CEILING.length]);
   });
 
   it('0.9.7.53 → 0.9.7.52: a 0.9.7.53 heartbeat counts only while a 0.9.7.53 poll is live', async () => {
@@ -316,7 +333,11 @@ describe('a cabinet updated, rolled back and updated again (review R1-17)', () =
       const again = await updateRollBackUpdateAgain(peers, after);
 
       const status = await after.surfaceStatus('api', again);
-      assert.deepEqual([status.version, status.missing.length], ['0.9.7.53', 0], 'the rolled-back 0.9.7.52 is superseded');
+      assert.deepEqual(
+        [status.version, status.missing.length],
+        ['0.9.7.53', AFTER_THE_CEILING.length],
+        'the rolled-back 0.9.7.52 is superseded',
+      );
       // Its last heartbeat was 30 minutes before the re-update: it would have counted until 35 minutes after.
       for (let t = again; t <= again + 40 * MINUTE; t += MINUTE) {
         await after.observePoll('api', undefined, t);

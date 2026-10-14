@@ -28,6 +28,7 @@ import { PAYMENT_RECONCILIATION_QUEUE } from '../src/modules/payments/constants/
 import { MoyNalogQueueService } from '../src/modules/payments/services/moy-nalog-queue.service';
 import { PaymentAutoRetryService } from '../src/modules/payments/services/payment-auto-retry.service';
 import { PaymentWebhookOpsService } from '../src/modules/payments/services/payment-webhook-ops.service';
+import { ProviderSubscriptionService } from '../src/modules/payments/services/provider-subscription.service';
 import { PROFILE_SYNC_QUEUE } from '../src/modules/profile-sync/profile-sync.constants';
 import { ProfileSyncQueueService } from '../src/modules/profile-sync/profile-sync-queue.service';
 import { WebhookQueueService } from '../src/modules/webhooks/services/webhook-queue.service';
@@ -291,6 +292,35 @@ describe('every producer mints ids BullMQ accepts and dedups on', () => {
     assertAdmittedAndDistinct(queue, 2, 'payment auto-retry');
   });
 
+  it('ProviderSubscriptionService.pokeDelayedSignUp, one look per half minute per checkout', async () => {
+    const queue = new OfflineBullMqQueue<unknown>(PAYMENT_RECONCILIATION_QUEUE);
+    const service = new ProviderSubscriptionService({} as never, {} as never, {} as never, queue.asQueue());
+    const checkout = {
+      id: CUID,
+      gatewayId: 'APAY-1',
+      planSnapshot: {
+        providerSubscription: {
+          unit: 'month',
+          count: 1,
+          amount: 299,
+          durationDays: 30,
+          planId: 'plan-1',
+          subscriptionId: null,
+          method: 'SBP',
+          delay: { count: 7, unit: 'DAY', days: 7 },
+        },
+      },
+    };
+    const at = new Date('2026-10-14T12:00:10.000Z');
+
+    await service.pokeDelayedSignUp(checkout as never, at);
+    await service.pokeDelayedSignUp(checkout as never, new Date(at.getTime() + 5_000));
+    await service.pokeDelayedSignUp(checkout as never, new Date(at.getTime() + 40_000));
+
+    // The first two share a half minute: one job. The third is the next half minute's.
+    assertAdmittedAndDistinct(queue, 2, 'delayed sign-up look');
+  });
+
   it('PaymentWebhookOpsService.replayEvent', async () => {
     const queue = new OfflineBullMqQueue<unknown>(PAYMENT_RECONCILIATION_QUEUE);
     const event = {
@@ -351,6 +381,7 @@ const DRIVEN_PRODUCERS: readonly string[] = [
   'src/modules/payments/services/moy-nalog-queue.service.ts',
   'src/modules/payments/services/payment-auto-retry.service.ts',
   'src/modules/payments/services/payment-webhook-ops.service.ts',
+  'src/modules/payments/services/provider-subscription.service.ts',
   'src/modules/profile-sync/profile-sync-queue.service.ts',
   'src/modules/webhooks/services/webhook-queue.service.ts',
 ];

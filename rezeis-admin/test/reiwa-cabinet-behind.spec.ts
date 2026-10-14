@@ -3,7 +3,13 @@ import { afterEach, describe, it } from 'node:test';
 
 import { _resetProcessRoleCacheForTests } from '../src/common/runtime/process-role.util';
 import { EVENT_PRESENTATION, EVENT_TYPES } from '../src/common/services/system-events.service';
-import { CABINET_CAPABILITY, capabilityRowsHostedBy } from '../src/modules/reiwa-peers/cabinet-capabilities';
+import {
+  CABINET_CAPABILITY,
+  CABINET_CAPABILITY_REGISTRY,
+  capabilityRowsHostedBy,
+  compareCabinetVersions,
+  IMPLIED_CEILING_VERSION,
+} from '../src/modules/reiwa-peers/cabinet-capabilities';
 import { PANEL_VERSION } from '../src/modules/reiwa-peers/panel-capabilities';
 import { ReiwaCabinetBehindService } from '../src/modules/reiwa-peers/reiwa-cabinet-behind.service';
 import {
@@ -21,11 +27,20 @@ import { memoryRawCache } from './helpers/memory-raw-cache';
  * for ten minutes — so an ordinary update gap sends nothing — deduplicated by a
  * claim, re-armed when the cabinet catches up, and never for a surface the
  * panel has not seen or for a 0.9.7.53 cabinet, which lacks nothing this panel
- * registered.
+ * registered up to it. (A 0.9.7.53 cabinet that leaves no declaration lacks the
+ * ids registered AFTER the frozen ceiling, and is carded for exactly those.)
  */
 
 const T0 = Date.parse('2026-09-26T12:00:00.000Z');
 const MINUTE = 60_000;
+/** The ids registered after the frozen ceiling: what a silent 0.9.7.53 cabinet cannot have. */
+const AFTER_THE_CEILING = CABINET_CAPABILITY_REGISTRY.filter(
+  (row) => compareCabinetVersions(row.since, IMPLIED_CEILING_VERSION) > 0,
+).map((row) => row.id);
+const BOT_054_ALL = {
+  'x-reiwa-client': 'surface=bot; version=0.9.7.54; instance=reiwa-bot',
+  'x-reiwa-capabilities': capabilityRowsHostedBy('bot').map((row) => row.id).join(','),
+};
 const API_054_ALL = {
   'x-reiwa-client': 'surface=api; version=0.9.7.54; instance=reiwa',
   'x-reiwa-capabilities': capabilityRowsHostedBy('api').map((row) => row.id).join(','),
@@ -161,12 +176,29 @@ describe('«🧩 Кабинет старше панели»', () => {
     assert.equal(silent.cache.read(behindKey('api')), undefined, 'the mark is dropped');
     assert.deepEqual(silent.cards, []);
 
+    // A cabinet that declares everything this panel registered lacks nothing.
     const current = world();
-    await current.peers.observePoll('api', undefined, T0);
-    await current.peers.observePoll('bot', undefined, T0);
+    await current.peers.observePoll('api', API_054_ALL, T0);
+    await current.peers.observePoll('bot', BOT_054_ALL, T0);
     await current.service.check(T0);
-    assert.deepEqual(await current.service.check(T0 + BEHIND_CARD_DEBOUNCE_MS), { api: 'caught-up', bot: 'caught-up' });
+    assert.equal((await current.service.check(T0 + BEHIND_CARD_DEBOUNCE_MS)).api, 'caught-up');
     assert.deepEqual(current.cards, []);
+  });
+
+  it('a silent 0.9.7.53 cabinet lacks exactly what was registered after it, and is carded for that and nothing else', async () => {
+    const w = world();
+    await w.peers.observePoll('api', undefined, T0);
+    assert.equal((await w.service.check(T0)).api, 'waiting');
+    assert.equal((await w.service.check(T0 + BEHIND_CARD_DEBOUNCE_MS)).api, 'sent');
+    const [card] = w.cards;
+    assert.ok(card);
+    assert.equal(card.metadata['cabinetVersion'], '0.9.7.53');
+    assert.deepEqual(card.metadata['missingCapabilities'], AFTER_THE_CEILING);
+    assert.equal(
+      String(card.metadata['note']).split('\n').length,
+      AFTER_THE_CEILING.length + 2,
+      'the list names only what came after, between the opening line and the closing one',
+    );
   });
 
   it('no card for a cabinet updated to 0.9.7.53 whose boot heartbeat was lost (review R1-05)', async () => {
@@ -177,10 +209,16 @@ describe('«🧩 Кабинет старше панели»', () => {
       for (let t = from; t <= to; t += MINUTE) await w.peers.observePoll('api', undefined, t);
     };
     await pollUntil(T0 + 5 * MINUTE, T0 + 10 * MINUTE);
-    assert.equal((await w.service.check(T0 + 10 * MINUTE)).api, 'caught-up');
+    await w.service.check(T0 + 10 * MINUTE);
     await pollUntil(T0 + 11 * MINUTE, T0 + 25 * MINUTE);
-    assert.equal((await w.service.check(T0 + 25 * MINUTE)).api, 'caught-up');
-    assert.deepEqual(w.cards, [], 'no «Кабинет Reiwa 0.9.7.52 старше» while 0.9.7.53 runs');
+    await w.service.check(T0 + 25 * MINUTE);
+    // Placed as 0.9.7.53 at once: a card, once it comes, is about that version.
+    assert.deepEqual(
+      w.cards.filter((card) => card.metadata['cabinetVersion'] === '0.9.7.52'),
+      [],
+      'no «Кабинет Reiwa 0.9.7.52 старше» while 0.9.7.53 runs',
+    );
+    assert.ok(w.cards.every((card) => card.metadata['cabinetVersion'] === '0.9.7.53'));
   });
 
   it('no card after a cabinet updated, rolled back and updated again (review R1-17)', async () => {
@@ -203,10 +241,14 @@ describe('«🧩 Кабинет старше панели»', () => {
     for (let t = again; t <= again + 40 * MINUTE; t += MINUTE) {
       await w.peers.observePoll('api', undefined, w.at(t));
       if ((t - again) % (5 * MINUTE) === 0) {
-        assert.equal((await w.service.check(t)).api, 'caught-up', `${(t - again) / MINUTE} min after the re-update`);
+        await w.service.check(t);
       }
     }
-    assert.deepEqual(w.cards, [], 'no «Кабинет Reiwa 0.9.7.52 старше» while 0.9.7.53 runs again');
+    assert.deepEqual(
+      w.cards.filter((card) => card.metadata['cabinetVersion'] === '0.9.7.52'),
+      [],
+      'no «Кабинет Reiwa 0.9.7.52 старше» while 0.9.7.53 runs again',
+    );
   });
 
   it('a cache it cannot read decides nothing', async () => {

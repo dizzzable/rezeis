@@ -926,7 +926,7 @@ describe('the autopay list', () => {
 });
 
 describe('the look the payer\'s return asks for', () => {
-  it('queues one look per half minute for a delayed checkout, under a job id of three parts', async () => {
+  it('queues one look per half minute for a delayed checkout, under a job id BullMQ takes', async () => {
     const w = world();
     const checkout = w.tx();
     const at = new Date('2026-10-14T12:00:10Z');
@@ -939,7 +939,8 @@ describe('the look the payer\'s return asks for', () => {
     const ids = pokes.map((job) => String(job.options['jobId']));
     assert.equal(ids[0], ids[1], 'the same half minute is the same job');
     assert.notEqual(ids[0], ids[2]);
-    for (const id of ids) assert.equal(id.split(':').length, 3, id);
+    // Built with `toBullMqJobId`: no colon for BullMQ to refuse.
+    for (const id of ids) assert.equal(id.includes(':'), false, id);
   });
 
   it('queues nothing for a payment that is no delayed sign-up, or one with no provider handle yet', async () => {

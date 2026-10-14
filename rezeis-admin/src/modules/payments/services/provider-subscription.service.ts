@@ -18,6 +18,7 @@ import {
 import { Queue } from 'bullmq';
 import { firstValueFrom } from 'rxjs';
 
+import { toBullMqJobId } from '../../../common/queue/bullmq-job-id';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { shouldRunSchedules } from '../../../common/runtime/process-role.util';
 import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
@@ -1188,7 +1189,7 @@ export class ProviderSubscriptionService {
    * and nothing is paid with a delay for Antilopay to call back about, so the
    * ask is what starts the look. At most one look every 30 seconds per
    * checkout: the job's id carries the half-minute, and BullMQ adds a job id
-   * once (three parts, because a custom id with a colon must have exactly three).
+   * once (built with `toBullMqJobId`, which keeps the colon out of it).
    */
   public async pokeDelayedSignUp(transaction: Pick<Transaction, 'id' | 'gatewayId' | 'planSnapshot'>, now: Date = new Date()): Promise<void> {
     const terms = readProviderSubscriptionTerms(transaction.planSnapshot);
@@ -1200,7 +1201,7 @@ export class ProviderSubscriptionService {
         PROVIDER_SUBSCRIPTION_SYNC_JOB,
         { gatewayType: PaymentGatewayType.ANTILOPAY, providerSubscriptionId: gatewayId },
         {
-          jobId: `delay-poke:${transaction.id}:${Math.floor(now.getTime() / 30_000)}`,
+          jobId: toBullMqJobId('delay-poke', `${transaction.id}:${Math.floor(now.getTime() / 30_000)}`),
           attempts: 3,
           backoff: { type: 'exponential', delay: 30_000 },
           removeOnComplete: 100,
