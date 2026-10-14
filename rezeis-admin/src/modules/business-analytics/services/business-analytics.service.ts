@@ -26,6 +26,8 @@ import {
   type CurrencySumRow,
   firstPaymentSql,
   type FirstPaymentRow,
+  trialPerDaySql,
+  type TrialPerDaySqlRow,
   trialPlansSql,
   type TrialPlanRow,
   trialRevenueSql,
@@ -276,16 +278,17 @@ export class BusinessAnalyticsService {
   public async getTrialConversion(daysRaw: number): Promise<TrialConversionReport> {
     const window = planAnalyticsWindow(daysRaw, new Date(), await this.readZone());
     const prisma = this.prismaService;
-    const [summary, plans, revenue, firstPayment, fx] = await Promise.all([
+    const [summary, plans, revenue, firstPayment, perDay, fx] = await Promise.all([
       prisma.$queryRaw<TrialSummaryRow[]>(trialSummarySql(window)),
       prisma.$queryRaw<TrialPlanRow[]>(trialPlansSql(window)),
       prisma.$queryRaw<CurrencySumRow[]>(trialRevenueSql(window)),
       prisma.$queryRaw<FirstPaymentRow[]>(firstPaymentSql(window)),
+      prisma.$queryRaw<TrialPerDaySqlRow[]>(trialPerDaySql(window, window.now)),
       this.readFx(),
     ]);
     return assembleTrialConversion(
       window,
-      { summary: summary[0], plans, revenue, firstPayment: firstPayment[0] },
+      { summary: summary[0], plans, revenue, firstPayment: firstPayment[0], perDay },
       fx,
     );
   }

@@ -310,7 +310,11 @@ export const en = {
         title: 'From trial to payment',
         description_one: 'When {{count, number}} converted customer paid.',
         description_other: 'When {{count, number}} converted customers paid.',
-        info: 'How long it took from the start of the free trial to the first payment after it, for those who converted.',
+        info: 'How long it took from the start of the free trial to the first payment after it, for those who converted. When every free trial of the period has the same length, up to 14 days, each day of the trial is shown, then the span from the next day to twice the length, and “Later”. Otherwise (trials of different lengths, or longer than 14 days) the coarser spans are shown. The length of a trial is the shortest term of the trial plan (the one a trial is granted for) as it is now: if the term was changed, spans for an earlier period may not match the days. “Paid X % of those who took a trial” is the share who paid among the trials that began more than two trial lengths ago (the rest have not had time yet); a payment at any moment counts, not only inside the spans shown.',
+        day: 'Day {{count}}',
+        after: '{{from}}–{{to}} days',
+        later: 'Later',
+        matured: 'Paid {{share}} of those who took a trial: {{paid}} of {{trials}} (only trials begun more than {{days}} days ago).',
         empty: 'Nobody has converted from a trial to a payment yet.',
       },
       topPlans: {

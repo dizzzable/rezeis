@@ -24,6 +24,12 @@ import {
 } from '../src/modules/business-analytics/utils/analytics-payment-hours.util';
 import { assembleRevenue, type RevenuePlanRow } from '../src/modules/business-analytics/utils/analytics-revenue.util';
 import {
+  assembleTrialConversion,
+  TRIAL_MATURITY_LENGTHS,
+  TRIAL_PER_DAY_MAX_LENGTH,
+  type TrialPerDaySqlRow,
+} from '../src/modules/business-analytics/utils/analytics-conversion.util';
+import {
   assemblePaidCohorts,
   PAID_COHORT_OFFSETS,
 } from '../src/modules/business-analytics/utils/analytics-first-payment-cohort.util';
@@ -351,5 +357,72 @@ describe('revenue by plan and term (assembly)', () => {
   it('reads a term that arrives as text from the driver', () => {
     const rows = byPlan([plan({ kind: 'plan', planId: 'pro', name: 'Pro', days: '30' as unknown as number, amount: 1, payments: 1 })]);
     assert.equal(rows[0]?.days, 30);
+  });
+});
+
+describe('days from the trial to the payment (assembly)', () => {
+  const NOW = at('2026-10-14T09:00:00Z');
+  const window = planAnalyticsWindow(30, NOW, UTC_ZONE);
+  const FX = { base: 'RUB', rates: new Map() };
+  const length = (trialDays: number | null, count: number, converted: number, matured: number, maturedPaid: number): TrialPerDaySqlRow => ({
+    kind: 'length', trialDays, day: 0, count, converted, matured, maturedPaid,
+  });
+  const day = (trialDays: number | null, dayIndex: number, count: number): TrialPerDaySqlRow => ({
+    kind: 'day', trialDays, day: dayIndex, count, converted: 0, matured: 0, maturedPaid: 0,
+  });
+  const report = (perDay: readonly TrialPerDaySqlRow[]) =>
+    assembleTrialConversion(window, { summary: undefined, plans: [], revenue: [], firstPayment: undefined, perDay }, FX);
+
+  it('lays out the days of a short trial, then the span up to twice its length, then later', () => {
+    const result = report([
+      length(3, 10, 8, 8, 7),
+      day(3, 0, 2), day(3, 1, 2), day(3, 2, 1), // days 1, 2, 3
+      day(3, 3, 1), day(3, 5, 1), //               days 4-6
+      day(3, 6, 1), day(3, 28, 1), //              later, the cap included
+    ]);
+    assert.equal(result.trialLengthDays, 3);
+    assert.deepEqual(result.perDay, { trialDays: 3, days: [2, 2, 1], after: 2, later: 2 });
+    assert.deepEqual(result.maturedConversion, { trials: 8, paid: 7, share: 7 / 8 });
+  });
+
+  it('keeps one-day trials: the first day, the second, later', () => {
+    const result = report([length(1, 4, 3, 3, 2), day(1, 0, 1), day(1, 1, 1), day(1, 5, 1)]);
+    assert.deepEqual(result.perDay, { trialDays: 1, days: [1], after: 1, later: 1 });
+  });
+
+  it('draws the days up to the largest length, 14, and no longer', () => {
+    const longest = report([length(TRIAL_PER_DAY_MAX_LENGTH, 5, 2, 2, 1), day(TRIAL_PER_DAY_MAX_LENGTH, 13, 1), day(TRIAL_PER_DAY_MAX_LENGTH, 14, 1)]);
+    assert.equal(longest.perDay?.days.length, 14);
+    assert.equal(longest.perDay?.days[13], 1);
+    assert.equal(longest.perDay?.after, 1);
+    const tooLong = report([length(TRIAL_PER_DAY_MAX_LENGTH + 1, 5, 2, 2, 1), day(TRIAL_PER_DAY_MAX_LENGTH + 1, 3, 2)]);
+    assert.equal(tooLong.perDay, null);
+    assert.equal(tooLong.trialLengthDays, 15);
+    assert.deepEqual(tooLong.maturedConversion, { trials: 2, paid: 1, share: 0.5 });
+  });
+
+  it('draws no days, states no length and no share, when the lengths differ or one is not known', () => {
+    for (const rows of [
+      [length(3, 5, 2, 2, 1), length(7, 5, 2, 2, 1)],
+      [length(3, 5, 2, 2, 1), length(null, 5, 2, 0, 0)],
+      [length(null, 5, 2, 0, 0)],
+    ]) {
+      const result = report(rows);
+      assert.equal(result.trialLengthDays, null);
+      assert.equal(result.perDay, null);
+      assert.equal(result.maturedConversion, null);
+    }
+  });
+
+  it('has a share of null while no trial is old enough', () => {
+    const result = report([length(3, 4, 1, 0, 0)]);
+    assert.deepEqual(result.maturedConversion, { trials: 0, paid: 0, share: null });
+  });
+
+  it('carries nothing when nobody took a trial, or the statement was not run', () => {
+    assert.deepEqual([report([]).trialLengthDays, report([]).perDay, report([]).maturedConversion], [null, null, null]);
+    const without = assembleTrialConversion(window, { summary: undefined, plans: [], revenue: [], firstPayment: undefined }, FX);
+    assert.equal(without.perDay, null);
+    assert.equal(TRIAL_MATURITY_LENGTHS, 2);
   });
 });

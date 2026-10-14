@@ -9,12 +9,13 @@
  */
 import { type JSX, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
+import type { TFunction } from 'i18next'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { ArrowRightLeft, Clock, DollarSign, Hourglass, Tags, Users } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 
-import { type DaysToPayCount, getTrialConversion, type TrialConversionReport } from './analytics-api'
+import { getTrialConversion, type TrialConversionReport } from './analytics-api'
 import {
   ChartCard,
   ChartSkeleton,
@@ -78,7 +79,11 @@ export function ConversionTab({ days, played }: { readonly days: number; readonl
                 })
           }
           icon={<Clock className="size-4 text-muted-foreground" aria-hidden="true" />}
-          buckets={report.firstPayment.buckets}
+          buckets={report.firstPayment.buckets.map((bucket) => ({
+            key: bucket.key,
+            label: t(`analyticsPage.conversion.buckets.${bucket.key}`),
+            users: bucket.users,
+          }))}
           empty={t('analyticsPage.conversion.firstPayment.empty')}
         />
         <DaysCard
@@ -87,9 +92,9 @@ export function ConversionTab({ days, played }: { readonly days: number; readonl
           title={t('analyticsPage.conversion.trialDays.title')}
           info={t('analyticsPage.conversion.trialDays.info')}
           rule="money"
-          description={t('analyticsPage.conversion.trialDays.description', { count: report.convertedUsers })}
+          description={trialDaysDescription(t, report)}
           icon={<Hourglass className="size-4 text-muted-foreground" aria-hidden="true" />}
-          buckets={report.daysToConvert}
+          buckets={trialDayRows(t, report)}
           empty={t('analyticsPage.conversion.trialDays.empty')}
         />
         <TopPlansCard report={report} played={played} className="@min-[56rem]:col-span-2 @min-[88rem]:col-span-1" />
@@ -153,6 +158,47 @@ function ConversionKpis({ report }: { readonly report: TrialConversionReport }):
   )
 }
 
+/** A bar of an «elapsed time» card: its key, its words, how many customers. */
+interface DaysRow {
+  readonly key: string
+  readonly label: string
+  readonly users: number
+}
+
+/**
+ * «От пробного до оплаты»: with one known trial length of up to 14 days, a bar for each day of the
+ * trial, then «L+1…2L дней», then «Позже»; else the fixed bins of the report.
+ */
+function trialDayRows(t: TFunction, report: TrialConversionReport): DaysRow[] {
+  const perDay = report.perDay
+  if (perDay === null) {
+    return report.daysToConvert.map((bucket) => ({
+      key: bucket.key,
+      label: t(`analyticsPage.conversion.buckets.${bucket.key}`),
+      users: bucket.users,
+    }))
+  }
+  const length = perDay.trialDays
+  return [
+    ...perDay.days.map((users, index) => ({ key: `day-${index + 1}`, label: t('analyticsPage.conversion.trialDays.day', { count: index + 1 }), users })),
+    { key: 'after', label: t('analyticsPage.conversion.trialDays.after', { from: length + 1, to: length * 2 }), users: perDay.after },
+    { key: 'later', label: t('analyticsPage.conversion.trialDays.later'), users: perDay.later },
+  ]
+}
+
+/** The card's subtitle: who converted, and — when the trial's length is known — the share who paid among the trials old enough to have had the chance. */
+function trialDaysDescription(t: TFunction, report: TrialConversionReport): string {
+  const converted = t('analyticsPage.conversion.trialDays.description', { count: report.convertedUsers })
+  const matured = report.maturedConversion
+  if (matured === null || matured.share === null || report.trialLengthDays === null) return converted
+  return `${converted} ${t('analyticsPage.conversion.trialDays.matured', {
+    share: formatPercent(matured.share),
+    paid: formatCount(matured.paid),
+    trials: formatCount(matured.trials),
+    days: report.trialLengthDays * 2,
+  })}`
+}
+
 function DaysCard({
   id,
   played,
@@ -171,7 +217,7 @@ function DaysCard({
   readonly rule: AnalyticsRule
   readonly description: string
   readonly icon: JSX.Element
-  readonly buckets: readonly DaysToPayCount[]
+  readonly buckets: readonly DaysRow[]
   readonly empty: string
 }): JSX.Element {
   const { t } = useTranslation()
@@ -188,7 +234,7 @@ function DaysCard({
             animate={entrance.animate && entrance.show}
             rows={buckets.map((bucket) => ({
               key: bucket.key,
-              label: t(`analyticsPage.conversion.buckets.${bucket.key}`),
+              label: bucket.label,
               value: bucket.users,
               valueText: formatCount(bucket.users),
               shareText: formatPercent(bucket.users / total),

@@ -207,6 +207,16 @@ export function revenueReport(money: MoneyView = ROUBLES): RevenueReport {
   }
 }
 
+/** The same report for a 3-day trial: each day of the trial, then days 4-6, then later; and the share who paid among the old enough. */
+export function perDayConversionReport(): TrialConversionReport {
+  return {
+    ...conversionReport(),
+    trialLengthDays: 3,
+    perDay: { trialDays: 3, days: [4, 3, 1], after: 2, later: 1 },
+    maturedConversion: { trials: 40, paid: 12, share: 0.3 },
+  }
+}
+
 export function emptyRevenueReport(): RevenueReport {
   const base = revenueReport()
   return {
@@ -247,6 +257,10 @@ export function conversionReport(): TrialConversionReport {
       { key: 'd15_30', users: 1 },
       { key: 'd31_plus', users: 0 },
     ],
+    // Mixed lengths, as far as this fixture goes: the fixed bins are drawn.
+    trialLengthDays: null,
+    perDay: null,
+    maturedConversion: null,
     topConvertedPlans: [
       { plan: 'Pro', planId: 'p1', kind: 'plan', count: 7, percentage: 0.7 },
       { plan: 'Basic', planId: 'p2', kind: 'plan', count: 3, percentage: 0.3 },

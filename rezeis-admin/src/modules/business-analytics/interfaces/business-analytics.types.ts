@@ -533,6 +533,22 @@ export interface DaysToPayCountInterface {
   readonly users: number;
 }
 
+export interface TrialPerDayInterface {
+  readonly trialDays: number;
+  readonly days: readonly number[];
+  readonly after: number;
+  readonly later: number;
+}
+
+export interface MaturedConversionInterface {
+  /** Trial starts of the window that began more than two trial lengths ago. */
+  readonly trials: number;
+  /** Of them, the ones who paid. */
+  readonly paid: number;
+  /** `paid / trials`, or `null` when there are none. */
+  readonly share: number | null;
+}
+
 export interface TrialConversionReport {
   readonly windowDays: number;
   /** The zone the window's days are counted in, as in `AnalyticsPeriodInterface`. */
@@ -549,6 +565,19 @@ export interface TrialConversionReport {
   readonly money: MoneyViewInterface;
   /** Trial grant → first payment after it. */
   readonly daysToConvert: readonly DaysToPayCountInterface[];
+  /**
+   * The length of the free trial, in days, when every trial start of the window has the same
+   * known one; `null` when they differ or it is not known.
+   */
+  readonly trialLengthDays: number | null;
+  /**
+   * The conversions by day of the trial, for a trial of 1 to 14 days: `days[k]` converted in day
+   * `k + 1`, `after` in days `L + 1` to `2L`, `later` after that. `null` otherwise — then the
+   * fixed `daysToConvert` bins are the answer.
+   */
+  readonly perDay: TrialPerDayInterface | null;
+  /** The share who paid among the trials that started more than two trial lengths ago; `null` when the length is not known. */
+  readonly maturedConversion: MaturedConversionInterface | null;
   readonly topConvertedPlans: readonly ConvertedPlanItem[];
   /** Registration → first payment ever, for customers who first paid in the window. */
   readonly firstPayment: {

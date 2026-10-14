@@ -783,4 +783,112 @@ run('business analytics cards on PostgreSQL', { concurrency: false }, () => {
       assert.deepEqual(report.byPlan.map((row) => [row.key, row.days]), [['plan:pro:', null]]);
     });
   });
+
+  // ── «От пробного до оплаты» по дням пробного ─────────────────────────────
+
+  describe('days from the trial to the payment', () => {
+    /** A trial plan whose shortest term is `days` (the one a free trial is granted for), and a longer one beside it. */
+    async function trialPlan(tx: Prisma.TransactionClient, id: string, days: number) {
+      await tx.plan.create({ data: { id, name: `Trial ${id}`, availability: 'TRIAL' } });
+      for (const length of [days * 2, days]) {
+        await tx.planDuration.create({ data: { planId: id, days: length, prices: { create: [{ currency: 'RUB', price: '1' }] } } });
+      }
+    }
+
+    /** A free trial as `grantTrial` writes it: the trial subscription and the ledger's FREE claim. */
+    async function trial(tx: Prisma.TransactionClient, userId: string, plan: string, startedAgo: number, paidAfter?: number) {
+      await customer(tx, userId);
+      const started = daysAgo(startedAgo);
+      const subscription = await tx.subscription.create({
+        data: { userId, isTrial: true, planSnapshot: { id: plan, name: `Trial ${plan}` }, createdAt: started, startedAt: started, expiresAt: plusDays(started, 3) },
+      });
+      await tx.trialClaim.create({
+        data: { userId, planId: plan, subscriptionId: subscription.id, source: 'FREE', status: 'CONSUMED', units: 1, consumedAt: started, createdAt: started },
+      });
+      if (paidAfter !== undefined) {
+        await pay(tx, { userId, purchaseType: 'UPGRADE', createdAt: plusDays(started, paidAfter), planSnapshot: bought(30) });
+      }
+    }
+
+    it('files each conversion under the day of the trial it fell in, then «L+1…2L», then later; and counts who paid among trials old enough', async () => {
+      const report = await onCleanSlate(async (tx, service) => {
+        await trialPlan(tx, 'trial', 3);
+        await trial(tx, 't1', 'trial', 40, 0.5);
+        await trial(tx, 't2', 'trial', 40, 1.2);
+        await trial(tx, 't3', 'trial', 40, 2.9);
+        await trial(tx, 't4', 'trial', 40, 3.5);
+        await trial(tx, 't5', 'trial', 40, 5.9);
+        await trial(tx, 't6', 'trial', 40, 6.5);
+        await trial(tx, 't7', 'trial', 40, 30);
+        await trial(tx, 't8', 'trial', 40);
+        // Too young to have had two trial lengths (6 days): counted in the days, not in the share.
+        await trial(tx, 't9', 'trial', 2);
+        await trial(tx, 't10', 'trial', 5, 1.1);
+        return service.getTrialConversion(90);
+      });
+      assert.equal(report.trialLengthDays, 3);
+      assert.deepEqual(report.perDay, { trialDays: 3, days: [1, 2, 1], after: 2, later: 2 });
+      assert.equal(report.totalTrialUsers, 10);
+      assert.equal(report.convertedUsers, 8);
+      // Started over 6 days ago: t1…t8; paid: all but t8.
+      assert.deepEqual(report.maturedConversion, { trials: 8, paid: 7, share: 7 / 8 });
+      // The fixed bins are still there for a page that wants them.
+      assert.equal(report.daysToConvert.length, 6);
+    });
+
+    it('keeps the fixed bins, and says no length, when the trials of the period have different lengths', async () => {
+      const report = await onCleanSlate(async (tx, service) => {
+        await trialPlan(tx, 'short', 3);
+        await trialPlan(tx, 'long', 7);
+        await trial(tx, 'a', 'short', 20, 1);
+        await trial(tx, 'b', 'long', 20, 2);
+        return service.getTrialConversion(90);
+      });
+      assert.equal(report.trialLengthDays, null);
+      assert.equal(report.perDay, null);
+      assert.equal(report.maturedConversion, null);
+      assert.equal(report.convertedUsers, 2);
+    });
+
+    it('keeps the fixed bins for a trial longer than 14 days, but still states its length and the share over two lengths', async () => {
+      const report = await onCleanSlate(async (tx, service) => {
+        await trialPlan(tx, 'month', 20);
+        // 2L = 40 days: only the first two are old enough.
+        await trial(tx, 'old1', 'month', 60, 5);
+        await trial(tx, 'old2', 'month', 60);
+        await trial(tx, 'young', 'month', 30, 5);
+        return service.getTrialConversion(90);
+      });
+      assert.equal(report.trialLengthDays, 20);
+      assert.equal(report.perDay, null);
+      assert.deepEqual(report.maturedConversion, { trials: 2, paid: 1, share: 0.5 });
+    });
+
+    it('does not guess a length for a trial whose plan has no term left', async () => {
+      const report = await onCleanSlate(async (tx, service) => {
+        await tx.plan.create({ data: { id: 'bare', name: 'Bare', availability: 'TRIAL' } });
+        await trial(tx, 'a', 'bare', 20, 1);
+        return service.getTrialConversion(90);
+      });
+      assert.equal(report.trialLengthDays, null);
+      assert.equal(report.perDay, null);
+    });
+
+    it('has nothing to say when nobody took a trial', async () => {
+      const report = await onCleanSlate((_tx, service) => service.getTrialConversion(90));
+      assert.equal(report.trialLengthDays, null);
+      assert.equal(report.perDay, null);
+      assert.equal(report.maturedConversion, null);
+    });
+
+    it('names the day by the span from the start, not by the calendar: 23 hours is day 1, 25 hours day 2', async () => {
+      const report = await onCleanSlate(async (tx, service) => {
+        await trialPlan(tx, 'trial', 3);
+        await trial(tx, 'a', 'trial', 30, 23 / 24);
+        await trial(tx, 'b', 'trial', 30, 25 / 24);
+        return service.getTrialConversion(90);
+      });
+      assert.deepEqual(report.perDay?.days, [1, 1, 0]);
+    });
+  });
 });

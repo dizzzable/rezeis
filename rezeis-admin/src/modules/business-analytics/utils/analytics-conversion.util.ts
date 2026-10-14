@@ -72,19 +72,31 @@ export type DaysToPayRow = Readonly<Record<DaysToPayBucket, number>> & {
  *     money: that customer is a paying one, their paid trial the first money.
  *     Before 0.9.6.80 the backfill's claim names neither the payment nor the
  *     subscription, and only the payment's plan tells ({@link paidTrialPurchaseSql}).
+ *
+ * THE LENGTH OF A TRIAL is the shortest term of the trial plan the claim names
+ * (`selectGrantableTrialPlan` grants exactly that), read from the plan as it is
+ * now: a claim with no plan of its own (the ledger's backfill) takes its
+ * subscription's. A trial whose plan has since lost every term has no known
+ * length.
  */
 const TRIAL_STARTS = (window: AnalyticsWindowInterface): Prisma.Sql => Prisma.sql`
   "trial_start" AS (
-    SELECT c."user_id", MIN(COALESCE(c."consumed_at", c."created_at")) AS "granted_at"
+    SELECT c."user_id", MIN(COALESCE(c."consumed_at", c."created_at")) AS "granted_at",
+           (ARRAY_AGG(COALESCE(c."plan_id", NULLIF(cs."plan_snapshot"->>'id', '')) ORDER BY COALESCE(c."consumed_at", c."created_at"), c."id"))[1] AS "plan_id"
       FROM "trial_claims" c
+      LEFT JOIN "subscriptions" cs ON cs."id" = c."subscription_id"
      WHERE c."status" = 'CONSUMED'
        AND NOT EXISTS (SELECT 1 FROM "transactions" ct WHERE ct."id" = c."transaction_id" AND ct."amount" > 0)
        AND (c."subscription_id" IS NULL OR NOT ${boughtSubscriptionSql(Prisma.sql`c."subscription_id"`)})
      GROUP BY c."user_id"
   ),
+  "trial_length" AS (
+    SELECT d."plan_id", MIN(d."days") AS "days" FROM "plan_durations" d WHERE d."days" > 0 GROUP BY d."plan_id"
+  ),
   "grant" AS (
-    SELECT s."user_id", s."granted_at"
+    SELECT s."user_id", s."granted_at", l."days" AS "trial_days"
       FROM "trial_start" s
+      LEFT JOIN "trial_length" l ON l."plan_id" = s."plan_id"
      WHERE s."granted_at" >= ${window.start}
        AND NOT EXISTS (
          SELECT 1 FROM "transactions" e
@@ -98,7 +110,7 @@ const TRIAL_STARTS = (window: AnalyticsWindowInterface): Prisma.Sql => Prisma.sq
 const TRIAL_FIRST_PAID = (window: AnalyticsWindowInterface): Prisma.Sql => Prisma.sql`
   ${TRIAL_STARTS(window)},
   "first_paid" AS (
-    SELECT DISTINCT ON (t."user_id") t."user_id", t."created_at", g."granted_at", t."purchase_type", t."plan_snapshot"
+    SELECT DISTINCT ON (t."user_id") t."user_id", t."created_at", g."granted_at", g."trial_days", t."purchase_type", t."plan_snapshot"
       FROM "transactions" t
       JOIN "grant" g ON g."user_id" = t."user_id"
      WHERE ${moneyReceivedSql()} AND t."created_at" >= g."granted_at"
@@ -114,6 +126,58 @@ export function trialSummarySql(window: AnalyticsWindowInterface): Prisma.Sql {
            COUNT(*)::int AS "converted",
            ${daysToPaySql(Prisma.sql`"granted_at"`, Prisma.sql`"created_at"`)}
       FROM "first_paid"`;
+}
+
+/** Trials starting more than this many trial-lengths ago have had time to convert: the base of «Оплатили X %». */
+export const TRIAL_MATURITY_LENGTHS = 2;
+
+/** The per-day layout is used for trials up to this many days long. */
+export const TRIAL_PER_DAY_MAX_LENGTH = 14;
+
+/** Day indexes past this are one: a conversion later than `2 × 14` days is «позже» whatever the length. */
+const TRIAL_DAY_CAP = TRIAL_MATURITY_LENGTHS * TRIAL_PER_DAY_MAX_LENGTH;
+
+export interface TrialPerDaySqlRow {
+  /** `length`: the trial starts of one length (counts); `day`: the conversions of that length, by whole days from the start. */
+  readonly kind: 'length' | 'day';
+  /** The trial's length in days; `null` when it is not known. */
+  readonly trialDays: number | null;
+  /** `day`: whole days from the trial's start to the payment, capped; `length`: 0. */
+  readonly day: number;
+  /** `length`: trial starts; `day`: conversions. */
+  readonly count: number;
+  /** `length`: of those, who paid. */
+  readonly converted: number;
+  /** `length`: trial starts more than {@link TRIAL_MATURITY_LENGTHS} lengths ago. */
+  readonly matured: number;
+  /** `length`: of those, who paid. */
+  readonly maturedPaid: number;
+}
+
+/**
+ * The trial starts of the window by length, with who paid and how many of them
+ * started long enough ago to have had the chance; and the conversions of each
+ * length by whole days since the start. Two small result sets in one statement.
+ */
+export function trialPerDaySql(window: AnalyticsWindowInterface, now: Date): Prisma.Sql {
+  const cap = Prisma.raw(String(TRIAL_DAY_CAP));
+  const lengths = Prisma.raw(String(TRIAL_MATURITY_LENGTHS));
+  return Prisma.sql`
+    WITH ${TRIAL_FIRST_PAID(window)}
+    SELECT 'length' AS "kind", g."trial_days" AS "trialDays", 0 AS "day", COUNT(*)::int AS "count",
+           COUNT(f."user_id")::int AS "converted",
+           COUNT(*) FILTER (WHERE g."trial_days" IS NOT NULL
+                              AND g."granted_at" < ${now}::timestamptz - g."trial_days" * ${lengths} * INTERVAL '1 day')::int AS "matured",
+           COUNT(f."user_id") FILTER (WHERE g."trial_days" IS NOT NULL
+                              AND g."granted_at" < ${now}::timestamptz - g."trial_days" * ${lengths} * INTERVAL '1 day')::int AS "maturedPaid"
+      FROM "grant" g
+      LEFT JOIN "first_paid" f ON f."user_id" = g."user_id"
+     GROUP BY g."trial_days"
+    UNION ALL
+    SELECT 'day', f."trial_days", LEAST(FLOOR(EXTRACT(EPOCH FROM (f."created_at" - f."granted_at")) / 86400), ${cap})::int,
+           COUNT(*)::int, 0, 0, 0
+      FROM "first_paid" f
+     GROUP BY f."trial_days", 3`;
 }
 
 export interface TrialPlanRow {
@@ -191,6 +255,42 @@ function buckets(row: DaysToPayRow | undefined): DaysToPayCountInterface[] {
   return DAYS_TO_PAY_BUCKETS.map((key) => ({ key, users: row?.[key] ?? 0 }));
 }
 
+/**
+ * The trial's own days: when every trial start of the window has the same known
+ * length, and it is up to {@link TRIAL_PER_DAY_MAX_LENGTH} days, each day of the
+ * trial is a bar, then «L+1…2L дней», then «позже». Otherwise — a longer trial,
+ * several lengths, or one not known — the report keeps its fixed bins and says
+ * only the length it knows. `matured` is the share who paid among the trials
+ * that started more than two lengths ago.
+ */
+function assemblePerDay(rows: readonly TrialPerDaySqlRow[]): Pick<TrialConversionReport, 'trialLengthDays' | 'perDay' | 'maturedConversion'> {
+  const lengths = rows.filter((row) => row.kind === 'length');
+  const known = lengths.filter((row) => row.trialDays !== null);
+  const single = lengths.length === 1 && known.length === 1 ? known[0] : undefined;
+  const length = single?.trialDays === null || single?.trialDays === undefined ? null : Number(single.trialDays);
+  if (single === undefined || length === null) {
+    return { trialLengthDays: null, perDay: null, maturedConversion: null };
+  }
+  const maturedTrials = num(single.matured);
+  const maturedConversion = {
+    trials: maturedTrials,
+    paid: num(single.maturedPaid),
+    share: maturedTrials === 0 ? null : num(single.maturedPaid) / maturedTrials,
+  };
+  if (length > TRIAL_PER_DAY_MAX_LENGTH) return { trialLengthDays: length, perDay: null, maturedConversion };
+  const days = Array.from({ length }, () => 0);
+  let after = 0;
+  let later = 0;
+  for (const row of rows) {
+    if (row.kind !== 'day') continue;
+    const day = Number(row.day);
+    if (day < length) days[day] = (days[day] ?? 0) + num(row.count);
+    else if (day < length * 2) after += num(row.count);
+    else later += num(row.count);
+  }
+  return { trialLengthDays: length, perDay: { trialDays: length, days, after, later }, maturedConversion };
+}
+
 export function assembleTrialConversion(
   window: AnalyticsWindowInterface,
   rows: {
@@ -198,6 +298,7 @@ export function assembleTrialConversion(
     readonly plans: readonly TrialPlanRow[];
     readonly revenue: readonly CurrencySumRow[];
     readonly firstPayment: FirstPaymentRow | undefined;
+    readonly perDay?: readonly TrialPerDaySqlRow[];
   },
   fx: FxSnapshot,
 ): TrialConversionReport {
@@ -236,6 +337,7 @@ export function assembleTrialConversion(
     revenueFromConvertedByCurrency: revenue.byCurrency,
     money: view,
     daysToConvert: buckets(rows.summary),
+    ...assemblePerDay(rows.perDay ?? []),
     topConvertedPlans,
     firstPayment: {
       payers: rows.firstPayment?.payers ?? 0,

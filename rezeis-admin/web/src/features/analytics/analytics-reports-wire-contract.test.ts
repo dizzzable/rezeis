@@ -140,6 +140,8 @@ const PAIRS: ReadonlyArray<readonly [server: string, panel: string]> = [
   ['LtvBucketInterface', 'LtvBucket'],
   ['LtvReportInterface', 'LtvReport'],
   ['DaysToPayCountInterface', 'DaysToPayCount'],
+  ['TrialPerDayInterface', 'TrialPerDay'],
+  ['MaturedConversionInterface', 'MaturedConversion'],
   ['TrialConversionReport', 'TrialConversionReport'],
   ['ConvertedPlanItem', 'ConvertedPlanItem'],
   ['SubscriptionByPlanItem', 'SubscriptionByPlanItem'],

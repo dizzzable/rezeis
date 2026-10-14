@@ -26,6 +26,7 @@ import {
   overviewReport,
   paidCohortReport,
   paymentHoursReport,
+  perDayConversionReport,
   revenueReport,
   SUBSCRIPTIONS_BY_PLAN,
   SURFACES,
@@ -274,6 +275,72 @@ describe('the retention tab', () => {
     })
     expect(plain(stats.textContent)).toContain('Медиана499 ₽')
     expect(plain(stats.textContent)).toContain('10 % лучших — от1 490 ₽')
+  })
+})
+
+describe('the days from the trial to the payment', () => {
+  async function card(): Promise<HTMLElement> {
+    renderWithProviders(<AnalyticsPage />)
+    await openTab('conversion')
+    return waitFor(() => {
+      const found = document.querySelector<HTMLElement>('[data-analytics-card="conversion-trial-days"]')
+      if (found === null || found.querySelector('[data-ranked-row]') === null) throw new Error('no trial days card')
+      return found
+    })
+  }
+  const rows = (found: HTMLElement): string[] => [...found.querySelectorAll('[data-ranked-row]')].map((row) => plain(row.textContent))
+
+  it('keeps the fixed bins when the trials have different lengths', async () => {
+    const found = await card()
+    expect([...found.querySelectorAll('[data-ranked-row]')].map((row) => row.getAttribute('data-ranked-row'))).toEqual(['d0', 'd1_3', 'd4_7', 'd8_14', 'd15_30', 'd31_plus'])
+    expect(rows(found)[0]).toContain('В первые сутки')
+    expect(found.querySelector('[data-ranked-row="day-1"]')).toBeNull()
+    expect(plain(found.textContent)).not.toContain('Оплатили')
+  })
+
+  it('draws each day of a short trial, then the span to twice its length, then «Позже»', async () => {
+    api.getTrialConversion.mockResolvedValue(perDayConversionReport())
+    const found = await card()
+    expect([...found.querySelectorAll('[data-ranked-row]')].map((row) => row.getAttribute('data-ranked-row'))).toEqual(['day-1', 'day-2', 'day-3', 'after', 'later'])
+    expect([...found.querySelectorAll('[data-ranked-row] .break-words')].map((label) => plain(label.textContent))).toEqual(['День 1', 'День 2', 'День 3', '4–6 дней', 'Позже'])
+    // 4 + 3 + 1 + 2 + 1 customers: day 1 is 4 of 11.
+    expect(plain(found.querySelector('[data-ranked-row="day-1"]')?.textContent)).toContain('4')
+    expect(plain(found.querySelector('[data-ranked-row="day-1"]')?.textContent)).toContain('36 %')
+  })
+
+  it('states the share who paid among the trials old enough, in the description', async () => {
+    api.getTrialConversion.mockResolvedValue(perDayConversionReport())
+    const found = await card()
+    expect(plain(found.textContent)).toContain('Оплатили 30 % взявших пробный: 12 из 40 (только пробные, начатые больше 6 дн. назад).')
+  })
+
+  it('says nothing about the share when the trial’s length is not known', async () => {
+    api.getTrialConversion.mockResolvedValue({ ...perDayConversionReport(), trialLengthDays: null, perDay: null, maturedConversion: null })
+    const found = await card()
+    expect(plain(found.textContent)).not.toContain('взявших пробный')
+  })
+
+  it('states the share, and keeps the fixed bins, for a trial longer than 14 days', async () => {
+    api.getTrialConversion.mockResolvedValue({ ...perDayConversionReport(), trialLengthDays: 20, perDay: null, maturedConversion: { trials: 10, paid: 4, share: 0.4 } })
+    const found = await card()
+    expect(found.querySelector('[data-ranked-row="d0"]')).not.toBeNull()
+    expect(plain(found.textContent)).toContain('Оплатили 40 % взявших пробный: 4 из 10 (только пробные, начатые больше 40 дн. назад).')
+  })
+
+  it('does not print the share when no trial is old enough yet', async () => {
+    api.getTrialConversion.mockResolvedValue({ ...perDayConversionReport(), maturedConversion: { trials: 0, paid: 0, share: null } })
+    const found = await card()
+    expect(plain(found.textContent)).not.toContain('взявших пробный')
+  })
+
+  it('explains in the (i) when each day is shown and what the length of a trial is taken from', async () => {
+    const user = userEvent.setup()
+    renderWithProviders(<AnalyticsPage />)
+    await openTab('conversion')
+    await user.hover(await screen.findByRole('button', { name: i18n.t('analyticsPage.common.aboutLabel', { title: 'От пробного до оплаты' }) }))
+    const tip = await screen.findByRole('tooltip')
+    expect(tip).toHaveTextContent('одинаковая длина, не больше 14 дней')
+    expect(tip).toHaveTextContent('самый короткий срок тарифа пробного периода')
   })
 })
 

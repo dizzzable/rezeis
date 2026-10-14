@@ -434,6 +434,22 @@ export interface ConvertedPlanItem {
   percentage: number
 }
 
+export interface TrialPerDay {
+  trialDays: number
+  days: readonly number[]
+  after: number
+  later: number
+}
+
+export interface MaturedConversion {
+  /** Trial starts of the window that began more than two trial lengths ago. */
+  trials: number
+  /** Of them, the ones who paid. */
+  paid: number
+  /** `paid / trials`, or `null` when there are none. */
+  share: number | null
+}
+
 export interface TrialConversionReport {
   windowDays: number
   timeZone: string
@@ -447,6 +463,19 @@ export interface TrialConversionReport {
   revenueFromConvertedByCurrency: readonly CurrencyAmount[]
   money: MoneyView
   daysToConvert: readonly DaysToPayCount[]
+  /**
+   * The length of the free trial, in days, when every trial start of the window has the same
+   * known one; `null` when they differ or it is not known.
+   */
+  trialLengthDays: number | null
+  /**
+   * The conversions by day of the trial, for a trial of 1 to 14 days: `days[k]` converted in day
+   * `k + 1`, `after` in days `L + 1` to `2L`, `later` after that. `null` otherwise — then the
+   * fixed `daysToConvert` bins are the answer.
+   */
+  perDay: TrialPerDay | null
+  /** The share who paid among the trials that started more than two trial lengths ago; `null` when the length is not known. */
+  maturedConversion: MaturedConversion | null
   topConvertedPlans: readonly ConvertedPlanItem[]
   firstPayment: {
     readonly payers: number;
