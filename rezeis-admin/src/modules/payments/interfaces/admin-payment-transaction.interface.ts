@@ -52,4 +52,11 @@ export interface AdminPaymentTransactionListItemInterface extends AdminPaymentTr
    * every other payment.
    */
   readonly conversionWithheld: WithheldConversionMark | null;
+  /**
+   * Set for the plan an Antilopay SBP subscription granted for the delay of its
+   * first charge («Отсрочка первого списания по СБП»): COMPLETED and delivered,
+   * for 0, because no money moved — the first charge comes later as a payment
+   * of its own. Null for every other payment.
+   */
+  readonly delayGrant: { readonly days: number; readonly originalAmount: string } | null;
 }

@@ -28,6 +28,7 @@ import { WebhookReplayControl } from './webhook-replay-control'
 import { PermissionRequiredNotice } from './permission-required-notice'
 import { paymentsRoutePermissions, useRouteAccess } from './payments-route-permissions'
 import { PaymentDetailsSheet } from './payment-details-sheet'
+import { DelayGrantBadge } from './delay-grant'
 import { WithheldBadge } from './withheld-conversion'
 import {
   GATEWAY_LABELS,
@@ -561,6 +562,9 @@ function TransactionsTab({
                         {/* COMPLETED yet applied to nothing: without the mark
                             this row reads as an ordinary sale. */}
                         {tx.conversionWithheld ? <WithheldBadge mark={tx.conversionWithheld} /> : null}
+                        {/* COMPLETED for 0 because the first SBP charge waits:
+                            without the mark this row reads as a free purchase. */}
+                        {tx.delayGrant ? <DelayGrantBadge grant={tx.delayGrant} /> : null}
                       </div>
                     </TableCell>
                     <TableCell className="text-xs">{gatewayLabel(tx.gatewayType, t)}</TableCell>

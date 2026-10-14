@@ -39,6 +39,18 @@ export interface TransactionRow {
    * absent from a server older than the mark.
    */
   readonly conversionWithheld?: WithheldConversion | null
+  /**
+   * Set for the plan an Antilopay SBP subscription granted for the delay of its
+   * first charge: COMPLETED for 0, because no money moved. Null for every other
+   * payment; absent from a server older than the delay.
+   */
+  readonly delayGrant?: DelayGrant | null
+}
+
+/** `delayGrant` on the server: the days given, and the sum the first charge will be. */
+export interface DelayGrant {
+  readonly days: number
+  readonly originalAmount: string
 }
 
 /** `WithheldConversionMark` on the server. */

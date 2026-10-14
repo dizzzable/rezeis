@@ -477,6 +477,12 @@ export const ru = {
   // `addResourceBundle`): kept out of the core dictionary, which every page
   // loads before its first paint.
   paymentsPage: {
+    // Тариф, выданный на время отсрочки первого списания по СБП (Antilopay):
+    // платёж на 0, потому что деньги не двигались.
+    delayGrant: {
+      badge: 'Отсрочка автосписания',
+      hint: 'Тариф выдан на {{days}} дн. без оплаты: у подписки по СБП в Antilopay стоит «Отсрочка первого списания». Денег по этому платежу не списано. Первое списание {{amount}} ₽ придёт позже отдельным платежом.',
+    },
     // «Отметить возврат» for a payment of a gateway the panel does not refund
     // itself. The same words are in `userDetailPanel.providerRefund` (the user
     // card's bundle): one dialog on two pages, and a test holds them equal.

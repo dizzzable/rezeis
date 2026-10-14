@@ -42,6 +42,7 @@ import { PermissionRequiredNotice } from './permission-required-notice'
 import { paymentsRoutePermissions, useRouteAccess } from './payments-route-permissions'
 import { ProviderRefundSection } from './provider-refund'
 import { WebhookReplayControl } from './webhook-replay-control'
+import { DelayGrantBadge } from './delay-grant'
 import { WithheldBadge, WithheldConversionSection } from './withheld-conversion'
 import { clientPaymentsHref, subscriptionPaymentsHref } from './payments-filters'
 import {
@@ -105,6 +106,7 @@ export function PaymentDetailsSheet({ reference, seed, onClose, onShowMatches }:
               </Badge>
             )}
             {transaction?.conversionWithheld ? <WithheldBadge mark={transaction.conversionWithheld} /> : null}
+            {transaction?.delayGrant ? <DelayGrantBadge grant={transaction.delayGrant} /> : null}
           </SheetTitle>
           <SheetDescription className="break-all font-mono text-xs">
             {transaction !== undefined ? formatAmount(transaction) : (reference ?? '')}

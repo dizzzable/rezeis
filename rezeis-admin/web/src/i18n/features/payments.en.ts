@@ -459,6 +459,12 @@ export const en = {
   // `addResourceBundle`): kept out of the core dictionary, which every page
   // loads before its first paint.
   paymentsPage: {
+    // The plan granted for the delay of an SBP subscription's first charge
+    // (Antilopay): a payment for 0, because no money moved.
+    delayGrant: {
+      badge: 'Autopay delay',
+      hint: 'The plan was granted for {{days}} days unpaid: this Antilopay SBP subscription has a "Delay of the first SBP charge". No money was taken for this payment. The first charge of {{amount}} ₽ comes later, as a payment of its own.',
+    },
     // «Отметить возврат» for a payment of a gateway the panel does not refund
     // itself. The same words are in `userDetailPanel.providerRefund` (the user
     // card's bundle): one dialog on two pages, and a test holds them equal.

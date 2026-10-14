@@ -29,6 +29,7 @@ import {
   AdminPaymentTransactionInterface,
   AdminPaymentTransactionListItemInterface,
 } from '../interfaces/admin-payment-transaction.interface';
+import { readDelayGrant } from '../utils/antilopay-delay-grant.util';
 import type { AntilopayDelay } from '../utils/antilopay-recurrent.util';
 import {
   autopayNotAvailable,
@@ -200,6 +201,7 @@ export class PaymentsTransactionsService {
         fulfilledAt: tx.fulfilledAt?.toISOString() ?? null,
         lineItemSubscriptionIds: [...new Set(tx.items.map((item) => item.subscriptionId))],
         conversionWithheld: readWithheldConversion(tx.gatewayData),
+        delayGrant: readDelayGrantMark(tx.gatewayData),
       })),
       total,
     };
@@ -644,6 +646,12 @@ export class PaymentsTransactionsService {
       });
     });
   }
+}
+
+/** What the payments list says of a delay grant: the days given and the sum the first charge will be. */
+function readDelayGrantMark(gatewayData: Prisma.JsonValue | null): { readonly days: number; readonly originalAmount: string } | null {
+  const mark = readDelayGrant(gatewayData);
+  return mark === null ? null : { days: mark.days, originalAmount: mark.originalAmount };
 }
 
 function mapAdminPaymentTransaction(
