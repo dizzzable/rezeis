@@ -429,7 +429,10 @@ describe('a support reply to the customer — and so its operator copy', () => {
     const { service, created } = support(null);
     await service.notifyAdminReply({ ticketId: 't-1', subject: TYPED, user: { id: 'user-1', language: 'ru' } });
 
-    assert.ok((created[0]?.preRenderedText ?? '').includes(`«${CARRIED}»`), created[0]?.preRenderedText);
+    assert.ok(
+      (created[0]?.preRenderedText ?? '').includes(`«${CARRIED}»`),
+      created[0]?.preRenderedText ?? 'no pre-rendered text was created',
+    );
   });
 
   it('reaches the lock screen as typed: the push reads the references', async () => {

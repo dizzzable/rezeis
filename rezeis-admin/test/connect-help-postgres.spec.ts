@@ -1259,7 +1259,10 @@ run('«Помощь с подключением» on real rows', () => {
       const mine = new Set(decided);
       const seen: string[] = [];
       let cursor: string | undefined;
-      let previous: string | null = null;
+      // `as`, not a bare `null`: @types/node 26 gave `assert.ok` a second overload, and with
+      // the initial `null` TypeScript narrows `previous` to `null` for the whole loop, then
+      // calls it `never` at the comparison below.
+      let previous: string | null = null as string | null;
       for (let page = 0; page < 200 && seen.length < 3; page += 1) {
         const result = await status.log({ cursor, limit: 2, outcome: 'bot' });
         for (const item of result.items) {
