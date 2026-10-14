@@ -237,4 +237,150 @@ run('business analytics cards on PostgreSQL', { concurrency: false }, () => {
       assert.equal(row.retentionByMonth.every((cell) => cell === null), true);
     });
   });
+
+  // ── «Автоплатёж» ─────────────────────────────────────────────────────────
+
+  describe('autopay', () => {
+    /** A saved ЮKassa method bound `bound` days ago; `updatedAgo` is the day of its last write. */
+    async function method(
+      tx: Prisma.TransactionClient,
+      userId: string,
+      id: string,
+      options: { readonly bound: number; readonly enabled?: boolean; readonly updatedAgo?: number; readonly unboundAgo?: number },
+    ) {
+      await tx.savedPaymentMethod.create({
+        data: {
+          id,
+          userId,
+          gatewayType: 'YOOKASSA',
+          providerMethodId: `pm-${id}`,
+          methodType: 'bank_card',
+          autopayEnabled: options.enabled ?? true,
+          isActive: options.unboundAgo === undefined,
+          unboundAt: options.unboundAgo === undefined ? null : daysAgo(options.unboundAgo),
+          createdAt: daysAgo(options.bound),
+        },
+      });
+      await tx.$executeRaw`UPDATE "saved_payment_methods" SET "updated_at" = ${daysAgo(options.updatedAgo ?? options.bound)} WHERE "id" = ${id}`;
+    }
+
+    async function toggle(tx: Prisma.TransactionClient, methodId: string, enabled: boolean, ago: number) {
+      await tx.adminAuditLog.create({
+        data: {
+          action: 'event.payment.method_autopay_updated',
+          metadata: { savedPaymentMethodId: methodId, autopayEnabled: enabled },
+          createdAt: daysAgo(ago),
+        },
+      });
+    }
+
+    async function providerSubscription(
+      tx: Prisma.TransactionClient,
+      userId: string,
+      id: string,
+      options: { readonly created: number; readonly cancelled?: number; readonly status?: 'ACTIVE' | 'CANCELLED' | 'FAILED' | 'PENDING'; readonly charges?: number },
+    ) {
+      await tx.providerSubscription.create({
+        data: {
+          userId,
+          gatewayType: 'PLATEGA',
+          providerSubscriptionId: id,
+          status: options.status ?? (options.cancelled === undefined ? 'ACTIVE' : 'CANCELLED'),
+          planId: 'pro',
+          durationDays: 30,
+          amount: '100',
+          currency: 'RUB',
+          intervalUnit: 'month',
+          intervalCount: 1,
+          firstTransactionId: `first-${id}`,
+          appliedChargeCount: options.charges ?? 1,
+          cancelledAt: options.cancelled === undefined ? null : daysAgo(options.cancelled),
+          consentVersion: 'v1',
+          createdAt: daysAgo(options.created),
+        },
+      });
+    }
+
+    it('splits ended periods by whether autopay was on at their end, and by what the client did next', async () => {
+      const report = await onCleanSlate(async (tx, service) => {
+        for (const id of ['u1', 'u2', 'u3', 'u4', 'u5', 'u6', 'u7', 'u8', 'u9', 'u10']) await customer(tx, id);
+        await tx.user.update({ where: { id: 'u8' }, data: { isBlocked: true } });
+        // u1: autopay on throughout. Renews 5 days early, then does not come back.
+        await method(tx, 'u1', 'm1', { bound: 200 });
+        await pay(tx, { userId: 'u1', createdAt: daysAgo(100), planSnapshot: bought(30) });
+        await pay(tx, { userId: 'u1', purchaseType: 'RENEW', createdAt: daysAgo(75), planSnapshot: bought(30) });
+        // u2: autopay switched off 20 days ago (no audit row left): it was on when the period ended. Back 2 days after.
+        await method(tx, 'u2', 'm2', { bound: 200, enabled: false, updatedAgo: 20 });
+        await pay(tx, { userId: 'u2', createdAt: daysAgo(90), planSnapshot: bought(30) });
+        await pay(tx, { userId: 'u2', purchaseType: 'RENEW', createdAt: daysAgo(58), planSnapshot: bought(30) });
+        // u3: no autopay. Back 15 days after.
+        await pay(tx, { userId: 'u3', createdAt: daysAgo(100), planSnapshot: bought(30) });
+        await pay(tx, { userId: 'u3', purchaseType: 'RENEW', createdAt: daysAgo(55), planSnapshot: bought(30) });
+        // u4: no autopay, never back.
+        await pay(tx, { userId: 'u4', createdAt: daysAgo(110), planSnapshot: bought(30) });
+        // u5: a provider subscription, cancelled after the period ended. Never back.
+        await providerSubscription(tx, 'u5', 'ps5', { created: 150, cancelled: 50 });
+        await pay(tx, { userId: 'u5', createdAt: daysAgo(100), planSnapshot: bought(30) });
+        // u6: a provider subscription cancelled BEFORE the period ended. Back 20 days after.
+        await providerSubscription(tx, 'u6', 'ps6', { created: 150, cancelled: 75 });
+        await pay(tx, { userId: 'u6', createdAt: daysAgo(100), planSnapshot: bought(30) });
+        await pay(tx, { userId: 'u6', purchaseType: 'RENEW', createdAt: daysAgo(50), planSnapshot: bought(30) });
+        // u7: the card is on today, but the audit log says it was off from day 95 to day 65 — the period ended at day 70.
+        await method(tx, 'u7', 'm7', { bound: 200, enabled: true, updatedAgo: 65 });
+        await toggle(tx, 'm7', false, 95);
+        await toggle(tx, 'm7', true, 65);
+        await pay(tx, { userId: 'u7', createdAt: daysAgo(100), planSnapshot: bought(30) });
+        // u8: blocked. u9: periods ended 10 and 150 days ago. u10: a lifetime never ends.
+        await pay(tx, { userId: 'u8', createdAt: daysAgo(100), planSnapshot: bought(30) });
+        await pay(tx, { userId: 'u9', createdAt: daysAgo(40), planSnapshot: bought(30) });
+        await pay(tx, { userId: 'u9', purchaseType: 'RENEW', createdAt: daysAgo(180), planSnapshot: bought(30) });
+        await pay(tx, { userId: 'u10', createdAt: daysAgo(100), planSnapshot: bought(-1) });
+        return service.getAutopayReport();
+      });
+      assert.deepEqual(report.withAutopayPeriods, { early: 1, firstDays: 1, later: 0, gone: 2 });
+      assert.deepEqual(report.withoutAutopayPeriods, { early: 0, firstDays: 0, later: 2, gone: 2 });
+      assert.deepEqual([report.fromDaysAgo, report.toDaysAgo, report.firstDays, report.laterDays], [120, 30, 3, 30]);
+    });
+
+    it('counts, for the header, the clients with a paid period in force and how many of them have autopay on now', async () => {
+      const report = await onCleanSlate(async (tx, service) => {
+        for (const id of ['on', 'off', 'unbound', 'provider', 'lifetime', 'lapsed', 'blocked', 'cancelled']) await customer(tx, id);
+        await tx.user.update({ where: { id: 'blocked' }, data: { isBlocked: true } });
+        await method(tx, 'on', 'mon', { bound: 100 });
+        await method(tx, 'unbound', 'mun', { bound: 100, unboundAgo: 3 });
+        await method(tx, 'blocked', 'mbl', { bound: 100 });
+        await providerSubscription(tx, 'provider', 'psp', { created: 20 });
+        await providerSubscription(tx, 'cancelled', 'psc', { created: 20, cancelled: 2 });
+        for (const id of ['on', 'off', 'unbound', 'provider', 'blocked', 'cancelled']) {
+          await pay(tx, { userId: id, createdAt: daysAgo(10), planSnapshot: bought(30) });
+        }
+        await pay(tx, { userId: 'lifetime', createdAt: daysAgo(10), planSnapshot: bought(-1) });
+        await pay(tx, { userId: 'lapsed', createdAt: daysAgo(60), planSnapshot: bought(30) });
+        return service.getAutopayReport();
+      });
+      // on, off, unbound, provider, lifetime, cancelled — the blocked and the lapsed are not paying clients.
+      assert.equal(report.payingClients, 6);
+      // on (a card), provider (a subscription). unbound and cancelled ended theirs.
+      assert.equal(report.withAutopay, 2);
+    });
+
+    it('answers with zeroes when nobody has paid', async () => {
+      const report = await onCleanSlate((_tx, service) => service.getAutopayReport());
+      assert.equal(report.payingClients, 0);
+      assert.equal(report.withAutopay, 0);
+      assert.deepEqual(report.withAutopayPeriods, { early: 0, firstDays: 0, later: 0, gone: 0 });
+      assert.deepEqual(report.withoutAutopayPeriods, { early: 0, firstDays: 0, later: 0, gone: 0 });
+    });
+
+    it('does not count a provider subscription the payer never confirmed', async () => {
+      const report = await onCleanSlate(async (tx, service) => {
+        await customer(tx, 'pending');
+        await providerSubscription(tx, 'pending', 'psx', { created: 150, status: 'FAILED', charges: 0 });
+        await pay(tx, { userId: 'pending', createdAt: daysAgo(100), planSnapshot: bought(30) });
+        return service.getAutopayReport();
+      });
+      assert.deepEqual(report.withoutAutopayPeriods, { early: 0, firstDays: 0, later: 0, gone: 1 });
+      assert.deepEqual(report.withAutopayPeriods, { early: 0, firstDays: 0, later: 0, gone: 0 });
+    });
+  });
 });

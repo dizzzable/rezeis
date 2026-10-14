@@ -6,6 +6,7 @@
 import type {
   AdvancedAnalyticsReport,
   AnalyticsPeriod,
+  AutopayReport,
   CohortRow,
   ExpiringReport,
   LtvReport,
@@ -289,6 +290,21 @@ export function paidCohortReport(): PaidCohortReport {
   }
 }
 
+/** Forty per cent of the paying clients have autopay; the ones with it renew before the end far more often. */
+export function autopayReport(): AutopayReport {
+  return {
+    payingClients: 200,
+    withAutopay: 80,
+    withAutopayPeriods: { early: 60, firstDays: 6, later: 3, gone: 1 },
+    withoutAutopayPeriods: { early: 20, firstDays: 10, later: 30, gone: 40 },
+    fromDaysAgo: 120,
+    toDaysAgo: 30,
+    firstDays: 3,
+    laterDays: 30,
+    generatedAt: '2026-09-18T12:00:00.000Z',
+  }
+}
+
 /**
  * The newer cards' reports for a page test that has no opinion about them: every
  * query the tabs make answers, so none shows its error state or a stray unmocked
@@ -296,8 +312,10 @@ export function paidCohortReport(): PaidCohortReport {
  */
 export function installNewCardMocks(api: {
   readonly getPaidCohorts: { mockResolvedValue: (value: PaidCohortReport) => unknown }
+  readonly getAutopayReport: { mockResolvedValue: (value: AutopayReport) => unknown }
 }): void {
   api.getPaidCohorts.mockResolvedValue(paidCohortReport())
+  api.getAutopayReport.mockResolvedValue(autopayReport())
 }
 
 export function ltvReport(): LtvReport {

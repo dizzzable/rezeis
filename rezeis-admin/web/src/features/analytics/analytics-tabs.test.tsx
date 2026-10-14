@@ -15,6 +15,7 @@ import { installIntersectionObserver, renderWithProviders, type IntersectionObse
 
 import { ACCENT, currencyColor, funnelColor, heatColor, OTHER_COLOR } from './analytics-palette'
 import {
+  autopayReport,
   COHORTS,
   installNewCardMocks,
   conversionReport,
@@ -150,6 +151,70 @@ describe('the retention tab', () => {
     // 50 % is the strongest cell of the table: the cap of 80 %.
     expect(cells[0]?.style.backgroundColor).toBe(heatColor(1))
     expect(cells[1]?.style.backgroundColor).toBe(heatColor(0.5))
+  })
+
+  it('states the share of paying clients with autopay, and what became of the ended periods in each group', async () => {
+    renderWithProviders(<AnalyticsPage />)
+    await openTab('retention')
+    const card = await waitFor(() => {
+      const found = document.querySelector<HTMLElement>('[data-analytics-card="retention-autopay"]')
+      if (found === null || found.querySelector('[data-autopay]') === null) throw new Error('no autopay card')
+      return found
+    })
+    expect(plain(card.querySelector('[data-autopay-share]')?.textContent)).toBe('40 %платящих клиентов с автоплатежом: 80 из 200')
+    const outcomes = (group: string): string[] =>
+      [...card.querySelectorAll(`[data-autopay-group="${group}"] [data-autopay-outcome]`)].map((row) => plain(row.textContent))
+    // 70 periods ended with autopay on, 100 without.
+    expect(outcomes('with')).toEqual([
+      'Продлили до окончания86 % 60',
+      'В первые 3 дня после8,6 % 6',
+      'Через 4–30 дней4,3 % 3',
+      'Не вернулись за 30 дней1,4 % 1',
+    ])
+    expect(outcomes('without')).toEqual([
+      'Продлили до окончания20 % 20',
+      'В первые 3 дня после10 % 10',
+      'Через 4–30 дней30 % 30',
+      'Не вернулись за 30 дней40 % 40',
+    ])
+    expect(plain(card.querySelector('[data-autopay-group="with"] h4')?.textContent)).toContain('С автоплатежом')
+    expect(plain(card.querySelector('[data-autopay-group="with"] h4')?.textContent)).toContain('70 оплаченных сроков')
+    expect(plain(card.querySelector('[data-autopay-group="without"] h4')?.textContent)).toContain('Без автоплатежа')
+    expect(plain(card.querySelector('[data-autopay-footnote]')?.textContent)).toContain('Автоплатёж учтён на дату конца каждого срока')
+  })
+
+  it('draws each outcome’s bar as its share of the group', async () => {
+    renderWithProviders(<AnalyticsPage />)
+    await openTab('retention')
+    const bars = await waitFor(() => {
+      const found = [...document.querySelectorAll<HTMLElement>('[data-autopay-group="without"] [data-autopay-outcome] [aria-hidden="true"] > div')]
+      if (found.length !== 4) throw new Error('no bars')
+      return found
+    })
+    expect(bars.map((bar) => bar.style.width)).toEqual(['20%', '10%', '30%', '40%'])
+  })
+
+  it('says which history autopay is read from, in the (i), and the window it compares', async () => {
+    const user = userEvent.setup()
+    renderWithProviders(<AnalyticsPage />)
+    await openTab('retention')
+    await user.hover(await screen.findByRole('button', { name: i18n.t('analyticsPage.common.aboutLabel', { title: 'Автоплатёж' }) }))
+    const tip = await screen.findByRole('tooltip')
+    expect(tip).toHaveTextContent('закончились от 30 до 120 дней назад')
+    expect(tip).toHaveTextContent('автоплатёж был включён на момент конца срока, а не сегодня')
+  })
+
+  it('says there is nothing to compare when no period ended in the window and nobody pays', async () => {
+    api.getAutopayReport.mockResolvedValue({
+      ...autopayReport(),
+      payingClients: 0,
+      withAutopay: 0,
+      withAutopayPeriods: { early: 0, firstDays: 0, later: 0, gone: 0 },
+      withoutAutopayPeriods: { early: 0, firstDays: 0, later: 0, gone: 0 },
+    })
+    renderWithProviders(<AnalyticsPage />)
+    await openTab('retention')
+    expect(await screen.findByText('Сравнивать пока нечего: ни один оплаченный срок не закончился от 30 до 120 дней назад.')).toBeTruthy()
   })
 
   it('puts the first-payment cohorts beside the registration ones, columns from month 1, a cell only once its date has come', async () => {

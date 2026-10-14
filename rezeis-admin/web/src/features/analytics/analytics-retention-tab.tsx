@@ -10,16 +10,19 @@
 import { type JSX, useMemo, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery } from '@tanstack/react-query'
-import { CalendarClock, Grid3x3, Layers } from 'lucide-react'
+import { CalendarClock, Grid3x3, Layers, RefreshCw } from 'lucide-react'
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import type { TFunction } from 'i18next'
 
 import { cn } from '@/lib/utils'
 
 import {
+  type AutopayOutcomes,
+  type AutopayReport,
   type CohortRow,
   type ExpiringReport,
   getAnalyticsCohorts,
+  getAutopayReport,
   getExpiring,
   getLtvDistribution,
   getPaidCohorts,
@@ -49,7 +52,7 @@ import {
   useChartEntrance,
 } from './analytics-chart-support'
 import { formatCohortMonth, formatCount, formatDay, formatMoney, formatPercent } from './analytics-format'
-import { ACCENT, EXPIRING_COLORS, heatColor } from './analytics-palette'
+import { ACCENT, EXPIRING_COLORS, GHOST, heatColor } from './analytics-palette'
 
 /** Bottom to top: the subscriptions that need the operator sit on the baseline. */
 const SEGMENTS = ['manual', 'autopay', 'trial'] as const
@@ -57,6 +60,7 @@ type Segment = (typeof SEGMENTS)[number]
 
 export function RetentionTab({ played }: { readonly played: Set<string> }): JSX.Element {
   const expiring = useQuery({ queryKey: ['analytics', 'expiring'], queryFn: getExpiring, staleTime: 60_000 })
+  const autopay = useQuery({ queryKey: ['analytics', 'autopay'], queryFn: getAutopayReport, staleTime: 5 * 60_000 })
   const cohorts = useQuery({ queryKey: ['analytics', 'cohorts'], queryFn: getAnalyticsCohorts, staleTime: 5 * 60_000 })
   const paidCohorts = useQuery({ queryKey: ['analytics', 'paid-cohorts'], queryFn: getPaidCohorts, staleTime: 5 * 60_000 })
   const ltv = useQuery({ queryKey: ['analytics', 'ltv'], queryFn: getLtvDistribution, staleTime: 5 * 60_000 })
@@ -65,6 +69,7 @@ export function RetentionTab({ played }: { readonly played: Set<string> }): JSX.
     <div className="@container space-y-4" data-analytics-tab="retention">
       <ZoneNote fallback={expiring.data?.timeZoneFallback === true} />
       <ExpiringCard query={expiring} played={played} />
+      <AutopayCard query={autopay} />
       <CohortCard query={cohorts} />
       <PaidCohortCard query={paidCohorts} />
       <LtvCard query={ltv} played={played} />
@@ -213,6 +218,118 @@ function ExpiringChart({
           </ResponsiveContainer>
         )}
       </div>
+    </div>
+  )
+}
+
+// ── Autopay ──────────────────────────────────────────────────────────────────
+
+const OUTCOMES = ['early', 'firstDays', 'later', 'gone'] as const
+
+function outcomeTotal(outcomes: AutopayOutcomes): number {
+  return outcomes.early + outcomes.firstDays + outcomes.later + outcomes.gone
+}
+
+/**
+ * «Автоплатёж»: the share of paying clients with autopay on, and — for the paid
+ * periods that ended a month to four months ago — what the client did next,
+ * side by side for the ones that had autopay when the period ended and the ones
+ * that did not.
+ */
+function AutopayCard({
+  query,
+}: {
+  readonly query: { readonly data: AutopayReport | undefined; readonly isLoading: boolean; readonly isError: boolean }
+}): JSX.Element {
+  const { t } = useTranslation()
+  const report = query.data
+  return (
+    <ChartCard
+      id="retention-autopay"
+      title={t('analyticsPage.retention.autopay.title')}
+      icon={<RefreshCw className="size-4 text-muted-foreground" aria-hidden="true" />}
+      info={t('analyticsPage.retention.autopay.info', { from: report?.fromDaysAgo ?? 120, to: report?.toDaysAgo ?? 30 })}
+      description={t('analyticsPage.retention.autopay.description')}
+    >
+      <QueryBody query={query} height="h-64">
+        {(data) =>
+          data.payingClients === 0 && outcomeTotal(data.withAutopayPeriods) + outcomeTotal(data.withoutAutopayPeriods) === 0 ? (
+            <EmptyState className="h-40">{t('analyticsPage.retention.autopay.empty', { from: data.fromDaysAgo, to: data.toDaysAgo })}</EmptyState>
+          ) : (
+            <AutopayBody report={data} />
+          )
+        }
+      </QueryBody>
+    </ChartCard>
+  )
+}
+
+function AutopayBody({ report }: { readonly report: AutopayReport }): JSX.Element {
+  const { t } = useTranslation()
+  const share = report.payingClients === 0 ? 0 : report.withAutopay / report.payingClients
+  const groups = [
+    { key: 'with', label: t('analyticsPage.retention.autopay.withAutopay'), outcomes: report.withAutopayPeriods, color: ACCENT },
+    { key: 'without', label: t('analyticsPage.retention.autopay.withoutAutopay'), outcomes: report.withoutAutopayPeriods, color: GHOST },
+  ] as const
+  const outcomeLabel = (outcome: (typeof OUTCOMES)[number]): string => {
+    switch (outcome) {
+      case 'early':
+        return t('analyticsPage.retention.autopay.early')
+      case 'firstDays':
+        return t('analyticsPage.retention.autopay.firstDays', { count: report.firstDays })
+      case 'later':
+        return t('analyticsPage.retention.autopay.later', { from: report.firstDays + 1, to: report.laterDays })
+      case 'gone':
+        return t('analyticsPage.retention.autopay.gone', { count: report.laterDays })
+    }
+  }
+  return (
+    <div className="space-y-4" data-autopay="">
+      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1" data-autopay-share="">
+        <span className="text-3xl font-semibold tabular-nums">{formatPercent(share)}</span>
+        <span className="text-sm text-muted-foreground">
+          {t('analyticsPage.retention.autopay.shareOf', { with: formatCount(report.withAutopay), total: formatCount(report.payingClients) })}
+        </span>
+      </div>
+      <div className="grid gap-x-8 gap-y-5 @min-[40rem]:grid-cols-2">
+        {groups.map((group) => {
+          const total = outcomeTotal(group.outcomes)
+          return (
+            <section key={group.key} aria-label={group.label} data-autopay-group={group.key} className="space-y-2">
+              <h4 className="flex flex-wrap items-baseline justify-between gap-x-2 text-sm font-medium">
+                <span className="flex items-center gap-2">
+                  <span aria-hidden="true" className="size-2.5 shrink-0 rounded-[2px]" style={{ backgroundColor: group.color }} />
+                  {group.label}
+                </span>
+                <span className="text-xs font-normal text-muted-foreground">{t('analyticsPage.retention.autopay.periods', { count: total })}</span>
+              </h4>
+              <ul className="space-y-2">
+                {OUTCOMES.map((outcome) => {
+                  const count = group.outcomes[outcome]
+                  const ratio = total === 0 ? 0 : count / total
+                  return (
+                    <li key={outcome} data-autopay-outcome={outcome}>
+                      <div className="flex items-baseline justify-between gap-3 text-sm">
+                        <span>{outcomeLabel(outcome)}</span>
+                        <span className="tabular-nums">
+                          <span className="font-medium">{total === 0 ? '—' : formatPercent(ratio)}</span>{' '}
+                          <span className="text-xs text-muted-foreground">{formatCount(count)}</span>
+                        </span>
+                      </div>
+                      <div aria-hidden="true" className="mt-1 h-1.5 overflow-hidden rounded-full bg-muted">
+                        <div className="h-full rounded-full" style={{ width: `${Math.round(ratio * 100)}%`, backgroundColor: group.color }} />
+                      </div>
+                    </li>
+                  )
+                })}
+              </ul>
+            </section>
+          )
+        })}
+      </div>
+      <p className="text-xs text-muted-foreground" data-autopay-footnote="">
+        {t('analyticsPage.retention.autopay.footnote')}
+      </p>
     </div>
   )
 }

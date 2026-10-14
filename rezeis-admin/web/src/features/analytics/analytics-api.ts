@@ -245,6 +245,36 @@ export interface CohortRow {
   retentionByMonth: readonly number[]
 }
 
+/** What became of the paid periods of one group (autopay on / off at their end). */
+export interface AutopayOutcomes {
+  /** «Продлили до окончания»: the next payment came before the period ended. */
+  early: number
+  /** «В первые 3 дня после». */
+  firstDays: number
+  /** «Через 4–30 дней». */
+  later: number
+  /** «Не вернулись за 30 дней». */
+  gone: number
+}
+
+export interface AutopayReport {
+  /** Clients with a paid period in force now (blocked owners left out). */
+  payingClients: number
+  /** Of them, the clients with autopay on now. */
+  withAutopay: number
+  /** Paid periods that ended in the window, autopay on at their end. */
+  withAutopayPeriods: AutopayOutcomes
+  /** The same, autopay off at their end. */
+  withoutAutopayPeriods: AutopayOutcomes
+  /** The window: periods that ended between `fromDaysAgo` and `toDaysAgo` days ago. */
+  fromDaysAgo: number
+  toDaysAgo: number
+  /** «В первые N дней после» and «Через N+1…M дней» run to this many days after the end. */
+  firstDays: number
+  laterDays: number
+  generatedAt: string
+}
+
 export interface PaidCohortRow {
   /** `YYYY-MM` — the local month of the cohort's first payment. */
   cohort: string
@@ -382,6 +412,11 @@ export async function getTrialConversion(days: number): Promise<TrialConversionR
 export async function getAnalyticsCohorts(): Promise<readonly CohortRow[]> {
   const response = await api.get('/admin/analytics/cohorts')
   return expectArray<CohortRow>(unwrapPayload(response.data).cohorts)
+}
+
+export async function getAutopayReport(): Promise<AutopayReport> {
+  const response = await api.get('/admin/analytics/autopay')
+  return recordWith(response.data, ['payingClients', 'withAutopay', 'withAutopayPeriods', 'withoutAutopayPeriods']) as unknown as AutopayReport
 }
 
 export async function getPaidCohorts(): Promise<PaidCohortReport> {

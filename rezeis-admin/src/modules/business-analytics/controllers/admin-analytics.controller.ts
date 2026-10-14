@@ -59,6 +59,13 @@ export class AdminAnalyticsController {
     return this.analyticsService.getPaidCohortRetention();
   }
 
+  @Get('admin/analytics/autopay')
+  @RequirePermission('analytics', 'view')
+  @ApiOperation({ summary: 'Share of paying clients with autopay, and what became of paid periods that ended 30-120 days ago with and without it' })
+  public getAutopay() {
+    return this.analyticsService.getAutopayReport();
+  }
+
   @Get('admin/analytics/expiring')
   @RequirePermission('analytics', 'view')
   @ApiOperation({ summary: 'Live subscriptions ending in the coming 30 days, by day and by whether autopay will charge' })

@@ -56,33 +56,37 @@ export const PAID_COVERAGE_GRACE_DAYS = 4;
  */
 export function paidCoverageCtes(): Prisma.Sql {
   return Prisma.sql`
-    "pay_single" AS (
+    -- The conditions on the payment's JSON are computed as columns here and filtered in the next
+    -- step: PostgreSQL guesses a selectivity for a JSON expression, and guessed twice over it
+    -- thought this step held a dozen rows (it holds all of them), then joined it with nested loops.
+    "pay_raw" AS MATERIALIZED (
       SELECT t."user_id", t."id" AS "tx", t."created_at" AS "at", t."subscription_id" AS "sub_id",
-             (t."plan_snapshot"->>'selectedDurationDays')::int AS "days"
+             CASE WHEN t."plan_snapshot"->>'selectedDurationDays' ~ '^(-1|[1-9][0-9]{0,4})$'
+                  THEN (t."plan_snapshot"->>'selectedDurationDays')::int END AS "days",
+             (t."gateway_data"->>'conversionWithheldAt' IS NULL
+              AND NOT (t."purchase_type" = 'ADDITIONAL' AND t."plan_snapshot"->>'snapshotSource' = 'ADDON_PURCHASE')) AS "bought",
+             EXISTS (SELECT 1 FROM "transaction_items" i WHERE i."transaction_id" = t."id") AS "combined"
         FROM "transactions" t
         JOIN "users" u ON u."id" = t."user_id"
        WHERE ${moneyReceivedSql()}
          AND t."created_at" >= u."created_at"
-         AND t."gateway_data"->>'conversionWithheldAt' IS NULL
-         AND NOT (t."purchase_type" = 'ADDITIONAL' AND t."plan_snapshot"->>'snapshotSource' = 'ADDON_PURCHASE')
-         AND NOT EXISTS (SELECT 1 FROM "transaction_items" i WHERE i."transaction_id" = t."id")
-         AND t."plan_snapshot"->>'selectedDurationDays' ~ '^(-1|[1-9][0-9]{0,4})$'
+    ),
+    "pay_single" AS (
+      SELECT r."user_id", r."tx", r."at", r."sub_id", r."days"
+        FROM "pay_raw" r
+       WHERE r."bought" AND NOT r."combined" AND r."days" IS NOT NULL
     ),
     "pay_items" AS (
-      SELECT t."user_id", t."id" AS "tx", t."created_at" AS "at", i."subscription_id" AS "sub_id", i."duration_days" AS "days"
-        FROM "transactions" t
-        JOIN "users" u ON u."id" = t."user_id"
-        JOIN "transaction_items" i ON i."transaction_id" = t."id"
-       WHERE ${moneyReceivedSql()}
-         AND t."created_at" >= u."created_at"
-         AND t."gateway_data"->>'conversionWithheldAt' IS NULL
-         AND (i."duration_days" = -1 OR i."duration_days" > 0)
+      SELECT r."user_id", r."tx", r."at", i."subscription_id" AS "sub_id", i."duration_days" AS "days"
+        FROM "pay_raw" r
+        JOIN "transaction_items" i ON i."transaction_id" = r."tx"
+       WHERE r."bought" AND r."combined" AND (i."duration_days" = -1 OR i."duration_days" > 0)
     ),
-    "pay_line" AS (
+    "pay_line" AS MATERIALIZED (
       SELECT l."user_id", l."tx", l."at", COALESCE(l."sub_id", 'user:' || l."user_id") AS "chain", l."days"
         FROM (SELECT * FROM "pay_single" UNION ALL SELECT * FROM "pay_items") l
     ),
-    "pay_ranked" AS (
+    "pay_ranked" AS MATERIALIZED (
       SELECT l.*, ROW_NUMBER() OVER (PARTITION BY l."chain" ORDER BY l."at", l."tx") AS "rn"
         FROM "pay_line" l
     ),

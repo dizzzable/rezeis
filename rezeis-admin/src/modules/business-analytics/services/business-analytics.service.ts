@@ -6,6 +6,7 @@ import { FxRateService } from '../../fx/fx-rate.service';
 import { SettingsService } from '../../settings/services/settings.service';
 import {
   AdvancedAnalyticsReportInterface,
+  AutopayReportInterface,
   CohortRowInterface,
   ExpiringReportInterface,
   PaidCohortReportInterface,
@@ -46,6 +47,7 @@ import {
   ANALYTICS_DEFAULT_TOP_PAYERS_LIMIT,
   ANALYTICS_ONE_DAY_MS,
 } from '../utils/analytics-date.util';
+import { assembleAutopay, autopaySql, type AutopaySqlRow } from '../utils/analytics-autopay.util';
 import {
   assemblePaidCohorts,
   paidCohortSql,
@@ -286,6 +288,17 @@ export class BusinessAnalyticsService {
       paidCohortSql(zonedMonthStart(now, zone, ANALYTICS_COHORT_MONTHS - 1), zone),
     );
     return assemblePaidCohorts(now, zone, rows);
+  }
+
+  /**
+   * The share of paying clients with autopay on, and what became of the paid
+   * periods that ended 30-120 days ago with and without it. See
+   * `analytics-autopay.util.ts`.
+   */
+  public async getAutopayReport(): Promise<AutopayReportInterface> {
+    const now = new Date();
+    const rows = await this.prismaService.$queryRaw<AutopaySqlRow[]>(autopaySql(now));
+    return assembleAutopay(now, rows);
   }
 
   /** Live subscriptions whose term ends within the coming 30 local days, by day and by what will happen. */

@@ -2,6 +2,13 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import {
+  assembleAutopay,
+  AUTOPAY_FIRST_DAYS,
+  AUTOPAY_LATER_DAYS,
+  AUTOPAY_PERIOD_FROM_DAYS_AGO,
+  AUTOPAY_PERIOD_TO_DAYS_AGO,
+} from '../src/modules/business-analytics/utils/analytics-autopay.util';
+import {
   assemblePaidCohorts,
   PAID_COHORT_OFFSETS,
 } from '../src/modules/business-analytics/utils/analytics-first-payment-cohort.util';
@@ -69,5 +76,41 @@ describe('retention by month of first payment (assembly)', () => {
     // September: month 1 is 1 November + 4 days away from the latest first payment — not yet.
     const september = report.cohorts[10]?.retentionByMonth ?? [];
     assert.equal(september.every((cell) => cell === null), true);
+  });
+});
+
+describe('autopay (assembly)', () => {
+  const NOW = at('2026-10-14T09:00:00Z');
+
+  it('sums the header over both states and files each outcome under its group', () => {
+    const report = assembleAutopay(NOW, [
+      { kind: 'payers', autopay: true, outcome: null, count: 30 },
+      { kind: 'payers', autopay: false, outcome: null, count: 70 },
+      { kind: 'periods', autopay: true, outcome: 'early', count: 50 },
+      { kind: 'periods', autopay: true, outcome: 'firstDays', count: 5 },
+      { kind: 'periods', autopay: true, outcome: 'later', count: 3 },
+      { kind: 'periods', autopay: true, outcome: 'gone', count: 2 },
+      { kind: 'periods', autopay: false, outcome: 'early', count: 10 },
+      { kind: 'periods', autopay: false, outcome: 'gone', count: 40 },
+    ]);
+    assert.equal(report.payingClients, 100);
+    assert.equal(report.withAutopay, 30);
+    assert.deepEqual(report.withAutopayPeriods, { early: 50, firstDays: 5, later: 3, gone: 2 });
+    assert.deepEqual(report.withoutAutopayPeriods, { early: 10, firstDays: 0, later: 0, gone: 40 });
+  });
+
+  it('states the window it compared, from the same constants the SQL uses', () => {
+    const report = assembleAutopay(NOW, []);
+    assert.equal(report.fromDaysAgo, AUTOPAY_PERIOD_FROM_DAYS_AGO);
+    assert.equal(report.toDaysAgo, AUTOPAY_PERIOD_TO_DAYS_AGO);
+    assert.equal(report.firstDays, AUTOPAY_FIRST_DAYS);
+    assert.equal(report.laterDays, AUTOPAY_LATER_DAYS);
+    assert.equal(report.generatedAt, '2026-10-14T09:00:00.000Z');
+    assert.equal(report.payingClients, 0);
+  });
+
+  it('ignores a periods row with no outcome rather than adding it to a group', () => {
+    const report = assembleAutopay(NOW, [{ kind: 'periods', autopay: true, outcome: null, count: 9 }]);
+    assert.deepEqual(report.withAutopayPeriods, { early: 0, firstDays: 0, later: 0, gone: 0 });
   });
 });

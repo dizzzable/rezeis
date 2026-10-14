@@ -25,6 +25,7 @@ import { api } from '@/lib/api'
 import {
   getAnalyticsCohorts,
   getAnalyticsOverview,
+  getAutopayReport,
   getExpiring,
   getLtvDistribution,
   getPaidCohorts,
@@ -34,6 +35,7 @@ import {
   getTrialConversion,
 } from './analytics-api'
 import {
+  autopayReport,
   COHORTS,
   conversionReport,
   expiringReport,
@@ -115,6 +117,8 @@ const PAIRS: ReadonlyArray<readonly [server: string, panel: string]> = [
   ['ExpiringDayInterface', 'ExpiringDay'],
   ['ExpiringReportInterface', 'ExpiringReport'],
   ['CohortRowInterface', 'CohortRow'],
+  ['AutopayOutcomesInterface', 'AutopayOutcomes'],
+  ['AutopayReportInterface', 'AutopayReport'],
   ['PaidCohortRowInterface', 'PaidCohortRow'],
   ['PaidCohortReportInterface', 'PaidCohortReport'],
   ['TopPayerInterface', 'TopPayer'],
@@ -159,6 +163,7 @@ describe('each report is fetched from the route that serves it, and only from an
     ['admin/analytics/revenue', 'getRevenueReport'],
     ['admin/analytics/expiring', 'getExpiring'],
     ['admin/analytics/cohorts-by-first-payment', 'getPaidCohortRetention'],
+    ['admin/analytics/autopay', 'getAutopayReport'],
     ['admin/analytics/trial-conversion', 'getTrialConversion'],
     ['admin/analytics/top-payers', 'getTopPayers'],
     ['admin/analytics/ltv-distribution', 'getLtvDistribution'],
@@ -185,6 +190,7 @@ describe('each report is fetched from the route that serves it, and only from an
       '/admin/analytics/trial-conversion?days=7': conversionReport(),
       '/admin/analytics/cohorts': { cohorts: COHORTS },
       '/admin/analytics/cohorts-by-first-payment': paidCohortReport(),
+      '/admin/analytics/autopay': autopayReport(),
       '/admin/analytics/expiring': expiringReport(),
       '/admin/analytics/top-payers?limit=20': topPayersReport(),
       '/admin/analytics/ltv-distribution': ltvReport(),
@@ -200,11 +206,12 @@ describe('each report is fetched from the route that serves it, and only from an
     await expect(getTrialConversion(7)).resolves.toEqual(conversionReport())
     await expect(getAnalyticsCohorts()).resolves.toEqual(COHORTS)
     await expect(getPaidCohorts()).resolves.toEqual(paidCohortReport())
+    await expect(getAutopayReport()).resolves.toEqual(autopayReport())
     await expect(getExpiring()).resolves.toEqual(expiringReport())
     await expect(getTopPayers(20)).resolves.toEqual(topPayersReport())
     await expect(getLtvDistribution()).resolves.toEqual(ltvReport())
     await expect(getSubscriptionsByPlan()).resolves.toEqual(SUBSCRIPTIONS_BY_PLAN)
-    expect(get).toHaveBeenCalledTimes(9)
+    expect(get).toHaveBeenCalledTimes(10)
   })
 
   it('refuses a body from a panel a release behind rather than draw it half', async () => {

@@ -214,6 +214,36 @@ export interface PaidCohortRowInterface {
   readonly retentionByMonth: readonly (number | null)[];
 }
 
+/** What became of the paid periods of one group (autopay on / off at their end). */
+export interface AutopayOutcomesInterface {
+  /** «Продлили до окончания»: the next payment came before the period ended. */
+  readonly early: number;
+  /** «В первые 3 дня после». */
+  readonly firstDays: number;
+  /** «Через 4–30 дней». */
+  readonly later: number;
+  /** «Не вернулись за 30 дней». */
+  readonly gone: number;
+}
+
+export interface AutopayReportInterface {
+  /** Clients with a paid period in force now (blocked owners left out). */
+  readonly payingClients: number;
+  /** Of them, the clients with autopay on now. */
+  readonly withAutopay: number;
+  /** Paid periods that ended in the window, autopay on at their end. */
+  readonly withAutopayPeriods: AutopayOutcomesInterface;
+  /** The same, autopay off at their end. */
+  readonly withoutAutopayPeriods: AutopayOutcomesInterface;
+  /** The window: periods that ended between `fromDaysAgo` and `toDaysAgo` days ago. */
+  readonly fromDaysAgo: number;
+  readonly toDaysAgo: number;
+  /** «В первые N дней после» and «Через N+1…M дней» run to this many days after the end. */
+  readonly firstDays: number;
+  readonly laterDays: number;
+  readonly generatedAt: string;
+}
+
 export interface PaidCohortReportInterface {
   readonly cohorts: readonly PaidCohortRowInterface[];
   /** Days after a term's end a renewal still counts as the term kept. */
