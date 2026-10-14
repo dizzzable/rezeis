@@ -44,6 +44,13 @@ export class AdminAnalyticsController {
     return this.analyticsService.getRevenueReport(query.days ?? 30);
   }
 
+  @Get('admin/analytics/payment-hours')
+  @RequirePermission('analytics', 'view')
+  @ApiOperation({ summary: 'Payments by weekday and hour in the panel time zone, automatic charges left out' })
+  public getPaymentHours(@Query() query: AnalyticsWindowQueryDto) {
+    return this.analyticsService.getPaymentHours(query.days ?? 30);
+  }
+
   @Get('admin/analytics/discounts')
   @RequirePermission('analytics', 'view')
   @ApiOperation({ summary: 'Discounts of subscription purchases in the window, by size, and whether first-purchase discounts bring repeat buyers' })

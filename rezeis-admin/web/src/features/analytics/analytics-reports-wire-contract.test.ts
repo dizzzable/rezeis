@@ -31,6 +31,7 @@ import {
   getLtvDistribution,
   getPaidCohorts,
   getPaidLtv,
+  getPaymentHours,
   getRevenueReport,
   getSubscriptionsByPlan,
   getTopPayers,
@@ -46,6 +47,7 @@ import {
   ltvReport,
   overviewReport,
   paidCohortReport,
+  paymentHoursReport,
   revenueReport,
   SUBSCRIPTIONS_BY_PLAN,
   topPayersReport,
@@ -121,6 +123,8 @@ const PAIRS: ReadonlyArray<readonly [server: string, panel: string]> = [
   ['ExpiringDayInterface', 'ExpiringDay'],
   ['ExpiringReportInterface', 'ExpiringReport'],
   ['CohortRowInterface', 'CohortRow'],
+  ['PaymentHourInterface', 'PaymentHour'],
+  ['PaymentHoursReportInterface', 'PaymentHoursReport'],
   ['FirstPaymentLtvRowInterface', 'FirstPaymentLtvRow'],
   ['FirstPaymentLtvReportInterface', 'FirstPaymentLtvReport'],
   ['DiscountBucketInterface', 'DiscountBucket'],
@@ -176,6 +180,7 @@ describe('each report is fetched from the route that serves it, and only from an
     ['admin/analytics/autopay', 'getAutopayReport'],
     ['admin/analytics/discounts', 'getDiscountReport'],
     ['admin/analytics/ltv-by-first-payment', 'getPaidLtv'],
+    ['admin/analytics/payment-hours', 'getPaymentHours'],
     ['admin/analytics/trial-conversion', 'getTrialConversion'],
     ['admin/analytics/top-payers', 'getTopPayers'],
     ['admin/analytics/ltv-distribution', 'getLtvDistribution'],
@@ -205,6 +210,7 @@ describe('each report is fetched from the route that serves it, and only from an
       '/admin/analytics/autopay': autopayReport(),
       '/admin/analytics/discounts?days=7': discountReport(),
       '/admin/analytics/ltv-by-first-payment': firstPaymentLtvReport(),
+      '/admin/analytics/payment-hours?days=7': paymentHoursReport(),
       '/admin/analytics/expiring': expiringReport(),
       '/admin/analytics/top-payers?limit=20': topPayersReport(),
       '/admin/analytics/ltv-distribution': ltvReport(),
@@ -223,11 +229,12 @@ describe('each report is fetched from the route that serves it, and only from an
     await expect(getAutopayReport()).resolves.toEqual(autopayReport())
     await expect(getDiscountReport(7)).resolves.toEqual(discountReport())
     await expect(getPaidLtv()).resolves.toEqual(firstPaymentLtvReport())
+    await expect(getPaymentHours(7)).resolves.toEqual(paymentHoursReport())
     await expect(getExpiring()).resolves.toEqual(expiringReport())
     await expect(getTopPayers(20)).resolves.toEqual(topPayersReport())
     await expect(getLtvDistribution()).resolves.toEqual(ltvReport())
     await expect(getSubscriptionsByPlan()).resolves.toEqual(SUBSCRIPTIONS_BY_PLAN)
-    expect(get).toHaveBeenCalledTimes(12)
+    expect(get).toHaveBeenCalledTimes(13)
   })
 
   it('refuses a body from a panel a release behind rather than draw it half', async () => {

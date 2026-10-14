@@ -68,7 +68,7 @@ export function paidCoverageCtes(): Prisma.Sql {
              CASE WHEN t."plan_snapshot"->>'selectedDurationDays' ~ '^(-1|[1-9][0-9]{0,4})$'
                   THEN (t."plan_snapshot"->>'selectedDurationDays')::int END AS "days",
              (t."gateway_data"->>'conversionWithheldAt' IS NULL
-              AND NOT (t."purchase_type" = 'ADDITIONAL' AND t."plan_snapshot"->>'snapshotSource' = 'ADDON_PURCHASE')) AS "bought",
+              AND NOT (t."purchase_type" = 'ADDITIONAL' AND t."plan_snapshot"->>'snapshotSource' IS NOT DISTINCT FROM 'ADDON_PURCHASE')) AS "bought",
              EXISTS (SELECT 1 FROM "transaction_items" i WHERE i."transaction_id" = t."id") AS "combined"
         FROM "transactions" t
         JOIN "users" u ON u."id" = t."user_id"

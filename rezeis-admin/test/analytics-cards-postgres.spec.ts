@@ -177,6 +177,17 @@ run('business analytics cards on PostgreSQL', { concurrency: false }, () => {
       assert.equal(report.cohorts.every((cohort) => cohort.cohortSize === 0), true);
     });
 
+    it('takes an ADDITIONAL purchase of another subscription for time, even when its snapshot names no source', async () => {
+      const report = await onCleanSlate(async (tx, service) => {
+        await customer(tx, 'second');
+        await pay(tx, { userId: 'second', purchaseType: 'ADDITIONAL', createdAt: midMonth(7), planSnapshot: bought(60) });
+        return service.getPaidCohortRetention();
+      });
+      const row = report.cohorts.find((cohort) => cohort.cohortSize > 0);
+      assert.equal(row?.cohortSize, 1);
+      assert.equal(row?.retentionByMonth[1], 1, 'month 2 is inside its 60 days');
+    });
+
     it('counts a combined renewal per subscription, from its lines', async () => {
       const report = await onCleanSlate(async (tx, service) => {
         const first = midMonth(7);
@@ -602,6 +613,76 @@ run('business analytics cards on PostgreSQL', { concurrency: false }, () => {
       const utc = await monthOf('UTC');
       const tokyo = await monthOf('Asia/Tokyo');
       assert.notEqual(utc, tokyo);
+    });
+  });
+
+  // ── «Когда платят» ───────────────────────────────────────────────────────
+
+  describe('when they pay', () => {
+    /** The latest `isoWeekday` (1 = Monday) at least three days ago, at `hourUtc:minute` UTC. */
+    function lastWeekday(isoWeekday: number, hourUtc: number, minute = 0): Date {
+      const day = new Date(Date.now() - 3 * DAY_MS);
+      day.setUTCHours(0, 0, 0, 0);
+      while (((day.getUTCDay() + 6) % 7) + 1 !== isoWeekday) day.setTime(day.getTime() - DAY_MS);
+      return new Date(day.getTime() + hourUtc * 3_600_000 + minute * 60_000);
+    }
+
+    it('counts payments by weekday and hour of the panel zone, and names the busiest hours', async () => {
+      const report = await onCleanSlate(
+        async (tx, service) => {
+          for (const id of ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i']) await customer(tx, id);
+          // Monday 22:30 and 22:45 UTC are Tuesday 01:30 and 01:45 in Moscow: the same cell.
+          await pay(tx, { userId: 'a', createdAt: lastWeekday(1, 22, 30), planSnapshot: bought(30) });
+          await pay(tx, { userId: 'b', createdAt: lastWeekday(1, 22, 45), planSnapshot: bought(30) });
+          await pay(tx, { userId: 'c', createdAt: lastWeekday(5, 15), planSnapshot: bought(30) });
+          // A payment system’s first charge is the payer’s own: counted. An add-on is a payment too.
+          await pay(tx, { userId: 'd', gatewayType: 'PLATEGA', createdAt: lastWeekday(6, 9), planSnapshot: bought(30) });
+          await pay(tx, { userId: 'e', purchaseType: 'ADDITIONAL', createdAt: lastWeekday(4, 6), planSnapshot: bought(30, { snapshotSource: 'ADDON_PURCHASE' }) });
+          // Automatic: the autopay scheduler’s checkout, and the repeat charge of a payment system.
+          await pay(tx, { userId: 'f', createdAt: lastWeekday(3, 12), idempotencyKey: 'auto-renew:sub-1:1700000000000:a1', planSnapshot: bought(30) });
+          await pay(tx, {
+            userId: 'g', gatewayType: 'PLATEGA', purchaseType: 'RENEW', createdAt: lastWeekday(3, 13),
+            planSnapshot: { snapshotSource: 'PROVIDER_SUBSCRIPTION_CHARGE', providerSubscriptionId: 'ps-1', chargeNumber: 2 },
+          });
+          // Not money received, or not in the period.
+          await pay(tx, { userId: 'h', amount: '0', createdAt: lastWeekday(2, 10), planSnapshot: bought(30) });
+          await pay(tx, { userId: 'i', createdAt: daysAgo(60), planSnapshot: bought(30) });
+          return service.getPaymentHours(30);
+        },
+        { timezone: 'Europe/Moscow' },
+      );
+      const at = (weekday: number, hour: number): number => report.cells[(weekday - 1) * 24 + hour] ?? -1;
+      assert.equal(report.cells.length, 168);
+      assert.equal(at(2, 1), 2);
+      assert.equal(at(5, 18), 1);
+      assert.equal(at(6, 12), 1);
+      assert.equal(at(4, 9), 1);
+      assert.equal(report.total, 5);
+      assert.equal(report.automatic, 2);
+      assert.deepEqual(report.topHours, [
+        { hour: 1, payments: 2 },
+        { hour: 9, payments: 1 },
+        { hour: 12, payments: 1 },
+      ]);
+      assert.equal(report.timeZone, 'Europe/Moscow');
+    });
+
+    it('is the same hour in UTC as the clock says there', async () => {
+      const report = await onCleanSlate(async (tx, service) => {
+        await customer(tx, 'a');
+        await pay(tx, { userId: 'a', createdAt: lastWeekday(1, 22, 30), planSnapshot: bought(30) });
+        return service.getPaymentHours(30);
+      });
+      assert.equal(report.cells[22], 1);
+      assert.deepEqual(report.topHours, [{ hour: 22, payments: 1 }]);
+    });
+
+    it('answers with an empty grid when nobody paid', async () => {
+      const report = await onCleanSlate((_tx, service) => service.getPaymentHours(30));
+      assert.equal(report.total, 0);
+      assert.equal(report.automatic, 0);
+      assert.equal(report.cells.every((count) => count === 0), true);
+      assert.deepEqual(report.topHours, []);
     });
   });
 });

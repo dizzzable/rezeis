@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
 import {
@@ -13,7 +15,13 @@ import {
   DISCOUNT_BUCKETS,
   DISCOUNT_REPEAT_AFTER_DAYS,
 } from '../src/modules/business-analytics/utils/analytics-discount.util';
+import { PROVIDER_SUBSCRIPTION_CHARGE } from '../src/modules/payments/utils/refund-autopay.util';
 import { assembleFirstPaymentLtv } from '../src/modules/business-analytics/utils/analytics-first-payment-ltv.util';
+import {
+  assemblePaymentHours,
+  AUTOPAY_IDEMPOTENCY_PREFIX,
+  PAYMENT_HOURS_TOP,
+} from '../src/modules/business-analytics/utils/analytics-payment-hours.util';
 import {
   assemblePaidCohorts,
   PAID_COHORT_OFFSETS,
@@ -215,5 +223,60 @@ describe('value by month of first payment (assembly)', () => {
     const report = assembleFirstPaymentLtv(NOW, UTC_ZONE, ROUBLES, [{ cohort: 'all', clients: 0, mean: null, median: null }]);
     assert.deepEqual([report.clients, report.mean, report.median], [0, null, null]);
     assert.equal(report.timeZone, 'UTC');
+  });
+});
+
+describe('when they pay (assembly)', () => {
+  const NOW = at('2026-10-14T09:00:00Z');
+  const window = planAnalyticsWindow(30, NOW, UTC_ZONE);
+  const cell = (weekday: number, hour: number, payments: number) => ({ kind: 'cell', weekday, hour, payments }) as const;
+
+  it('puts each count at (weekday - 1) * 24 + hour of a Monday-first grid of 168', () => {
+    const report = assemblePaymentHours(window, [cell(1, 0, 3), cell(7, 23, 5), cell(3, 14, 2)]);
+    assert.equal(report.cells.length, 168);
+    assert.equal(report.cells[0], 3);
+    assert.equal(report.cells[6 * 24 + 23], 5);
+    assert.equal(report.cells[2 * 24 + 14], 2);
+    assert.equal(report.total, 10);
+  });
+
+  it('names the busiest hours over all weekdays, busiest first, the earlier hour first on a tie, at most three', () => {
+    const report = assemblePaymentHours(window, [
+      cell(1, 19, 4), cell(2, 19, 4), cell(5, 20, 6), cell(1, 12, 3), cell(2, 9, 3), cell(3, 3, 1),
+    ]);
+    assert.equal(PAYMENT_HOURS_TOP, 3);
+    assert.deepEqual(report.topHours, [
+      { hour: 19, payments: 8 },
+      { hour: 20, payments: 6 },
+      { hour: 9, payments: 3 },
+    ]);
+  });
+
+  it('keeps the automatic charges out of the grid and reports their number', () => {
+    const report = assemblePaymentHours(window, [cell(2, 10, 1), { kind: 'automatic', weekday: 0, hour: 0, payments: 9 }]);
+    assert.equal(report.total, 1);
+    assert.equal(report.automatic, 9);
+    assert.equal(report.cells[0], 0);
+  });
+
+  it('ignores a weekday or an hour outside the grid rather than writing past it', () => {
+    const report = assemblePaymentHours(window, [cell(8, 5, 4), cell(0, 5, 4), cell(2, 24, 4), cell(2, -1, 4)]);
+    assert.equal(report.total, 0);
+    assert.equal(report.cells.length, 168);
+  });
+
+  it('recognises an automatic charge by the very markers its writers use', () => {
+    // The SQL spells both markers out; if a writer renames one, the card would count machine charges as people paying.
+    const autoRenew = readFileSync(join(__dirname, '../src/modules/auto-renew/auto-renew.service.ts'), 'utf8');
+    assert.ok(autoRenew.includes(`const IDEMPOTENCY_PREFIX = '${AUTOPAY_IDEMPOTENCY_PREFIX}';`));
+    assert.equal(PROVIDER_SUBSCRIPTION_CHARGE, 'PROVIDER_SUBSCRIPTION_CHARGE');
+  });
+
+  it('names no hours when nobody paid, and carries the zone', () => {
+    const report = assemblePaymentHours(window, []);
+    assert.deepEqual(report.topHours, []);
+    assert.equal(report.timeZone, 'UTC');
+    assert.equal(report.windowDays, 30);
+    assert.equal(AUTOPAY_IDEMPOTENCY_PREFIX, 'auto-renew:');
   });
 });

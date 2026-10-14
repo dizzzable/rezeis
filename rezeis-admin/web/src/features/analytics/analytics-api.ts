@@ -275,6 +275,27 @@ export interface AutopayReport {
   generatedAt: string
 }
 
+export interface PaymentHour {
+  /** The hour of the day, 0-23. */
+  hour: number
+  payments: number
+}
+
+export interface PaymentHoursReport {
+  windowDays: number
+  generatedAt: string
+  timeZone: string
+  timeZoneFallback: boolean
+  /** Payments in the grid: money received, automatic charges left out. */
+  total: number
+  /** Automatic charges (ЮKassa autopay, a payment system's repeat charges) in the window, left out of the grid. */
+  automatic: number
+  /** 7 weekdays × 24 hours, Monday first: the cell of (weekday 1-7, hour) is at `(weekday - 1) * 24 + hour`. */
+  cells: readonly number[]
+  /** The busiest hours of the day over all weekdays, busiest first; at most three, none with no payments. */
+  topHours: readonly PaymentHour[]
+}
+
 export interface FirstPaymentLtvRow {
   /** `YYYY-MM` — the local month of the cohort's first payment. */
   cohort: string
@@ -474,6 +495,16 @@ export async function getTrialConversion(days: number): Promise<TrialConversionR
 export async function getAnalyticsCohorts(): Promise<readonly CohortRow[]> {
   const response = await api.get('/admin/analytics/cohorts')
   return expectArray<CohortRow>(unwrapPayload(response.data).cohorts)
+}
+
+export async function getPaymentHours(days: number): Promise<PaymentHoursReport> {
+  const response = await api.get(`/admin/analytics/payment-hours?days=${days}`)
+  const body = recordWith(response.data, ['cells', 'total', 'topHours'])
+  return {
+    ...(body as unknown as PaymentHoursReport),
+    cells: expectArray<number>(body.cells),
+    topHours: expectArray<PaymentHour>(body.topHours),
+  }
 }
 
 export async function getPaidLtv(): Promise<FirstPaymentLtvReport> {

@@ -61,6 +61,7 @@ import {
 import { formatBucket, formatCount, formatMoney, formatPercent, gatewayName, partnerBalanceText } from './analytics-format'
 import { ACCENT, CURRENCY_ORDER, currencyColor, OTHER_COLOR, PURCHASE_KIND_COLORS } from './analytics-palette'
 import { DiscountsCard } from './analytics-discounts-card'
+import { PaymentHoursCard } from './analytics-payment-hours-card'
 import { revenueKindsOf, SALE_KINDS } from './analytics-revenue-kinds'
 
 const LISTS_ROW = 'grid gap-4 @min-[56rem]:grid-cols-2 @min-[88rem]:grid-cols-3'
@@ -112,6 +113,7 @@ export function RevenueTab({ days, played }: { readonly days: number; readonly p
         {report === undefined ? <ChartSkeleton className="h-72" /> : <GatewaysCard report={report} played={played} />}
         <SubscriptionsByPlanCard query={plans} played={played} className="@min-[56rem]:col-span-2 @min-[88rem]:col-span-1" />
       </div>
+      <PaymentHoursCard days={days} />
       <DiscountsCard days={days} />
     </div>
   )

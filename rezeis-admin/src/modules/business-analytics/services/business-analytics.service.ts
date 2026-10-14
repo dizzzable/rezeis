@@ -12,6 +12,7 @@ import {
   ExpiringReportInterface,
   FirstPaymentLtvReportInterface,
   PaidCohortReportInterface,
+  PaymentHoursReportInterface,
   LtvReportInterface,
   MoneyViewInterface,
   RevenueReportInterface,
@@ -62,6 +63,7 @@ import {
   type PaidCohortSqlRow,
 } from '../utils/analytics-first-payment-cohort.util';
 import { chooseMoneyView, type FxSnapshot, readFxSnapshot } from '../utils/analytics-money.util';
+import { assemblePaymentHours, paymentHoursSql, type PaymentHoursSqlRow } from '../utils/analytics-payment-hours.util';
 import {
   type ActiveSeriesRow,
   activeSeriesSql,
@@ -251,6 +253,16 @@ export class BusinessAnalyticsService {
     const window = planAnalyticsWindow(daysRaw, new Date(), await this.readZone());
     const rows = await this.prismaService.$queryRaw<DiscountSqlRow[]>(discountSql(window, window.now));
     return assembleDiscounts(window, rows);
+  }
+
+  /**
+   * Payments by weekday and hour in the panel's zone, automatic charges left
+   * out. See `analytics-payment-hours.util.ts`.
+   */
+  public async getPaymentHours(daysRaw: number): Promise<PaymentHoursReportInterface> {
+    const window = planAnalyticsWindow(daysRaw, new Date(), await this.readZone());
+    const rows = await this.prismaService.$queryRaw<PaymentHoursSqlRow[]>(paymentHoursSql(window));
+    return assemblePaymentHours(window, rows);
   }
 
   /** Live subscriptions (ACTIVE and LIMITED) per plan. */

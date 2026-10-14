@@ -14,6 +14,7 @@ import type {
   LtvReport,
   MoneyView,
   PaidCohortReport,
+  PaymentHoursReport,
   RevenueReport,
   SubscriptionByPlanItem,
   TopPayersReport,
@@ -292,6 +293,40 @@ export function paidCohortReport(): PaidCohortReport {
   }
 }
 
+/**
+ * A week of evenings: 40 payments at 19:00 on weekdays, 25 at 20:00, 10 at 12:00 on Tuesday and 6 at 09:00 on Sunday;
+ * 7 automatic charges left out.
+ */
+export function paymentHoursReport(): PaymentHoursReport {
+  const cells = Array.from({ length: 7 * 24 }, () => 0)
+  const put = (weekday: number, hour: number, count: number): void => {
+    cells[(weekday - 1) * 24 + hour] = count
+  }
+  put(1, 19, 8)
+  put(2, 19, 8)
+  put(3, 19, 8)
+  put(4, 19, 8)
+  put(5, 19, 8)
+  put(1, 20, 10)
+  put(5, 20, 15)
+  put(2, 12, 10)
+  put(7, 9, 6)
+  return {
+    windowDays: 30,
+    generatedAt: '2026-09-18T12:00:00.000Z',
+    timeZone: 'UTC',
+    timeZoneFallback: false,
+    total: 81,
+    automatic: 7,
+    cells,
+    topHours: [
+      { hour: 19, payments: 40 },
+      { hour: 20, payments: 25 },
+      { hour: 12, payments: 10 },
+    ],
+  }
+}
+
 /** Three first-payment months: older clients have paid more; the newest has paid once. */
 export function firstPaymentLtvReport(): FirstPaymentLtvReport {
   return {
@@ -362,11 +397,13 @@ export function installNewCardMocks(api: {
   readonly getAutopayReport: { mockResolvedValue: (value: AutopayReport) => unknown }
   readonly getDiscountReport: { mockResolvedValue: (value: DiscountReport) => unknown }
   readonly getPaidLtv: { mockResolvedValue: (value: FirstPaymentLtvReport) => unknown }
+  readonly getPaymentHours: { mockResolvedValue: (value: PaymentHoursReport) => unknown }
 }): void {
   api.getPaidCohorts.mockResolvedValue(paidCohortReport())
   api.getAutopayReport.mockResolvedValue(autopayReport())
   api.getDiscountReport.mockResolvedValue(discountReport())
   api.getPaidLtv.mockResolvedValue(firstPaymentLtvReport())
+  api.getPaymentHours.mockResolvedValue(paymentHoursReport())
 }
 
 export function ltvReport(): LtvReport {

@@ -244,6 +244,27 @@ export interface AutopayReportInterface {
   readonly generatedAt: string;
 }
 
+export interface PaymentHourInterface {
+  /** The hour of the day, 0-23. */
+  readonly hour: number;
+  readonly payments: number;
+}
+
+export interface PaymentHoursReportInterface {
+  readonly windowDays: number;
+  readonly generatedAt: string;
+  readonly timeZone: string;
+  readonly timeZoneFallback: boolean;
+  /** Payments in the grid: money received, automatic charges left out. */
+  readonly total: number;
+  /** Automatic charges (ЮKassa autopay, a payment system's repeat charges) in the window, left out of the grid. */
+  readonly automatic: number;
+  /** 7 weekdays × 24 hours, Monday first: the cell of (weekday 1-7, hour) is at `(weekday - 1) * 24 + hour`. */
+  readonly cells: readonly number[];
+  /** The busiest hours of the day over all weekdays, busiest first; at most three, none with no payments. */
+  readonly topHours: readonly PaymentHourInterface[];
+}
+
 export interface FirstPaymentLtvRowInterface {
   /** `YYYY-MM` — the local month of the cohort's first payment. */
   readonly cohort: string;

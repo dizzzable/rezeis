@@ -25,6 +25,7 @@ import {
   ltvReport,
   overviewReport,
   paidCohortReport,
+  paymentHoursReport,
   revenueReport,
   SUBSCRIPTIONS_BY_PLAN,
   SURFACES,
@@ -273,6 +274,77 @@ describe('the retention tab', () => {
     })
     expect(plain(stats.textContent)).toContain('Медиана499 ₽')
     expect(plain(stats.textContent)).toContain('10 % лучших — от1 490 ₽')
+  })
+})
+
+describe('the payment hours card', () => {
+  async function card(): Promise<HTMLElement> {
+    renderWithProviders(<AnalyticsPage />)
+    await openTab('revenue')
+    return waitFor(() => {
+      const found = document.querySelector<HTMLElement>('[data-analytics-card="revenue-hours"]')
+      if (found === null || found.querySelector('[data-hours]') === null) throw new Error('no hours card')
+      return found
+    })
+  }
+
+  it('draws a row per weekday and a column per hour, 168 cells with their counts', async () => {
+    const found = await card()
+    expect(found.querySelectorAll('[data-hours-weekday]')).toHaveLength(7)
+    expect(found.querySelectorAll('[data-hours-cell]')).toHaveLength(168)
+    expect(found.querySelector('[data-hours-cell="5-20"]')?.getAttribute('data-count')).toBe('15')
+    expect(found.querySelector('[data-hours-cell="3-3"]')?.getAttribute('data-count')).toBe('0')
+    expect(found.querySelectorAll('thead th [aria-hidden="true"]')).toHaveLength(24)
+  })
+
+  it('names the three busiest hours in the subtitle', async () => {
+    const found = await card()
+    expect(plain(found.textContent)).toContain('Чаще всего платят в 19:00, 20:00 и 12:00 (по часовому поясу панели).')
+  })
+
+  it('shades each cell relative to the busiest one, and gives an empty cell the faintest tint', async () => {
+    const found = await card()
+    const colour = (key: string): string | undefined => found.querySelector<HTMLElement>(`[data-hours-cell="${key}"]`)?.style.backgroundColor
+    expect(colour('5-20')).toBe(heatColor(1))
+    expect(colour('1-20')).toBe(heatColor(10 / 15))
+    expect(colour('3-3')).toBe(heatColor(0))
+  })
+
+  it('labels every cell for a screen reader with its day, hour and count', async () => {
+    const found = await card()
+    expect(plain(found.querySelector('[data-hours-cell="5-20"]')?.textContent)).toBe('пятница, 20:00: 15 платежей')
+    expect(plain(found.querySelector('[data-hours-cell="7-9"]')?.textContent)).toBe('воскресенье, 09:00: 6 платежей')
+  })
+
+  it('says what it left out, and how many', async () => {
+    const found = await card()
+    const note = plain(found.querySelector('[data-hours-footnote]')?.textContent)
+    expect(note).toContain('Автоматические списания не учтены')
+    expect(note).toContain('Не вошло автоматических списаний за период: 7.')
+  })
+
+  it('keeps the grid’s scroll inside the card so a phone does not widen', async () => {
+    const found = await card()
+    const scroller = found.querySelector('[data-hours-table]')?.parentElement
+    expect(scroller?.className).toContain('overflow-x-auto')
+  })
+
+  it('says nobody paid in the period, and still says how many automatic charges were left out', async () => {
+    api.getPaymentHours.mockResolvedValue({ ...paymentHoursReport(), total: 0, cells: Array.from({ length: 168 }, () => 0), topHours: [] })
+    renderWithProviders(<AnalyticsPage />)
+    await openTab('revenue')
+    expect(await screen.findByText('За период клиенты не сделали ни одного платежа.')).toBeTruthy()
+    expect(plain(document.querySelector('[data-hours-footnote]')?.textContent)).toContain('7')
+  })
+
+  it('defines what it counts in its (i): payments by number, and not the automatic ones', async () => {
+    const user = userEvent.setup()
+    renderWithProviders(<AnalyticsPage />)
+    await openTab('revenue')
+    await user.hover(await screen.findByRole('button', { name: i18n.t('analyticsPage.common.aboutLabel', { title: 'Когда платят' }) }))
+    const tip = await screen.findByRole('tooltip')
+    expect(tip).toHaveTextContent('штуками, а не суммой')
+    expect(tip).toHaveTextContent('Автоматические списания не считаются')
   })
 })
 
