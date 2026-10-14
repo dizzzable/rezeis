@@ -4,6 +4,12 @@ import { z } from 'zod';
 
 import { ANTILOPAY_KEY_REFUSAL_CODES, findAntilopayKeyProblem } from './antilopay-keys.util';
 import {
+  ANTILOPAY_DELAY_COUNT_SETTING,
+  ANTILOPAY_DELAY_UNIT_SETTING,
+  ANTILOPAY_MAX_DELAY_DAYS,
+  makeAntilopayDelay,
+} from './antilopay-recurrent.util';
+import {
   decryptSettingValue,
   encryptSettingValue,
   isEncryptedSettingValue,
@@ -241,6 +247,22 @@ const antilopayPaymentCountSetting = z
     message: 'recurrentPaymentCount must be a whole number of at least 2',
   });
 
+/**
+ * «Отсрочка первого списания по СБП»: a whole number (0 or empty is none) and a
+ * unit. The unit is exactly one of Antilopay's own words (`DAY`, `WEEK`,
+ * `MONTH`, `QUARTER`, `YEAR`): they are sent as they are stored, and
+ * Antilopay is case-sensitive (it refused `rub` for `RUB`), so `day` is
+ * refused here rather than stored and then rejected on every payment.
+ */
+const antilopayDelayCountSetting = z
+  .union([z.number().int().min(0), z.string().trim().regex(/^\d+$/)])
+  .transform((value) => (typeof value === 'number' ? value : Number(value)))
+  .refine((value) => Number.isSafeInteger(value), {
+    message: 'sbpDelayCount must be a whole number of at least 0',
+  });
+
+const antilopayDelayUnitSetting = z.enum(['DAY', 'WEEK', 'MONTH', 'QUARTER', 'YEAR']);
+
 const antilopaySettingsSchema = z
   .object({
     projectIdentificator: z.string().min(1).optional(),
@@ -257,8 +279,31 @@ const antilopaySettingsSchema = z
     // «Число списаний (вместе с первым)»: sent as `recurrent.payment_count` only
     // when set (antilopay-recurrent.util.ts). A whole number of at least 2.
     recurrentPaymentCount: antilopayPaymentCountSetting.optional(),
+    // «Отсрочка первого списания по СБП»: how long an SBP subscription waits
+    // before its first charge, the payer holding the plan meanwhile
+    // (antilopay-recurrent.util.ts). Empty or 0 is today's behaviour.
+    [ANTILOPAY_DELAY_COUNT_SETTING]: antilopayDelayCountSetting.optional(),
+    [ANTILOPAY_DELAY_UNIT_SETTING]: antilopayDelayUnitSetting.optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((settings, ctx) => {
+    const count = settings[ANTILOPAY_DELAY_COUNT_SETTING];
+    if (count === undefined || count === 0) return;
+    const unit = settings[ANTILOPAY_DELAY_UNIT_SETTING];
+    if (unit === undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        path: [ANTILOPAY_DELAY_UNIT_SETTING],
+        message: 'sbpDelayUnit is required when sbpDelayCount is set',
+      });
+    } else if (makeAntilopayDelay(count, unit) === null) {
+      ctx.addIssue({
+        code: 'custom',
+        path: [ANTILOPAY_DELAY_COUNT_SETTING],
+        message: `the delay must be at least 1 and at most ${ANTILOPAY_MAX_DELAY_DAYS} days`,
+      });
+    }
+  });
 
 /**
  * The keys that are about to be stored, read the way the code that will use

@@ -107,6 +107,27 @@ export function antilopayRecurrentTypeFor(period: ProviderPeriod): AntilopayRecu
 }
 
 /**
+ * Antilopay's `recurrent.delay_type` codes («Период задержки перед списанием»):
+ * how long an SBP subscription waits before its first charge. Upper-case on
+ * the wire, exactly as the documentation spells them, like `RUB`.
+ */
+export type AntilopayDelayUnit = 'DAY' | 'WEEK' | 'MONTH' | 'QUARTER' | 'YEAR';
+
+export const ANTILOPAY_DELAY_UNITS: readonly AntilopayDelayUnit[] = ['DAY', 'WEEK', 'MONTH', 'QUARTER', 'YEAR'];
+
+/**
+ * Days in one unit of a delay: a day is 1 and the rest are the periods above
+ * (a week 7, a month 30, a quarter 90, a year 365), so a delay and a charging
+ * period of the same word are the same number of days.
+ */
+export function antilopayDelayUnitDays(unit: AntilopayDelayUnit): number {
+  if (unit === 'DAY') return 1;
+  const period = ANTILOPAY_PERIODS.find((entry) => entry.type === unit);
+  if (period === undefined) throw new Error(`Antilopay has no period ${unit}`);
+  return period.days;
+}
+
+/**
  * Platega takes the amount of one charge as an integer number of roubles, so a
  * price with kopecks cannot be charged as it is. Rounding would charge a price
  * the customer was never shown; such a price offers no automatic charging.

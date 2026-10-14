@@ -1,7 +1,13 @@
 import { ProviderSubscriptionStatus } from '@prisma/client';
 
 import { type AntilopayRefund, readAntilopayRefunds } from './antilopay-refund.util';
-import { antilopayRecurrentTypeFor, type ProviderPeriod } from './provider-subscription-period.util';
+import {
+  ANTILOPAY_DELAY_UNITS,
+  antilopayDelayUnitDays,
+  type AntilopayDelayUnit,
+  antilopayRecurrentTypeFor,
+  type ProviderPeriod,
+} from './provider-subscription-period.util';
 
 /**
  * Antilopay's repeat charges (documentation 1.51, «Создание платежа» →
@@ -17,7 +23,9 @@ import { antilopayRecurrentTypeFor, type ProviderPeriod } from './provider-subsc
  *     made on Antilopay's form, and Antilopay charges the card on schedule
  *     after it.
  *   - SBP: `category: SUBSCRIPTION`, SBP only. The payer subscribes on the
- *     form; with `delay: 0` the first charge is made at activation.
+ *     form; with `delay: 0` the first charge is made at activation, and with
+ *     the operator's «Отсрочка первого списания по СБП» (`AntilopayDelay`) it
+ *     is made after the delay, the payer holding the plan meanwhile.
  */
 export type AntilopayAutopayMethod = 'CARD' | 'SBP';
 
@@ -43,6 +51,57 @@ export function readAntilopayPaymentCount(settings: Record<string, unknown>): nu
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 2 ? value : null;
 }
 
+/**
+ * «Отсрочка первого списания по СБП»: how long an SBP subscription waits before
+ * its first charge (`recurrent.delay` × `recurrent.delay_type`). Only SBP has
+ * one: «параметр category - SUBSCRIPTION работает только с СБП платежами, а
+ * PAYMENT_TEMPLATE - только с картами», and only SUBSCRIPTION takes a delay, so
+ * a card's first payment is always charged on the form.
+ */
+export interface AntilopayDelay {
+  readonly count: number;
+  /** The wire word, upper-case: `DAY`, `WEEK`, `MONTH`, `QUARTER` or `YEAR`. */
+  readonly unit: AntilopayDelayUnit;
+  /** The days the delay is worth: what the payer is given for it (`antilopayDelayUnitDays`). */
+  readonly days: number;
+}
+
+/** The operator's two settings that make a delay: a whole number, and a unit. */
+export const ANTILOPAY_DELAY_COUNT_SETTING = 'sbpDelayCount';
+export const ANTILOPAY_DELAY_UNIT_SETTING = 'sbpDelayUnit';
+
+/**
+ * The longest delay the panel will give away: a year. A typo (a quarter typed
+ * as 90 quarters) would otherwise grant years of free access to every first-time
+ * payer; the settings refuse it when saved and this reads it as no delay.
+ */
+export const ANTILOPAY_MAX_DELAY_DAYS = 366;
+
+export function isAntilopayDelayUnit(value: unknown): value is AntilopayDelayUnit {
+  // Case-sensitive on purpose: the wire value is `DAY`, never `day`.
+  return typeof value === 'string' && (ANTILOPAY_DELAY_UNITS as readonly string[]).includes(value);
+}
+
+/** A delay of `count` × `unit`, or null when it is none, or longer than {@link ANTILOPAY_MAX_DELAY_DAYS}. */
+export function makeAntilopayDelay(count: unknown, unit: unknown): AntilopayDelay | null {
+  if (!isAntilopayDelayUnit(unit)) return null;
+  if (typeof count !== 'number' || !Number.isSafeInteger(count) || count < 1) return null;
+  const days = count * antilopayDelayUnitDays(unit);
+  return days > ANTILOPAY_MAX_DELAY_DAYS ? null : { count, unit, days };
+}
+
+/**
+ * «Отсрочка первого списания по СБП» as the operator stored it, or null for
+ * none: empty, 0, a unit that is not one of the five (a lower-case `day` is not
+ * one), or a delay past the cap. Null is today's behaviour: the first charge is
+ * made at activation.
+ */
+export function readAntilopayDelay(settings: Record<string, unknown>): AntilopayDelay | null {
+  const raw = settings[ANTILOPAY_DELAY_COUNT_SETTING];
+  const count = typeof raw === 'string' && /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : raw;
+  return makeAntilopayDelay(count, settings[ANTILOPAY_DELAY_UNIT_SETTING]);
+}
+
 /** What `payment/create` is sent to make a payment the start of a subscription. */
 export interface AntilopayRecurrentRequest {
   readonly recurrent: Readonly<Record<string, unknown>>;
@@ -59,6 +118,8 @@ export function buildAntilopayRecurrent(input: {
   readonly period: ProviderPeriod;
   readonly method: AntilopayAutopayMethod;
   readonly paymentCount: number | null;
+  /** SBP only; a card has none. Absent or null: the first charge is made at activation. */
+  readonly delay?: AntilopayDelay | null;
 }): AntilopayRecurrentRequest | null {
   const type = antilopayRecurrentTypeFor(input.period);
   if (type === null) return null;
@@ -72,8 +133,18 @@ export function buildAntilopayRecurrent(input: {
   // «Можно указать 0 чтобы сразу при активации произвести списание»: the first
   // charge is made when the subscription is activated. `delay_type` is the
   // period's own unit, so a delay of 0 reads the same whichever is meant.
+  // With the operator's delay, nothing is charged at activation: the first
+  // charge comes after `delay` × `delay_type`, and `delay_type` is the delay's
+  // own word (`DAY`, which a charging period never is).
+  const delay = input.delay ?? null;
   return {
-    recurrent: { type, category: 'SUBSCRIPTION', delay: 0, delay_type: type, ...count },
+    recurrent: {
+      type,
+      category: 'SUBSCRIPTION',
+      delay: delay === null ? 0 : delay.count,
+      delay_type: delay === null ? type : delay.unit,
+      ...count,
+    },
     preferMethods: ['SBP'],
   };
 }
@@ -247,6 +318,12 @@ const ANTILOPAY_CLOCK_SLACK_MS = 12 * 60 * 60 * 1000;
  * Last resort: with no FIRST and the first transaction not yet delivered, the
  * earliest charge is given to it — money was taken and nothing else can
  * deliver it, and a renewal would wait for a delivery that never comes.
+ *
+ * A DELAYED SBP subscription (`delayed`) has no charge at activation, and the
+ * first transaction is the access it grants for the delay, not a charge: the
+ * start is never FIRST, and every charge that is not the start renews — a
+ * weekly subscription with a one-day delay charges within the window above,
+ * and that charge is the first renewal, not the checkout.
  */
 export function assignAntilopayChargeRoles(input: {
   readonly charges: readonly AntilopayCharge[];
@@ -255,10 +332,14 @@ export function assignAntilopayChargeRoles(input: {
   readonly method: string | null;
   readonly signedUpAt: Date;
   readonly firstDelivered: boolean;
+  readonly delayed?: boolean;
 }): ReadonlyMap<string, AntilopayChargeRole> {
   const isStart = (charge: AntilopayCharge): boolean =>
     charge.id === input.providerSubscriptionId ||
     (input.firstOrderId !== null && charge.orderId === input.firstOrderId);
+  if (input.delayed === true) {
+    return new Map(input.charges.map((charge) => [charge.id, isStart(charge) ? 'START' : 'RENEW'] as const));
+  }
   const start = input.charges.find(isStart) ?? null;
   let first: AntilopayCharge | null = start;
   let startIsNotACharge = false;

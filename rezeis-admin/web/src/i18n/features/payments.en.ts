@@ -89,6 +89,8 @@ export const en = {
       antilopayRecurrentPaymentCount: 'Number of charges (including the first)',
       antilopayAutopayCard: 'Card autopay approved by the provider',
       antilopayAutopaySbp: 'SBP autopay approved by the provider',
+      antilopaySbpDelayCount: 'Delay of the first SBP charge',
+      antilopaySbpDelayUnit: 'Delay of the first SBP charge: unit',
       selfEmployedEnabled: 'Self-employed (НПД): «Мой Налог» income sync',
       moyNalogAuthMethod: '«Мой Налог» auth method',
       moyNalogInn: 'Self-employed INN',
@@ -130,6 +132,11 @@ export const en = {
       plategaSberpay: '14 — SberPay',
       antilopayVat10: '10% — reduced rate',
       antilopayVat22: '22% — standard rate',
+      antilopayDelayDay: 'days',
+      antilopayDelayWeek: 'weeks',
+      antilopayDelayMonth: 'months',
+      antilopayDelayQuarter: 'quarters (3 months)',
+      antilopayDelayYear: 'years',
     },
     keyCheck: {
       title:
@@ -177,6 +184,14 @@ export const en = {
       publicKeyIsPrivate:
         'The keys look swapped: a private key was pasted into "Public key (Base64)".',
     },
+    errors: {
+      sbpDelayCount:
+        '"Delay of the first SBP charge": enter a whole number, for example 7. To charge at once on activation, leave it empty or enter 0.',
+      sbpDelayUnit:
+        '"Delay of the first SBP charge": pick a unit (days, weeks, months, quarters or years) — without one the number means nothing.',
+      sbpDelayTooLong:
+        '"Delay of the first SBP charge" cannot be longer than a year: the customer gets the plan free for the whole delay. Lower the number.',
+    },
     selectPlaceholder: 'Select a value',
     hints: {
       paymentNotPayout:
@@ -192,11 +207,13 @@ export const en = {
       antilopayAutopayCard:
         'Turn on once Antilopay has enabled recurring payments by card for your project: without that, creating a payment answers error 30 ("no permission to create recurring payments") or 25 (payment method not available). The cabinet then shows an Antilopay option "for automatic charging" by card: the first payment on Antilopay\'s form, then Antilopay charges by itself. Offered only for plans of 7, 30, 90 and 365 days and for a price in whole roubles. Turning it off stops new subscriptions only: existing ones keep charging until the customer turns them off in "Payment methods". Off by default.',
       antilopayAutopaySbp:
-        'Turn on once Antilopay has enabled recurring payments by SBP for your project: without that, creating a payment answers error 30 ("no permission to create recurring payments") or 25 (payment method not available). The cabinet then shows an Antilopay option "for automatic charging" by SBP: the customer subscribes on Antilopay\'s form and the first charge is made at activation. Offered only for plans of 7, 30, 90 and 365 days and for a price in whole roubles. Turning it off stops new subscriptions only: existing ones keep charging until the customer turns them off in "Payment methods". Off by default.',
+        'Turn on once Antilopay has enabled recurring payments by SBP for your project: without that, creating a payment answers error 30 ("no permission to create recurring payments") or 25 (payment method not available). The cabinet then shows an Antilopay option "for automatic charging" by SBP: the customer subscribes on Antilopay\'s form and the first charge is made at activation (or after the time in "Delay of the first SBP charge", if you set one). Offered only for plans of 7, 30, 90 and 365 days and for a price in whole roubles. Turning it off stops new subscriptions only: existing ones keep charging until the customer turns them off in "Payment methods". Off by default.',
       antilopayWebhook:
         'Enter this address in your project\'s settings in the Antilopay dashboard. It must be https with a valid certificate (full chain) and TLS 1.2 or newer, or Antilopay cannot deliver notifications.',
       antilopayIp:
         'If your Antilopay project restricts API access by IP, add the panel server\'s outgoing IP there: otherwise every request fails with error 22.',
+      antilopaySbpDelay:
+        'Optional. How long to wait before the first charge when a customer subscribes by SBP: a whole number and the unit below (days, weeks, months, quarters of 3 months or years). Empty or 0 keeps today\'s behaviour: the first charge is made at activation. SBP only (that is how Antilopay works), so a card\'s first payment is charged at once on the form. During the delay the customer gets the chosen plan for that time straight away and pays nothing; the first charge for the full sum comes after it, then every period. If the customer turns autopay off before the first charge, the delay days stay theirs. The delay is given once per customer: someone who has used it pays at once on their next SBP subscription and is not told about a delay. At most a year. It only takes effect when the cabinet is updated to a version that supports the delay: an older cabinet tells the customer "charged at once", so the charge stays at once.',
       antilopayRecurrentPaymentCount:
         'How many charges in all (the first included) a subscription makes. Optional: left empty, Antilopay is sent no such number. A whole number of at least 2. Once every charge is made, Antilopay completes the subscription and the customer\'s autopay ends.',
       plategaAutopay:

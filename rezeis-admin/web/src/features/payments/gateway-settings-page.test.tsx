@@ -762,6 +762,114 @@ describe('GatewaySettingsPage Antilopay VAT rate', () => {
     })
   })
 
+  it('asks for the delay of the first SBP charge once SBP is approved, and not for a card', async () => {
+    mockGatewayList([createAntilopay()])
+    grantPermissions([
+      { resource: 'payment_gateways', action: 'view' },
+      { resource: 'payment_gateways', action: 'edit' },
+    ])
+    const user = userEvent.setup()
+
+    renderWithProviders(<GatewaySettingsPage />)
+    await user.click(await screen.findByRole('button', { name: 'Open settings' }))
+    expect(screen.queryByPlaceholderText('7')).not.toBeInTheDocument()
+
+    // A card's first payment is charged on the form: the delay is not its setting.
+    await user.click(screen.getByRole('switch', { name: 'Card autopay approved by the provider' }))
+    expect(screen.queryByPlaceholderText('7')).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('switch', { name: 'SBP autopay approved by the provider' }))
+    expect(await screen.findByPlaceholderText('7')).toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: 'Delay of the first SBP charge: unit' })).toBeInTheDocument()
+  })
+
+  it('sends the delay as a number and one of Antilopay\'s own upper-case words', async () => {
+    mockGatewayList([createAntilopay()])
+    const patchSpy = vi.spyOn(api, 'patch').mockResolvedValue({ data: {} })
+    grantPermissions([
+      { resource: 'payment_gateways', action: 'view' },
+      { resource: 'payment_gateways', action: 'edit' },
+    ])
+    const user = userEvent.setup()
+
+    renderWithProviders(<GatewaySettingsPage />)
+    await user.click(await screen.findByRole('button', { name: 'Open settings' }))
+    await user.click(screen.getByRole('switch', { name: 'SBP autopay approved by the provider' }))
+    await user.type(await screen.findByPlaceholderText('7'), '2')
+    await user.click(screen.getByRole('combobox', { name: 'Delay of the first SBP charge: unit' }))
+    expect(screen.getAllByRole('option').map((option) => option.textContent)).toEqual([
+      'Not set',
+      'days',
+      'weeks',
+      'months',
+      'quarters (3 months)',
+      'years',
+    ])
+    await user.click(screen.getByRole('option', { name: 'weeks' }))
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(patchSpy).toHaveBeenCalled())
+    expect(readSavedSettings(patchSpy)).toMatchObject({
+      autopaySbpApproved: 'true',
+      sbpDelayCount: '2',
+      // The word as Antilopay spells it, not the label the operator read.
+      sbpDelayUnit: 'WEEK',
+    })
+  })
+
+  it('keeps a stored delay on reopen and sends nothing for a delay left empty', async () => {
+    mockGatewayList([createAntilopay({ autopaySbpApproved: true, sbpDelayCount: 7, sbpDelayUnit: 'DAY' })])
+    const patchSpy = vi.spyOn(api, 'patch').mockResolvedValue({ data: {} })
+    grantPermissions([
+      { resource: 'payment_gateways', action: 'view' },
+      { resource: 'payment_gateways', action: 'edit' },
+    ])
+    const user = userEvent.setup()
+
+    renderWithProviders(<GatewaySettingsPage />)
+    await user.click(await screen.findByRole('button', { name: 'Open settings' }))
+    expect(await screen.findByPlaceholderText('7')).toHaveValue('7')
+    expect(screen.getByRole('combobox', { name: 'Delay of the first SBP charge: unit' })).toHaveTextContent('days')
+
+    await user.clear(screen.getByPlaceholderText('7'))
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(patchSpy).toHaveBeenCalled())
+    expect(readSavedSettings(patchSpy)).not.toHaveProperty('sbpDelayCount')
+  })
+
+  it('says what is wrong with a delay before sending it, instead of a bare «settings invalid»', async () => {
+    mockGatewayList([createAntilopay({ autopaySbpApproved: true })])
+    const patchSpy = vi.spyOn(api, 'patch').mockResolvedValue({ data: {} })
+    const errorToast = vi.spyOn(toast, 'error').mockReturnValue('toast-1')
+    grantPermissions([
+      { resource: 'payment_gateways', action: 'view' },
+      { resource: 'payment_gateways', action: 'edit' },
+    ])
+    const user = userEvent.setup()
+
+    renderWithProviders(<GatewaySettingsPage />)
+    await user.click(await screen.findByRole('button', { name: 'Open settings' }))
+    const count = await screen.findByPlaceholderText('7')
+
+    await user.type(count, '7')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(errorToast).toHaveBeenLastCalledWith(expect.stringContaining('pick a unit'))
+
+    await user.clear(count)
+    await user.type(count, 'abc')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(errorToast).toHaveBeenLastCalledWith(expect.stringContaining('whole number'))
+
+    await user.clear(count)
+    await user.type(count, '400')
+    await user.click(screen.getByRole('combobox', { name: 'Delay of the first SBP charge: unit' }))
+    await user.click(screen.getByRole('option', { name: 'days' }))
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(errorToast).toHaveBeenLastCalledWith(expect.stringContaining('longer than a year'))
+
+    expect(patchSpy).not.toHaveBeenCalled()
+  })
+
   it('offers a card and an SBP approval, both off, and no single «approved by the provider» switch', async () => {
     mockGatewayList([createAntilopay()])
     grantPermissions([

@@ -476,6 +476,32 @@ const GATEWAY_META: ReadonlyArray<GatewayMeta> = [
         dependsOn: ['autopayCardApproved', 'autopaySbpApproved'],
         hintKey: 'paymentGateways.hints.antilopayRecurrentPaymentCount',
       },
+      {
+        // «Отсрочка первого списания по СБП»: a whole number and a unit, sent
+        // as `recurrent.delay` / `delay_type` (antilopay-recurrent.util.ts on
+        // the server). SBP only, so asked for once SBP is approved.
+        key: 'sbpDelayCount',
+        labelKey: 'paymentGateways.fields.antilopaySbpDelayCount',
+        placeholder: '7',
+        dependsOn: 'autopaySbpApproved',
+        hintKey: 'paymentGateways.hints.antilopaySbpDelay',
+      },
+      {
+        // The wire words, upper-case: Antilopay is case-sensitive.
+        key: 'sbpDelayUnit',
+        labelKey: 'paymentGateways.fields.antilopaySbpDelayUnit',
+        placeholder: '',
+        type: 'select',
+        clearable: true,
+        dependsOn: 'autopaySbpApproved',
+        options: [
+          { value: 'DAY', labelKey: 'paymentGateways.options.antilopayDelayDay' },
+          { value: 'WEEK', labelKey: 'paymentGateways.options.antilopayDelayWeek' },
+          { value: 'MONTH', labelKey: 'paymentGateways.options.antilopayDelayMonth' },
+          { value: 'QUARTER', labelKey: 'paymentGateways.options.antilopayDelayQuarter' },
+          { value: 'YEAR', labelKey: 'paymentGateways.options.antilopayDelayYear' },
+        ],
+      },
     ],
   },
   {
@@ -1182,6 +1208,35 @@ function withoutBlankEntries(values: Record<string, string>): Record<string, str
   )
 }
 
+/** Days in one unit of Antilopay's delay, as the panel counts them (`antilopayDelayUnitDays` on the server). */
+const ANTILOPAY_DELAY_UNIT_DAYS: Readonly<Record<string, number>> = {
+  DAY: 1,
+  WEEK: 7,
+  MONTH: 30,
+  QUARTER: 90,
+  YEAR: 365,
+}
+
+/** The longest delay the panel accepts: a year (`ANTILOPAY_MAX_DELAY_DAYS` on the server). */
+const ANTILOPAY_MAX_DELAY_DAYS = 366
+
+/**
+ * What is wrong with «Отсрочка первого списания по СБП» before it is sent, as
+ * the key of the sentence that says so, or null. The server refuses the same
+ * three things, but only as «settings invalid», which says nothing of which
+ * field. Empty, or 0, is none: today's behaviour.
+ */
+function antilopayDelayProblem(values: Record<string, string>): string | null {
+  const count = (values['sbpDelayCount'] ?? '').trim()
+  if (count.length === 0) return null
+  if (!/^\d+$/.test(count)) return 'paymentGateways.errors.sbpDelayCount'
+  const amount = Number(count)
+  if (amount === 0) return null
+  const unitDays = ANTILOPAY_DELAY_UNIT_DAYS[(values['sbpDelayUnit'] ?? '').trim()]
+  if (unitDays === undefined) return 'paymentGateways.errors.sbpDelayUnit'
+  return amount * unitDays > ANTILOPAY_MAX_DELAY_DAYS ? 'paymentGateways.errors.sbpDelayTooLong' : null
+}
+
 /**
  * Stand-in for the «not set» choice of a `clearable` select. Radix reserves
  * `''` for «nothing selected» and throws on a `SelectItem` holding it, so the
@@ -1618,7 +1673,14 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
         </Button>
         <Button
           size="sm"
-          onClick={(): void => saveMutation.mutate()}
+          onClick={(): void => {
+            const problem = gateway.type === 'ANTILOPAY' ? antilopayDelayProblem(values) : null
+            if (problem !== null) {
+              toast.error(t(problem))
+              return
+            }
+            saveMutation.mutate()
+          }}
           disabled={saveMutation.isPending}
         >
           {saveMutation.isPending ? (
