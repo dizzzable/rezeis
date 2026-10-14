@@ -13,7 +13,11 @@
 FROM node:24-alpine AS dependencies
 
 WORKDIR /app
-# Install build tools for native addons (better-sqlite3)
+# Build tools for the optional native addon `msgpackr-extract` (BullMQ's msgpack
+# accelerator): it compiles here when no prebuild fits musl, and msgpackr falls
+# back to plain JavaScript if it cannot. `better-sqlite3` no longer needs them:
+# 13.x is Node-API and ships linuxmusl-x64 and linuxmusl-arm64 prebuilds inside
+# the package.
 RUN apk add --no-cache python3 make g++
 COPY package.json package-lock.json ./
 ENV HUSKY=0
@@ -23,7 +27,7 @@ RUN npm ci --omit=dev
 FROM node:24-alpine AS build-backend
 
 WORKDIR /app
-# Install build tools for native addons (better-sqlite3)
+# Same build tools as the `dependencies` stage, for the same optional addon.
 RUN apk add --no-cache python3 make g++
 COPY package.json package-lock.json ./
 RUN npm ci
