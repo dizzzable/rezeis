@@ -275,6 +275,46 @@ export interface AutopayReport {
   generatedAt: string
 }
 
+export interface DiscountBucket {
+  /** Whole per cent, the bucket's lower end (included). */
+  from: number
+  /** The upper end (excluded); `null` for the last, open bucket. */
+  to: number | null
+  purchases: number
+}
+
+export interface DiscountRepeatGroup {
+  /** Clients whose first purchase was in the window, whose first period ended more than `afterDays` days ago. */
+  clients: number
+  /** Of them, the clients who bought again. */
+  boughtAgain: number
+}
+
+export interface DiscountRepeat {
+  afterDays: number
+  withDiscount: DiscountRepeatGroup
+  withoutDiscount: DiscountRepeatGroup
+  /** Of those who bought again after a discounted first purchase: the ones whose second price is known … */
+  secondPriceKnown: number
+  /** … and of those, the ones who paid the full price the second time. */
+  secondFullPrice: number
+}
+
+export interface DiscountReport {
+  windowDays: number
+  generatedAt: string
+  /** Subscription purchases of the window whose list price is known. */
+  purchases: number
+  /** Of them, the ones paid with a discount of at least 1 %. */
+  discounted: number
+  /** The mean of the discounts, in per cent, over the discounted purchases; `null` when there are none. */
+  averageDiscount: number | null
+  /** Purchases of the window with no list price to compare with: in neither count. */
+  unknown: number
+  buckets: readonly DiscountBucket[]
+  repeat: DiscountRepeat
+}
+
 export interface PaidCohortRow {
   /** `YYYY-MM` — the local month of the cohort's first payment. */
   cohort: string
@@ -412,6 +452,12 @@ export async function getTrialConversion(days: number): Promise<TrialConversionR
 export async function getAnalyticsCohorts(): Promise<readonly CohortRow[]> {
   const response = await api.get('/admin/analytics/cohorts')
   return expectArray<CohortRow>(unwrapPayload(response.data).cohorts)
+}
+
+export async function getDiscountReport(days: number): Promise<DiscountReport> {
+  const response = await api.get(`/admin/analytics/discounts?days=${days}`)
+  const body = recordWith(response.data, ['purchases', 'discounted', 'buckets', 'repeat'])
+  return { ...(body as unknown as DiscountReport), buckets: expectArray<DiscountBucket>(body.buckets) }
 }
 
 export async function getAutopayReport(): Promise<AutopayReport> {

@@ -19,6 +19,7 @@ import {
   COHORTS,
   installNewCardMocks,
   conversionReport,
+  discountReport,
   expiringReport,
   ltvReport,
   overviewReport,
@@ -271,6 +272,73 @@ describe('the retention tab', () => {
     })
     expect(plain(stats.textContent)).toContain('Медиана499 ₽')
     expect(plain(stats.textContent)).toContain('10 % лучших — от1 490 ₽')
+  })
+})
+
+describe('the discounts card', () => {
+  async function discountsCard(): Promise<HTMLElement> {
+    renderWithProviders(<AnalyticsPage />)
+    await openTab('revenue')
+    return waitFor(() => {
+      const found = document.querySelector<HTMLElement>('[data-analytics-card="revenue-discounts"]')
+      if (found === null || found.querySelector('[data-discounts]') === null) throw new Error('no discounts card')
+      return found
+    })
+  }
+
+  it('states the share of purchases with a discount and the average discount', async () => {
+    const card = await discountsCard()
+    expect(plain(card.querySelector('[data-discounts-share]')?.textContent)).toBe('40 %')
+    expect(plain(card.querySelector('[data-discounts-header]')?.textContent)).toContain('12 из 30')
+    expect(plain(card.querySelector('[data-discounts-average]')?.textContent)).toBe('25 %')
+  })
+
+  it('lists the size buckets, and leaves the 1-9 % one out while nobody is in it', async () => {
+    const card = await discountsCard()
+    const rows = [...card.querySelectorAll('[data-discount-bucket]')].map((row) => plain(row.textContent))
+    expect(rows).toEqual(['10–19 %5 42 %', '20–29 %3 25 %', '30–39 %2 17 %', '40–49 %0 0 %', '50 % и больше2 17 %'])
+  })
+
+  it('shows the 1-9 % bucket once a purchase falls in it', async () => {
+    const report = discountReport()
+    api.getDiscountReport.mockResolvedValue({
+      ...report,
+      buckets: report.buckets.map((bucket, index) => (index === 0 ? { ...bucket, purchases: 1 } : bucket)),
+    })
+    const card = await discountsCard()
+    expect(plain(card.querySelector('[data-discount-bucket="1"]')?.textContent)).toBe('1–9 %1 8,3 %')
+  })
+
+  it('asks whether they buy again for first purchases with and without a discount, and states the full-price share', async () => {
+    const card = await discountsCard()
+    expect(plain(card.querySelector('[data-discounts-first="discount"]')?.textContent)).toBe('Первая покупка со скидкой40 % купили снова: 4 из 10')
+    expect(plain(card.querySelector('[data-discounts-first="full"]')?.textContent)).toBe('Первая покупка без скидки60 % купили снова: 12 из 20')
+    expect(plain(card.querySelector('[data-discounts-footnote]')?.textContent)).toBe(
+      'Из тех, кто купил снова после первой покупки со скидкой, второй раз полную цену заплатили 75 % (3 из 4).',
+    )
+  })
+
+  it('says how many purchases it could not price', async () => {
+    const card = await discountsCard()
+    expect(plain(card.querySelector('[data-discounts-unknown]')?.textContent)).toContain('2 покупки не вошли в цифры')
+  })
+
+  it('says it has nothing to compare when no purchase has a price', async () => {
+    api.getDiscountReport.mockResolvedValue({ ...discountReport(), purchases: 0, discounted: 0, averageDiscount: null })
+    renderWithProviders(<AnalyticsPage />)
+    await openTab('revenue')
+    expect(await screen.findByText('За период не было покупок подписки, цену которых есть с чем сравнить.')).toBeTruthy()
+  })
+
+  it('defines a discount in its (i): against the list price, with no fee and no conversion', async () => {
+    const user = userEvent.setup()
+    renderWithProviders(<AnalyticsPage />)
+    await openTab('revenue')
+    await user.hover(await screen.findByRole('button', { name: i18n.t('analyticsPage.common.aboutLabel', { title: 'Промокоды и скидки' }) }))
+    const tip = await screen.findByRole('tooltip')
+    expect(tip).toHaveTextContent('Скидка — разница между прайсом и уплаченной суммой')
+    expect(tip).toHaveTextContent('Комиссия платёжной системы и пересчёт валюты скидкой не считаются')
+    expect(tip).toHaveTextContent('«по старой цене»')
   })
 })
 

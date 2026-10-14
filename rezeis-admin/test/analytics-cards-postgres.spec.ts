@@ -383,4 +383,143 @@ run('business analytics cards on PostgreSQL', { concurrency: false }, () => {
       assert.deepEqual(report.withAutopayPeriods, { early: 0, firstDays: 0, later: 0, gone: 0 });
     });
   });
+
+  // ── «Промокоды и скидки» ─────────────────────────────────────────────────
+
+  describe('discounts', () => {
+    /** The plan `pro` with list prices in roubles: 7 days 30, 30 days 100, 90 days 270. */
+    async function catalog(tx: Prisma.TransactionClient) {
+      await tx.plan.create({ data: { id: 'pro', name: 'Pro' } });
+      for (const [days, price] of [
+        [7, '30'],
+        [30, '100'],
+        [90, '270'],
+      ] as const) {
+        await tx.planDuration.create({ data: { planId: 'pro', days, prices: { create: [{ currency: 'RUB', price }] } } });
+      }
+    }
+
+    it('files each purchase of the window under the size of its discount against the list price, and counts the full ones', async () => {
+      const report = await onCleanSlate(async (tx, service) => {
+        await catalog(tx);
+        for (const id of ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k']) await customer(tx, id);
+        await pay(tx, { userId: 'a', createdAt: daysAgo(5), amount: '100', planSnapshot: bought(30) });
+        await pay(tx, { userId: 'b', createdAt: daysAgo(6), amount: '90', planSnapshot: bought(30) });
+        await pay(tx, { userId: 'c', createdAt: daysAgo(7), amount: '189', planSnapshot: bought(90) });
+        await pay(tx, { userId: 'd', createdAt: daysAgo(8), amount: '99', planSnapshot: bought(30) });
+        await pay(tx, { userId: 'e', createdAt: daysAgo(9), amount: '50', planSnapshot: bought(30) });
+        // A price in a currency the plan has no list for: unknown, in neither count.
+        await pay(tx, { userId: 'f', createdAt: daysAgo(10), amount: '5', currency: 'USD', planSnapshot: bought(30) });
+        // A combined renewal: each line carries the percent the quote applied.
+        const combined = await pay(tx, { userId: 'g', purchaseType: 'RENEW', createdAt: daysAgo(11), amount: '180', planSnapshot: { combinedRenewal: true } });
+        const one = await tx.subscription.create({ data: { userId: 'g' } });
+        const two = await tx.subscription.create({ data: { userId: 'g' } });
+        await tx.transactionItem.createMany({
+          data: [
+            { transactionId: combined.id, subscriptionId: one.id, planId: 'pro', durationDays: 30, amount: '80', currency: 'RUB', discountPercent: 20 },
+            { transactionId: combined.id, subscriptionId: two.id, planId: 'pro', durationDays: 30, amount: '100', currency: 'RUB', discountPercent: 0 },
+          ],
+        });
+        // A charge of a provider subscription, at the frozen amount: 20 % off the list of the sign-up (100), though the plan lists 150 now.
+        await tx.plan.create({ data: { id: 'legacy', name: 'Legacy' } });
+        await tx.planDuration.create({ data: { planId: 'legacy', days: 30, prices: { create: [{ currency: 'RUB', price: '150' }] } } });
+        await tx.providerSubscription.create({
+          data: {
+            userId: 'h', gatewayType: 'PLATEGA', providerSubscriptionId: 'psh', status: 'ACTIVE', planId: 'legacy', durationDays: 30,
+            amount: '80', listAmount: '100', currency: 'RUB', intervalUnit: 'month', intervalCount: 1, firstTransactionId: 'first-psh', consentVersion: 'v1',
+          },
+        });
+        const sub = await tx.subscription.create({ data: { userId: 'h' } });
+        const charge = await pay(tx, {
+          userId: 'h', gatewayType: 'PLATEGA', purchaseType: 'RENEW', createdAt: daysAgo(12), amount: '80',
+          planSnapshot: { combinedRenewal: true, snapshotSource: 'PROVIDER_SUBSCRIPTION_CHARGE', providerSubscriptionId: 'psh', chargeNumber: 2 },
+        });
+        await tx.transactionItem.create({ data: { transactionId: charge.id, subscriptionId: sub.id, planId: 'legacy', durationDays: 30, amount: '80', currency: 'RUB', discountPercent: 0 } });
+        // A plan change after the first payment is priced by the difference, not by a list: left out.
+        await pay(tx, { userId: 'i', createdAt: daysAgo(25), amount: '100', planSnapshot: bought(30) });
+        await pay(tx, { userId: 'i', purchaseType: 'UPGRADE', createdAt: daysAgo(4), amount: '40', planSnapshot: bought(30) });
+        // Not purchases of subscription time: an add-on, a payment for nothing, a refunded one.
+        await pay(tx, { userId: 'j', purchaseType: 'ADDITIONAL', createdAt: daysAgo(5), amount: '20', planSnapshot: bought(30, { snapshotSource: 'ADDON_PURCHASE' }) });
+        await pay(tx, { userId: 'j', createdAt: daysAgo(5), amount: '0', planSnapshot: bought(30) });
+        await pay(tx, { userId: 'k', status: 'CANCELED', createdAt: daysAgo(5), amount: '50', gatewayData: { refundReversedAt: new Date().toISOString() }, planSnapshot: bought(30) });
+        return service.getDiscountReport(30);
+      });
+      // Known: a (full), b, c, d, e, g1, g2 (full), h, i (full) = 9 purchases; discounted: b, c, d, e, g1, h = 6.
+      assert.equal(report.purchases, 9);
+      assert.equal(report.discounted, 6);
+      assert.equal(report.unknown, 1);
+      assert.equal(Math.round((report.averageDiscount ?? 0) * 100) / 100, Math.round((131 / 6) * 100) / 100);
+      assert.deepEqual(
+        report.buckets.map((bucket) => [bucket.from, bucket.to, bucket.purchases]),
+        [
+          [1, 10, 1],
+          [10, 20, 1],
+          [20, 30, 2],
+          [30, 40, 1],
+          [40, 50, 0],
+          [50, null, 1],
+        ],
+      );
+    });
+
+    it('answers with nothing but zeroes when nothing was bought, and no average', async () => {
+      const report = await onCleanSlate(async (_tx, service) => service.getDiscountReport(30));
+      assert.equal(report.purchases, 0);
+      assert.equal(report.discounted, 0);
+      assert.equal(report.averageDiscount, null);
+      assert.deepEqual(report.repeat.withDiscount, { clients: 0, boughtAgain: 0 });
+      assert.equal(report.buckets.length, 6);
+    });
+
+    it('follows first purchases of the window that ended a week ago: do they buy again, and at the full price', async () => {
+      const report = await onCleanSlate(async (tx, service) => {
+        await catalog(tx);
+        for (const id of ['r1', 'r2', 'r3', 'r4', 'r5', 'r6', 'r7', 'r8']) await customer(tx, id);
+        // Seven days for 30: 24 is 20 % off.
+        const first = (userId: string, ago: number, amount: string, extra: Partial<Prisma.TransactionUncheckedCreateInput> = {}) =>
+          pay(tx, { userId, createdAt: daysAgo(ago), amount, planSnapshot: bought(7), ...extra });
+        const again = (userId: string, ago: number, amount: string) =>
+          pay(tx, { userId, purchaseType: 'RENEW', createdAt: daysAgo(ago), amount, planSnapshot: bought(7) });
+        await first('r1', 20, '24');
+        await again('r1', 5, '30');
+        await first('r2', 20, '24');
+        await again('r2', 5, '24');
+        await first('r3', 20, '24');
+        await first('r4', 20, '30');
+        await again('r4', 5, '30');
+        await first('r5', 20, '30');
+        // Ended only five days ago: too soon to say.
+        await first('r6', 12, '24');
+        // First bought before the window.
+        await first('r7', 100, '24');
+        await again('r7', 5, '30');
+        // The first price is unknown.
+        await first('r8', 20, '5', { currency: 'USD' });
+        return service.getDiscountReport(60);
+      });
+      assert.equal(report.repeat.afterDays, 7);
+      assert.deepEqual(report.repeat.withDiscount, { clients: 3, boughtAgain: 2 });
+      assert.deepEqual(report.repeat.withoutDiscount, { clients: 2, boughtAgain: 1 });
+      assert.equal(report.repeat.secondPriceKnown, 2);
+      assert.equal(report.repeat.secondFullPrice, 1);
+    });
+
+    it('does not count the second line of a combined first payment as the client buying again', async () => {
+      const report = await onCleanSlate(async (tx, service) => {
+        await catalog(tx);
+        await customer(tx, 'twin');
+        const one = await tx.subscription.create({ data: { userId: 'twin' } });
+        const two = await tx.subscription.create({ data: { userId: 'twin' } });
+        const combined = await pay(tx, { userId: 'twin', purchaseType: 'RENEW', createdAt: daysAgo(20), amount: '48', planSnapshot: { combinedRenewal: true } });
+        await tx.transactionItem.createMany({
+          data: [
+            { transactionId: combined.id, subscriptionId: one.id, planId: 'pro', durationDays: 7, amount: '24', currency: 'RUB', discountPercent: 20 },
+            { transactionId: combined.id, subscriptionId: two.id, planId: 'pro', durationDays: 7, amount: '24', currency: 'RUB', discountPercent: 20 },
+          ],
+        });
+        return service.getDiscountReport(60);
+      });
+      assert.deepEqual(report.repeat.withDiscount, { clients: 1, boughtAgain: 0 });
+    });
+  });
 });

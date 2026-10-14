@@ -44,6 +44,13 @@ export class AdminAnalyticsController {
     return this.analyticsService.getRevenueReport(query.days ?? 30);
   }
 
+  @Get('admin/analytics/discounts')
+  @RequirePermission('analytics', 'view')
+  @ApiOperation({ summary: 'Discounts of subscription purchases in the window, by size, and whether first-purchase discounts bring repeat buyers' })
+  public getDiscounts(@Query() query: AnalyticsWindowQueryDto) {
+    return this.analyticsService.getDiscountReport(query.days ?? 30);
+  }
+
   @Get('admin/analytics/cohorts')
   @RequirePermission('analytics', 'view')
   @ApiOperation({ summary: 'Month-over-month retention cohort matrix' })

@@ -8,6 +8,7 @@ import {
   AdvancedAnalyticsReportInterface,
   AutopayReportInterface,
   CohortRowInterface,
+  DiscountReportInterface,
   ExpiringReportInterface,
   PaidCohortReportInterface,
   LtvReportInterface,
@@ -48,6 +49,7 @@ import {
   ANALYTICS_ONE_DAY_MS,
 } from '../utils/analytics-date.util';
 import { assembleAutopay, autopaySql, type AutopaySqlRow } from '../utils/analytics-autopay.util';
+import { assembleDiscounts, discountSql, type DiscountSqlRow } from '../utils/analytics-discount.util';
 import {
   assemblePaidCohorts,
   paidCohortSql,
@@ -232,6 +234,17 @@ export class BusinessAnalyticsService {
       this.readFx(),
     ]);
     return assembleRevenue(window, { slices, plans, gateways, partnerBalance, viewCurrencies }, fx);
+  }
+
+  /**
+   * Discounts of the window's subscription purchases: how many, how large, and
+   * whether a client whose first purchase had one buys again. See
+   * `analytics-discount.util.ts`.
+   */
+  public async getDiscountReport(daysRaw: number): Promise<DiscountReportInterface> {
+    const window = planAnalyticsWindow(daysRaw, new Date(), await this.readZone());
+    const rows = await this.prismaService.$queryRaw<DiscountSqlRow[]>(discountSql(window, window.now));
+    return assembleDiscounts(window, rows);
   }
 
   /** Live subscriptions (ACTIVE and LIMITED) per plan. */

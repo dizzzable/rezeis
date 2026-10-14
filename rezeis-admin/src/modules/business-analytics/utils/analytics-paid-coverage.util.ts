@@ -61,6 +61,10 @@ export function paidCoverageCtes(): Prisma.Sql {
     -- thought this step held a dozen rows (it holds all of them), then joined it with nested loops.
     "pay_raw" AS MATERIALIZED (
       SELECT t."user_id", t."id" AS "tx", t."created_at" AS "at", t."subscription_id" AS "sub_id",
+             t."purchase_type"::text AS "ptype", t."gateway_type"::text AS "gateway", t."currency"::text AS "currency",
+             t."amount" AS "amount", NULLIF(t."plan_snapshot"->>'id', '') AS "plan_id",
+             CASE WHEN t."plan_snapshot"->>'snapshotSource' = 'PROVIDER_SUBSCRIPTION_CHARGE'
+                  THEN t."plan_snapshot"->>'providerSubscriptionId' END AS "charge_of",
              CASE WHEN t."plan_snapshot"->>'selectedDurationDays' ~ '^(-1|[1-9][0-9]{0,4})$'
                   THEN (t."plan_snapshot"->>'selectedDurationDays')::int END AS "days",
              (t."gateway_data"->>'conversionWithheldAt' IS NULL

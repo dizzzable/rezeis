@@ -8,6 +8,7 @@ import type {
   AnalyticsPeriod,
   AutopayReport,
   CohortRow,
+  DiscountReport,
   ExpiringReport,
   LtvReport,
   MoneyView,
@@ -290,6 +291,33 @@ export function paidCohortReport(): PaidCohortReport {
   }
 }
 
+/** 30 purchases with a known price, 12 of them discounted (average 25 %); the clients with a discounted first purchase come back less. */
+export function discountReport(): DiscountReport {
+  return {
+    windowDays: 30,
+    generatedAt: '2026-09-18T12:00:00.000Z',
+    purchases: 30,
+    discounted: 12,
+    averageDiscount: 25,
+    unknown: 2,
+    buckets: [
+      { from: 1, to: 10, purchases: 0 },
+      { from: 10, to: 20, purchases: 5 },
+      { from: 20, to: 30, purchases: 3 },
+      { from: 30, to: 40, purchases: 2 },
+      { from: 40, to: 50, purchases: 0 },
+      { from: 50, to: null, purchases: 2 },
+    ],
+    repeat: {
+      afterDays: 7,
+      withDiscount: { clients: 10, boughtAgain: 4 },
+      withoutDiscount: { clients: 20, boughtAgain: 12 },
+      secondPriceKnown: 4,
+      secondFullPrice: 3,
+    },
+  }
+}
+
 /** Forty per cent of the paying clients have autopay; the ones with it renew before the end far more often. */
 export function autopayReport(): AutopayReport {
   return {
@@ -313,9 +341,11 @@ export function autopayReport(): AutopayReport {
 export function installNewCardMocks(api: {
   readonly getPaidCohorts: { mockResolvedValue: (value: PaidCohortReport) => unknown }
   readonly getAutopayReport: { mockResolvedValue: (value: AutopayReport) => unknown }
+  readonly getDiscountReport: { mockResolvedValue: (value: DiscountReport) => unknown }
 }): void {
   api.getPaidCohorts.mockResolvedValue(paidCohortReport())
   api.getAutopayReport.mockResolvedValue(autopayReport())
+  api.getDiscountReport.mockResolvedValue(discountReport())
 }
 
 export function ltvReport(): LtvReport {

@@ -244,6 +244,46 @@ export interface AutopayReportInterface {
   readonly generatedAt: string;
 }
 
+export interface DiscountBucketInterface {
+  /** Whole per cent, the bucket's lower end (included). */
+  readonly from: number;
+  /** The upper end (excluded); `null` for the last, open bucket. */
+  readonly to: number | null;
+  readonly purchases: number;
+}
+
+export interface DiscountRepeatGroupInterface {
+  /** Clients whose first purchase was in the window, whose first period ended more than `afterDays` days ago. */
+  readonly clients: number;
+  /** Of them, the clients who bought again. */
+  readonly boughtAgain: number;
+}
+
+export interface DiscountRepeatInterface {
+  readonly afterDays: number;
+  readonly withDiscount: DiscountRepeatGroupInterface;
+  readonly withoutDiscount: DiscountRepeatGroupInterface;
+  /** Of those who bought again after a discounted first purchase: the ones whose second price is known … */
+  readonly secondPriceKnown: number;
+  /** … and of those, the ones who paid the full price the second time. */
+  readonly secondFullPrice: number;
+}
+
+export interface DiscountReportInterface {
+  readonly windowDays: number;
+  readonly generatedAt: string;
+  /** Subscription purchases of the window whose list price is known. */
+  readonly purchases: number;
+  /** Of them, the ones paid with a discount of at least 1 %. */
+  readonly discounted: number;
+  /** The mean of the discounts, in per cent, over the discounted purchases; `null` when there are none. */
+  readonly averageDiscount: number | null;
+  /** Purchases of the window with no list price to compare with: in neither count. */
+  readonly unknown: number;
+  readonly buckets: readonly DiscountBucketInterface[];
+  readonly repeat: DiscountRepeatInterface;
+}
+
 export interface PaidCohortReportInterface {
   readonly cohorts: readonly PaidCohortRowInterface[];
   /** Days after a term's end a renewal still counts as the term kept. */

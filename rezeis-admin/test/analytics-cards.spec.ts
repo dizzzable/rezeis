@@ -9,10 +9,16 @@ import {
   AUTOPAY_PERIOD_TO_DAYS_AGO,
 } from '../src/modules/business-analytics/utils/analytics-autopay.util';
 import {
+  assembleDiscounts,
+  DISCOUNT_BUCKETS,
+  DISCOUNT_REPEAT_AFTER_DAYS,
+} from '../src/modules/business-analytics/utils/analytics-discount.util';
+import {
   assemblePaidCohorts,
   PAID_COHORT_OFFSETS,
 } from '../src/modules/business-analytics/utils/analytics-first-payment-cohort.util';
 import { PAID_COVERAGE_GRACE_DAYS } from '../src/modules/business-analytics/utils/analytics-paid-coverage.util';
+import { planAnalyticsWindow } from '../src/modules/business-analytics/utils/analytics-window.util';
 import { UTC_ZONE } from '../src/modules/business-analytics/utils/analytics-zone.util';
 
 const at = (iso: string): Date => new Date(iso);
@@ -112,5 +118,67 @@ describe('autopay (assembly)', () => {
   it('ignores a periods row with no outcome rather than adding it to a group', () => {
     const report = assembleAutopay(NOW, [{ kind: 'periods', autopay: true, outcome: null, count: 9 }]);
     assert.deepEqual(report.withAutopayPeriods, { early: 0, firstDays: 0, later: 0, gone: 0 });
+  });
+});
+
+describe('discounts (assembly)', () => {
+  const NOW = at('2026-10-14T09:00:00Z');
+  const window = planAnalyticsWindow(30, NOW, UTC_ZONE);
+  const purchases = (key: string, count: number, sum: number | null = null) =>
+    ({ kind: 'purchases', key, count, sum, known: null, full: null }) as const;
+
+  it('counts the full ones in the denominator, the bucketed ones as discounted, and averages over the discounted', () => {
+    const report = assembleDiscounts(window, [
+      purchases('full', 6),
+      purchases('b10', 2, 30),
+      purchases('b30', 1, 35),
+      purchases('b50', 1, 60),
+      purchases('unknown', 3),
+    ]);
+    assert.equal(report.purchases, 10);
+    assert.equal(report.discounted, 4);
+    assert.equal(report.averageDiscount, 31.25);
+    assert.equal(report.unknown, 3);
+    assert.equal(report.windowDays, 30);
+  });
+
+  it('always carries every bucket, in order, the last one open, with zero for an empty one', () => {
+    const report = assembleDiscounts(window, [purchases('b20', 2, 44)]);
+    assert.deepEqual(
+      report.buckets.map((bucket) => [bucket.from, bucket.to, bucket.purchases]),
+      [
+        [1, 10, 0],
+        [10, 20, 0],
+        [20, 30, 2],
+        [30, 40, 0],
+        [40, 50, 0],
+        [50, null, 0],
+      ],
+    );
+    assert.equal(DISCOUNT_BUCKETS.length, 6);
+  });
+
+  it('has no average when nothing was discounted', () => {
+    const report = assembleDiscounts(window, [purchases('full', 3)]);
+    assert.equal(report.discounted, 0);
+    assert.equal(report.averageDiscount, null);
+  });
+
+  it('reads the repeat block: clients and those who bought again per group, and the full-price second purchase', () => {
+    const report = assembleDiscounts(window, [
+      { kind: 'first', key: 'discount', count: 10, sum: 4, known: 4, full: 3 },
+      { kind: 'first', key: 'full', count: 20, sum: 12, known: 12, full: 9 },
+    ]);
+    assert.deepEqual(report.repeat.withDiscount, { clients: 10, boughtAgain: 4 });
+    assert.deepEqual(report.repeat.withoutDiscount, { clients: 20, boughtAgain: 12 });
+    // The footnote is about those who bought again after a DISCOUNTED first purchase only.
+    assert.equal(report.repeat.secondPriceKnown, 4);
+    assert.equal(report.repeat.secondFullPrice, 3);
+    assert.equal(report.repeat.afterDays, DISCOUNT_REPEAT_AFTER_DAYS);
+  });
+
+  it('reads a pg numeric sum that arrives as text', () => {
+    const report = assembleDiscounts(window, [purchases('b10', 2, '31.0000000000000000' as unknown as number)]);
+    assert.equal(report.averageDiscount, 15.5);
   });
 });
