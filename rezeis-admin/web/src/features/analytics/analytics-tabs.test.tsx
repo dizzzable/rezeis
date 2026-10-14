@@ -16,10 +16,12 @@ import { installIntersectionObserver, renderWithProviders, type IntersectionObse
 import { ACCENT, currencyColor, funnelColor, heatColor, OTHER_COLOR } from './analytics-palette'
 import {
   COHORTS,
+  installNewCardMocks,
   conversionReport,
   expiringReport,
   ltvReport,
   overviewReport,
+  paidCohortReport,
   revenueReport,
   SUBSCRIPTIONS_BY_PLAN,
   SURFACES,
@@ -46,6 +48,11 @@ vi.mock('./analytics-api', () => ({
   getExpiring: vi.fn(),
   getTopPayers: vi.fn(),
   getLtvDistribution: vi.fn(),
+  getPaidCohorts: vi.fn(),
+  getAutopayReport: vi.fn(),
+  getDiscountReport: vi.fn(),
+  getPaidLtv: vi.fn(),
+  getPaymentHours: vi.fn(),
   getSubscriptionsByPlan: vi.fn(),
   getSurfaceAnalytics: vi.fn(),
 }))
@@ -77,6 +84,7 @@ beforeEach(() => {
   api.getExpiring.mockResolvedValue(expiringReport())
   api.getTopPayers.mockResolvedValue(topPayersReport())
   api.getLtvDistribution.mockResolvedValue(ltvReport())
+  installNewCardMocks(api)
   api.getSubscriptionsByPlan.mockResolvedValue(SUBSCRIPTIONS_BY_PLAN)
   api.getSurfaceAnalytics.mockResolvedValue(SURFACES)
 })
@@ -142,6 +150,50 @@ describe('the retention tab', () => {
     // 50 % is the strongest cell of the table: the cap of 80 %.
     expect(cells[0]?.style.backgroundColor).toBe(heatColor(1))
     expect(cells[1]?.style.backgroundColor).toBe(heatColor(0.5))
+  })
+
+  it('puts the first-payment cohorts beside the registration ones, columns from month 1, a cell only once its date has come', async () => {
+    renderWithProviders(<AnalyticsPage />)
+    await openTab('retention')
+    const table = await waitFor(() => {
+      const found = document.querySelector<HTMLElement>('[data-cohort-kind="first-payment"]')
+      if (found === null) throw new Error('no first-payment table')
+      return found
+    })
+    expect([...table.querySelectorAll('thead th [aria-hidden="true"]')].map((head) => head.textContent)).toEqual(
+      Array.from({ length: 12 }, (_, index) => String(index + 1)),
+    )
+    const august = table.querySelector<HTMLElement>('[data-cohort="2026-08"]')
+    expect(plain(august?.querySelector('th')?.textContent)).toBe('авг. 2026 г.')
+    expect(plain(august?.querySelector('td')?.textContent)).toBe('80')
+    const cells = [...(august?.querySelectorAll<HTMLElement>('[data-cohort-cell]') ?? [])]
+    expect(cells.map((cell) => plain(cell.textContent))).toEqual(['75 %', '50 %'])
+    expect(cells.map((cell) => cell.getAttribute('data-cohort-cell'))).toEqual(['1', '2'])
+    // 80 % (July, month 1) is the strongest cell of the table.
+    expect(cells[0]?.style.backgroundColor).toBe(heatColor(0.75 / 0.8))
+    // September's clients have no date behind them yet: a row with no cell at all.
+    expect(table.querySelector('[data-cohort="2026-09"] [data-cohort-cell]')).toBeNull()
+    expect(table.querySelectorAll('[data-cohort="2026-07"] [data-cohort-cell]')).toHaveLength(3)
+  })
+
+  it('says in plain words what the registration table counts, and what the first-payment one counts instead', async () => {
+    const user = userEvent.setup()
+    renderWithProviders(<AnalyticsPage />)
+    await openTab('retention')
+    await waitFor(() => expect(document.querySelector('[data-cohort-kind="first-payment"]')).not.toBeNull())
+    const registration = document.querySelector('[data-analytics-card="retention-cohorts"]')
+    expect(plain(registration?.textContent)).toContain('считаются месяцы с оплатой, а не оплаченные месяцы')
+    await user.hover(screen.getByRole('button', { name: i18n.t('analyticsPage.common.aboutLabel', { title: 'Удержание по месяцам регистрации' }) }))
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('Считаются месяцы, в которых была оплата, а не оплаченные месяцы')
+    const paid = document.querySelector('[data-analytics-card="retention-paid-cohorts"]')
+    expect(plain(paid?.textContent)).toContain('Удержание по месяцу первой оплаты')
+  })
+
+  it('says it has no first payments to follow when there are none', async () => {
+    api.getPaidCohorts.mockResolvedValue({ ...paidCohortReport(), cohorts: paidCohortReport().cohorts.map((row) => ({ ...row, cohortSize: 0, retentionByMonth: [] })) })
+    renderWithProviders(<AnalyticsPage />)
+    await openTab('retention')
+    expect(await screen.findByText('За последние 12 месяцев никто не оплатил подписку впервые.')).toBeTruthy()
   })
 
   it('states the lifetime value’s median and top decile in the currency of the report', async () => {

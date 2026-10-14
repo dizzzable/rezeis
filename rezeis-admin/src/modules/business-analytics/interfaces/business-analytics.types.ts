@@ -202,6 +202,27 @@ export interface CohortRowInterface {
   readonly retentionByMonth: readonly number[];
 }
 
+export interface PaidCohortRowInterface {
+  /** `YYYY-MM` — the local month of the cohort's first payment. */
+  readonly cohort: string;
+  readonly cohortSize: number;
+  /**
+   * `retentionByMonth[i]` is the share of the cohort with a paid subscription
+   * running `i + 1` months after the first payment (the grace included), or
+   * `null` while that date has not come yet. Empty for a month with no clients.
+   */
+  readonly retentionByMonth: readonly (number | null)[];
+}
+
+export interface PaidCohortReportInterface {
+  readonly cohorts: readonly PaidCohortRowInterface[];
+  /** Days after a term's end a renewal still counts as the term kept. */
+  readonly graceDays: number;
+  readonly generatedAt: string;
+  readonly timeZone: string;
+  readonly timeZoneFallback: boolean;
+}
+
 export interface TopPayerInterface {
   readonly userId: string;
   readonly telegramId: string | null;

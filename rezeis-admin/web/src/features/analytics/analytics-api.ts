@@ -245,6 +245,27 @@ export interface CohortRow {
   retentionByMonth: readonly number[]
 }
 
+export interface PaidCohortRow {
+  /** `YYYY-MM` — the local month of the cohort's first payment. */
+  cohort: string
+  cohortSize: number
+  /**
+   * `retentionByMonth[i]` is the share of the cohort with a paid subscription
+   * running `i + 1` months after the first payment (the grace included), or
+   * `null` while that date has not come yet. Empty for a month with no clients.
+   */
+  retentionByMonth: readonly (number | null)[]
+}
+
+export interface PaidCohortReport {
+  cohorts: readonly PaidCohortRow[]
+  /** Days after a term's end a renewal still counts as the term kept. */
+  graceDays: number
+  generatedAt: string
+  timeZone: string
+  timeZoneFallback: boolean
+}
+
 export interface TopPayer {
   userId: string
   telegramId: string | null
@@ -361,6 +382,12 @@ export async function getTrialConversion(days: number): Promise<TrialConversionR
 export async function getAnalyticsCohorts(): Promise<readonly CohortRow[]> {
   const response = await api.get('/admin/analytics/cohorts')
   return expectArray<CohortRow>(unwrapPayload(response.data).cohorts)
+}
+
+export async function getPaidCohorts(): Promise<PaidCohortReport> {
+  const response = await api.get('/admin/analytics/cohorts-by-first-payment')
+  const body = recordWith(response.data, ['cohorts', 'graceDays'])
+  return { ...(body as unknown as PaidCohortReport), cohorts: expectArray<PaidCohortRow>(body.cohorts) }
 }
 
 export async function getExpiring(): Promise<ExpiringReport> {

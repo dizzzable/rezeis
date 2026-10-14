@@ -10,6 +10,7 @@ import type {
   ExpiringReport,
   LtvReport,
   MoneyView,
+  PaidCohortReport,
   RevenueReport,
   SubscriptionByPlanItem,
   TopPayersReport,
@@ -271,6 +272,33 @@ export const COHORTS: readonly CohortRow[] = [
   { cohort: '2026-08', cohortSize: 80, retentionByMonth: [0.5, 0.25] },
   { cohort: '2026-09', cohortSize: 30, retentionByMonth: [0.3] },
 ]
+
+/** Three first-payment months, twelve cells each: the near ones filled in, the rest not yet due. */
+export function paidCohortReport(): PaidCohortReport {
+  const later = (cells: readonly number[]): (number | null)[] => [...cells, ...Array.from({ length: 12 - cells.length }, () => null)]
+  return {
+    cohorts: [
+      { cohort: '2026-07', cohortSize: 50, retentionByMonth: later([0.8, 0.6, 0.5]) },
+      { cohort: '2026-08', cohortSize: 80, retentionByMonth: later([0.75, 0.5]) },
+      { cohort: '2026-09', cohortSize: 30, retentionByMonth: later([]) },
+    ],
+    graceDays: 4,
+    generatedAt: '2026-09-18T12:00:00.000Z',
+    timeZone: 'UTC',
+    timeZoneFallback: false,
+  }
+}
+
+/**
+ * The newer cards' reports for a page test that has no opinion about them: every
+ * query the tabs make answers, so none shows its error state or a stray unmocked
+ * call. A test about one of the cards overrides its mock after this.
+ */
+export function installNewCardMocks(api: {
+  readonly getPaidCohorts: { mockResolvedValue: (value: PaidCohortReport) => unknown }
+}): void {
+  api.getPaidCohorts.mockResolvedValue(paidCohortReport())
+}
 
 export function ltvReport(): LtvReport {
   return {

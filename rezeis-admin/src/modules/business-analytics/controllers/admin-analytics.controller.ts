@@ -52,6 +52,13 @@ export class AdminAnalyticsController {
     return { cohorts };
   }
 
+  @Get('admin/analytics/cohorts-by-first-payment')
+  @RequirePermission('analytics', 'view')
+  @ApiOperation({ summary: 'Retention by month of first payment: the share still covered by a paid subscription 1-12 months later' })
+  public getPaidCohorts() {
+    return this.analyticsService.getPaidCohortRetention();
+  }
+
   @Get('admin/analytics/expiring')
   @RequirePermission('analytics', 'view')
   @ApiOperation({ summary: 'Live subscriptions ending in the coming 30 days, by day and by whether autopay will charge' })

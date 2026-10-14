@@ -20,6 +20,7 @@ import { installIntersectionObserver, renderWithProviders, type IntersectionObse
 import { StackSegment } from './analytics-chart-kit'
 import {
   COHORTS,
+  installNewCardMocks,
   conversionReport,
   emptyOverviewReport,
   emptyRevenueReport,
@@ -76,6 +77,11 @@ vi.mock('./analytics-api', () => ({
   getExpiring: vi.fn(),
   getTopPayers: vi.fn(),
   getLtvDistribution: vi.fn(),
+  getPaidCohorts: vi.fn(),
+  getAutopayReport: vi.fn(),
+  getDiscountReport: vi.fn(),
+  getPaidLtv: vi.fn(),
+  getPaymentHours: vi.fn(),
   getSubscriptionsByPlan: vi.fn(),
   getSurfaceAnalytics: vi.fn(),
 }))
@@ -123,6 +129,7 @@ beforeEach(() => {
   api.getExpiring.mockResolvedValue(expiringReport())
   api.getTopPayers.mockResolvedValue(topPayersReport())
   api.getLtvDistribution.mockResolvedValue(ltvReport())
+  installNewCardMocks(api)
   api.getSubscriptionsByPlan.mockResolvedValue(SUBSCRIPTIONS_BY_PLAN)
   api.getSurfaceAnalytics.mockResolvedValue(SURFACES)
 })

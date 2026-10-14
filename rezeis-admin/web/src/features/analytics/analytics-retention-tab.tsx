@@ -22,7 +22,9 @@ import {
   getAnalyticsCohorts,
   getExpiring,
   getLtvDistribution,
+  getPaidCohorts,
   type LtvReport,
+  type PaidCohortReport,
 } from './analytics-api'
 import {
   ChartCard,
@@ -56,6 +58,7 @@ type Segment = (typeof SEGMENTS)[number]
 export function RetentionTab({ played }: { readonly played: Set<string> }): JSX.Element {
   const expiring = useQuery({ queryKey: ['analytics', 'expiring'], queryFn: getExpiring, staleTime: 60_000 })
   const cohorts = useQuery({ queryKey: ['analytics', 'cohorts'], queryFn: getAnalyticsCohorts, staleTime: 5 * 60_000 })
+  const paidCohorts = useQuery({ queryKey: ['analytics', 'paid-cohorts'], queryFn: getPaidCohorts, staleTime: 5 * 60_000 })
   const ltv = useQuery({ queryKey: ['analytics', 'ltv'], queryFn: getLtvDistribution, staleTime: 5 * 60_000 })
 
   return (
@@ -63,6 +66,7 @@ export function RetentionTab({ played }: { readonly played: Set<string> }): JSX.
       <ZoneNote fallback={expiring.data?.timeZoneFallback === true} />
       <ExpiringCard query={expiring} played={played} />
       <CohortCard query={cohorts} />
+      <PaidCohortCard query={paidCohorts} />
       <LtvCard query={ltv} played={played} />
     </div>
   )
@@ -235,7 +239,19 @@ function CohortCard({
           rows.every((row) => row.cohortSize === 0) ? (
             <EmptyState className="h-48">{t('analyticsPage.retention.cohorts.empty')}</EmptyState>
           ) : (
-            <CohortHeatmap rows={rows} />
+            <CohortHeatmap
+              kind="registration"
+              rows={rows.map((row) => ({ cohort: row.cohort, cohortSize: row.cohortSize, cells: row.retentionByMonth }))}
+              firstMonth={0}
+              labels={{
+                title: t('analyticsPage.retention.cohorts.title'),
+                cohortColumn: t('analyticsPage.retention.cohorts.cohortColumn'),
+                sizeColumn: t('analyticsPage.retention.cohorts.sizeColumn'),
+                monthAfter: (count) => t('analyticsPage.retention.cohorts.monthAfter', { count }),
+                monthsAfter: t('analyticsPage.retention.cohorts.monthsAfter'),
+                notYet: '',
+              }}
+            />
           )
         }
       </QueryBody>
@@ -244,14 +260,86 @@ function CohortCard({
 }
 
 /**
+ * «Удержание по месяцу первой оплаты»: the same table, the other cohort — the
+ * clients of each month of first payment, and the share still covered by a paid
+ * subscription 1…12 months on.
+ */
+function PaidCohortCard({
+  query,
+}: {
+  readonly query: { readonly data: PaidCohortReport | undefined; readonly isLoading: boolean; readonly isError: boolean }
+}): JSX.Element {
+  const { t } = useTranslation()
+  return (
+    <ChartCard
+      id="retention-paid-cohorts"
+      title={t('analyticsPage.retention.paidCohorts.title')}
+      icon={<Grid3x3 className="size-4 text-muted-foreground" aria-hidden="true" />}
+      info={t('analyticsPage.retention.paidCohorts.info', { grace: query.data?.graceDays ?? 4 })}
+      rule="money"
+      description={t('analyticsPage.retention.paidCohorts.description')}
+    >
+      <QueryBody query={query} height="h-72">
+        {(report) =>
+          report.cohorts.every((row) => row.cohortSize === 0) ? (
+            <EmptyState className="h-48">{t('analyticsPage.retention.paidCohorts.empty')}</EmptyState>
+          ) : (
+            <CohortHeatmap
+              kind="first-payment"
+              rows={report.cohorts.map((row) => ({ cohort: row.cohort, cohortSize: row.cohortSize, cells: row.retentionByMonth }))}
+              firstMonth={1}
+              labels={{
+                title: t('analyticsPage.retention.paidCohorts.title'),
+                cohortColumn: t('analyticsPage.retention.paidCohorts.cohortColumn'),
+                sizeColumn: t('analyticsPage.retention.paidCohorts.sizeColumn'),
+                monthAfter: (count) => t('analyticsPage.retention.paidCohorts.monthAfter', { count }),
+                monthsAfter: t('analyticsPage.retention.paidCohorts.monthsAfter'),
+                notYet: t('analyticsPage.retention.paidCohorts.notYet'),
+              }}
+            />
+          )
+        }
+      </QueryBody>
+    </ChartCard>
+  )
+}
+
+interface HeatmapRow {
+  readonly cohort: string
+  readonly cohortSize: number
+  /** `cells[k]` is the share `firstMonth + k` months after the cohort's event; `null`: that date has not come. */
+  readonly cells: readonly (number | null)[]
+}
+
+interface HeatmapLabels {
+  readonly title: string
+  readonly cohortColumn: string
+  readonly sizeColumn: string
+  readonly monthAfter: (count: number) => string
+  readonly monthsAfter: string
+  /** What an empty cell stands for, for a screen reader; empty when the table has no such cell. */
+  readonly notYet: string
+}
+
+/**
  * A table, because it is one: every cell prints its percentage, and the colour
  * behind it only helps the eye find the strong and the weak months. The shade
  * is relative to the strongest cell of the table (said in the scale below it).
  */
-function CohortHeatmap({ rows }: { readonly rows: readonly CohortRow[] }): JSX.Element {
-  const { t } = useTranslation()
-  const months = Math.max(1, ...rows.map((row) => row.retentionByMonth.length))
-  const max = Math.max(0, ...rows.flatMap((row) => row.retentionByMonth))
+function CohortHeatmap({
+  rows,
+  firstMonth,
+  labels,
+  kind,
+}: {
+  readonly rows: readonly HeatmapRow[]
+  /** The month number of the first column: 0 for sign-ups (the same month), 1 for first payments. */
+  readonly firstMonth: number
+  readonly labels: HeatmapLabels
+  readonly kind: 'registration' | 'first-payment'
+}): JSX.Element {
+  const months = Math.max(1, ...rows.map((row) => row.cells.length))
+  const max = Math.max(0, ...rows.flatMap((row) => row.cells.map((cell) => cell ?? 0)))
   // A month nobody signed up in has nothing to show.
   const visible = rows.filter((row) => row.cohortSize > 0)
   return (
@@ -260,16 +348,16 @@ function CohortHeatmap({ rows }: { readonly rows: readonly CohortRow[] }): JSX.E
           boxes, and without a positioned scroll box they escape it — on a phone
           the far columns' labels widened the whole page by 335 px. */}
       <div className="relative overflow-x-auto">
-        <table className="w-full border-separate border-spacing-0.5 text-xs" data-cohort-table="">
-          <caption className="sr-only">{t('analyticsPage.retention.cohorts.title')}</caption>
+        <table className="w-full border-separate border-spacing-0.5 text-xs" data-cohort-table="" data-cohort-kind={kind}>
+          <caption className="sr-only">{labels.title}</caption>
           <thead>
             <tr className="text-muted-foreground">
-              <th scope="col" className="px-2 py-1.5 text-left font-medium">{t('analyticsPage.retention.cohorts.cohortColumn')}</th>
-              <th scope="col" className="px-2 py-1.5 text-right font-medium">{t('analyticsPage.retention.cohorts.sizeColumn')}</th>
-              {Array.from({ length: months }, (_, month) => (
-                <th key={month} scope="col" className="min-w-11 px-1 py-1.5 text-center font-medium tabular-nums">
-                  <span className="sr-only">{t('analyticsPage.retention.cohorts.monthAfter', { count: month })}</span>
-                  <span aria-hidden="true">{month}</span>
+              <th scope="col" className="px-2 py-1.5 text-left font-medium">{labels.cohortColumn}</th>
+              <th scope="col" className="px-2 py-1.5 text-right font-medium">{labels.sizeColumn}</th>
+              {Array.from({ length: months }, (_, index) => (
+                <th key={index} scope="col" className="min-w-11 px-1 py-1.5 text-center font-medium tabular-nums">
+                  <span className="sr-only">{labels.monthAfter(firstMonth + index)}</span>
+                  <span aria-hidden="true">{firstMonth + index}</span>
                 </th>
               ))}
             </tr>
@@ -279,15 +367,17 @@ function CohortHeatmap({ rows }: { readonly rows: readonly CohortRow[] }): JSX.E
               <tr key={row.cohort} data-cohort={row.cohort}>
                 <th scope="row" className="whitespace-nowrap px-2 py-1.5 text-left font-medium">{formatCohortMonth(row.cohort)}</th>
                 <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground">{formatCount(row.cohortSize)}</td>
-                {Array.from({ length: months }, (_, month) => {
-                  const value = row.retentionByMonth[month]
-                  if (value === undefined) return <td key={month} aria-hidden="true" />
+                {Array.from({ length: months }, (_, index) => {
+                  const value = row.cells[index]
+                  if (value === undefined || value === null) {
+                    return <td key={index} aria-hidden="true" title={labels.notYet === '' ? undefined : labels.notYet} />
+                  }
                   return (
                     <td
-                      key={month}
+                      key={index}
                       className={cn('rounded-[3px] px-1 py-1.5 text-center tabular-nums', value === 0 && 'text-muted-foreground')}
                       style={{ backgroundColor: heatColor(max === 0 ? 0 : value / max) }}
-                      data-cohort-cell={month}
+                      data-cohort-cell={firstMonth + index}
                     >
                       {formatPercent(value)}
                     </td>
@@ -299,7 +389,7 @@ function CohortHeatmap({ rows }: { readonly rows: readonly CohortRow[] }): JSX.E
         </table>
       </div>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground" data-cohort-scale="">
-        <span>{t('analyticsPage.retention.cohorts.monthsAfter')}</span>
+        <span>{labels.monthsAfter}</span>
         <span className="ml-auto flex items-center gap-2">
           <span>{formatPercent(0)}</span>
           <span

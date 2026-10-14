@@ -8,6 +8,7 @@ import {
   AdvancedAnalyticsReportInterface,
   CohortRowInterface,
   ExpiringReportInterface,
+  PaidCohortReportInterface,
   LtvReportInterface,
   MoneyViewInterface,
   RevenueReportInterface,
@@ -45,6 +46,11 @@ import {
   ANALYTICS_DEFAULT_TOP_PAYERS_LIMIT,
   ANALYTICS_ONE_DAY_MS,
 } from '../utils/analytics-date.util';
+import {
+  assemblePaidCohorts,
+  paidCohortSql,
+  type PaidCohortSqlRow,
+} from '../utils/analytics-first-payment-cohort.util';
 import { chooseMoneyView, type FxSnapshot, readFxSnapshot } from '../utils/analytics-money.util';
 import {
   type ActiveSeriesRow,
@@ -265,6 +271,21 @@ export class BusinessAnalyticsService {
       cohortSql(zonedMonthStart(now, zone, ANALYTICS_COHORT_MONTHS - 1), zone),
     );
     return assembleCohorts(now, zone, rows);
+  }
+
+  /**
+   * The retention matrix by month of FIRST payment: for every local month of
+   * the last twelve, the share of the clients who paid first then that had a
+   * paid subscription running 1…12 months later. See
+   * `analytics-first-payment-cohort.util.ts`.
+   */
+  public async getPaidCohortRetention(): Promise<PaidCohortReportInterface> {
+    const now = new Date();
+    const zone = await this.readZone();
+    const rows = await this.prismaService.$queryRaw<PaidCohortSqlRow[]>(
+      paidCohortSql(zonedMonthStart(now, zone, ANALYTICS_COHORT_MONTHS - 1), zone),
+    );
+    return assemblePaidCohorts(now, zone, rows);
   }
 
   /** Live subscriptions whose term ends within the coming 30 local days, by day and by what will happen. */
