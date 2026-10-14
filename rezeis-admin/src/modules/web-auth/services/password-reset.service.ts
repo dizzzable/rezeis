@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
-import { Prisma, SubscriptionStatus } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 
 import { RawCacheService } from '../../../common/cache/raw-cache.service';
 import { PrismaService } from '../../../common/prisma/prisma.service';
@@ -12,7 +12,6 @@ import { loginPolicy } from '../../auth/utils/login-policy.util';
 import { EmailDeliveryService } from '../../email/services/email-delivery.service';
 import { BotNotifierClient } from '../../notifications/services/bot-notifier.client';
 import { WebPushService } from '../../push/services/web-push.service';
-import { configUrlShortIds } from '../../remnawave/services/panel-user-address';
 import { tempPasswordCacheKey } from '../../users/utils/temp-password-cache.util';
 import type {
   PasswordRecoveryMethod,
@@ -38,7 +37,6 @@ import {
 } from '../utils/recovery-withdrawal-hold.util';
 import { canReceiveResetLink, hasVerifiedEmail, smtpCanDeliver } from '../utils/reset-channels.util';
 import { raiseSessionsRevokedAt, type SessionsRevokedAtWriter } from '../utils/sessions-revoked-at.util';
-import { escapeLikeLiteral, parseSubscriptionLink } from '../utils/subscription-link.util';
 
 // ── Limits ─────────────────────────────────────────────────────────────────
 
@@ -50,17 +48,20 @@ export const PASSWORD_RESET_SPENT_MEMORY_SECONDS = 24 * 60 * 60;
 export const PASSWORD_RESET_SEND_COOLDOWN_SECONDS = 60;
 /** …and at most this many per hour. */
 export const PASSWORD_RESET_SENDS_PER_HOUR = 5;
-/** Recovery-by-subscription attempts one address (an IPv6 /64) may make per hour. */
+/**
+ * Recovery-by-login attempts one address (an IPv6 /64) may make per hour. The
+ * names say "subscription" because the route, the operator's switch and the
+ * Redis keys were named for the link this path used to ask for; they are kept so
+ * a cabinet, a setting and a counter that already exist keep meaning the same
+ * thing.
+ */
 export const SUBSCRIPTION_RECOVERY_ATTEMPTS_PER_IP_PER_HOUR = 5;
-/** Attempts that name one account's subscription, per window, before the path refuses it. */
+/** Passwords one account may be handed back through this path (no channel, login only) per window. */
 export const SUBSCRIPTION_RECOVERY_ATTEMPTS_PER_OWNER = 5;
-/** The window those attempts are counted in. */
+/** The window those are counted in. */
 export const SUBSCRIPTION_RECOVERY_OWNER_WINDOW_SECONDS = 24 * 60 * 60;
-/** An expired subscription still counts for this many days. */
-export const SUBSCRIPTION_RECOVERY_EXPIRED_GRACE_DAYS = 30;
 
 const HOUR_SECONDS = 60 * 60;
-const DAY_MS = 24 * 60 * 60 * 1000;
 const TOKEN_BYTES = 32;
 const TOKEN_SHAPE = /^[a-f0-9]{64}$/;
 
@@ -72,7 +73,7 @@ const KEY = {
   hourly: (webAccountId: string) => `web-auth:pwreset:hourly:${webAccountId}`,
   /** Slot prefix, keyed by the hashed address bucket. */
   subscriptionIp: (bucketHash: string) => `web-auth:subrec:ip:${bucketHash}`,
-  /** Slot prefix, keyed by the web account the pasted link belongs to. */
+  /** Slot prefix, keyed by the web account a login-only recovery was granted to. */
   subscriptionOwner: (webAccountId: string) => `web-auth:subrec:owner:${webAccountId}`,
 } as const;
 
@@ -98,22 +99,6 @@ export const RESET_ACCOUNT_SELECT = {
 } as const satisfies Prisma.WebAccountSelect;
 
 export type ResetAccountRow = Prisma.WebAccountGetPayload<{ select: typeof RESET_ACCOUNT_SELECT }>;
-
-/** A subscription a pasted link could name, with what deciding about it needs. */
-export const LINK_OWNER_SELECT = {
-  id: true,
-  status: true,
-  expiresAt: true,
-  configUrl: true,
-  user: {
-    select: {
-      isBlocked: true,
-      webAccount: { select: { id: true, login: true, loginNormalized: true } },
-    },
-  },
-} as const satisfies Prisma.SubscriptionSelect;
-
-export type LinkOwnerRow = Prisma.SubscriptionGetPayload<{ select: typeof LINK_OWNER_SELECT }>;
 
 export interface PasswordResetTransaction extends SessionsRevokedAtWriter {
   readonly webAccount: {
@@ -141,12 +126,6 @@ export interface PasswordResetDatabase {
       select: typeof RESET_ACCOUNT_SELECT;
     }): PromiseLike<ResetAccountRow | null>;
   };
-  readonly subscription: {
-    findMany(args: {
-      where: Prisma.SubscriptionWhereInput;
-      select: typeof LINK_OWNER_SELECT;
-    }): PromiseLike<LinkOwnerRow[]>;
-  };
   $transaction<R>(fn: (tx: PasswordResetTransaction) => Promise<R>): Promise<R>;
 }
 
@@ -159,7 +138,7 @@ export function asPasswordResetDatabase(prisma: PrismaService): PasswordResetDat
 }
 
 export type PasswordResetEvents = Pick<SystemEventsService, 'info'>;
-/** The operator's switch for recovery by subscription link lives in the platform policy. */
+/** The operator's switch for recovery by login lives in the platform policy (`subscriptionLinkRecovery`). */
 export type PasswordResetPolicy = Pick<SettingsService, 'getInternalPlatformPolicy'>;
 export type PasswordResetMail = Pick<EmailDeliveryService, 'getSmtpSettings' | 'sendPasswordResetLink'>;
 export type PasswordResetTelegram = Pick<BotNotifierClient, 'notifyUser' | 'isEnabled'>;
@@ -221,14 +200,18 @@ interface ResetLinksSent {
  *    hands the link to the bot to send, so nobody has to remember a login);
  *  - **a link by e-mail** — to the account's VERIFIED address, when the
  *    operator has SMTP on;
- *  - **the VPN subscription link** (`recoverBySubscription`) — ONLY for an
- *    account with neither. The link is effectively the whole proof: the login
- *    typed beside it is NOT a secret (the panel names Remnawave profiles after
- *    it, and a subscription's public info page shows that name), so it only
- *    selects the account and adds friction. That is why an account that has a
- *    channel never gets a password from this path — it gets the ordinary link
- *    on its channel — and why a reset here holds partner withdrawals for three
- *    days and tells the operators.
+ *  - **the login alone** (`recoverBySubscription`) — ONLY for an account with
+ *    neither. This path used to ask for the VPN subscription link as well; the
+ *    owner decided that the login is enough, knowing it is not a secret (the
+ *    panel names Remnawave profiles after it, and a subscription's public info
+ *    page shows that name). So nothing here proves anything: whoever types a
+ *    login of an account with no channel is handed the way to set its password.
+ *    That is why an account that has a channel never gets a password from this
+ *    path — it gets the ordinary link on its channel — and why a reset here
+ *    signs the other sessions out, holds partner withdrawals for three days, and
+ *    tells the operators. The route, the operator's switch and the stored
+ *    method keep their old names (`subscription`, `subscriptionLinkRecovery`,
+ *    `subscription_link`): they are wire and stored values.
  *
  * Every road ends at the same single-use token and the same `consume`.
  *
@@ -246,7 +229,7 @@ interface ResetLinksSent {
  * `request` delivers in the background and answers before anything is sent,
  * so neither its body nor its duration depends on Telegram or SMTP; the cabinet
  * shows every visitor one message. `recoverBySubscription` answers `mismatch`
- * for every failed verification, whichever half was wrong.
+ * for an unknown, blocked or malformed login alike.
  *
  * ── Where the link points ─────────────────────────────────────────────────
  *
@@ -403,23 +386,27 @@ export class PasswordResetService {
   }
 
   /**
-   * Recovery by VPN subscription link. See the class header for why this path
-   * trusts so little: the login selects the account, the link is the proof.
+   * Recovery by login alone. See the class header for why this path trusts so
+   * little: the login selects the account and nothing else is asked.
    *
-   * The attempt is COUNTED before anything is decided — against the address,
-   * and against every account the link names — each by an atomic slot claim,
-   * so a burst of parallel guesses cannot all be judged against a count none
-   * of them has raised yet. Every failure answers `mismatch`.
+   * `link` is what cabinets up to the one that dropped it still send. It is
+   * accepted and never looked at: no subscription is read here, so neither a
+   * missing link nor a wrong one nor an expired subscription changes the answer.
+   *
+   * The attempt is COUNTED before anything is decided — against the address — by
+   * an atomic slot claim, so a burst of parallel requests cannot all be judged
+   * against a count none of them has raised yet; and a password granted is
+   * counted against the account (`grantLinkOnlyRecovery`).
    */
   public async recoverBySubscription(input: {
-    readonly link: string;
+    readonly link?: string;
     readonly login: string;
     readonly clientIp: string | null;
     readonly cabinetUrl: string | null;
   }): Promise<PasswordResetSubscriptionResultInterface> {
-    // The operator's switch («Восстановление пароля по ссылке подписки»), asked
-    // before anything is counted or looked up: a refusal that came after the
-    // lookup could differ by whether the link or the login matched.
+    // The operator's switch («Восстановление пароля по логину»), asked before
+    // anything is counted or looked up: a refusal that came after the lookup
+    // could differ by whether the login existed.
     let enabled: boolean;
     try {
       enabled = (await this.policy.getInternalPlatformPolicy()).subscriptionLinkRecovery === true;
@@ -439,41 +426,16 @@ export class PasswordResetService {
     if (address === 'unavailable') return { status: 'unavailable' };
     if (address === 'full') return { status: 'rate_limited', retryAfterSeconds: HOUR_SECONDS };
 
-    const parsed = parseSubscriptionLink(input.link);
-    const named = await this.findSubscriptionsNamedBy(parsed.candidates);
-
-    // Counted against the OWNERS of what the link names — never against the
-    // login typed beside it, which anybody can type to lock anybody out.
-    const owners = [...new Set(named.map((row) => row.user.webAccount?.id).filter(isString))];
-    for (const owner of owners) {
-      const claim = await this.claimSlot(
-        KEY.subscriptionOwner(owner),
-        SUBSCRIPTION_RECOVERY_ATTEMPTS_PER_OWNER,
-        SUBSCRIPTION_RECOVERY_OWNER_WINDOW_SECONDS,
-      );
-      if (claim === 'unavailable') return { status: 'unavailable' };
-      if (claim === 'full') return { status: 'mismatch' };
-    }
-
-    const loginNormalized = loginPolicy.normalizeLogin(input.login);
-    const now = new Date();
-    const match = named.find(
-      (row) =>
-        row.user.webAccount !== null &&
-        row.user.webAccount.login !== null &&
-        row.user.webAccount.loginNormalized === loginNormalized &&
-        !row.user.isBlocked &&
-        qualifiesForRecovery(row, now),
-    );
-    if (match === undefined || match.user.webAccount === null) return { status: 'mismatch' };
+    // A login that cannot be one names nobody; counted above all the same.
+    if (!loginPolicy.isValidLogin(input.login)) return { status: 'mismatch' };
     const account = await this.db.webAccount.findUnique({
-      where: { id: match.user.webAccount.id },
+      where: { loginNormalized: loginPolicy.normalizeLogin(input.login) },
       select: RESET_ACCOUNT_SELECT,
     });
     if (account === null || account.login === null || account.user.isBlocked) return { status: 'mismatch' };
 
     if (await this.hasWorkingChannel(account)) {
-      // The link is not the proof here: this account can be reached. It gets
+      // Nothing proves who is asking, and this account can be reached: it gets
       // the ordinary link on its own channel, and the visitor the answer every
       // visitor of the recovery form gets.
       await this.sendResetLinks(account, linkBase(input.cabinetUrl));
@@ -483,11 +445,20 @@ export class PasswordResetService {
   }
 
   /**
-   * THE POLICY SEAM for an account with no channel, where possession of the
-   * subscription link is the whole proof. Today: self-service (A) — a
-   * single-use token, with the 72-hour hold on the partner balance (no
-   * withdrawal, no purchase paid with it) written by `consume` and the
-   * operators told through `auth.password_recovery`.
+   * THE POLICY SEAM for an account with no channel, where the login is all that
+   * was asked. Today: self-service (A) — a single-use token, with the 72-hour
+   * hold on the partner balance (no withdrawal, no purchase paid with it)
+   * written by `consume` and the operators told through
+   * `auth.password_recovery`.
+   *
+   * What bounds it is the budget of the account: five passwords handed back per
+   * day, counted when one is granted — not when a login is merely typed, so
+   * nobody can use the budget up by typing a stranger's login WITHOUT also being
+   * handed the way in. It is deliberately not given back when the owner then
+   * uses the token: with nothing to prove, a count that reset on success would
+   * let two people take one account back and forth without end. Past it the
+   * answer is `rate_limited`, and the customer is told to try tomorrow or write
+   * to support.
    *
    * Switching to operator confirmation (B) is this method alone: instead of a
    * token, raise an operator event naming `account.userId` (the operator then
@@ -498,10 +469,17 @@ export class PasswordResetService {
     account: ResetAccountRow,
   ): Promise<PasswordResetSubscriptionResultInterface> {
     if (account.login === null) return { status: 'mismatch' };
+    const claim = await this.claimSlot(
+      KEY.subscriptionOwner(account.id),
+      SUBSCRIPTION_RECOVERY_ATTEMPTS_PER_OWNER,
+      SUBSCRIPTION_RECOVERY_OWNER_WINDOW_SECONDS,
+    );
+    if (claim === 'unavailable') return { status: 'unavailable' };
+    if (claim === 'full') {
+      return { status: 'rate_limited', retryAfterSeconds: SUBSCRIPTION_RECOVERY_OWNER_WINDOW_SECONDS };
+    }
     const issued = await this.mintToken(account, 'subscription_link');
     if (issued === null) return { status: 'unavailable' };
-    // A verified owner starts the next window with a clean count.
-    await this.releaseSlots(KEY.subscriptionOwner(account.id), SUBSCRIPTION_RECOVERY_ATTEMPTS_PER_OWNER);
     return { status: 'verified', token: issued.token, login: account.login, expiresAt: issued.expiresAt };
   }
 
@@ -719,10 +697,6 @@ export class PasswordResetService {
     return (await this.cache.exists(`${prefix}:1`)) ? 'full' : 'unavailable';
   }
 
-  private async releaseSlots(prefix: string, slots: number): Promise<void> {
-    await this.cache.delMany(Array.from({ length: slots }, (_, index) => `${prefix}:${index + 1}`));
-  }
-
   /** A fresh token, stored as its hash. `null` when Redis did not take it. */
   private async mintToken(
     account: ResetAccountRow,
@@ -745,29 +719,6 @@ export class PasswordResetService {
 
   private async missingTokenStatus(hash: string): Promise<'expired' | 'used'> {
     return (await this.cache.exists(KEY.spent(hash))) ? 'used' : 'expired';
-  }
-
-  /**
-   * The subscriptions whose OWN stored address carries one of the candidate
-   * ids: one exact lookup per candidate, the id escaped so none of its
-   * characters is a LIKE wildcard, no truncation, and the exact comparison
-   * against `configUrlShortIds` deciding.
-   */
-  private async findSubscriptionsNamedBy(candidates: readonly string[]): Promise<LinkOwnerRow[]> {
-    const found = new Map<string, LinkOwnerRow>();
-    for (const candidate of candidates) {
-      const literal = escapeLikeLiteral(candidate);
-      const rows = await this.db.subscription.findMany({
-        where: {
-          OR: [{ configUrl: { endsWith: `/${literal}` } }, { configUrl: { endsWith: `/${literal}/` } }],
-        },
-        select: LINK_OWNER_SELECT,
-      });
-      for (const row of rows) {
-        if (configUrlShortIds(row.configUrl).includes(candidate)) found.set(row.id, row);
-      }
-    }
-    return [...found.values()];
   }
 
   private async sendTelegramLink(
@@ -826,10 +777,6 @@ function sha256(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
 }
 
-function isString(value: string | undefined): value is string {
-  return typeof value === 'string';
-}
-
 /**
  * A stand-in for the password hash, compared at consume time. A digest rather
  * than the hash itself, so Redis never holds a crackable credential.
@@ -851,14 +798,3 @@ export function linkBase(cabinetUrl: string | null): string | null {
   }
 }
 
-/** Active or limited, or expired no more than thirty days ago. */
-export function qualifiesForRecovery(
-  subscription: { readonly status: SubscriptionStatus; readonly expiresAt: Date | null },
-  now: Date,
-): boolean {
-  if (subscription.status === SubscriptionStatus.ACTIVE || subscription.status === SubscriptionStatus.LIMITED) {
-    return true;
-  }
-  if (subscription.status !== SubscriptionStatus.EXPIRED || subscription.expiresAt === null) return false;
-  return subscription.expiresAt.getTime() >= now.getTime() - SUBSCRIPTION_RECOVERY_EXPIRED_GRACE_DAYS * DAY_MS;
-}

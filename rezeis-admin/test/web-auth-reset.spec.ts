@@ -6,7 +6,9 @@ import { describe, it } from 'node:test';
 
 import { Logger, UnauthorizedException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
-import { Locale, SubscriptionStatus } from '@prisma/client';
+import { plainToInstance } from 'class-transformer';
+import { validate } from 'class-validator';
+import { Locale } from '@prisma/client';
 
 import { RawCacheService } from '../src/common/cache/raw-cache.service';
 import { PrismaService } from '../src/common/prisma/prisma.service';
@@ -36,14 +38,14 @@ import {
   configUrlShortIds,
   panelShortUuidFromConfigUrl,
 } from '../src/modules/remnawave/services/panel-user-address';
+import { PANEL_CAPABILITIES, PANEL_CAPABILITY, panelAnnouncement } from '../src/modules/reiwa-peers/panel-capabilities';
 import { InternalWebAuthController } from '../src/modules/web-auth/controllers/internal-web-auth.controller';
+import { PasswordResetSubscriptionDto } from '../src/modules/web-auth/dto/password-reset-subscription.dto';
 import {
-  LINK_OWNER_SELECT,
   PASSWORD_RESET_DATABASE,
   PASSWORD_RESET_TTL_SECONDS,
   PasswordResetService,
   RESET_ACCOUNT_SELECT,
-  type LinkOwnerRow,
   type PasswordResetDatabase,
   type PasswordResetEvents,
   type PasswordResetMail,
@@ -61,7 +63,6 @@ import {
   RECOVERY_WITHDRAWAL_HOLD_PURPOSE,
   type RecoveryWithdrawalHoldReader,
 } from '../src/modules/web-auth/utils/recovery-withdrawal-hold.util';
-import { escapeLikeLiteral, parseSubscriptionLink } from '../src/modules/web-auth/utils/subscription-link.util';
 import { applySessionsRevokedAtRaise } from './helpers/sessions-revoked-at-sql';
 
 /**
@@ -213,14 +214,6 @@ interface AccountFixture {
   sessionsRevokedAt: Date | null;
 }
 
-interface SubscriptionFixture {
-  id: string;
-  userId: string;
-  status: SubscriptionStatus;
-  expiresAt: Date | null;
-  configUrl: string | null;
-}
-
 interface ChallengeFixture {
   id: string;
   webAccountId: string;
@@ -234,27 +227,7 @@ interface ChallengeFixture {
 interface DatabaseState {
   users: UserFixture[];
   accounts: AccountFixture[];
-  subscriptions: SubscriptionFixture[];
   challenges: ChallengeFixture[];
-}
-
-/**
- * Postgres `LIKE`, whole-string: `%` any run, `_` any one character, and a
- * backslash makes the next character literal (the default ESCAPE). Prisma's
- * `endsWith: v` is `LIKE ('%' || v)` with `v` bound verbatim.
- */
-function likeMatches(value: string, pattern: string): boolean {
-  let regex = '';
-  for (let index = 0; index < pattern.length; index += 1) {
-    const char = pattern[index];
-    if (char === '\\' && index + 1 < pattern.length) {
-      index += 1;
-      regex += pattern[index].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    } else if (char === '%') regex += '[\\s\\S]*';
-    else if (char === '_') regex += '[\\s\\S]';
-    else regex += char.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  }
-  return new RegExp(`^${regex}$`).test(value);
 }
 
 class FakeDatabase implements PasswordResetDatabase {
@@ -263,8 +236,8 @@ class FakeDatabase implements PasswordResetDatabase {
   public readonly passwordWrites: Array<{ id: string; passwordHash: string }> = [];
   /** The sign-out moment statements that landed, with the rows each reported. */
   public readonly raises: number[] = [];
-  /** Every subscription lookup's LIKE patterns, as Postgres receives them. */
-  public readonly subscriptionQueries: string[][] = [];
+  /** How many account reads the service made — a switched-off path makes none. */
+  public reads = 0;
 
   public constructor(state: DatabaseState) {
     this.state = state;
@@ -324,6 +297,7 @@ class FakeDatabase implements PasswordResetDatabase {
 
   public readonly webAccount: PasswordResetDatabase['webAccount'] = {
     findUnique: async (args) => {
+      this.reads += 1;
       // Every account read goes through the one select the projection mirrors.
       assert.equal(args.select, RESET_ACCOUNT_SELECT, 'an account read used another select');
       const keys = Object.keys(args.where);
@@ -340,6 +314,7 @@ class FakeDatabase implements PasswordResetDatabase {
       return account === undefined ? null : this.projectAccount(account);
     },
     findFirst: async (args) => {
+      this.reads += 1;
       assert.equal(args.select, RESET_ACCOUNT_SELECT, 'an account read used another select');
       const where = args.where as { user?: { telegramId?: unknown } };
       assert.deepEqual(Object.keys(where), ['user'], 'findFirst supports a user filter only');
@@ -347,58 +322,6 @@ class FakeDatabase implements PasswordResetDatabase {
       const user = this.state.users.find((candidate) => candidate.telegramId === where.user?.telegramId);
       const account = user === undefined ? undefined : this.state.accounts.find((a) => a.userId === user.id);
       return account === undefined ? null : this.projectAccount(account);
-    },
-  };
-
-  public readonly subscription: PasswordResetDatabase['subscription'] = {
-    // Postgres as Prisma drives it: an OR of `configUrl` string filters, each a
-    // LIKE with its value bound verbatim; rows in storage order; `take` cuts.
-    // Anything else is a shape this fake was not written for, and it says so.
-    findMany: async (args) => {
-      assert.equal(args.select, LINK_OWNER_SELECT, 'a subscription lookup used another select');
-      const extra = Object.keys(args).filter((key) => key !== 'select' && key !== 'where' && key !== 'take');
-      assert.deepEqual(extra, [], 'the fake models select, where and take only');
-      const take = (args as { take?: unknown }).take;
-      assert.ok(take === undefined || (Number.isInteger(take) && Number(take) > 0), `take: ${String(take)}`);
-      const or = (args.where as { OR?: Array<{ configUrl?: Record<string, unknown> }> }).OR;
-      assert.ok(Array.isArray(or) && or.length > 0, 'the lookup is an OR of configUrl filters');
-      const LIKE_OF: Record<string, (value: string) => string> = {
-        endsWith: (value) => `%${value}`,
-        startsWith: (value) => `${value}%`,
-        contains: (value) => `%${value}%`,
-      };
-      const patterns = or.map((clause) => {
-        const filters = Object.entries(clause.configUrl ?? {});
-        assert.equal(filters.length, 1, `one configUrl filter per clause: ${JSON.stringify(clause)}`);
-        const [operator, value] = filters[0];
-        assert.ok(operator in LIKE_OF, `unmodelled configUrl filter: ${operator}`);
-        assert.equal(typeof value, 'string');
-        return LIKE_OF[operator](String(value));
-      });
-      this.subscriptionQueries.push(patterns);
-      const rows: LinkOwnerRow[] = [];
-      for (const subscription of this.state.subscriptions) {
-        if (take !== undefined && rows.length >= Number(take)) break;
-        const url = subscription.configUrl;
-        if (url === null || !patterns.some((pattern) => likeMatches(url, pattern))) continue;
-        const user = this.state.users.find((candidate) => candidate.id === subscription.userId);
-        assert.ok(user, `fixture subscription ${subscription.id} has no user`);
-        const account = this.state.accounts.find((candidate) => candidate.userId === subscription.userId);
-        rows.push({
-          id: subscription.id,
-          status: subscription.status,
-          expiresAt: subscription.expiresAt,
-          configUrl: subscription.configUrl,
-          user: {
-            isBlocked: user.isBlocked,
-            webAccount:
-              account === undefined
-                ? null
-                : { id: account.id, login: account.login, loginNormalized: account.loginNormalized },
-          },
-        });
-      }
-      return rows;
     },
   };
 
@@ -470,12 +393,7 @@ class FakeDatabase implements PasswordResetDatabase {
 
 const ALICE_SHORT = 'AliceShort01q';
 const BOB_SHORT = 'Bob_Short_77z';
-const GINA_SHORT = 'GinaShort01q';
-const IVAN_SHORT = 'IvanShort029';
-const JUNE_SHORT = 'JuneShort031';
 const KATE_SHORT = 'KateShort0001';
-const LEO_SHORT = 'LeoShort00001';
-const FRANK_SHORT = 'FrankShort01';
 
 function account(
   overrides: Partial<AccountFixture> & Pick<AccountFixture, 'id' | 'userId'>,
@@ -497,48 +415,20 @@ function account(
   };
 }
 
-/** A customer with a web login and nothing else, and one subscription. */
+/** A customer with a web login and nothing else: no Telegram, no e-mail. */
 function loneCustomer(
   name: string,
-  subscription: Pick<SubscriptionFixture, 'status' | 'expiresAt' | 'configUrl'>,
   options: { readonly isBlocked?: boolean } = {},
-): { user: UserFixture; account: AccountFixture; subscription: SubscriptionFixture } {
+): { user: UserFixture; account: AccountFixture } {
   return {
     user: { id: `u-${name}`, telegramId: null, isBlocked: options.isBlocked ?? false, language: Locale.RU },
     account: account({ id: `wa-${name}`, userId: `u-${name}`, login: name, loginNormalized: name.toLowerCase() }),
-    subscription: { id: `s-${name}`, userId: `u-${name}`, ...subscription },
   };
 }
 
 function fixtures(now = new Date()): DatabaseState {
-  const lone = [
-    loneCustomer('gina', {
-      status: SubscriptionStatus.ACTIVE,
-      expiresAt: new Date(now.getTime() + 20 * DAY_MS),
-      configUrl: `https://sub.example.com/${GINA_SHORT}`,
-    }),
-    loneCustomer('ivan', {
-      status: SubscriptionStatus.EXPIRED,
-      expiresAt: new Date(now.getTime() - 29 * DAY_MS),
-      configUrl: `https://sub.example.com/${IVAN_SHORT}`,
-    }),
-    loneCustomer('june', {
-      status: SubscriptionStatus.EXPIRED,
-      expiresAt: new Date(now.getTime() - 31 * DAY_MS),
-      configUrl: `https://sub.example.com/${JUNE_SHORT}`,
-    }),
-    // An operator's subscription page under a custom path prefix.
-    loneCustomer('kate', {
-      status: SubscriptionStatus.ACTIVE,
-      expiresAt: null,
-      configUrl: `https://sub.example.com/vpn/${KATE_SHORT}`,
-    }),
-    loneCustomer(
-      'leo',
-      { status: SubscriptionStatus.ACTIVE, expiresAt: null, configUrl: `https://sub.example.com/${LEO_SHORT}` },
-      { isBlocked: true },
-    ),
-  ];
+  // No subscriptions anywhere: recovery by login does not read one.
+  const lone = [loneCustomer('gina'), loneCustomer('leo', { isBlocked: true })];
   return {
     users: [
       { id: 'u-alice', telegramId: 700_001n, isBlocked: false, language: Locale.RU },
@@ -605,30 +495,6 @@ function fixtures(now = new Date()): DatabaseState {
         now,
       ),
       ...lone.map((entry) => entry.account),
-    ],
-    subscriptions: [
-      {
-        id: 's-alice',
-        userId: 'u-alice',
-        status: SubscriptionStatus.ACTIVE,
-        expiresAt: new Date(now.getTime() + 20 * DAY_MS),
-        configUrl: `https://sub.example.com/${ALICE_SHORT}`,
-      },
-      {
-        id: 's-bob',
-        userId: 'u-bob',
-        status: SubscriptionStatus.EXPIRED,
-        expiresAt: new Date(now.getTime() - 29 * DAY_MS),
-        configUrl: `https://panel.example.com/api/sub/${BOB_SHORT}`,
-      },
-      {
-        id: 's-frank',
-        userId: 'u-frank',
-        status: SubscriptionStatus.LIMITED,
-        expiresAt: new Date(now.getTime() + 5 * DAY_MS),
-        configUrl: `https://sub.example.com/${FRANK_SHORT}`,
-      },
-      ...lone.map((entry) => entry.subscription),
     ],
     challenges: [],
   };
@@ -812,13 +678,9 @@ function nextIp(): string {
   return `10.${(address >> 16) & 255}.${(address >> 8) & 255}.${address & 255}`;
 }
 
-function recover(
-  h: ReturnType<typeof harness>,
-  link: string,
-  login: string,
-  clientIp: string = nextIp(),
-) {
-  return h.service.recoverBySubscription({ link, login, clientIp, cabinetUrl: CABINET });
+/** Recovery by login alone, as the cabinet that knows the panel can do it asks. */
+function recover(h: ReturnType<typeof harness>, login: string, clientIp: string = nextIp()) {
+  return h.service.recoverBySubscription({ login, clientIp, cabinetUrl: CABINET });
 }
 
 // ── The token ───────────────────────────────────────────────────────────────
@@ -925,8 +787,8 @@ describe('password reset: what a consume writes', () => {
 
   it('signs every older session out in the same transaction as the new password — whatever the channel', async () => {
     // A link sent to Telegram, a link sent to a verified e-mail, and a link won
-    // with the subscription link: each is a new password, and each names the
-    // moment before which every cabinet session of the account ends.
+    // with the login alone: each is a new password, and each names the moment
+    // before which every cabinet session of the account ends.
     const viaTelegram = harness();
     const telegram = await viaTelegram.service.consume(await telegramToken(viaTelegram), NEW_PASSWORD);
 
@@ -937,7 +799,7 @@ describe('password reset: what a consume writes', () => {
     const email = await viaEmail.service.consume(tokenOf(viaEmail.mails[0].link), NEW_PASSWORD);
 
     const viaSubscription = harness();
-    const verified = await recover(viaSubscription, `https://sub.example.com/${GINA_SHORT}`, 'gina');
+    const verified = await recover(viaSubscription, 'gina');
     assert.equal(verified.status, 'verified');
     const subscription = await viaSubscription.service.consume(
       (verified as { token: string }).token,
@@ -992,7 +854,7 @@ describe('password reset: what a consume writes', () => {
     const email = await viaEmail.service.consume(tokenOf(viaEmail.mails[0].link), NEW_PASSWORD);
 
     const viaSubscription = harness({ duringHash: stampLater('wa-gina') });
-    const verified = await recover(viaSubscription, `https://sub.example.com/${GINA_SHORT}`, 'gina');
+    const verified = await recover(viaSubscription, 'gina');
     const subscription = await viaSubscription.service.consume((verified as { token: string }).token, NEW_PASSWORD);
 
     for (const [h, result, id] of [
@@ -1538,68 +1400,19 @@ describe('an account imported without a password: first sign-in', () => {
   });
 });
 
-// ── Recovery by subscription link ───────────────────────────────────────────
+// ── Recovery by login alone ─────────────────────────────────────────────────
+//
+// This path used to ask for the VPN subscription link as well as the login, and
+// for a subscription that was active or expired less than thirty days ago. The
+// owner decided the login is enough — knowing it is not a secret — so what is
+// pinned here is what STAYS: the operator's switch, the address budget, the
+// account budget, the blocked-user exclusion, the ordinary link for an account
+// with a channel, the 72-hour withdrawal hold, the operator's event and the
+// sign-out of the other sessions. And that the link and the subscription no
+// longer matter at all.
 
-describe('subscription link: what a customer can paste', () => {
-  const cases: Array<[string, string, string]> = [
-    ['a bare-domain URL', `https://sub.example.com/${ALICE_SHORT}`, ALICE_SHORT],
-    ['a client suffix and a query', `https://sub.example.com/${ALICE_SHORT}/singbox?format=json`, ALICE_SHORT],
-    ['the /api/sub/ form with a suffix', `https://panel.example.com/api/sub/${BOB_SHORT}/json`, BOB_SHORT],
-    ['the /sub/ form', `https://example.com/sub/${ALICE_SHORT}`, ALICE_SHORT],
-    ['a bare short id', `  ${ALICE_SHORT}  `, ALICE_SHORT],
-    ['happ://add/', `happ://add/https://sub.example.com/${ALICE_SHORT}`, ALICE_SHORT],
-    [
-      'v2rayng://install-sub?url=<encoded>',
-      `v2rayng://install-sub?url=${encodeURIComponent(`https://sub.example.com/${ALICE_SHORT}/v2ray`)}&name=VPN`,
-      ALICE_SHORT,
-    ],
-    ['streisand://import/', `streisand://import/https://sub.example.com/${ALICE_SHORT}#My%20VPN`, ALICE_SHORT],
-    [
-      'sing-box://import-remote-profile?url=',
-      `sing-box://import-remote-profile?url=${encodeURIComponent(`https://sub.example.com/${ALICE_SHORT}`)}#name`,
-      ALICE_SHORT,
-    ],
-    [
-      'a doubly encoded clash link',
-      `clash://install-config?url=${encodeURIComponent(encodeURIComponent(`https://sub.example.com/${ALICE_SHORT}`))}`,
-      ALICE_SHORT,
-    ],
-    [
-      'sub://<base64>',
-      `sub://${Buffer.from(`https://sub.example.com/${ALICE_SHORT}`, 'utf8').toString('base64')}`,
-      ALICE_SHORT,
-    ],
-    ['a custom path prefix with a client suffix', `https://sub.example.com/vpn/${KATE_SHORT}/singbox`, KATE_SHORT],
-    [
-      'a deep custom prefix',
-      `https://sub.example.com/aaaaaaaa1/bbbbbbbb2/cccccccc3/dddddddd4/${KATE_SHORT}`,
-      KATE_SHORT,
-    ],
-  ];
-  for (const [shape, input, expected] of cases) {
-    it(`finds the id in ${shape}`, () => {
-      const parsed = parseSubscriptionLink(input);
-      assert.equal(parsed.encrypted, false);
-      assert.ok(parsed.candidates.includes(expected), JSON.stringify(parsed.candidates));
-    });
-  }
-
-  it('reports an encrypted Happ link as unresolvable, and finds nothing in noise', () => {
-    assert.deepEqual(parseSubscriptionLink('happ://crypt3/AbCdEfGh0123456789'), { candidates: [], encrypted: true });
-    assert.deepEqual(parseSubscriptionLink('hello, my vpn does not work'), { candidates: [], encrypted: false });
-    assert.deepEqual(parseSubscriptionLink('https://sub.example.com/'), { candidates: [], encrypted: false });
-    assert.deepEqual(parseSubscriptionLink('%%%'), { candidates: [], encrypted: false });
-  });
-
-  it('escapes every LIKE metacharacter of a candidate', () => {
-    assert.equal(escapeLikeLiteral('a_b%c\\d'), 'a\\_b\\%c\\\\d');
-    assert.equal(likeMatches('xa_bz', `%${escapeLikeLiteral('a_b')}%`), true);
-    assert.equal(likeMatches('xaQbz', `%${escapeLikeLiteral('a_b')}%`), false, 'an escaped _ matched another character');
-  });
-});
-
-describe('subscription link: which stored addresses are recognised', () => {
-  it('recognises a custom path prefix for recovery, and leaves the panel addressing reader strict', () => {
+describe('subscription address: which stored addresses are recognised', () => {
+  it('recognises a custom path prefix, and leaves the panel addressing reader strict', () => {
     const custom = `https://sub.example.com/vpn/${KATE_SHORT}`;
     assert.deepEqual(configUrlShortIds(custom), [KATE_SHORT]);
     assert.equal(panelShortUuidFromConfigUrl(custom), null, 'panel addressing must not start reading custom paths');
@@ -1624,13 +1437,11 @@ describe('subscription link: which stored addresses are recognised', () => {
   });
 });
 
-describe('subscription link: recovery', () => {
-  const ginaLink = `happ://add/https://sub.example.com/${GINA_SHORT}/json`;
-
-  it('verifies an account with no channel, and the token resets the password with a 72-hour withdrawal hold', async () => {
+describe('recovery by login', () => {
+  it('verifies an account with no channel from its login alone, and the token resets the password with a 72-hour withdrawal hold', async () => {
     const h = harness();
 
-    const verified = await recover(h, ginaLink, 'GINA');
+    const verified = await recover(h, 'GINA');
     assert.equal(verified.status, 'verified');
     if (verified.status !== 'verified') throw new Error('unreachable');
     assert.equal(verified.login, 'gina');
@@ -1642,28 +1453,50 @@ describe('subscription link: recovery', () => {
     assert.equal(holds[0].webAccountId, 'wa-gina');
     const holdHours = (holds[0].expiresAt.getTime() - before) / 3_600_000;
     assert.ok(holdHours > 71.99 && holdHours < 72.01, `hold of ${holdHours}h`);
+    // The stored name of the path is unchanged: tokens, events and webhooks carry it.
     assert.deepEqual(h.events.map((event) => event.metadata), [{ userId: 'u-gina', method: 'subscription_link' }]);
+
+    // The other sessions of the account end with the reset, as with any other road.
+    assert.ok(h.db.account('wa-gina').sessionsRevokedAt instanceof Date);
 
     await h.runTasks();
     assert.equal(h.pushes.length, 1);
     assert.equal(h.pushes[0].userId, 'u-gina');
-    assert.equal(h.pushes[0].body, 'Пароль от кабинета изменён по ссылке подписки. Если это были не вы — напишите в поддержку.');
+    assert.equal(
+      h.pushes[0].body,
+      'Пароль от кабинета изменён через восстановление по логину. Если это были не вы — напишите в поддержку.',
+    );
+  });
+
+  it('asks for no subscription: the account has none, and a link — right, wrong or absent — changes nothing', async () => {
+    // The fixtures hold no subscription at all, and the service has no way to
+    // read one. What an older cabinet still sends in `link` is ignored.
+    for (const link of [undefined, '', 'garbage', 'https://sub.example.com/SomeoneElses01', 'happ://crypt3/AbCdEfGh0123456789']) {
+      const h = harness();
+      const answer = await h.service.recoverBySubscription({
+        ...(link === undefined ? {} : { link }),
+        login: 'gina',
+        clientIp: nextIp(),
+        cabinetUrl: CABINET,
+      });
+      assert.equal(answer.status, 'verified', `link ${JSON.stringify(link)}`);
+    }
   });
 
   it('never resets an account that has a channel: it sends the ordinary link there instead', async () => {
     const h = harness();
 
-    const both = await recover(h, `https://sub.example.com/${ALICE_SHORT}`, 'alice');
-    const email = await recover(h, `https://panel.example.com/api/sub/${BOB_SHORT}`, 'bob');
+    const both = await recover(h, 'alice');
+    const email = await recover(h, 'bob');
     // Telegram only — the e-mail typed in was never confirmed.
-    const telegram = await recover(h, `https://sub.example.com/${FRANK_SHORT}/json`, 'frank');
+    const telegram = await recover(h, 'frank');
 
     assert.deepEqual(both, { status: 'sent_to_channels' });
     assert.deepEqual(email, { status: 'sent_to_channels' });
     assert.deepEqual(telegram, { status: 'sent_to_channels' });
     assert.ok(
       h.storedTokens().every((token) => token.channel !== 'subscription_link'),
-      `a subscription-link token was minted for an account with a channel: ${JSON.stringify(h.storedTokens())}`,
+      `a login-only token was minted for an account with a channel: ${JSON.stringify(h.storedTokens())}`,
     );
     await h.runTasks();
     assert.deepEqual(h.telegramSends.map((send) => send.telegramId).sort(), ['700001', '700006']);
@@ -1672,53 +1505,39 @@ describe('subscription link: recovery', () => {
   });
 
   it('counts a linked Telegram as a channel even when the panel cannot reach the bot', async () => {
-    // The bot's own "send me a link" still works, so the link is not the only way in.
+    // The bot's own "send me a link" still works, so nothing here is the only way in.
     const h = harness({ relayEnabled: false, smtpEnabled: false });
-    assert.deepEqual(await recover(h, `https://sub.example.com/${FRANK_SHORT}`, 'frank'), {
-      status: 'sent_to_channels',
-    });
+    assert.deepEqual(await recover(h, 'frank'), { status: 'sent_to_channels' });
     assert.equal(h.storedTokens().length, 0);
   });
 
   it('treats an e-mail as no channel when the operator has SMTP off', async () => {
     const h = harness({ smtpEnabled: false });
-    const answer = await recover(h, `https://panel.example.com/api/sub/${BOB_SHORT}`, 'bob');
-    assert.equal(answer.status, 'verified');
+    assert.equal((await recover(h, 'bob')).status, 'verified');
   });
 
-  it('gives a wrong link, a wrong login, an unknown login, a blocked owner and an encrypted link the same answer', async () => {
+  it('gives an unknown login, a blocked owner and a malformed login the same answer, and mints nothing', async () => {
     const h = harness();
     const answers = [
-      await recover(h, `https://sub.example.com/${IVAN_SHORT}`, 'gina'),
-      await recover(h, ginaLink, 'ivan'),
-      await recover(h, ginaLink, 'nobody-at-all'),
-      await recover(h, `https://sub.example.com/${LEO_SHORT}`, 'leo'),
-      await recover(h, 'happ://crypt3/AbCdEfGh0123456789', 'gina'),
+      await recover(h, 'nobody-at-all'),
+      await recover(h, 'leo'), // blocked, and no channel: would be verified if it were not
+      await recover(h, 'dave'), // blocked, with Telegram
+      await recover(h, 'not a login'),
+      await recover(h, ''),
+      await recover(h, 'x'),
     ];
     for (const answer of answers) assert.deepEqual(answer, { status: 'mismatch' });
-    assert.equal(h.redis.keysStartingWith(TOKEN_PREFIX).length, 0, 'a failed verification minted a token');
+    assert.equal(h.redis.keysStartingWith(TOKEN_PREFIX).length, 0, 'a failed request minted a token');
+    assert.equal(h.tasks.length, 0);
   });
 
-  it('accepts a subscription expired 29 days ago and refuses one expired 31 days ago', async () => {
+  it('allows five requests an hour per address — an IPv6 /64 counting as one address', async () => {
     const h = harness();
-    assert.equal((await recover(h, `https://sub.example.com/${IVAN_SHORT}`, 'ivan')).status, 'verified');
-    assert.deepEqual(await recover(h, `https://sub.example.com/${JUNE_SHORT}`, 'june'), { status: 'mismatch' });
-  });
-
-  it('recognises an address under a custom path prefix', async () => {
-    const h = harness();
-    const answer = await recover(h, `https://sub.example.com/vpn/${KATE_SHORT}/singbox`, 'kate');
-    assert.equal(answer.status, 'verified');
-  });
-
-  it('allows five attempts an hour per address — an IPv6 /64 counting as one address', async () => {
-    const h = harness();
-    const nobodysLink = 'https://sub.example.com/Nothing00001';
     for (let attempt = 1; attempt <= 5; attempt += 1) {
-      const answer = await recover(h, nobodysLink, `nobody${attempt}`, `2001:db8:1:2::${attempt}`);
+      const answer = await recover(h, `nobody${attempt}`, `2001:db8:1:2::${attempt}`);
       assert.deepEqual(answer, { status: 'mismatch' }, `attempt ${attempt}`);
     }
-    assert.deepEqual(await recover(h, ginaLink, 'gina', '2001:db8:1:2:ffff:ffff:ffff:9'), {
+    assert.deepEqual(await recover(h, 'gina', '2001:db8:1:2:ffff:ffff:ffff:9'), {
       status: 'rate_limited',
       retryAfterSeconds: 3600,
     });
@@ -1726,81 +1545,103 @@ describe('subscription link: recovery', () => {
     for (let slot = 1; slot <= 5; slot += 1) {
       assert.equal(h.redis.store.get(`${bucket}:${slot}`)?.ttlSeconds, 3600, `slot ${slot}`);
     }
-    assert.equal((await recover(h, ginaLink, 'gina', '2001:db8:1:3::1')).status, 'verified', 'another /64 was blocked');
+    assert.equal((await recover(h, 'gina', '2001:db8:1:3::1')).status, 'verified', 'another /64 was blocked');
   });
 
-  it('refuses the owner of a link for 24 hours after five attempts that named it — even the right pair', async () => {
+  it('hands one account its password back five times a day, and then refuses', async () => {
     const h = harness();
-    for (let attempt = 1; attempt <= 5; attempt += 1) {
-      assert.deepEqual(await recover(h, ginaLink, `guess${attempt}`), { status: 'mismatch' });
+    for (let grant = 1; grant <= 5; grant += 1) {
+      assert.equal((await recover(h, 'gina')).status, 'verified', `grant ${grant}`);
     }
     for (let slot = 1; slot <= 5; slot += 1) {
       assert.equal(h.redis.store.get(`web-auth:subrec:owner:wa-gina:${slot}`)?.ttlSeconds, 86_400, `slot ${slot}`);
     }
-    assert.deepEqual(await recover(h, ginaLink, 'gina'), { status: 'mismatch' });
+
+    assert.deepEqual(await recover(h, 'gina'), { status: 'rate_limited', retryAfterSeconds: 86_400 });
+    // Another account is untouched by it.
+    assert.equal((await recover(h, 'carol')).status, 'verified');
   });
 
-  it('does not lock a login somebody merely TYPED — only the owner of a real link', async () => {
+  it('spends no account budget on a login that was merely typed — unknown, blocked, or with a channel', async () => {
     const h = harness();
-    for (let attempt = 1; attempt <= 8; attempt += 1) {
-      assert.deepEqual(await recover(h, `https://sub.example.com/Garbage0000${attempt}`, 'gina'), {
-        status: 'mismatch',
-      });
+    for (const login of ['nobody-at-all', 'leo', 'dave', 'alice', 'bob', 'frank', 'alice', 'bob']) {
+      await recover(h, login);
     }
-    assert.equal((await recover(h, ginaLink, 'gina')).status, 'verified', 'typing a login locked its owner out');
+    assert.deepEqual(h.redis.keysStartingWith('web-auth:subrec:owner:'), []);
+
+    // So an account that was typed at, with a channel, is not locked out of the path it may still need.
+    for (let grant = 1; grant <= 5; grant += 1) {
+      assert.equal((await recover(h, 'gina')).status, 'verified', `grant ${grant}`);
+    }
   });
 
-  it('gives a verified owner a clean count', async () => {
+  it('does not give the count back when the token is used — two people cannot take one account back and forth without end', async () => {
     const h = harness();
-    await recover(h, ginaLink, 'typo1');
-    await recover(h, ginaLink, 'typo2');
-    assert.equal((await recover(h, ginaLink, 'gina')).status, 'verified');
-    assert.deepEqual(h.redis.keysStartingWith('web-auth:subrec:owner:wa-gina:'), []);
+    const first = await recover(h, 'gina');
+    assert.equal(first.status, 'verified');
+    assert.equal((await h.service.consume((first as { token: string }).token, NEW_PASSWORD)).status, 'ok');
+
+    assert.equal(h.redis.keysStartingWith('web-auth:subrec:owner:wa-gina:').length, 1);
   });
 
-  it('refuses to verify at all without Redis, rather than verify unmetered', async () => {
+  it('hands out exactly five tokens to twelve requests made at once', async () => {
+    const h = harness();
+
+    const results = await Promise.all(Array.from({ length: 12 }, () => recover(h, 'gina')));
+
+    assert.equal(results.filter((result) => result.status === 'verified').length, 5);
+    assert.equal(results.filter((result) => result.status === 'rate_limited').length, 7);
+    assert.equal(h.storedTokens().length, 5);
+  });
+
+  it('refuses to answer at all without Redis, rather than answer unmetered', async () => {
     const h = harness();
     h.redis.status = 'end';
-    // A WRONG pair is the case that matters: answered `mismatch` without the
-    // per-address budget, this path would be an unmetered oracle for guessing —
-    // and a link that names nobody must not answer differently from one that
-    // names somebody.
-    for (const login of ['gina', 'ivan', 'nobody-at-all']) {
-      assert.deepEqual(await recover(h, ginaLink, login), { status: 'unavailable' }, login);
+    // An unmetered answer would be an oracle for which logins exist and have no channel.
+    for (const login of ['gina', 'alice', 'nobody-at-all']) {
+      assert.deepEqual(await recover(h, login), { status: 'unavailable' }, login);
     }
-    assert.deepEqual(await recover(h, 'https://sub.example.com/Nothing00001', 'gina'), { status: 'unavailable' });
+  });
+
+  it('is never a way to look up a login that has a channel: the answer for it is the recovery form\'s own', async () => {
+    const h = harness();
+    const withChannel = await recover(h, 'alice');
+    assert.deepEqual(withChannel, { status: 'sent_to_channels' });
+    // `request` (the "forgot password" form) says the same thing about an unreachable login as about a missing one.
+    assert.deepEqual(await h.service.request({ identifier: 'carol', cabinetUrl: CABINET }), {
+      method: 'none',
+      resetLinks: true,
+    });
   });
 });
 
-describe('subscription link: the operator switch', () => {
-  const ginaLink = `https://sub.example.com/${GINA_SHORT}`;
-
+describe('recovery by login: the operator switch', () => {
   it('refuses everything the same way when OFF — before anything is counted or looked up', async () => {
     const h = harness({ subscriptionLinkRecovery: false });
 
     const answers = [
-      await recover(h, ginaLink, 'gina'),
-      await recover(h, ginaLink, 'somebody-else'),
-      await recover(h, 'https://sub.example.com/Nothing00001', 'gina'),
-      await recover(h, `https://sub.example.com/${ALICE_SHORT}`, 'alice'),
+      await recover(h, 'gina'),
+      await recover(h, 'somebody-else'),
+      await recover(h, 'alice'),
+      await recover(h, 'not a login'),
     ];
 
     for (const answer of answers) assert.deepEqual(answer, { status: 'disabled' });
-    assert.deepEqual(h.db.subscriptionQueries, [], 'a switched-off path looked the link up');
+    assert.equal(h.db.reads, 0, 'a switched-off path looked an account up');
     assert.deepEqual(h.redis.keysStartingWith('web-auth:'), [], 'a switched-off path counted or minted');
     assert.equal(h.tasks.length, 0);
     assert.equal(h.db.passwordWrites.length, 0);
   });
 
-  it('works as before when ON', async () => {
+  it('works when ON', async () => {
     const h = harness({ subscriptionLinkRecovery: true });
-    assert.equal((await recover(h, ginaLink, 'gina')).status, 'verified');
+    assert.equal((await recover(h, 'gina')).status, 'verified');
   });
 
   it('says "unavailable", not "off" and not "on", when the policy cannot be read', async () => {
     const h = harness({ subscriptionLinkRecovery: 'unreadable' });
-    assert.deepEqual(await recover(h, ginaLink, 'gina'), { status: 'unavailable' });
-    assert.deepEqual(h.db.subscriptionQueries, []);
+    assert.deepEqual(await recover(h, 'gina'), { status: 'unavailable' });
+    assert.equal(h.db.reads, 0);
   });
 
   it('leaves the channel paths alone', async () => {
@@ -1813,70 +1654,29 @@ describe('subscription link: the operator switch', () => {
   });
 });
 
-// ── The reviewer's probe, kept as a regression test ─────────────────────────
+describe('recovery by login: the wire, and the pair', () => {
+  const accepted = async (body: Record<string, unknown>) =>
+    validate(plainToInstance(PasswordResetSubscriptionDto, body));
 
-describe('regression: the owner lock cannot be crowded out or raced (review probe)', () => {
-  /** 25 other customers whose rows come first, and the victim — no channel. */
-  function world(): DatabaseState {
-    const victim = loneCustomer('victim', {
-      status: SubscriptionStatus.ACTIVE,
-      expiresAt: null,
-      configUrl: 'https://sub.vpnbrand.com/VictimShort01',
-    });
-    const fillers = Array.from({ length: 25 }, (_, i) =>
-      loneCustomer(`user${i}`, {
-        status: SubscriptionStatus.ACTIVE,
-        expiresAt: null,
-        configUrl: `https://sub.vpnbrand.com/Filler${String(i).padStart(4, '0')}xyz`,
-      }),
-    );
-    const all = [...fillers, victim];
-    return {
-      users: all.map((entry) => entry.user),
-      accounts: all.map((entry) => entry.account),
-      subscriptions: all.map((entry) => entry.subscription),
-      challenges: [],
-    };
-  }
-
-  it('CONTROL: five wrong logins with the victim link, and the right pair is refused', async () => {
-    const h = harness({ state: world() });
-    for (let i = 0; i < 5; i += 1) {
-      assert.deepEqual(await recover(h, 'https://sub.vpnbrand.com/VictimShort01', `guess${i}`), { status: 'mismatch' });
-    }
-    assert.deepEqual(await recover(h, 'https://sub.vpnbrand.com/VictimShort01', 'victim'), { status: 'mismatch' });
+  it('accepts a login alone (a cabinet that read the capability), and a link beside it (one that did not)', async () => {
+    assert.deepEqual(await accepted({ login: 'gina' }), []);
+    assert.deepEqual(await accepted({ login: 'gina', clientIp: '203.0.113.7', cabinetUrl: CABINET }), []);
+    assert.deepEqual(await accepted({ link: 'https://sub.example.com/Anything01', login: 'gina' }), []);
+    assert.deepEqual(await accepted({ link: '', login: 'gina' }), []);
   });
 
-  it('a second candidate matching every address does not push the owner out', async () => {
-    const h = harness({ state: world() });
-    const link = 'https://anything.invalid/VictimShort01/vpnbrand';
-    for (let i = 0; i < 40; i += 1) {
-      assert.deepEqual(await recover(h, link, `guess${i}`), { status: 'mismatch' });
-    }
-    assert.deepEqual(await recover(h, link, 'victim'), { status: 'mismatch' }, 'the owner lock was bypassed');
+  it('still requires a login, and bounds what it takes', async () => {
+    assert.ok((await accepted({})).length > 0);
+    assert.ok((await accepted({ link: 'x' })).length > 0);
+    assert.ok((await accepted({ login: '' })).length > 0);
+    assert.ok((await accepted({ login: 'x'.repeat(65) })).length > 0);
+    assert.ok((await accepted({ login: 'gina', link: 'x'.repeat(4097) })).length > 0);
   });
 
-  it('a run of underscores (a LIKE wildcard) names nobody and does not push the owner out', async () => {
-    const h = harness({ state: world() });
-    const link = 'https://anything.invalid/VictimShort01/______';
-    for (let i = 0; i < 40; i += 1) await recover(h, link, `guess${i}`);
-    assert.deepEqual(await recover(h, link, 'victim'), { status: 'mismatch' });
-    assert.ok(
-      h.db.subscriptionQueries.flat().some((pattern) => pattern.includes('\\_\\_\\_\\_\\_\\_')),
-      `the underscores reached the database unescaped: ${JSON.stringify(h.db.subscriptionQueries.slice(0, 3))}`,
-    );
-  });
-
-  it('a concurrent burst is counted before any of it is judged', async () => {
-    const h = harness({ state: world() });
-    const link = 'https://sub.vpnbrand.com/VictimShort01';
-    const burst = Array.from({ length: 30 }, (_, i) => (i === 29 ? 'victim' : `guess${i}`));
-
-    const results = await Promise.all(burst.map((login) => recover(h, link, login)));
-
-    assert.deepEqual(results[29], { status: 'mismatch' }, '29 wrong guesses in the same burst did not lock the owner');
-    assert.equal(h.redis.keysStartingWith('web-auth:subrec:owner:wa-victim:').length, 5);
-    assert.ok(results.every((result) => result.status === 'mismatch'));
+  it('announces the capability a cabinet gates its login-only screen on', () => {
+    assert.equal(PANEL_CAPABILITY.loginRecovery, 'panel.login-recovery');
+    assert.ok(PANEL_CAPABILITIES.includes('panel.login-recovery'));
+    assert.deepEqual(panelAnnouncement().capabilities, [...PANEL_CAPABILITIES]);
   });
 });
 
@@ -1940,7 +1740,7 @@ describe('password reset: wiring', () => {
     assert.equal(issued.status, 'issued');
     // The switch is read through the SettingsService token, not some other object.
     assert.deepEqual(
-      await service.recoverBySubscription({ link: `https://sub.example.com/${GINA_SHORT}`, login: 'gina', clientIp: null, cabinetUrl: null }),
+      await service.recoverBySubscription({ login: 'gina', clientIp: null, cabinetUrl: null }),
       { status: 'disabled' },
     );
   });
@@ -2175,27 +1975,4 @@ describe('the fakes behave as the real servers do', () => {
     assert.deepEqual(await Promise.all([readThenDelete(), readThenDelete()]), ['payload', 'payload']);
   });
 
-  it('Postgres LIKE: an unescaped underscore matches any character, an escaped one only itself', () => {
-    assert.equal(likeMatches('https://x/Filler0001xyz', '%/______%'), true);
-    assert.equal(likeMatches('https://x/Filler0001xyz', `%/${escapeLikeLiteral('______')}`), false);
-    assert.equal(likeMatches('https://x/______', `%/${escapeLikeLiteral('______')}`), true);
-  });
-
-  it('Postgres rows: a wide filter returns every match in storage order, and `take` cuts it there', async () => {
-    const db = new FakeDatabase(fixtures());
-    const everything = await db.subscription.findMany({
-      where: { OR: [{ configUrl: { contains: '/' } }] },
-      select: LINK_OWNER_SELECT,
-    });
-    assert.deepEqual(
-      everything.map((row) => row.id),
-      db.state.subscriptions.map((row) => row.id),
-    );
-    const cut = await db.subscription.findMany({
-      where: { OR: [{ configUrl: { contains: '/' } }] },
-      select: LINK_OWNER_SELECT,
-      take: 2,
-    } as Parameters<FakeDatabase['subscription']['findMany']>[0]);
-    assert.deepEqual(cut.map((row) => row.id), ['s-alice', 's-bob']);
-  });
 });

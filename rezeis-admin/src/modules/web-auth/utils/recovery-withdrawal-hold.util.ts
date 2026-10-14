@@ -2,14 +2,15 @@ import { BadRequestException } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
 
 /**
- * The withdrawal hold after a password reset by subscription link.
- * ═════════════════════════════════════════════════════════════════
- * Recovery by subscription link is open only to an account with no Telegram
- * and no verified e-mail, and for such an account the link is effectively the
- * whole proof: the login typed beside it is not a secret (Remnawave profiles
- * are named after it). A subscription link is not a secret the way a password
- * is either — customers share it with family, paste it into apps, post it in
- * support chats. The one thing somebody holding a shared link could turn into
+ * The withdrawal hold after a password reset by login alone.
+ * ═════════════════════════════════════════════════════════════
+ * Recovery by login is open only to an account with no Telegram and no
+ * verified e-mail, and for such an account nothing proves who asked: the login
+ * is not a secret (Remnawave profiles are named after it), and since the owner
+ * decided that it is enough, anybody who knows it can set the password. (Until
+ * then a subscription link was asked as well — and that is no secret the way a
+ * password is either; customers share it with family and post it in support
+ * chats.) The one thing somebody who took an account this way could turn into
  * money is a partner balance, so for three days after such a reset nothing
  * leaves it: neither a withdrawal request nor a purchase paid with the balance
  * (see `assertPartnerBalanceNotHeld`).
@@ -30,10 +31,10 @@ import type { Prisma } from '@prisma/client';
  */
 export const RECOVERY_WITHDRAWAL_HOLD_PURPOSE = 'recovery_withdrawal_hold';
 
-/** The channel recorded on the hold row: how the password was recovered. */
+/** The channel recorded on the hold row: how the password was recovered (the stored name of the login-only path). */
 export const RECOVERY_WITHDRAWAL_HOLD_CHANNEL = 'subscription_link';
 
-/** How long partner withdrawals wait after a reset by subscription link. */
+/** How long partner withdrawals wait after a reset by login alone. */
 export const RECOVERY_WITHDRAWAL_HOLD_HOURS = 72;
 
 /**

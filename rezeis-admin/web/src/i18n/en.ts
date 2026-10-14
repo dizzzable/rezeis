@@ -1008,14 +1008,14 @@ export const en = {
       requireTgWebCreds: 'Require login/password on Telegram sign-in',
       requireTgWebCredsHint:
         'When on, a user signing in via Telegram for the first time (web widget or Mini App) must set a cabinet login and password. Already-registered users pass straight through. When off, Telegram is accepted as a sufficient credential and the user enters the cabinet without a login/password.',
-      subscriptionLinkRecovery: 'Password recovery by subscription link',
+      subscriptionLinkRecovery: 'Password recovery by login',
       subscriptionLinkRecoveryHint:
-        'For customers with neither Telegram nor an email. When off, the cabinet offers support instead of this option.',
-      subscriptionLinkRecoveryInfoLabel: 'About password recovery by subscription link',
+        'For customers with neither Telegram nor a verified email: entering the login is enough. When off, the cabinet offers support instead of this option.',
+      subscriptionLinkRecoveryInfoLabel: 'About password recovery by login',
       subscriptionLinkRecoveryInfo_one:
-        'A customer whose account has neither Telegram nor an email linked can set a new password by pasting the subscription link from their VPN app.\n\nAnyone else who has that link can do the same — for example, someone they share the VPN with.\n\nAfter such a recovery, the partner balance is held for {{count}} hour: it can be neither withdrawn nor used to pay for a subscription. Operators get a notice.',
+        'A customer whose account has neither Telegram nor a verified email linked can set a new password by entering only their login on the recovery page. No subscription link, and no subscription, is needed.\n\nA login is not a secret, so anyone who knows someone else’s login can do the same.\n\nAfter such a recovery, the account’s other sessions are signed out and the partner balance is held for {{count}} hour: it can be neither withdrawn nor used to pay for a subscription. Operators get a notice.',
       subscriptionLinkRecoveryInfo_other:
-        'A customer whose account has neither Telegram nor an email linked can set a new password by pasting the subscription link from their VPN app.\n\nAnyone else who has that link can do the same — for example, someone they share the VPN with.\n\nAfter such a recovery, the partner balance is held for {{count}} hours: it can be neither withdrawn nor used to pay for a subscription. Operators get a notice.',
+        'A customer whose account has neither Telegram nor a verified email linked can set a new password by entering only their login on the recovery page. No subscription link, and no subscription, is needed.\n\nA login is not a secret, so anyone who knows someone else’s login can do the same.\n\nAfter such a recovery, the account’s other sessions are signed out and the partner balance is held for {{count}} hours: it can be neither withdrawn nor used to pay for a subscription. Operators get a notice.',
       projectNamePlaceholder: 'Rezeis VPN',
       webTitlePlaceholder: 'Rezeis — Fast VPN',
       channelUsernamePlaceholder: '@yourchannel',

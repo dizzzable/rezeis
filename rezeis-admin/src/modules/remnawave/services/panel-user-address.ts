@@ -169,7 +169,7 @@ function panelShortUuidFromPath(pathname: string): string | null {
  * A path segment, percent-decoded — or `null` when its encoding is malformed.
  *
  * `decodeURIComponent` THROWS on `%E0%A4%A`, and this sits under panel
- * addressing and under recovery by subscription link: a single stored address
+ * addressing and (until recovery by login replaced the link) under password recovery: a single stored address
  * with a stray `%` used to throw out of every caller. "Cannot tell" is the
  * honest answer; the raw text would be an id nobody issued.
  */

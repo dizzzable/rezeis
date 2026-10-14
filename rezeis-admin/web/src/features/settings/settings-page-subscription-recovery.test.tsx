@@ -12,8 +12,10 @@ import { ru } from '@/i18n/ru'
 import { BrandingTab, RECOVERY_WITHDRAWAL_HOLD_HOURS } from './settings-page'
 
 /**
- * «Восстановление пароля по ссылке подписки» — the operator's switch in the
- * Branding card of Settings, next to the cabinet's other sign-in policy.
+ * «Восстановление пароля по логину» — the operator's switch in the Branding
+ * card of Settings, next to the cabinet's other sign-in policy. (The setting is
+ * still stored as `subscriptionLinkRecovery`: it was named for the link the
+ * recovery used to ask for.)
  */
 
 vi.mock('@/lib/api', () => ({
@@ -33,8 +35,8 @@ function grant(tokens: readonly string[]): void {
   })
 }
 
-const SWITCH = 'Password recovery by subscription link'
-const INFO = 'About password recovery by subscription link'
+const SWITCH = 'Password recovery by login'
+const INFO = 'About password recovery by login'
 
 beforeEach(() => {
   vi.mocked(api.patch).mockReset()
@@ -45,7 +47,7 @@ afterEach(() => {
   grant([])
 })
 
-describe('Settings → Branding: recovery by subscription link', () => {
+describe('Settings → Branding: recovery by login', () => {
   it('is ON when the stored settings say nothing, and saves the operator’s OFF', async () => {
     grant(['settings:view', 'settings:edit'])
     const user = userEvent.setup()
@@ -91,8 +93,10 @@ describe('Settings → Branding: recovery by subscription link', () => {
 
     await user.click(screen.getByRole('button', { name: INFO }))
 
-    const [tip] = await screen.findAllByText(/Anyone else who has that link can do the same/)
-    expect(tip.textContent).toContain('pasting the subscription link from their VPN app')
+    const [tip] = await screen.findAllByText(/anyone who knows someone else’s login can do the same/)
+    expect(tip.textContent).toContain('by entering only their login')
+    expect(tip.textContent).toContain('No subscription link, and no subscription, is needed')
+    expect(tip.textContent).toContain('other sessions are signed out')
     // The whole balance, not only withdrawals: paying with it is held too.
     expect(tip.textContent).toContain('the partner balance is held for 72 hours')
     expect(tip.textContent).toContain('neither withdrawn nor used to pay for a subscription')
@@ -112,13 +116,17 @@ describe('the (i) in both languages', () => {
     const russian = i18n.t(key, { lng: 'ru', count: RECOVERY_WITHDRAWAL_HOLD_HOURS })
     const english = i18n.t(key, { lng: 'en', count: RECOVERY_WITHDRAWAL_HOLD_HOURS })
 
-    expect(russian).toContain('вставив ссылку на подписку из своего VPN-приложения')
-    expect(russian).toContain('То же сможет сделать любой, у кого есть эта ссылка')
+    expect(russian).toContain('указав на странице восстановления только свой логин')
+    expect(russian).toContain('Ссылка на подписку и сама подписка не нужны')
+    expect(russian).toContain('то же сможет сделать любой, кто знает чужой логин')
+    expect(russian).toContain('остальные сессии аккаунта завершаются')
     expect(russian).toContain(
       'партнёрский баланс замораживается на 72 часа: с него нельзя ни вывести деньги, ни оплатить подписку',
     )
     expect(russian).toContain('Операторам приходит уведомление')
-    expect(english).toContain('Anyone else who has that link can do the same')
+    expect(english).toContain('anyone who knows someone else’s login can do the same')
+    expect(english).toContain('No subscription link, and no subscription, is needed')
+    expect(english).toContain('other sessions are signed out')
     expect(english).toContain(
       'the partner balance is held for 72 hours: it can be neither withdrawn nor used to pay for a subscription',
     )
@@ -128,7 +136,7 @@ describe('the (i) in both languages', () => {
     expect(i18n.t(key, { lng: 'ru', count: 5 })).toContain('на 5 часов:')
     expect(i18n.t(key, { lng: 'en', count: 1 })).toContain('for 1 hour:')
     expect(i18n.t('settingsPage.branding.subscriptionLinkRecovery', { lng: 'ru' })).toBe(
-      'Восстановление пароля по ссылке подписки',
+      'Восстановление пароля по логину',
     )
     expect(i18n.t('settingsPage.branding.subscriptionLinkRecovery', { lng: 'en' })).toBe(SWITCH)
   })

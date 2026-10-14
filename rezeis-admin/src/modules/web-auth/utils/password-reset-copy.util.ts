@@ -60,7 +60,7 @@ export function telegramResetMessage(input: {
   };
 }
 
-/** The push shown after a reset by subscription link. */
+/** The push shown after a reset by login alone. */
 export function subscriptionResetPushNotice(locale: ResetCopyLocale): {
   readonly title: string;
   readonly body: string;
@@ -69,14 +69,14 @@ export function subscriptionResetPushNotice(locale: ResetCopyLocale): {
     return {
       title: 'Password changed',
       body:
-        'Your cabinet password was changed using your subscription link. ' +
+        'Your cabinet password was changed through recovery by login. ' +
         'If it wasn’t you, contact support.',
     };
   }
   return {
     title: 'Пароль изменён',
     body:
-      'Пароль от кабинета изменён по ссылке подписки. ' +
+      'Пароль от кабинета изменён через восстановление по логину. ' +
       'Если это были не вы — напишите в поддержку.',
   };
 }

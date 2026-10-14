@@ -192,7 +192,7 @@ export class AccountMergeService {
       // 7. Web account — at most one survives (unique userId/login/email).
       //
       //    The recovery hold on a partner balance (72 hours after a password
-      //    recovery by subscription link) is a row on the WEB ACCOUNT and
+      //    recovery by login alone) is a row on the WEB ACCOUNT and
       //    cascades with it. Step 5 already put the source's balance on the
       //    survivor; deleting either web account here would delete its hold
       //    with it and make held money withdrawable at once. So a standing hold

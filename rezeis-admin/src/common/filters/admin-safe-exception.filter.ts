@@ -383,7 +383,7 @@ export const SAFE_PRODUCT_CODES: ReadonlySet<string> = new Set<string>([
   // it answers 200 and never meets this filter.
   'CONNECT_PAGE_CATALOG_INVALID',
   // The partner balance held for three days after a password recovery by
-  // subscription link (`recovery-withdrawal-hold.util.ts`), refused alike by a
+  // login alone (`recovery-withdrawal-hold.util.ts`), refused alike by a
   // withdrawal request and by paying with the balance. The customer has to be
   // told it is temporary and until when; stripped of the code the cabinet had
   // only "Withdrawal request failed". Its `holdUntil` rides along through

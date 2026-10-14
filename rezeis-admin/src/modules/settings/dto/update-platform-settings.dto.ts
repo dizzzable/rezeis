@@ -126,7 +126,7 @@ export class PlatformBrandingDto {
   @IsBoolean()
   public requireTelegramWebCredentials?: boolean;
 
-  /** «Восстановление пароля по ссылке подписки» — see `PlatformBrandingInterface`. */
+  /** «Восстановление пароля по логину» (key kept from «по ссылке подписки») — see `PlatformBrandingInterface`. */
   @IsOptional()
   @IsBoolean()
   public subscriptionLinkRecovery?: boolean;

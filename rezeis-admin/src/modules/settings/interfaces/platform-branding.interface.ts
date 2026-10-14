@@ -47,13 +47,14 @@ export interface PlatformBrandingInterface {
    */
   readonly requireTelegramWebCredentials: boolean;
   /**
-   * «Восстановление пароля по ссылке подписки». When `true` (default), a
+   * «Восстановление пароля по логину» (the key keeps the name it had when the
+   * recovery asked for the VPN subscription link too). When `true` (default), a
    * customer whose account has neither Telegram nor a verified e-mail can set
-   * a new password by pasting the VPN subscription link from their app — and
-   * so can anybody else who has that link. After such a recovery the partner
-   * balance is held for 72 hours — no withdrawal, and no purchase paid with
-   * it — and the operators are told. When `false`, that path refuses and the
-   * cabinet points to support instead.
+   * a new password by entering only their login — and so can anybody else who
+   * knows it. After such a recovery the other sessions are signed out, the
+   * partner balance is held for 72 hours — no withdrawal, and no purchase paid
+   * with it — and the operators are told. When `false`, that path refuses and
+   * the cabinet points to support instead.
    */
   readonly subscriptionLinkRecovery: boolean;
 }

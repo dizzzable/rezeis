@@ -5,7 +5,7 @@ import type { SmtpSettingsInterface } from '../../email/interfaces/email.interfa
  * ══════════════════════════════════════════════════════════════
  * ONE definition, because three decisions hang on it and must not drift apart:
  *
- *   - recovery by subscription link is open only to an account this says NO
+ *   - recovery by login alone is open only to an account this says NO
  *     for (`PasswordResetService.recoverBySubscription`);
  *   - an account created without a password gets its first one through a link,
  *     so the sign-in form can only point such an account at a link when this

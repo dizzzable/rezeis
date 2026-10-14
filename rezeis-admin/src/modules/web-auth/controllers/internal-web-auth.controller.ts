@@ -181,9 +181,9 @@ export class InternalWebAuthController {
   @Post('password-reset/subscription')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: 'Recover by VPN subscription link, for an account with no Telegram and no verified e-mail',
+    summary: 'Recover by login, for an account with no Telegram and no verified e-mail',
     description:
-      '`verified` carries a reset token; `sent_to_channels` means the account has a channel and got the ordinary link there; every failed verification is the same `mismatch`; `disabled` means the operator switched the path off (answered before any lookup).',
+      '`verified` carries a reset token; `sent_to_channels` means the account has a channel and got the ordinary link there; an unknown, blocked or malformed login is `mismatch`; `rate_limited` is the address budget or the account\'s five-a-day; `disabled` means the operator switched the path off (answered before any lookup). `link` is accepted from older cabinets and ignored.',
   })
   public recoverPasswordBySubscription(
     @Body() body: PasswordResetSubscriptionDto,

@@ -28,9 +28,10 @@ export interface InternalPlatformPolicyInterface {
    */
   readonly requireTelegramWebCredentials: boolean;
   /**
-   * «Восстановление пароля по ссылке подписки» (default true). The cabinet
-   * offers recovery by subscription link only when this is `true`; a cabinet
-   * reading a panel that predates the field treats its absence as OFF.
+   * «Восстановление пароля по логину» (default true; the key keeps the name
+   * it had when the recovery asked for the subscription link). The cabinet
+   * offers the recovery only when this is `true`; a cabinet reading a panel
+   * that predates the field treats its absence as OFF.
    */
   readonly subscriptionLinkRecovery: boolean;
   readonly accessMode: AccessMode;

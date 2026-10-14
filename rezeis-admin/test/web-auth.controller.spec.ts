@@ -148,6 +148,8 @@ describe('InternalWebAuthController', () => {
       cabinetUrl: 'https://cabinet.example',
     });
     await controller.recoverPasswordBySubscription({ link: 'abcdef12', login: 'new-user' });
+    // A cabinet that read `panel.login-recovery` sends the login alone.
+    await controller.recoverPasswordBySubscription({ login: 'new-user' });
     assert.deepStrictEqual(
       await controller.sendFirstPasswordLink({ login: 'imported_user', cabinetUrl: 'https://cabinet.example' }),
       { status: 'sent', channel: 'telegram' },
@@ -172,6 +174,10 @@ describe('InternalWebAuthController', () => {
       {
         method: 'recoverBySubscription',
         payload: { link: 'abcdef12', login: 'new-user', clientIp: null, cabinetUrl: null },
+      },
+      {
+        method: 'recoverBySubscription',
+        payload: { link: undefined, login: 'new-user', clientIp: null, cabinetUrl: null },
       },
       {
         method: 'sendFirstPasswordLink',

@@ -143,7 +143,12 @@ export interface WebAuthBotSigninConsumeResultInterface {
   readonly userId: string | null;
 }
 
-/** How a password was (or is being) recovered. Travels in the reset token and the event. */
+/**
+ * How a password was (or is being) recovered. Travels in the reset token and the
+ * event. `subscription_link` is the login-only path's stored name: it was
+ * written for the link it used to ask for, and tokens, events and webhooks
+ * already carry it.
+ */
 export type PasswordRecoveryMethod = 'telegram' | 'email' | 'subscription_link';
 
 /**
@@ -220,15 +225,16 @@ export type PasswordResetFirstPasswordResultInterface =
  * Result of `POST /api/internal/web-auth/password-reset/subscription`.
  *
  *  - `verified`: an account with no channel; the token continues on the
- *    cabinet's reset page (policy A — see `grantLinkOnlyRecovery`).
+ *    cabinet's reset page (policy A — see `grantLinkOnlyRecovery`). The login
+ *    alone earns it: no subscription link is asked any more.
  *  - `sent_to_channels`: the account HAS a channel; the ordinary reset link
  *    went there, and the cabinet shows the recovery form's one answer.
- *  - `mismatch`: the one answer for EVERY failed verification — wrong link,
- *    wrong login, an expired subscription, an account locked on this path — so
- *    it cannot tell anybody which half they got wrong.
+ *  - `mismatch`: the one answer for an unknown, blocked or malformed login.
+ *  - `rate_limited`: the address's five an hour, or the account's five
+ *    granted a day.
  *  - `disabled`: the operator switched the path off («Восстановление пароля по
- *    ссылке подписки»). Answered before anything is looked up, so it is the
- *    same for every link and login.
+ *    логину»; the setting is still called `subscriptionLinkRecovery`). Answered
+ *    before anything is looked up, so it is the same for every login.
  */
 export type PasswordResetSubscriptionResultInterface =
   | {

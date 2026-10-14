@@ -105,7 +105,7 @@ export class InternalPartnerController {
        */
       referralPoints: user.points,
       /**
-       * The hold after a password recovery by subscription link, while it
+       * The hold after a password recovery by login alone, while it
        * stands: no withdrawal and no purchase paid with the balance until
        * `until`. `timezone` is the operator's own (Settings → Branding), for
        * showing that moment the way the operator's other dates are shown;
@@ -295,9 +295,10 @@ export class InternalPartnerController {
       throw partnerProgramInvitedOnly();
     }
 
-    // Three days after the password was reset by subscription link, money
-    // waits: a subscription link is often shared, and for an account with no
-    // Telegram and no e-mail that link was the whole proof. The check lives in
+    // Three days after the password was reset by login alone, money waits: for
+    // an account with no Telegram and no e-mail nothing but a login (no secret)
+    // was asked, and before that a subscription link, which is often shared.
+    // The check lives in
     // `createWithdrawalRequest` itself, before its debit — as it does in
     // `PartnerBalancePaymentService.pay` — so it holds for every caller; its
     // refusal carries `WITHDRAWAL_HOLD_AFTER_RECOVERY` and `holdUntil`.
