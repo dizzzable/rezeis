@@ -26,7 +26,7 @@ import {
   BROADCAST_BLOCKED_REASON,
 } from '../broadcast.constants';
 import { buildPromoButton } from '../utils/broadcast-promo.util';
-import { buildMenuInlineKeyboard, buildMenuNotifyButton, readMenuButton } from '../utils/broadcast-menu-button.util';
+import { buildMenuInlineKeyboard, readMenuButton, recipientPostButtons } from '../utils/broadcast-menu-button.util';
 import { captionOverflowOf, isMediaPayload } from '../utils/broadcast-caption.util';
 import { BroadcastService } from './broadcast.service';
 import {
@@ -122,21 +122,37 @@ export class BroadcastDeliveryService {
   ): Promise<{ ok: boolean; reason?: string; emailPreviewed?: boolean }> {
     const broadcast = await this.prismaService.broadcast.findUnique({
       where: { id: broadcastId },
-      select: { payload: true },
+      select: { payload: true, promoCode: true },
     });
     if (!broadcast) return { ok: false, reason: 'not-found' };
 
     const payload = broadcast.payload as Record<string, unknown> | null;
     const title = typeof payload?.title === 'string' ? payload.title.trim() : '';
     const text = typeof payload?.text === 'string' ? payload.text : '';
-    if (!title && !text.trim()) {
+    // The same test delivery uses: a photo or a video with no words is a post.
+    const hasMedia = isMediaPayload(payload);
+    if (!title && !text.trim() && !hasMedia) {
       return { ok: false, reason: 'empty' };
     }
 
-    // Render `:slug:` custom-emoji shortcodes into Telegram premium
-    // `<tg-emoji>` HTML for BOTH the title and the body, identical to real
-    // delivery (the dev DM is always HTML), so the preview is faithful.
-    const composed = await this.composeTelegram(title || null, text, true);
+    // ── THE POST AS A RECIPIENT GETS IT ──────────────────────────────────
+    //
+    // The owner (15.10.2026): «что бы тестово так же было». The preview was the
+    // text alone, HTML, under «❌ Закрыть»: a photo broadcast previewed with no
+    // photo, and neither the promo button nor «🏠 Главное меню» in sight. Now
+    // the text is composed exactly as `deliverBatch` composes it — HTML for a
+    // text post, the operator's own mode for a caption — the photo or video
+    // rides along by its file id, and the buttons are the recipients' own
+    // (`recipientPostButtons`). The bot draws them as it draws a recipient's
+    // and leaves «❌ Закрыть» off (`preview`). A bot older than this sends the
+    // text alone, as before.
+    const parseMode = (payload?.parseMode as string) ?? undefined;
+    const composed = await this.composeTelegram(title || null, text, hasMedia ? parseMode === 'HTML' : true);
+    const buttons = recipientPostButtons({
+      promoCode: broadcast.promoCode,
+      menuButton: readMenuButton(payload),
+      hasMedia,
+    });
 
     // 1) Telegram DM to the bot's BOT_DEV_ID (only when the relay is wired).
     let relayed = false;
@@ -144,7 +160,12 @@ export class BroadcastDeliveryService {
     if (this.botNotifier.isEnabled) {
       const outcome = await this.botNotifier.deliverRelayEvent('reiwa.dev.notify', {
         text: composed || ' ',
-        parseMode: 'HTML',
+        ...(hasMedia ? (parseMode === 'HTML' || parseMode === 'MarkdownV2' ? { parseMode } : {}) : { parseMode: 'HTML' }),
+        preview: true,
+        ...(hasMedia
+          ? { media: { type: payload?.mediaType === 'video' ? 'video' : 'photo', fileId: String(payload?.mediaFileId) } }
+          : {}),
+        ...(buttons.length > 0 ? { buttons } : {}),
       });
       relayStatus = outcome.status;
       relayed = isRelayDelivered('reiwa.dev.notify', outcome);
@@ -769,19 +790,17 @@ export class BroadcastDeliveryService {
         ? await this.customEmojiService.substituteFallbacks(title)
         : title;
 
-    // Promo-tagged broadcast → append a Mini App "activate promo" button to
-    // each delivered message (text path). The reiwa bot resolves the
-    // `webAppPath` against its own miniAppUrl, deep-linking `/promo?code=…`.
-    const promoButton =
-      broadcast.promoCode && broadcast.promoCode.length > 0
-        ? buildPromoButton(broadcast.promoCode, BROADCAST_PROMO_BUTTON_LABEL)
-        : null;
-    // «Кнопка «Меню» под постом»: under the promo button when there is one.
+    // The relay's buttons for a TEXT post (`recipientPostButtons`, shared with
+    // the test send): a promo-tagged broadcast's Mini App "activate promo"
+    // button — the reiwa bot resolves its `webAppPath` against its own
+    // miniAppUrl, deep-linking `/promo?code=…` — and «Кнопка «Меню» под
+    // постом» under it. A photo or a video carries the menu alone.
     const menuButton = readMenuButton(payload);
-    const relayButtons = [
-      ...(promoButton !== null ? [promoButton] : []),
-      ...(menuButton ? [buildMenuNotifyButton()] : []),
-    ];
+    const relayButtons = recipientPostButtons({
+      promoCode: broadcast.promoCode,
+      menuButton,
+      hasMedia: false,
+    });
 
     const messages = await this.prismaService.broadcastMessage.findMany({
       where: { id: { in: messageIds }, status: BroadcastMessageStatus.PENDING },

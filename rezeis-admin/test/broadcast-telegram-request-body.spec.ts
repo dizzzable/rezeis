@@ -123,8 +123,11 @@ describe('nothing in the delivery service hands the promo button to Telegram', (
       true,
       'the promo button no longer reaches the channel post either',
     );
+    // A text post's buttons — the promo's included — come from the one rule
+    // delivery and the test send share, handed to the relay; that rule is
+    // exercised in `broadcast-menu-button.spec.ts`.
     assert.equal(
-      /\.\.\.\(promoButton !== null \? \[promoButton\] : \[\]\)/.test(source),
+      /const relayButtons = recipientPostButtons\(/.test(source),
       true,
       'the promo button no longer reaches the relay for a text post',
     );

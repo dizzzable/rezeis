@@ -29,6 +29,7 @@ const VIDEO = { title: null, text: 'Ролик', mediaType: 'video', mediaFileId
 
 function harness(payload: Record<string, unknown>, promoCode: string | null = null) {
   const relayCalls: Array<{ buttons?: ReadonlyArray<Record<string, unknown>> }> = [];
+  const relayEvents: Array<{ event: string; metadata: Record<string, unknown> }> = [];
   const prisma = {
     userNotificationEvent: { findMany: async () => [] },
     broadcast: {
@@ -53,7 +54,11 @@ function harness(payload: Record<string, unknown>, promoCode: string | null = nu
       updateMany: async () => ({ count: 1 }),
       count: async () => 0,
     },
-    user: { findUnique: async () => ({ telegramId: 77n, email: null, webAccount: null, isBotBlocked: false }) },
+    user: {
+      findUnique: async () => ({ telegramId: 77n, email: null, webAccount: null, isBotBlocked: false }),
+      // The test send's DEV users: none, so the bot's DM is the whole preview.
+      findMany: async () => [],
+    },
   };
   const noop = (): undefined => undefined;
   const service = new BroadcastDeliveryService(
@@ -68,6 +73,11 @@ function harness(payload: Record<string, unknown>, promoCode: string | null = nu
         relayCalls.push(call);
         return { status: 'confirmed', messageId: 9, httpStatus: 200, detail: null };
       },
+      deliverRelayEvent: async (event: string, metadata: Record<string, unknown>) => {
+        relayEvents.push({ event, metadata });
+        // A dev card's 204: delivered, with no message id to keep.
+        return { status: 'unconfirmed', messageId: null, httpStatus: 204, detail: null };
+      },
     } as never,
     {
       isEnabled: true,
@@ -77,7 +87,7 @@ function harness(payload: Record<string, unknown>, promoCode: string | null = nu
     } as never,
     { checkPromoCodeDispatchable: async () => ({ ok: true }) } as never,
   );
-  return { service, relayCalls };
+  return { service, relayCalls, relayEvents };
 }
 
 async function capture<T>(run: () => Promise<T>): Promise<{ sent: Sent[]; result: T }> {
@@ -187,5 +197,72 @@ describe('an edit keeps the button on the post', () => {
 
     assert.equal(sent[0]?.endpoint, 'editMessageText');
     assert.equal(sent[0]?.body.reply_markup, undefined);
+  });
+});
+
+/**
+ * The test send (the owner, 15.10.2026: «Тестовая отправка … надо бы сделать
+ * полноценно, что бы тестово так же было»): the preview in the developer's
+ * chat is the post a recipient gets — the photo or video, the same caption,
+ * the same buttons — and each case below is held to what `deliverBatch`
+ * itself sends for the same draft.
+ */
+describe('the test send is the post a recipient gets', () => {
+  /** The callback or Mini App target of each button, in order. */
+  const targetsOf = (buttons: ReadonlyArray<Record<string, unknown>> | undefined): unknown[] =>
+    (buttons ?? []).map((button) => button.callbackData ?? button.webAppPath);
+
+  it('a text post: its text as HTML, the promo button and «🏠 Главное меню» — as delivered', async () => {
+    const h = harness({ ...TEXT, title: 'Акция', menuButton: true }, 'SALE30');
+    assert.deepEqual(await h.service.sendTestToDev('b-1'), { ok: true });
+    await h.service.deliverBatch('b-1', ['m-1']);
+
+    const preview = h.relayEvents[0];
+    assert.equal(preview?.event, 'reiwa.dev.notify');
+    assert.equal(preview?.metadata.preview, true);
+    assert.equal(preview?.metadata.parseMode, 'HTML');
+    assert.equal(preview?.metadata.media, undefined);
+    assert.ok(String(preview?.metadata.text).includes('<b>Акция</b>'));
+    const previewButtons = preview?.metadata.buttons as ReadonlyArray<Record<string, unknown>>;
+    assert.deepEqual(targetsOf(previewButtons), ['/promo?code=SALE30', 'menu:new']);
+    // Exactly the recipients' own.
+    assert.deepEqual(previewButtons, h.relayCalls[0]?.buttons);
+  });
+
+  for (const [name, payload] of [
+    ['photo', PHOTO],
+    ['video', VIDEO],
+  ] as const) {
+    it(`a ${name}: the ${name} itself, its caption, and the menu alone — no promo button, as delivered`, async () => {
+      const h = harness({ ...payload, menuButton: true }, 'SALE30');
+      await h.service.sendTestToDev('b-1');
+      const { sent } = await capture(() => h.service.deliverBatch('b-1', ['m-1']));
+
+      const preview = h.relayEvents[0]?.metadata;
+      assert.deepEqual(preview?.media, { type: name, fileId: payload.mediaFileId });
+      assert.equal(preview?.parseMode, 'HTML');
+      assert.equal(preview?.text, sent[0]?.body.caption);
+      assert.deepEqual(targetsOf(preview?.buttons as ReadonlyArray<Record<string, unknown>>), ['menu:new']);
+      assert.deepEqual(callbacksOf(sent[0]?.body), [['menu:new']]);
+    });
+  }
+
+  it('a caption in no parse mode is previewed in none, as delivered', async () => {
+    const h = harness({ ...PHOTO, parseMode: null });
+    await h.service.sendTestToDev('b-1');
+    assert.equal(h.relayEvents[0]?.metadata.parseMode, undefined);
+    assert.equal(h.relayEvents[0]?.metadata.buttons, undefined);
+  });
+
+  it('a photo with no words is previewed too', async () => {
+    const h = harness({ ...PHOTO, text: '', title: null });
+    assert.deepEqual(await h.service.sendTestToDev('b-1'), { ok: true });
+    assert.deepEqual(h.relayEvents[0]?.metadata.media, { type: 'photo', fileId: 'file-1' });
+  });
+
+  it('a draft with nothing in it is still refused', async () => {
+    const h = harness({ ...TEXT, text: '', title: null });
+    assert.deepEqual(await h.service.sendTestToDev('b-1'), { ok: false, reason: 'empty' });
+    assert.deepEqual(h.relayEvents, []);
   });
 });
