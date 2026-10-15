@@ -160,7 +160,7 @@ export const ru = {
       targetUrl: 'Абсолютный HTTPS URL',
       targetCallback: 'callback_data (например, menu:main)',
       callbackHint:
-        'Бот отвечает на: menu:main или menu — главное меню; screen:<shortId> или сам shortId экрана — этот экран (свой экран надёжнее открывать через screen:<shortId>); invite, rules, help — их экраны; back_to_menu — главное меню; close — удаляет сообщение; check_channel или check_channel:q:<id> — проверка подписки на канал, как «Я подписался»; quest_channel:<id> — проверка задания «Подписка на канал»; lang:<код>, например lang:ru, — смена языка; ai_support_exit — выход из ИИ-поддержки. На другое значение кнопка ничего не сделает.',
+        'Бот отвечает на: menu:main, menu или menu:new — главное меню новым сообщением, а уведомление остаётся; screen:<shortId> или сам shortId экрана — этот экран (свой экран надёжнее открывать через screen:<shortId>); invite, rules, help — их экраны; back_to_menu — главное меню; close — удаляет сообщение; check_channel или check_channel:q:<id> — проверка подписки на канал, как «Я подписался»; quest_channel:<id> — проверка задания «Подписка на канал»; lang:<код>, например lang:ru, — смена языка; ai_support_exit — выход из ИИ-поддержки. На другое значение кнопка ничего не сделает.',
       defaultTargetHint:
         'Без кнопок системa автоматически ведёт пользователя в раздел кабинета — можно увидеть на схеме.',
       lifetimeTopUpHint:

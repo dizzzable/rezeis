@@ -12,6 +12,7 @@
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery } from '@tanstack/react-query'
+import { useSearchParams } from 'react-router'
 import {
   AlertCircle,
   CircleDollarSign,
@@ -42,7 +43,10 @@ import { UsersTab } from './users/users-tab'
 
 export default function RemnaWavePage() {
   const { t } = useTranslation()
-  const [activeTab, setActiveTab] = useState<TabKey>('dashboard')
+  // `?tab=settings` opens a tab: «Перейти к настройке» on the notifications
+  // page lands on «Очистка профилей при истечении» this way.
+  const [searchParams] = useSearchParams()
+  const [activeTab, setActiveTab] = useState<TabKey>(() => readTabKey(searchParams.get('tab')) ?? 'dashboard')
 
   const { data: status, isLoading: statusLoading, error: statusError } = useQuery({
     queryKey: KEYS.status,
@@ -209,6 +213,12 @@ export default function RemnaWavePage() {
 }
 
 type TabKey = 'dashboard' | 'live' | 'infra' | 'catalog' | 'users' | 'costs' | 'settings'
+
+const TAB_KEYS: readonly TabKey[] = ['dashboard', 'live', 'infra', 'catalog', 'users', 'costs', 'settings']
+
+function readTabKey(value: string | null): TabKey | null {
+  return TAB_KEYS.find((key) => key === value) ?? null
+}
 
 /** Remnawave 2.x: the server refuses every request to it — "update the panel". */
 function PanelTooOldAlert({ version }: { version: string | null }) {

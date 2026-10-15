@@ -337,6 +337,13 @@ export const en = {
         graceLabel: 'Delete after (days past expiry)',
         graceHint: 'How many days to wait after a subscription expires before deleting its profile. 0 = delete immediately.',
         disabledNote: 'Deletion is off — Remnawave profiles are left untouched.',
+        winbackConflict:
+          'Win-back reminders ({{reminders}}) will not arrive: the subscription is deleted sooner. Set at least {{needed}} here, or turn the deletion off.',
+        winbackShort: {
+          expired_3_days_ago: 'after 3 days',
+          expired_7_days_ago: 'after 7 days',
+          expired_14_days_ago: 'after 14 days',
+        },
         save: 'Save',
         saved: 'Cleanup policy saved',
         error: 'Failed to save settings',

@@ -147,3 +147,21 @@ describe('RemnaWavePage — the panel version notice', () => {
     expect(screen.queryByTestId('remnawave-panel-too-old')).toBeNull()
   })
 })
+
+describe('RemnaWavePage — a link straight to a tab', () => {
+  it('opens «Настройки» from `?tab=settings` — where «Перейти к настройке» on the notifications page lands', async () => {
+    serve({ status: 'ok', capabilities: UNTESTED_3X })
+    renderWithProviders(<RemnaWavePage />, { route: '/remnawave?tab=settings' })
+
+    const settings = await screen.findByRole('tab', { name: text('remnaWavePage.tabs.settings') })
+    expect(settings).toHaveAttribute('aria-selected', 'true')
+  })
+
+  it('opens the dashboard for no tab, or for one it does not have', async () => {
+    serve({ status: 'ok', capabilities: UNTESTED_3X })
+    renderWithProviders(<RemnaWavePage />, { route: '/remnawave?tab=nonsense' })
+
+    const dashboard = await screen.findByRole('tab', { name: text('remnaWavePage.tabs.dashboard') })
+    expect(dashboard).toHaveAttribute('aria-selected', 'true')
+  })
+})

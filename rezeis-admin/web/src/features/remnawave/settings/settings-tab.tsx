@@ -40,6 +40,9 @@ import {
 } from '@/components/ui/table'
 
 import { remnawaveApi, type RemnawaveCleanupSettings } from '../remnawave-api'
+import { api } from '@/lib/api'
+import { adminQueryKeys } from '@/lib/admin-query-keys'
+import { winbackCleanupConflict } from '@/lib/winback-cleanup'
 import { KEYS } from '../remnawave-query-keys'
 import { TabHeader } from '../shared/tab-header'
 import { getCleanupSettingsFormKey } from './cleanup-settings-form-key'
@@ -183,6 +186,18 @@ function CleanupCardForm({
   const queryClient = useQueryClient()
   const [deleteEnabled, setDeleteEnabled] = useState(initialSettings?.deleteEnabled ?? true)
   const [graceDays, setGraceDays] = useState(() => String(initialSettings?.graceDays ?? 3))
+  // «Возврат покупателя»: the reminders switched on that these values would
+  // cut short — read as typed, before saving. The notifications page's own
+  // query; an operator who cannot read it gets no warning.
+  const { data: platformSettings } = useQuery({
+    queryKey: adminQueryKeys.settings.all,
+    queryFn: async () => (await api.get('/admin/settings')).data as { userNotifications?: Record<string, unknown> | null },
+    retry: false,
+  })
+  const winbackConflict = winbackCleanupConflict(platformSettings?.userNotifications ?? {}, {
+    deleteEnabled,
+    graceDays: Math.max(0, Math.min(365, Math.trunc(Number(graceDays) || 0))),
+  })
 
   const mutation = useMutation({
     mutationFn: () =>
@@ -251,6 +266,17 @@ function CleanupCardForm({
                 className="w-24"
               />
             </div>
+
+            {winbackConflict !== null && (
+              <p role="alert" className="text-xs text-amber-600 dark:text-amber-500">
+                {t('remnaWavePage.settings.cleanup.winbackConflict', {
+                  reminders: winbackConflict.cutShort
+                    .map((key) => t(`remnaWavePage.settings.cleanup.winbackShort.${key}`))
+                    .join(', '),
+                  needed: winbackConflict.needed,
+                })}
+              </p>
+            )}
 
             <div className="flex justify-end">
               <Button

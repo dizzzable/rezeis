@@ -49,6 +49,7 @@ describe('broadcast form schema', () => {
         mediaFileId: 'https://cdn.example.com/banner.jpg?version=1',
         emailEnabled: false,
         telegramChannelChatId: '',
+        menuButton: false,
       },
     })
   })
@@ -74,6 +75,7 @@ describe('broadcast form schema', () => {
         mediaFileId: 'BAACAgIAAxkBAAIB12345',
         emailEnabled: false,
         telegramChannelChatId: '',
+        menuButton: false,
       },
     })
   })
@@ -192,6 +194,17 @@ describe('broadcast form schema', () => {
     }
   })
 
+  it('sends «Кнопка «Меню» под постом» on and off, never leaving it out', () => {
+    // Off must reach the server as `false`: the update merges only the keys it
+    // receives, so an absent one would keep a button the operator switched off.
+    for (const menuButton of [true, false]) {
+      const result = createBroadcastFormSchema(messages).safeParse({ ...validDraft(), menuButton })
+      expect(result.success).toBe(true)
+      if (!result.success) return
+      expect(result.data.payload.menuButton).toBe(menuButton)
+    }
+  })
+
   it('rejects a malformed Telegram channel chat id', () => {
     const result = createBroadcastFormSchema(messages).safeParse({
       ...validDraft(),
@@ -217,5 +230,6 @@ function validDraft(): BroadcastFormDraft {
     mediaValue: '',
     emailEnabled: false,
     telegramChannelChatId: '',
+    menuButton: false,
   }
 }

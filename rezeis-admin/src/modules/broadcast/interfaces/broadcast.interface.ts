@@ -13,6 +13,8 @@ export interface BroadcastPayloadInterface {
   readonly emailEnabled: boolean;
   /** Additive channel: one-shot Telegram channel/group post target (or null). */
   readonly telegramChannelChatId: string | null;
+  /** «Кнопка «Меню» под постом»; false for a broadcast saved before it. */
+  readonly menuButton: boolean;
 }
 
 export interface BroadcastInterface {

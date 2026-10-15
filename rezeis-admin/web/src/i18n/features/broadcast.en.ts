@@ -135,6 +135,10 @@ export const en = {
           "We can't tell who has connected right now: Remnawave has not answered since {{time}} and no webhooks are arriving. Broadcasts with this filter are not sent, and the automatic help is paused too.",
       },
     },
+    menuButton: {
+      label: '«Menu» button under the post',
+      hint: 'A «🏠 Главное меню» button appears under the post in Telegram. The menu opens as a new message, and the post itself stays. The channel post gets no button.',
+    },
     channels: {
       title: 'Additional channels (optional)',
       hint: 'These run alongside the main delivery (cabinet + web-push + Telegram DM), not instead of it.',

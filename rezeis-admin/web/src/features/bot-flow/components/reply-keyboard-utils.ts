@@ -119,7 +119,10 @@ export interface RouteContext {
  * (`src/bot/pages/**`, registered in `main.ts` order), read 23.09.2026:
  *   • `builtInScreens` — `bot.callbackQuery('help' | 'rules' | 'invite')`, each
  *     rendering the flow screen of its name when there is one;
- *   • `mainMenu` — `menu:main` and `menu` (`start.ts`, one handler) and
+ *   • `mainMenu` — `menu:main` and `menu` (`start.ts`, one handler),
+ *     `menu:new` (`start.ts`, the menu as a new message: «Главное меню» under
+ *     a broadcast post or a notification, from 15.10.2026 — and the bot draws
+ *     `menu:main` / `menu` under a notification as `menu:new` too) and
  *     `back_to_menu` (`menu.ts`);
  *   • `answered` / `answeredPatterns` — answered, but not with a screen of the
  *     map: `close` (deletes the message), leaving AI support, «Я подписался»
@@ -135,7 +138,7 @@ export interface RouteContext {
  */
 export const CALLBACK_VOCABULARY = {
   builtInScreens: ['help', 'rules', 'invite'],
-  mainMenu: ['menu:main', 'menu', 'back_to_menu'],
+  mainMenu: ['menu:main', 'menu', 'menu:new', 'back_to_menu'],
   answered: ['close', 'ai_support_exit'],
   answeredPatterns: [
     { source: '^check_channel(?::q:([a-z][a-z0-9]{19,31}))?$', flags: 'i' },

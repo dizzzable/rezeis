@@ -29,9 +29,10 @@ import {
 import { InternalUserSessionInterface } from '../interfaces/internal-user-session.interface';
 import { buildUserReferenceWhere } from '../utils/user-reference.util';
 import {
-  SUBSCRIBER_MUTABLE_NOTIFICATION_TYPES,
   readSubscriberNotificationPrefs,
+  subscriberSwitchesOffered,
 } from '../../notifications/utils/notification-toggle.util';
+import { readUserNotificationToggleMap } from '../../notifications/utils/user-notification-toggle-map.reader';
 import { mapInternalUserSession, INTERNAL_USER_INCLUDE } from './internal-user.mappers';
 import { evaluateTrialClaim, readTrialSettings, TRIAL_CLAIM_LIMIT_MESSAGE } from '../../plans/utils/trial-settings.util';
 import { selectGrantableTrialPlan } from '../../subscriptions/services/grantable-trial-plan.util';
@@ -500,8 +501,9 @@ export class InternalUserEdgeService {
       // The switches this build honours. Shipped WITH the values so a cabinet
       // that is a release ahead renders only what the panel can actually act
       // on, instead of a switch that silently does nothing — the exact defect
-      // this whole screen had.
-      available: [...SUBSCRIBER_MUTABLE_NOTIFICATION_TYPES],
+      // this whole screen had. A reminder the operator has not turned on is
+      // one of those (`subscriberSwitchesOffered`).
+      available: await this.notificationSwitchesOffered(),
     };
   }
 
@@ -544,7 +546,22 @@ export class InternalUserEdgeService {
     });
     // The RESPONSE is narrowed again: the cabinet only draws what it knows.
     const next = { ...readSubscriberNotificationPrefs(stored), ...accepted };
-    return { prefs: next, available: [...SUBSCRIBER_MUTABLE_NOTIFICATION_TYPES] };
+    return { prefs: next, available: await this.notificationSwitchesOffered() };
+  }
+
+  /**
+   * The subscriber's switches this install offers: all of them, but a reminder
+   * that is off until the operator turns it on and still off. The operator's
+   * switches unreadable, those are left out — never a switch for nothing.
+   */
+  private async notificationSwitchesOffered(): Promise<readonly string[]> {
+    let toggles: Record<string, unknown> = {};
+    try {
+      toggles = await readUserNotificationToggleMap(this.prismaService);
+    } catch {
+      // Left empty: every default-off reminder reads as off.
+    }
+    return [...subscriberSwitchesOffered(toggles)];
   }
 
   public async markAllRead(telegramId: string): Promise<{ updated: number }> {

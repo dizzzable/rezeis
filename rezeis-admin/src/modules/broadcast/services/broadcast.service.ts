@@ -966,6 +966,7 @@ function payloadDtoToJson(
     parseMode: payload?.parseMode ?? null,
     emailEnabled: payload?.emailEnabled ?? false,
     telegramChannelChatId: payload?.telegramChannelChatId ?? null,
+    menuButton: payload?.menuButton ?? false,
   };
 }
 
@@ -997,6 +998,7 @@ function mergePayload(
   if (patch.telegramChannelChatId !== undefined) {
     base.telegramChannelChatId = patch.telegramChannelChatId;
   }
+  if (patch.menuButton !== undefined) base.menuButton = patch.menuButton;
   return base as Prisma.InputJsonObject;
 }
 
@@ -1085,6 +1087,7 @@ function readPayload(value: Prisma.JsonValue): BroadcastPayloadInterface {
       parseMode: null,
       emailEnabled: false,
       telegramChannelChatId: null,
+      menuButton: false,
     };
   }
   const candidate = value as Record<string, unknown>;
@@ -1101,6 +1104,7 @@ function readPayload(value: Prisma.JsonValue): BroadcastPayloadInterface {
       candidate.telegramChannelChatId.trim().length > 0
         ? candidate.telegramChannelChatId.trim()
         : null,
+    menuButton: candidate.menuButton === true,
   };
 }
 

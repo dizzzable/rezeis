@@ -5,6 +5,8 @@
  * (`queryClient.invalidateQueries({ queryKey: KEYS.nodes })` from a host
  * reorder, for example) hit the right cache without typo-driven misses.
  */
+import { CLEANUP_SETTINGS_QUERY_KEY } from '@/lib/winback-cleanup'
+
 export const KEYS = {
   status: ['remnawave', 'status'] as const,
   version: ['remnawave', 'version'] as const,
@@ -27,6 +29,7 @@ export const KEYS = {
   infraProviders: ['remnawave', 'infra-providers'] as const,
   nodePlugins: ['remnawave', 'node-plugins'] as const,
   geo: ['remnawave', 'geo-distribution'] as const,
-  cleanupSettings: ['remnawave', 'cleanup-settings'] as const,
+  // Shared with the «Возврат покупателя» warning on the notifications page.
+  cleanupSettings: CLEANUP_SETTINGS_QUERY_KEY,
   liveNode: (uuid: string) => ['remnawave', 'live-node', uuid] as const,
 } as const

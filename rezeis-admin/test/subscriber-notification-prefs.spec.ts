@@ -4,8 +4,12 @@ import { describe, it } from 'node:test';
 import { InternalUserEdgeService } from '../src/modules/internal-user/services/internal-user-edge.service';
 import {
   SUBSCRIBER_MUTABLE_NOTIFICATION_TYPES,
+  WINBACK_NOTIFICATION_TYPES,
+  isNotificationDeliveryEnabled,
+  isSubscriberMailableType,
   isSubscriberNotificationEnabled,
   readSubscriberNotificationPrefs,
+  subscriberSwitchesOffered,
 } from '../src/modules/notifications/utils/notification-toggle.util';
 
 /**
@@ -26,11 +30,14 @@ import {
  *    their own question — or fill the column with keys nobody reads.
  */
 
-function buildService(stored: unknown) {
+function buildService(stored: unknown, operatorToggles: Record<string, unknown> = {}) {
   const updates: Array<Record<string, unknown>> = [];
   const writeWheres: Array<Record<string, unknown>> = [];
   const selects: Array<Record<string, unknown>> = [];
   const prisma = {
+    // The operator's switches: whether a «Возврат покупателя» reminder is
+    // offered to the subscriber at all.
+    settings: { findUnique: async () => ({ userNotifications: operatorToggles }) },
     user: {
       // Honours `select`, because the read is half the gate: drop
       // `notificationPrefs: true` and the column is simply absent, every
@@ -99,6 +106,9 @@ describe('reading a subscriber switch', () => {
       'expires_in_1_days',
       'expired',
       'expired_1_day_ago',
+      'expired_3_days_ago',
+      'expired_7_days_ago',
+      'expired_14_days_ago',
       'connect_help',
       'addon_ends_in_3_days',
       'addon_ended',
@@ -111,6 +121,34 @@ describe('reading a subscriber switch', () => {
     assert.equal(isSubscriberNotificationEnabled({ connect_help: false }, 'connect_help'), false);
     assert.equal(isSubscriberNotificationEnabled({ connect_help: false }, 'connect_help_trial'), false);
     assert.equal(isSubscriberNotificationEnabled({ connect_help_trial: false }, 'connect_help_trial'), true);
+  });
+});
+
+describe('«Возврат покупателя» is off until the operator turns it on', () => {
+  it('reads an absent switch as OFF for the reminders and ON for everything else', () => {
+    for (const type of WINBACK_NOTIFICATION_TYPES) {
+      assert.equal(isNotificationDeliveryEnabled({}, type), false, type);
+      assert.equal(isNotificationDeliveryEnabled({ [type]: null }, type), false, type);
+      assert.equal(isNotificationDeliveryEnabled({ [type]: true }, type), true, type);
+      assert.equal(isNotificationDeliveryEnabled({ [type]: false }, type), false, type);
+    }
+    assert.equal(isNotificationDeliveryEnabled({}, 'expired_1_day_ago'), true);
+    assert.equal(isNotificationDeliveryEnabled({}, 'expired'), true);
+  });
+
+  it('offers the subscriber the switches of the reminders that are sent', () => {
+    const offered = subscriberSwitchesOffered({ expired_3_days_ago: true });
+    assert.ok(offered.includes('expired_3_days_ago'));
+    assert.ok(!offered.includes('expired_7_days_ago'));
+    assert.ok(offered.includes('expired_1_day_ago'));
+  });
+
+  it('lets the subscriber stop each reminder, in the bot and by mail', () => {
+    for (const type of WINBACK_NOTIFICATION_TYPES) {
+      assert.equal(isSubscriberNotificationEnabled({ [type]: false }, type), false, type);
+      assert.equal(isSubscriberNotificationEnabled({}, type), true, type);
+      assert.equal(isSubscriberMailableType(type), true, type);
+    }
   });
 });
 
@@ -142,9 +180,40 @@ describe('the internal preferences route', () => {
     const { service } = buildService({ expired: false });
     const result = await service.getNotificationPrefs('42');
     assert.deepEqual(result.prefs, { expired: false });
-    assert.deepEqual([...result.available], [...SUBSCRIBER_MUTABLE_NOTIFICATION_TYPES]);
+    // Every switch but the «Возврат покупателя» reminders, which the operator
+    // has not turned on here.
+    assert.deepEqual(
+      [...result.available],
+      SUBSCRIBER_MUTABLE_NOTIFICATION_TYPES.filter(
+        (type) => !(WINBACK_NOTIFICATION_TYPES as readonly string[]).includes(type),
+      ),
+    );
     // The cabinet draws «Помощь с подключением» only when this lists it.
     assert.ok(result.available.includes('connect_help'));
+  });
+
+  it('offers a «Возврат покупателя» switch only while the operator sends that reminder', async () => {
+    const { service } = buildService(null, { expired_7_days_ago: true, expired_14_days_ago: false });
+    const available = (await service.getNotificationPrefs('42')).available;
+    assert.ok(available.includes('expired_7_days_ago'));
+    assert.ok(!available.includes('expired_3_days_ago'), 'never switched on: off');
+    assert.ok(!available.includes('expired_14_days_ago'), 'switched off');
+    // And after a save, the same list.
+    const saved = await service.updateNotificationPrefs('42', { expired_7_days_ago: false });
+    assert.deepEqual([...saved.available], [...available]);
+    assert.deepEqual(saved.prefs, { expired_7_days_ago: false });
+  });
+
+  it('offers none of them when the operator’s switches cannot be read', async () => {
+    const { service } = buildService(null, { expired_7_days_ago: true });
+    (service as unknown as { prismaService: { settings: unknown } }).prismaService.settings = {
+      findUnique: async () => {
+        throw new Error('db down');
+      },
+    };
+    const available = (await service.getNotificationPrefs('42')).available;
+    for (const type of WINBACK_NOTIFICATION_TYPES) assert.ok(!available.includes(type), type);
+    assert.ok(available.includes('expired'));
   });
 
   it('stores the connect-help switch the cabinet sends, and returns it', async () => {

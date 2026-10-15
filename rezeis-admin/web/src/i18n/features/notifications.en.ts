@@ -22,6 +22,9 @@ export const en = {
       expired: 'Subscription expired',
       limited: 'Traffic exhausted',
       expired_1_day_ago: 'Subscription expired 1 day ago',
+      expired_3_days_ago: 'Win-back: 3 days after the end',
+      expired_7_days_ago: 'Win-back: 7 days after the end',
+      expired_14_days_ago: 'Win-back: 14 days after the end',
       addon_ends_in_3_days: 'Traffic add-on: 3 days before it ends',
       addon_ended: 'Traffic add-on has ended',
       addon_reset_ends_in_3_days: 'Traffic add-on until the reset: 3 days before the reset',
@@ -225,6 +228,25 @@ export const en = {
             other: 'unavailable',
           },
         },
+      },
+    },
+    winback: {
+      hint: '«Win-back» reminders go to customers who have paid at least once, are not blocked and have not bought a new subscription. Off to begin with, and while off they are not written to the cabinet feed either. They arrive only while the Remnawave profile has not been deleted.',
+      conflictTitle: 'Win-back reminders will not arrive',
+      conflict_one:
+        'Remnawave profiles are deleted {{count}} day after a subscription ends, and a reminder looks for a subscription that is not deleted yet. Will not arrive: {{reminders}}. Set «Delete after (days past expiry)» to at least {{needed}}, or turn off «Delete the profile from Remnawave» (Remnawave → Settings → Expired profile cleanup).',
+      conflict_other:
+        'Remnawave profiles are deleted {{count}} days after a subscription ends, and a reminder looks for a subscription that is not deleted yet. Will not arrive: {{reminders}}. Set «Delete after (days past expiry)» to at least {{needed}}, or turn off «Delete the profile from Remnawave» (Remnawave → Settings → Expired profile cleanup).',
+      setDays_one: 'Set {{count}} day',
+      setDays_other: 'Set {{count}} days',
+      openSettings: 'Open the setting',
+      saved_one: 'Profiles are now deleted {{count}} day after the end',
+      saved_other: 'Profiles are now deleted {{count}} days after the end',
+      saveFailed: 'Could not change when profiles are deleted',
+      short: {
+        expired_3_days_ago: 'after 3 days',
+        expired_7_days_ago: 'after 7 days',
+        expired_14_days_ago: 'after 14 days',
       },
     },
     userNotifications: {

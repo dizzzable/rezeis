@@ -160,7 +160,7 @@ export const en = {
       targetUrl: 'Absolute HTTPS URL',
       targetCallback: 'callback_data (e.g. menu:main)',
       callbackHint:
-        'The bot answers: menu:main or menu — the main menu; screen:<shortId> or a screen’s shortId itself — that screen (a screen of your own opens more reliably with screen:<shortId>); invite, rules, help — their screens; back_to_menu — the main menu; close — deletes the message; check_channel or check_channel:q:<id> — the channel subscription check, as «I subscribed»; quest_channel:<id> — the «Subscribe to channel» quest check; lang:<code>, such as lang:ru — switches the language; ai_support_exit — leaves AI support. With any other value the button does nothing.',
+        'The bot answers: menu:main, menu or menu:new — the main menu as a new message, and the notification stays; screen:<shortId> or a screen’s shortId itself — that screen (a screen of your own opens more reliably with screen:<shortId>); invite, rules, help — their screens; back_to_menu — the main menu; close — deletes the message; check_channel or check_channel:q:<id> — the channel subscription check, as «I subscribed»; quest_channel:<id> — the «Subscribe to channel» quest check; lang:<code>, such as lang:ru — switches the language; ai_support_exit — leaves AI support. With any other value the button does nothing.',
       defaultTargetHint:
         'With no buttons, the system still deep-links into the most relevant cabinet section — see the diagram.',
       lifetimeTopUpHint:

@@ -382,6 +382,11 @@ const PUSH_TAG_FAMILY_BY_TYPE: Readonly<Record<string, string>> = {
   expires_in_1_days: 'subscription-deadline',
   expired: 'subscription-deadline',
   expired_1_day_ago: 'subscription-deadline',
+  // «Возврат покупателя»: the same deadline, long passed — the newest reminder
+  // is the one that matters.
+  expired_3_days_ago: 'subscription-deadline',
+  expired_7_days_ago: 'subscription-deadline',
+  expired_14_days_ago: 'subscription-deadline',
   // A statement about right now, and DELIBERATELY NOT the family above even
   // though both land on `/renew`. "Your subscription expires" and "your
   // traffic ran out" are different facts about different things; a customer

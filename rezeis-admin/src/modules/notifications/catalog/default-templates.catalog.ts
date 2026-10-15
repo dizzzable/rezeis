@@ -156,6 +156,47 @@ const DURATION_TEMPLATES: ReadonlyArray<DefaultNotificationTemplate> = [
       SUBSCRIPTION_CARD_EN,
     buttons: EXPIRY_BUTTONS,
   },
+  // «Возврат покупателя» (the owner, 15.10.2026): a customer who paid and has
+  // not come back, 3, 7 and 14 days after the end. Off until the operator
+  // turns each on (`notification-toggle.util.ts`); «Продлить» works while the
+  // subscription is still there — the panel's Remnawave clean-up must not
+  // delete it sooner.
+  {
+    type: 'expired_3_days_ago',
+    title: '💔 Подписка закончилась 3 дня назад',
+    titleEn: '💔 Subscription ended 3 days ago',
+    body:
+      'Привет, {{name}}! Твоя подписка закончилась 3 дня назад, и VPN не работает. Продли её — доступ вернётся сразу 💔' +
+      SUBSCRIPTION_CARD_RU,
+    bodyEn:
+      'Hi, {{name}}! Your subscription ended 3 days ago, and the VPN is off. Renew it and access comes back at once 💔' +
+      SUBSCRIPTION_CARD_EN,
+    buttons: EXPIRY_BUTTONS,
+  },
+  {
+    type: 'expired_7_days_ago',
+    title: '👋 Неделя без VPN',
+    titleEn: '👋 A week without VPN',
+    body:
+      'Привет, {{name}}! Уже неделю твоя подписка не активна. Возвращайся — продлить можно в пару нажатий 👋' +
+      SUBSCRIPTION_CARD_RU,
+    bodyEn:
+      'Hi, {{name}}! Your subscription has been off for a week. Come back — renewing takes a couple of taps 👋' +
+      SUBSCRIPTION_CARD_EN,
+    buttons: EXPIRY_BUTTONS,
+  },
+  {
+    type: 'expired_14_days_ago',
+    title: '🎁 Ждём тебя обратно',
+    titleEn: '🎁 We would love to have you back',
+    body:
+      'Привет, {{name}}! Прошло две недели с окончания подписки. Мы скучаем — возвращайся 🎁' +
+      SUBSCRIPTION_CARD_RU,
+    bodyEn:
+      'Hi, {{name}}! It has been two weeks since your subscription ended. We miss you — come back 🎁' +
+      SUBSCRIPTION_CARD_EN,
+    buttons: EXPIRY_BUTTONS,
+  },
   {
     // A subscription with no end date is never renewed: for it the renewal
     // button goes out as «📦 Докупить трафик» → `/addons` of that subscription

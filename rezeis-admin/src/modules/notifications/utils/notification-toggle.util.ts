@@ -43,6 +43,43 @@ const TYPE_ALIAS_TO_TOGGLE_KEY: Readonly<Record<string, string>> = {
 };
 
 /**
+ * «Возврат покупателя» (the owner, 15.10.2026): a customer who has paid, whose
+ * subscription ended and who has not come back, is reminded 3, 7 and 14 days
+ * after the end (`AutoRenewService.createExpiredNotices`).
+ *
+ * OFF until the operator turns each on — the one exception to the opt-out rule
+ * below: a fresh install, and every install updated to this release, sends
+ * none of them unless somebody asked. And each one only reaches anybody while
+ * the subscription is still there: the panel deletes the Remnawave profile of
+ * an expired subscription after «Удалять через (дней после истечения)», and
+ * the reminders look for subscriptions that are expired, not deleted. The
+ * panel says so beside the switches (`notifications-page.tsx`) and beside
+ * that setting (Remnawave → Настройки).
+ */
+export const WINBACK_NOTIFICATION_TYPES = [
+  'expired_3_days_ago',
+  'expired_7_days_ago',
+  'expired_14_days_ago',
+] as const;
+
+export type WinbackNotificationType = (typeof WINBACK_NOTIFICATION_TYPES)[number];
+
+/** How many days after the end each reminder goes out. */
+export const WINBACK_NOTICE_DAYS: Readonly<Record<WinbackNotificationType, number>> = {
+  expired_3_days_ago: 3,
+  expired_7_days_ago: 7,
+  expired_14_days_ago: 14,
+};
+
+/**
+ * Whether `type` stays off until the operator switches it on: an absent key
+ * reads as OFF for these, where it reads as ON for every other type.
+ */
+export function isDefaultOffNotificationType(type: string): boolean {
+  return (WINBACK_NOTIFICATION_TYPES as readonly string[]).includes(resolveToggleKey(type));
+}
+
+/**
  * Resolve a fired notification `type` to the canonical toggle / template
  * key. Identity when no alias is registered.
  */
@@ -57,7 +94,9 @@ export function resolveToggleKey(type: string): string {
  * Opt-out semantics: a key that is absent / null / anything-but-false is
  * treated as enabled. Only an explicit `false` suppresses delivery. This
  * matches the SPA's `notifSettings[key] ?? true` default so an empty
- * settings record (fresh install) sends every notification.
+ * settings record (fresh install) sends every notification — but for the
+ * types that stay off until switched on ({@link isDefaultOffNotificationType}),
+ * which need an explicit `true`.
  *
  * `ADMIN_MESSAGE` and any other operator-initiated explicit sends are
  * never gated here because their type isn't in the toggle catalog —
@@ -69,7 +108,7 @@ export function isNotificationDeliveryEnabled(
 ): boolean {
   const key = resolveToggleKey(type);
   const value = toggleMap[key];
-  if (value === undefined || value === null) return true;
+  if (value === undefined || value === null) return !isDefaultOffNotificationType(key);
   return value !== false;
 }
 
@@ -103,6 +142,9 @@ export const SUBSCRIBER_MUTABLE_NOTIFICATION_TYPES = [
   'expires_in_1_days',
   'expired',
   'expired_1_day_ago',
+  // «Возврат покупателя»: offered to the subscriber only while the operator
+  // has it on (`subscriberSwitchesOffered`).
+  ...WINBACK_NOTIFICATION_TYPES,
   'connect_help',
   'addon_ends_in_3_days',
   'addon_ended',
@@ -175,6 +217,18 @@ export function isSubscriberNotificationEnabled(prefs: unknown, type: string): b
  * клиентам на почту» on, a verified address.
  */
 export const MAILABLE_WITHOUT_SWITCH_TYPES = ['addon_not_applied', 'addon_not_applied_other'] as const;
+
+/**
+ * The switches the cabinet draws for this install: every one the subscriber
+ * owns, but a reminder that is off until the operator turns it on and still
+ * off — a switch for a message nobody sends is the dead control this screen
+ * was rebuilt to be rid of.
+ */
+export function subscriberSwitchesOffered(toggleMap: Record<string, unknown>): readonly string[] {
+  return SUBSCRIBER_MUTABLE_NOTIFICATION_TYPES.filter(
+    (type) => !isDefaultOffNotificationType(type) || isNotificationDeliveryEnabled(toggleMap, type),
+  );
+}
 
 /** Whether `key` is one of the switches a subscriber owns. Canonical keys only. */
 function isSubscriberMutableType(key: string): boolean {

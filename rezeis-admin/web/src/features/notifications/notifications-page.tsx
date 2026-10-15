@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { Fragment, useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import { useForm, type Resolver } from 'react-hook-form'
@@ -66,6 +66,8 @@ import {
   type TelegramTestResult,
 } from './telegram-test-toast'
 import { ConnectHelpCard } from './connect-help-card'
+import { WinbackCleanupWarning } from './winback-cleanup-warning'
+import { isUserNotificationOn } from '@/lib/winback-cleanup'
 import { NOTIFICATION_TEMPLATES_ANCHOR } from './connect-help-view'
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -87,6 +89,14 @@ const USER_NOTIFICATION_KEYS = [
   'expired',
   'limited',
   'expired_1_day_ago',
+  // «Возврат покупателя» (the owner, 15.10.2026): a customer who paid and has
+  // not come back, 3, 7 and 14 days after the end. OFF until switched on
+  // (`isUserNotificationOn`), and only arriving while the Remnawave clean-up
+  // has not deleted the subscription — `WinbackCleanupWarning` says when it
+  // would.
+  'expired_3_days_ago',
+  'expired_7_days_ago',
+  'expired_14_days_ago',
   // A dated add-on three days before its end and at it: traffic, traffic that
   // ends with the traffic reset, then devices with ADDON_DEVICE_CLEANUP_AUTO
   // off and on — the sender picks by the add-on and the flag.
@@ -476,15 +486,27 @@ function UserNotificationsTab() {
         </CardHeader>
         <CardContent className="space-y-3">
           {USER_NOTIFICATION_KEYS.map((key) => {
-            const enabled = notifSettings[key] ?? true
+            // Absent is ON, but for the «Возврат покупателя» reminders: OFF
+            // until switched on, exactly as the server reads it.
+            const enabled = isUserNotificationOn(notifSettings, key)
             return (
-              <div key={key} className="flex items-center justify-between py-1">
-                <div>
-                  <Label className="text-sm">{t(String(`notificationsPage.userLabels.${key}`))}</Label>
-                  <p className="text-[11px] text-muted-foreground font-mono">{key}</p>
+              <Fragment key={key}>
+                <div className="flex items-center justify-between py-1">
+                  <div>
+                    <Label className="text-sm">{t(String(`notificationsPage.userLabels.${key}`))}</Label>
+                    <p className="text-[11px] text-muted-foreground font-mono">{key}</p>
+                  </div>
+                  <Switch checked={enabled} onCheckedChange={() => handleToggle(key, enabled)} />
                 </div>
-                <Switch checked={enabled} onCheckedChange={() => handleToggle(key, enabled)} />
-              </div>
+                {/* Right under the last «Возврат» switch: who they reach, and
+                    the reminders the Remnawave clean-up would cut short. */}
+                {key === 'expired_14_days_ago' && (
+                  <>
+                    <p className="text-xs text-muted-foreground">{t('notificationsPage.winback.hint')}</p>
+                    <WinbackCleanupWarning toggles={notifSettings} />
+                  </>
+                )}
+              </Fragment>
             )
           })}
         </CardContent>

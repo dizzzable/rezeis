@@ -10,6 +10,13 @@ import { PrismaService } from '../../common/prisma/prisma.service';
 import { EVENT_TYPES, SystemEventsService } from '../../common/services/system-events.service';
 import { planNamesMetadata } from '../../common/utils/plan-snapshot.util';
 import { UserNotificationsService } from '../notifications/services/user-notifications.service';
+import {
+  WINBACK_NOTICE_DAYS,
+  WINBACK_NOTIFICATION_TYPES,
+  isDefaultOffNotificationType,
+  isNotificationDeliveryEnabled,
+} from '../notifications/utils/notification-toggle.util';
+import { readUserNotificationToggleMap } from '../notifications/utils/user-notification-toggle-map.reader';
 import { PaymentsRenewalCheckoutService } from '../payments/services/payments-renewal-checkout.service';
 import { SavedPaymentMethodService } from '../payments/services/saved-payment-method.service';
 import { SubscriptionNoticePayloadService } from '../remnawave/services/subscription-notice-payload.service';
@@ -47,6 +54,30 @@ const EXPIRY_NOTICE_WINDOW_MS = 3 * 60 * 60 * 1000;
  * selecting a field the builder started reading.
  */
 const EXPIRY_NOTICE_SELECT = SubscriptionNoticePayloadService.SELECT;
+
+/**
+ * A subscription in any of these is one the customer still has: one who bought
+ * a new subscription after the old one ended has come back, and is not asked to
+ * (DISABLED — frozen by the operator — is not somebody to court either).
+ */
+const LIVE_SUBSCRIPTION_STATUSES = [
+  SubscriptionStatus.ACTIVE,
+  SubscriptionStatus.LIMITED,
+  SubscriptionStatus.DISABLED,
+];
+
+/**
+ * Who an after-the-end notice is for.
+ *
+ *  - `all` — «Подписка закончилась» on the day: a fact about THIS subscription,
+ *    told to everyone it happened to, a second live subscription or not.
+ *  - `notReturned` — «закончилась вчера»: a reminder, so not to a customer who
+ *    already has another live subscription.
+ *  - `paidNotReturned` — «Возврат покупателя» (the owner, 15.10.2026: «только
+ *    платившим»): the reminder, and only to a customer who has paid money at
+ *    least once and is not blocked.
+ */
+type ExpiredNoticeAudience = 'all' | 'notReturned' | 'paidNotReturned';
 
 /**
  * Auto-renewal service — donor: altshop `src/services/auto_renew.py` +
@@ -672,7 +703,18 @@ export class AutoRenewService {
   public async createExpiredNotices(input: {
     readonly daysAgo: number;
     readonly notificationType: string;
+    /** `all` when omitted. */
+    readonly audience?: ExpiredNoticeAudience;
   }): Promise<number> {
+    // A notice that is off until the operator turns it on writes NOTHING while
+    // it is off — not even the cabinet's feed row, which an operator's switch
+    // otherwise leaves in place: nobody asked for these, and three rows in
+    // every lapsed customer's bell would be the product talking unasked.
+    if (isDefaultOffNotificationType(input.notificationType)) {
+      const toggles = await readUserNotificationToggleMap(this.prismaService);
+      if (!isNotificationDeliveryEnabled(toggles, input.notificationType)) return 0;
+    }
+    const audience = input.audience ?? 'all';
     const now = new Date();
     const mark = new Date(now.getTime() - input.daysAgo * ONE_DAY_MS);
     const windowStart = new Date(mark.getTime() - EXPIRY_NOTICE_WINDOW_MS);
@@ -691,6 +733,22 @@ export class AutoRenewService {
         ...(alreadyNotifiedIds.length > 0
           ? { userId: { notIn: [...alreadyNotifiedIds] } }
           : {}),
+        // In the query too, for the same reason: a batch full of customers who
+        // came back would come back every tick and starve the rest.
+        ...(audience === 'all'
+          ? {}
+          : {
+              user: {
+                subscriptions: { none: { status: { in: LIVE_SUBSCRIPTION_STATUSES } } },
+                ...(audience === 'paidNotReturned'
+                  ? {
+                      isBlocked: false,
+                      // Paid money: any payment that completed for a price.
+                      transactions: { some: { status: TransactionStatus.COMPLETED, amount: { gt: 0 } } },
+                    }
+                  : {}),
+              },
+            }),
       },
       select: EXPIRY_NOTICE_SELECT,
       take: BATCH_SIZE,
@@ -758,6 +816,8 @@ export class AutoRenewService {
     readonly warnings1d: number;
     readonly expiredNotices: number;
     readonly expiredYesterdayNotices: number;
+    /** «Возврат покупателя», per type; 0 while the operator has it off. */
+    readonly winBackNotices: Readonly<Record<string, number>>;
     readonly autopayAttempted: number;
     readonly autopaySucceeded: number;
     readonly autopayFailed: number;
@@ -794,8 +854,20 @@ export class AutoRenewService {
       this.createExpiredNotices({ daysAgo: 0, notificationType: 'expired' }),
     );
     const expiredYesterdayNotices = await this.runEmitter('expired_1_day_ago', () =>
-      this.createExpiredNotices({ daysAgo: 1, notificationType: 'expired_1_day_ago' }),
+      this.createExpiredNotices({ daysAgo: 1, notificationType: 'expired_1_day_ago', audience: 'notReturned' }),
     );
+    // «Возврат покупателя»: 3, 7 and 14 days after the end, to a customer who
+    // paid and has not come back — each only while the operator has it on.
+    const winBackNotices: Record<string, number> = {};
+    for (const type of WINBACK_NOTIFICATION_TYPES) {
+      winBackNotices[type] = await this.runEmitter(type, () =>
+        this.createExpiredNotices({
+          daysAgo: WINBACK_NOTICE_DAYS[type],
+          notificationType: type,
+          audience: 'paidNotReturned',
+        }),
+      );
+    }
     return {
       expired,
       warnings3d,
@@ -803,6 +875,7 @@ export class AutoRenewService {
       warnings1d,
       expiredNotices,
       expiredYesterdayNotices,
+      winBackNotices,
       autopayAttempted: autopay.attempted,
       autopaySucceeded: autopay.succeeded,
       autopayFailed: autopay.failed,

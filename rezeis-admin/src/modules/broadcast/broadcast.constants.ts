@@ -96,3 +96,17 @@ export const BROADCAST_BLOCKED_REASON = 'telegram_blocked_by_user';
  * button labels (broadcasts are operator-authored single-language).
  */
 export const BROADCAST_PROMO_BUTTON_LABEL = '🎁 Активировать промокод';
+
+/**
+ * «Кнопка «Меню» под постом» (`utils/broadcast-menu-button.util.ts`). Russian,
+ * for the promo label's reason, and the words of the notifications' own
+ * «🏠 Главное меню» button.
+ */
+export const BROADCAST_MENU_BUTTON_LABEL = '🏠 Главное меню';
+
+/**
+ * reiwa's callback for the main menu as a NEW message, the post left as it is
+ * (`src/bot/lib/menu-anew.ts` there). `menu:main` would draw the menu in place
+ * of the post.
+ */
+export const BROADCAST_MENU_CALLBACK = 'menu:new';

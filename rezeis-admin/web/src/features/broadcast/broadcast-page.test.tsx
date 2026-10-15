@@ -126,10 +126,42 @@ describe('BroadcastPage create form validation', () => {
           mediaFileId: 'https://cdn.example.com/banner.jpg',
           emailEnabled: false,
           telegramChannelChatId: '',
+          // «Кнопка «Меню» под постом» is on for a new broadcast.
+          menuButton: true,
         },
       })
     })
     expect(postSpy).toHaveBeenCalledWith('/admin/broadcast/broadcast-1/send', {})
+  })
+
+  it('sends «Кнопка «Меню» под постом» off when the operator switches it off', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(api, 'get').mockImplementation(async (path: string) => {
+      if (path === '/admin/broadcast/drafts') return { data: [] }
+      return { data: {} }
+    })
+    const postSpy = vi.spyOn(api, 'post').mockImplementation(async (path: string) => {
+      if (path === '/admin/broadcast/drafts') return { data: { id: 'broadcast-1' } }
+      if (path === '/admin/broadcast/broadcast-1/send') return { data: { jobId: 'job-1' } }
+      return { data: {} }
+    })
+    await loadFeatureBundle('broadcast')
+
+    renderWithProviders(<BroadcastPage />)
+
+    await user.click(screen.getByRole('button', { name: 'New broadcast' }))
+    await user.type(screen.getByPlaceholderText(/Enter your message here/), 'Hello')
+    const menuSwitch = screen.getByRole('switch', { name: '«Menu» button under the post' })
+    expect(menuSwitch).toBeChecked()
+    await user.click(menuSwitch)
+    await user.click(screen.getByRole('button', { name: 'Create and send' }))
+
+    await waitFor(() => {
+      expect(postSpy).toHaveBeenCalledWith(
+        '/admin/broadcast/drafts',
+        expect.objectContaining({ payload: expect.objectContaining({ menuButton: false }) }),
+      )
+    })
   })
 
   it('shows the recipients that are neither delivered nor failed yet', async () => {

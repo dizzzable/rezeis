@@ -115,6 +115,8 @@ describe('BroadcastService', () => {
           parseMode: 'HTML',
           emailEnabled: false,
           telegramChannelChatId: null,
+          // «Кнопка «Меню» под постом»: off unless asked for.
+          menuButton: false,
         },
         totalCount: 5,
         successCount: 2,
@@ -191,6 +193,8 @@ describe('BroadcastService', () => {
             parseMode: 'MarkdownV2',
             emailEnabled: false,
             telegramChannelChatId: null,
+            // «Кнопка «Меню» под постом»: off unless asked for.
+            menuButton: false,
           },
           createdBy: 'admin-1',
         },
@@ -205,6 +209,8 @@ describe('BroadcastService', () => {
       parseMode: 'MarkdownV2',
       emailEnabled: false,
       telegramChannelChatId: null,
+      // «Кнопка «Меню» под постом»: off unless asked for.
+      menuButton: false,
     });
   });
 

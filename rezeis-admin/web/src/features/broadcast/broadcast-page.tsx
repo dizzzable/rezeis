@@ -339,6 +339,8 @@ interface BroadcastDraftDetail {
     readonly mediaFileId: string | null
     readonly emailEnabled: boolean
     readonly telegramChannelChatId: string | null
+    /** Absent from a panel older than 15.10.2026. */
+    readonly menuButton?: boolean
   }
 }
 
@@ -872,6 +874,7 @@ function CreateBroadcastForm({
       mediaValue: '',
       emailEnabled: false,
       telegramChannelChatId: '',
+      menuButton: true,
     },
     mode: 'onSubmit',
     reValidateMode: 'onBlur',
@@ -936,6 +939,9 @@ function CreateBroadcastForm({
   // broadcast once to an operator-configured Telegram channel/group.
   const [emailEnabled, setEmailEnabled] = useState(false)
   const [telegramChannelChatId, setTelegramChannelChatId] = useState('')
+  // On for a new broadcast (the owner, 15.10.2026: the menu one tap away under
+  // every post); a draft keeps what it was saved with.
+  const [menuButton, setMenuButton] = useState(true)
   const [uploaded, setUploaded] = useState<UploadedMedia | null>(null)
   // The raw selected file, kept only for the local inline preview (the actual
   // send uses the Telegram file_id returned by the upload endpoint).
@@ -979,6 +985,8 @@ function CreateBroadcastForm({
     }
     setEmailEnabled(editing.payload.emailEnabled)
     setTelegramChannelChatId(editing.payload.telegramChannelChatId ?? '')
+    // A draft saved before the switch existed has no button, and keeps none.
+    setMenuButton(editing.payload.menuButton === true)
     const filter = editing.audienceFilter
     if (filter) {
       const connect = readableConnect(filter.connect)
@@ -1274,6 +1282,7 @@ function CreateBroadcastForm({
       mediaValue,
       emailEnabled,
       telegramChannelChatId,
+      menuButton,
     }
     form.reset(draft)
     return form.handleSubmit(
@@ -1787,6 +1796,24 @@ function CreateBroadcastForm({
           </Badge>
         )}
         <FieldError message={formErrors.promoCode} />
+      </div>
+
+      {/* «Кнопка «Меню» под постом» (the owner, 15.10.2026): the bot's main
+          menu, opened as a new message so the post stays. In the recipients'
+          chats only — the channel copy gets none. */}
+      <div className="flex items-center justify-between gap-3 rounded-lg border border-border/60 p-3">
+        <div>
+          <Label htmlFor="broadcast-menu-button" className="text-sm font-normal">
+            {t('broadcastPage.menuButton.label')}
+          </Label>
+          <p className="text-xs text-muted-foreground">{t('broadcastPage.menuButton.hint')}</p>
+        </div>
+        <Switch
+          id="broadcast-menu-button"
+          checked={menuButton}
+          onCheckedChange={setMenuButton}
+          aria-label={t('broadcastPage.menuButton.label')}
+        />
       </div>
 
       <div className="space-y-2">

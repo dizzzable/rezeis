@@ -118,6 +118,16 @@ export class BroadcastPayloadDto {
   @IsString()
   @MaxLength(64)
   public telegramChannelChatId?: string;
+
+  /**
+   * «Кнопка «Меню» под постом»: a «🏠 Главное меню» button under the post in
+   * each recipient's chat with the bot, opening the menu as a new message so
+   * the post stays. Not under the channel copy — the menu does not open there.
+   * Omitted → no button, as every broadcast before it.
+   */
+  @IsOptional()
+  @IsBoolean()
+  public menuButton?: boolean;
 }
 
 export class CreateBroadcastDraftDto {

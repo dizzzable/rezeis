@@ -14,6 +14,8 @@ export interface BroadcastFormDraft {
   readonly mediaValue: string
   readonly emailEnabled: boolean
   readonly telegramChannelChatId: string
+  /** «Кнопка «Меню» под постом». */
+  readonly menuButton: boolean
 }
 
 export interface BroadcastCreateRequest {
@@ -26,6 +28,7 @@ export interface BroadcastCreateRequest {
     readonly mediaFileId?: string
     readonly emailEnabled?: boolean
     readonly telegramChannelChatId?: string
+    readonly menuButton?: boolean
   }
 }
 
@@ -70,6 +73,7 @@ export function createBroadcastFormSchema(messages: BroadcastFormValidationMessa
       mediaValue: z.string().trim().max(256, messages.mediaTooLong),
       emailEnabled: z.boolean(),
       telegramChannelChatId: z.string().trim().max(64),
+      menuButton: z.boolean(),
     })
     .superRefine((values, ctx) => {
       const hasText = values.text.trim().length > 0
@@ -151,6 +155,8 @@ export function createBroadcastFormSchema(messages: BroadcastFormValidationMessa
         mediaFileId: values.mediaType !== 'none' ? mediaValue : '',
         emailEnabled: values.emailEnabled,
         telegramChannelChatId: channelChatId,
+        // Sent every time, off included: an absent key leaves the stored value.
+        menuButton: values.menuButton,
       }
 
       return {

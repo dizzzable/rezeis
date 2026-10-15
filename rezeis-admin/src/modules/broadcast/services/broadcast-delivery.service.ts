@@ -26,6 +26,7 @@ import {
   BROADCAST_BLOCKED_REASON,
 } from '../broadcast.constants';
 import { buildPromoButton } from '../utils/broadcast-promo.util';
+import { buildMenuInlineKeyboard, buildMenuNotifyButton, readMenuButton } from '../utils/broadcast-menu-button.util';
 import { captionOverflowOf, isMediaPayload } from '../utils/broadcast-caption.util';
 import { BroadcastService } from './broadcast.service';
 import {
@@ -775,6 +776,12 @@ export class BroadcastDeliveryService {
       broadcast.promoCode && broadcast.promoCode.length > 0
         ? buildPromoButton(broadcast.promoCode, BROADCAST_PROMO_BUTTON_LABEL)
         : null;
+    // «Кнопка «Меню» под постом»: under the promo button when there is one.
+    const menuButton = readMenuButton(payload);
+    const relayButtons = [
+      ...(promoButton !== null ? [promoButton] : []),
+      ...(menuButton ? [buildMenuNotifyButton()] : []),
+    ];
 
     const messages = await this.prismaService.broadcastMessage.findMany({
       where: { id: { in: messageIds }, status: BroadcastMessageStatus.PENDING },
@@ -971,6 +978,7 @@ export class BroadcastDeliveryService {
             mediaType: mediaType ?? 'none',
             mediaFileId,
             parseMode,
+            ...(menuButton ? { replyMarkup: buildMenuInlineKeyboard() } : {}),
           });
           mediaOk = result.ok;
           mediaMessageId = result.messageId;
@@ -997,7 +1005,7 @@ export class BroadcastDeliveryService {
           telegramId: user.telegramId.toString(),
           text: telegramText || ' ',
           parseMode: 'HTML',
-          buttons: promoButton ? [promoButton] : undefined,
+          buttons: relayButtons.length > 0 ? relayButtons : undefined,
         });
         textMessageId = relayOutcome.messageId;
         await sleep(TELEGRAM_RATE_LIMIT_MS);
@@ -1519,6 +1527,7 @@ export class BroadcastDeliveryService {
     // separate `mediaType`-only reading would aim `editMessageCaption` at a
     // message that was sent as plain text, and Telegram refuses that.
     const isMedia = isMediaPayload(payload);
+    const menuButton = readMenuButton(payload);
     const title = typeof payload?.title === 'string' ? payload.title : null;
 
     // Telegram can't render our custom-emoji images — substitute `:slug:` just
@@ -1566,13 +1575,16 @@ export class BroadcastDeliveryService {
       const body: Record<string, unknown> = {
         chat_id: user.telegramId.toString(),
         message_id: Number(message.telegramMessageId),
-        // NO `reply_markup` — see `sendTelegramMessage`'s note on why the promo
-        // button cannot be built here.
-        // Telegram reads its absence as "remove the keyboard", so this edit
-        // does drop the promo button. That is stated on the compose screen
-        // rather than papered over: the alternative attempt — sending the relay
-        // DTO as an inline keyboard — is refused by Telegram with a 400 per
-        // recipient, so the whole correction lands nowhere.
+        // No promo button — see `sendTelegramMessage`'s note on why it cannot
+        // be built here.
+        // Telegram reads an absent `reply_markup` as "remove the keyboard", so
+        // this edit does drop the promo button. That is stated on the compose
+        // screen rather than papered over: the alternative attempt — sending
+        // the relay DTO as an inline keyboard — is refused by Telegram with a
+        // 400 per recipient, so the whole correction lands nowhere.
+        // The «Главное меню» button is an ordinary one and is sent again, or
+        // the edit would take it off every post.
+        ...(menuButton ? { reply_markup: buildMenuInlineKeyboard() } : {}),
       };
       // THE WIRE VALUE, derived exactly as delivery derives it: a text
       // broadcast always goes out as HTML, a media caption only when the
@@ -2102,7 +2114,14 @@ export class BroadcastDeliveryService {
       mediaType: string;
       mediaFileId: string | null;
       parseMode: string | undefined;
-      // ── NO `replyMarkup` PARAMETER, DELIBERATELY ────────────────────────
+      /**
+       * A keyboard of ordinary Telegram buttons, and of nothing else: the
+       * «Главное меню» callback (`broadcast-menu-button.util.ts`) needs nothing
+       * only the bot knows, so it can go straight to the Bot API. The promo
+       * button cannot — see below.
+       */
+      replyMarkup?: ReturnType<typeof buildMenuInlineKeyboard>;
+      // ── NO PROMO BUTTON HERE, DELIBERATELY ──────────────────────────────
       //
       // The obvious missing feature here is the promo button: a promo-tagged
       // PHOTO arrives with no way to activate the code, while the channel copy
@@ -2137,6 +2156,7 @@ export class BroadcastDeliveryService {
           photo: input.mediaFileId,
           caption: input.text || undefined,
           parse_mode: input.parseMode,
+          reply_markup: input.replyMarkup,
         };
       } else if (input.mediaType === 'video' && input.mediaFileId) {
         endpoint = 'sendVideo';
@@ -2146,6 +2166,7 @@ export class BroadcastDeliveryService {
           caption: input.text || undefined,
           parse_mode: input.parseMode,
           supports_streaming: true,
+          reply_markup: input.replyMarkup,
         };
       } else {
         endpoint = 'sendMessage';
@@ -2153,6 +2174,7 @@ export class BroadcastDeliveryService {
           chat_id: input.chatId,
           text: input.text,
           parse_mode: input.parseMode,
+          reply_markup: input.replyMarkup,
         };
       }
 
