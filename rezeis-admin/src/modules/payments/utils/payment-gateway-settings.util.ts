@@ -380,6 +380,8 @@ const aurapaySettingsSchema = z
     apiKey: z.string().min(1).optional(),
     shopId: z.string().min(1).optional(),
     secretKey: z.string().min(1).optional(),
+    // «Автоплатежи одобрены провайдером»: card subscriptions (gateway-autopay.util.ts).
+    savePaymentMethod: yookassaBooleanSetting.optional(),
   })
   .strict();
 

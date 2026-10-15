@@ -492,6 +492,47 @@ describe('GatewaySettingsPage Platega payment method', () => {
   })
 })
 
+describe('GatewaySettingsPage AuraPay automatic charging', () => {
+  beforeAll(async () => {
+    await loadFeatureBundle('payments')
+  })
+
+  beforeEach(() => {
+    usePermissionStore.getState().reset()
+    vi.restoreAllMocks()
+  })
+
+  // The owner, 15.10.2026: AuraPay runs card subscriptions too. Its card gets the
+  // same switch Platega and RollyPay have, OFF until the operator turns it on.
+  it('offers the approval switch, explains it, and saves it', async () => {
+    mockGatewayList([
+      createGateway({
+        type: 'AURAPAY',
+        isConfigured: true,
+        settings: { apiKey: 'api-1', shopId: 'shop-1', secretKey: 'secret-2' },
+      }),
+    ])
+    const patchSpy = vi.spyOn(api, 'patch').mockResolvedValue({ data: {} })
+    grantPermissions([
+      { resource: 'payment_gateways', action: 'view' },
+      { resource: 'payment_gateways', action: 'edit' },
+    ])
+    const user = userEvent.setup()
+
+    renderWithProviders(<GatewaySettingsPage />)
+    await user.click(await screen.findByRole('button', { name: 'Open settings' }))
+    const toggle = await screen.findByRole('switch', { name: 'Autopayments approved by the provider' })
+    expect(toggle).not.toBeChecked()
+    expect(screen.getByText(/AuraPay subscriptions have no SBP/)).toBeInTheDocument()
+
+    await user.click(toggle)
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(patchSpy).toHaveBeenCalled())
+    expect(readSavedSettings(patchSpy)).toMatchObject({ savePaymentMethod: 'true' })
+  })
+})
+
 describe('GatewaySettingsPage RioPay/Valutix serviceId', () => {
   beforeAll(async () => {
     await loadFeatureBundle('payments')

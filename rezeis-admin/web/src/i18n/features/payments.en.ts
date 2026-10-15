@@ -234,6 +234,8 @@ export const en = {
         'WATA RSA public key used to verify the webhook signature (SHA512withRSA). Served by GET /api/h2h/public-key. WATA has no shared secret.',
       aurapaySecret:
         'Secret key #2 from the AuraPay terminal settings. Used to verify the X-SIGNATURE webhook header.',
+      aurapayAutopay:
+        'Turn on once AuraPay has switched subscriptions on for your terminal. The cabinet then shows a second AuraPay option, «for automatic charging»: the customer pays the first payment by card on AuraPay\'s form, then AuraPay charges the same sum every period on its own, and access is extended for each paid charge. Card only: AuraPay subscriptions have no SBP. Offered for 7, 14, 30, 60, 90, 180 and 365 days and for a price in whole roubles up to 50 000 ₽. Turning it off stops new subscriptions only: existing ones keep charging until the customer turns them off in «Payment methods». Off by default.',
       rollypaySigningSecret:
         'signing_secret of the RollyPay terminal. Used to verify the X-Signature header on webhooks.',
       rollypayAutopay:

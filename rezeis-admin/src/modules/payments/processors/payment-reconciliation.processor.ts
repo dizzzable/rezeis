@@ -42,7 +42,11 @@ export class PaymentReconciliationProcessor extends WorkerHost {
           { paymentId: target.paymentId, status: target.status },
         );
       } else {
-        await this.providerSubscriptionService.sync(target.gatewayType, target.providerSubscriptionId);
+        await this.providerSubscriptionService.sync(
+          target.gatewayType,
+          target.providerSubscriptionId,
+          target.providerChargeId,
+        );
       }
       return;
     }
@@ -70,7 +74,12 @@ export class PaymentReconciliationProcessor extends WorkerHost {
 function readSyncTarget(
   data: unknown,
 ):
-  | { readonly gatewayType: PaymentGatewayType; readonly providerSubscriptionId: string }
+  | {
+      readonly gatewayType: PaymentGatewayType;
+      readonly providerSubscriptionId: string;
+      /** The charge a callback said was paid (AuraPay's invoice), or null. */
+      readonly providerChargeId: string | null;
+    }
   | { readonly gatewayType: PaymentGatewayType; readonly providerPaymentId: string }
   | {
       readonly gatewayType: PaymentGatewayType;
@@ -87,7 +96,13 @@ function readSyncTarget(
   }
   const providerSubscriptionId = record.providerSubscriptionId;
   if (typeof providerSubscriptionId === 'string' && providerSubscriptionId.length > 0) {
-    return { gatewayType: gatewayType as PaymentGatewayType, providerSubscriptionId };
+    const providerChargeId = record.providerChargeId;
+    return {
+      gatewayType: gatewayType as PaymentGatewayType,
+      providerSubscriptionId,
+      providerChargeId:
+        typeof providerChargeId === 'string' && providerChargeId.length > 0 ? providerChargeId : null,
+    };
   }
   const providerPaymentId = record.providerPaymentId;
   if (typeof providerPaymentId === 'string' && providerPaymentId.length > 0) {

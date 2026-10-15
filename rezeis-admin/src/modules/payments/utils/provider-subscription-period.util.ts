@@ -128,6 +128,34 @@ export function antilopayDelayUnitDays(unit: AntilopayDelayUnit): number {
 }
 
 /**
+ * AuraPay's periods (`interval` day, month or year, times `period`), for the
+ * terms a VPN is sold for. A month and a year are AuraPay's calendar ones — the
+ * payer reads «ежемесячно» and «ежегодно» on its form — and the day or two a
+ * real month is longer than 30 days is what `chargeCoverDays` stretches a
+ * renewal over. Every other term is counted in days, exactly: six calendar
+ * months are up to 184 days, more than that stretch covers, so 180 days are
+ * `day` × 180 and never `month` × 6.
+ */
+const AURAPAY_PERIODS: ReadonlyArray<{ readonly days: number; readonly period: ProviderPeriod }> = [
+  { days: 7, period: { unit: 'day', count: 7 } },
+  { days: 14, period: { unit: 'day', count: 14 } },
+  { days: 30, period: { unit: 'month', count: 1 } },
+  { days: 60, period: { unit: 'day', count: 60 } },
+  { days: 90, period: { unit: 'day', count: 90 } },
+  { days: 180, period: { unit: 'day', count: 180 } },
+  { days: 365, period: { unit: 'year', count: 1 } },
+];
+
+export function aurapayPeriodForDays(durationDays: number): ProviderPeriod | null {
+  return AURAPAY_PERIODS.find((entry) => entry.days === durationDays)?.period ?? null;
+}
+
+/** AuraPay's `interval` for a period of its own; null for one it has no word for (a week). */
+export function aurapayIntervalFor(period: ProviderPeriod): 'day' | 'month' | 'year' | null {
+  return period.unit === 'week' ? null : period.unit;
+}
+
+/**
  * Platega takes the amount of one charge as an integer number of roubles, so a
  * price with kopecks cannot be charged as it is. Rounding would charge a price
  * the customer was never shown; such a price offers no automatic charging.

@@ -53,14 +53,15 @@ export function approvedAutopayMethods(
 
 /**
  * The gateways whose repeat charges this build can run: ЮKassa charges a saved
- * method on the panel's schedule, Platega, RollyPay and Antilopay run a
- * subscription on their own (`PROVIDER_SUBSCRIPTION_GATEWAY_TYPES`).
+ * method on the panel's schedule, Platega, RollyPay, Antilopay and AuraPay run
+ * a subscription on their own (`PROVIDER_SUBSCRIPTION_GATEWAY_TYPES`).
  */
 export const AUTOPAY_GATEWAY_TYPES: ReadonlySet<PaymentGatewayType> = new Set([
   PaymentGatewayType.YOOKASSA,
   PaymentGatewayType.PLATEGA,
   PaymentGatewayType.ROLLYPAY,
   PaymentGatewayType.ANTILOPAY,
+  PaymentGatewayType.AURAPAY,
 ]);
 
 /**

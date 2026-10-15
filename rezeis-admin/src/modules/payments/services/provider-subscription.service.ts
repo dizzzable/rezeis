@@ -41,6 +41,12 @@ import {
 } from '../utils/antilopay-api.util';
 import { antilopayRefundEnvelope, completedAntilopayRefunds } from '../utils/antilopay-refund.util';
 import {
+  AURAPAY_API,
+  aurapayHeaders,
+  parseAurapayInvoice,
+  parseAurapaySubscription,
+} from '../utils/aurapay-subscription.util';
+import {
   type AntilopayAutopayMethod,
   type AntilopayCharge,
   type AntilopayDelay,
@@ -199,6 +205,12 @@ export interface ProviderSubscriptionState {
    * deliver one twice.
    */
   readonly charges?: readonly AntilopayCharge[];
+  /**
+   * When the first payment was paid (AuraPay): its status names no charges, so
+   * the first one is known from this and every later one only from the
+   * callback that names its invoice. Undefined for every other provider.
+   */
+  readonly activatedAt?: Date | null;
 }
 
 export interface CustomerProviderSubscriptionInterface {
@@ -256,6 +268,8 @@ export class ProviderSubscriptionService {
   private readonly unmatchedDisputesTold = new Set<string>();
   /** Antilopay recurrents whose paid charge nothing could place, told once; see {@link tellUnplacedRecurrentCharge}. */
   private readonly unplacedRecurrentsTold = new Set<string>();
+  /** AuraPay charges that seem taken and were never delivered, told once; see {@link tellMissedAurapayCharge}. */
+  private readonly missedAurapayChargesTold = new Set<string>();
 
   public constructor(
     private readonly prismaService: PrismaService,
@@ -301,11 +315,13 @@ export class ProviderSubscriptionService {
     gatewayType: PaymentGatewayType,
     providerSubscriptionId: string,
     delayMs = 0,
+    /** The charge a callback said was paid, where only the callback names it (AuraPay's invoice). */
+    providerChargeId: string | null = null,
   ): Promise<void> {
     await runPaymentReconciliationEnqueueWithTimeout(() =>
       this.paymentReconciliationQueue.add(
         PROVIDER_SUBSCRIPTION_SYNC_JOB,
-        { gatewayType, providerSubscriptionId },
+        { gatewayType, providerSubscriptionId, ...(providerChargeId === null ? {} : { providerChargeId }) },
         {
           ...(delayMs > 0 ? { delay: delayMs } : {}),
           attempts: 5,
@@ -631,7 +647,12 @@ export class ProviderSubscriptionService {
     return linked === null ? null : recurrentId.trim();
   }
 
-  public async sync(gatewayType: PaymentGatewayType, providerSubscriptionId: string): Promise<void> {
+  public async sync(
+    gatewayType: PaymentGatewayType,
+    providerSubscriptionId: string,
+    /** The charge a callback said was paid (AuraPay's invoice); see {@link applyAurapayCharges}. */
+    providerChargeId: string | null = null,
+  ): Promise<void> {
     const row =
       (await this.prismaService.providerSubscription.findUnique({
         where: { gatewayType_providerSubscriptionId: { gatewayType, providerSubscriptionId } },
@@ -642,10 +663,10 @@ export class ProviderSubscriptionService {
       this.logger.warn(`Callback for unknown ${gatewayType} subscription ${providerSubscriptionId}; ignored`);
       return;
     }
-    await this.syncRow(row);
+    await this.syncRow(row, providerChargeId);
   }
 
-  public async syncRow(row: ProviderSubscription): Promise<void> {
+  public async syncRow(row: ProviderSubscription, providerChargeId: string | null = null): Promise<void> {
     const gateway = await this.prismaService.paymentGateway.findUnique({
       where: { type: row.gatewayType },
     });
@@ -657,12 +678,17 @@ export class ProviderSubscriptionService {
 
     let applied = row.appliedChargeCount;
     let subscriptionId = row.subscriptionId;
+    let lastChargeAt = state.lastChargeAt;
     // A subscription signed up with a delay is given its plan the moment it is
     // active — before any charge, which renews what the grant created.
     if (state.charges !== undefined && (await this.grantsDelayNow(row, state))) {
       await this.ensureDelayGrant(row, state.nextChargeAt);
     }
-    if (state.charges !== undefined) {
+    if (row.gatewayType === PaymentGatewayType.AURAPAY) {
+      const delivered = await this.applyAurapayCharges(row, state, providerChargeId, gateway.settings);
+      subscriptionId = delivered.subscriptionId;
+      lastChargeAt = delivered.lastChargeAt;
+    } else if (state.charges !== undefined) {
       // Antilopay: each charge is delivered under its own payment's id.
       subscriptionId = await this.applyKeyedCharges(row, state.charges, state.nextChargeAt);
     } else if (row.userId === null && state.chargesSuccess !== null && state.chargesSuccess > applied) {
@@ -732,7 +758,7 @@ export class ProviderSubscriptionService {
         status,
         providerStatus: state.providerStatus,
         nextChargeAt: state.nextChargeAt,
-        lastChargeAt: state.lastChargeAt,
+        lastChargeAt,
         lastSyncedAt: new Date(),
         ...(state.endsAt === undefined ? {} : { endsAt: state.endsAt }),
         ...(state.plannedChargeCount === undefined ? {} : { plannedChargeCount: state.plannedChargeCount }),
@@ -871,6 +897,199 @@ export class ProviderSubscriptionService {
       }
     }
     return subscriptionId;
+  }
+
+  /**
+   * Delivers what AuraPay was paid for a subscription. Its status lists no
+   * charges, so:
+   *
+   *  - the FIRST payment is known from the status: `activated_at` is set once
+   *    it is paid (`ACTIVATED`), and it completes the checkout the payer
+   *    started — under the same key as the first charge of every other
+   *    provider, so its own invoice callback down the ordinary pipeline and
+   *    this look settle it once between them;
+   *  - every LATER charge only from the callback that names its invoice
+   *    (`providerChargeId`, the event's documented key): the invoice is read
+   *    back, must be PAID, and becomes one RENEW payment keyed by the invoice,
+   *    so a repeated callback, the event and the invoice callback of one charge,
+   *    or a crash half-way, deliver it once.
+   *
+   * A charge whose callback never arrived is not in anything AuraPay lists;
+   * {@link tellMissedAurapayCharge} tells the operator instead.
+   */
+  private async applyAurapayCharges(
+    row: ProviderSubscription,
+    state: ProviderSubscriptionState,
+    providerChargeId: string | null,
+    settingsJson: Prisma.JsonValue,
+  ): Promise<{ readonly subscriptionId: string | null; readonly lastChargeAt: Date | null }> {
+    let applied = row.appliedChargeCount;
+    let subscriptionId = row.subscriptionId;
+    let lastChargeAt = row.lastChargeAt;
+    const firstTransaction = await this.prismaService.transaction.findUnique({
+      where: { id: row.firstTransactionId },
+    });
+    const settleFirst = async (paidAt: Date | null): Promise<void> => {
+      if (applied >= 1) return;
+      if (row.userId === null) {
+        this.logger.error(
+          `Subscription ${row.id} (AURAPAY ${row.providerSubscriptionId}) was paid after its account was deleted; ` +
+            'refund at the provider',
+        );
+        return;
+      }
+      if (firstTransaction === null) {
+        this.logger.warn(`The first payment of subscription ${row.id} has no checkout to complete`);
+        return;
+      }
+      await this.enqueueSettlement(row, 1, firstTransaction);
+      await this.prismaService.providerSubscription.updateMany({
+        where: { id: row.id, appliedChargeCount: { lt: 1 } },
+        data: { appliedChargeCount: 1 },
+      });
+      applied = 1;
+      lastChargeAt = paidAt ?? new Date();
+    };
+
+    if (state.activatedAt !== undefined && state.activatedAt !== null) {
+      await settleFirst(state.activatedAt);
+    }
+
+    if (providerChargeId !== null) {
+      const invoice = await this.readAurapayInvoice(providerChargeId, readGatewaySettings(settingsJson));
+      if (invoice === null) {
+        this.logger.warn(`AuraPay has no invoice ${providerChargeId} (subscription ${row.id}); nothing delivered`);
+      } else if (invoice.status !== 'PAID') {
+        this.logger.warn(
+          `AuraPay invoice ${providerChargeId} of subscription ${row.id} is ${invoice.status ?? 'unreadable'}, ` +
+            'not PAID; nothing delivered',
+        );
+      } else if (firstTransaction !== null && invoice.orderId === firstTransaction.paymentId) {
+        // The first payment's own invoice, named before the status says active.
+        await settleFirst(null);
+      } else if (row.userId === null) {
+        this.logger.error(
+          `Subscription ${row.id} (AURAPAY ${row.providerSubscriptionId}) was charged after its account was ` +
+            `deleted (invoice ${providerChargeId}); refund at the provider`,
+        );
+      } else {
+        if (invoice.amount !== null && !new Prisma.Decimal(invoice.amount).equals(row.amount)) {
+          this.logger.warn(
+            `AuraPay charge ${providerChargeId} of ${row.id} was made for ${invoice.amount}, not the ` +
+              `${row.amount.toString()} the payer agreed to; delivered as a renewal all the same, the money is taken`,
+          );
+        }
+        const transaction = await this.findOrCreateChargeTransaction(
+          { ...row, subscriptionId: (subscriptionId ??= await this.resolveSubscriptionId(row)) },
+          applied + 1,
+          state.nextChargeAt,
+          providerChargeId,
+        );
+        if (transaction === null) {
+          // A later charge renews the subscription the first one created; until
+          // that first delivery lands there is nothing to renew. The callback
+          // will not come again, so this look books its own, with the invoice.
+          this.logger.warn(`Charge ${providerChargeId} of subscription ${row.id} is waiting for its first delivery`);
+          await this.enqueueSync(row.gatewayType, row.providerSubscriptionId, 60_000, providerChargeId);
+        } else {
+          // The number a charge carries is the one its payment was made with: a
+          // second look at the same invoice, after the count moved on, must not
+          // queue its notice under another body.
+          const chargeNumber = readChargeNumber(transaction.gatewayData) ?? applied + 1;
+          await this.enqueueSettlement(row, chargeNumber, transaction, providerChargeId);
+          if (chargeNumber > applied) {
+            await this.prismaService.providerSubscription.updateMany({
+              where: { id: row.id, appliedChargeCount: { lt: chargeNumber } },
+              data: { appliedChargeCount: chargeNumber },
+            });
+            applied = chargeNumber;
+          }
+          lastChargeAt = new Date();
+        }
+      }
+    }
+
+    await this.tellMissedAurapayCharge(row, state, subscriptionId ?? (await this.resolveSubscriptionId(row)), lastChargeAt);
+    return { subscriptionId, lastChargeAt };
+  }
+
+  /** `POST /invoice/status` by AuraPay's invoice id; null when AuraPay has none. */
+  private async readAurapayInvoice(
+    invoiceId: string,
+    settings: Record<string, unknown>,
+  ): Promise<ReturnType<typeof parseAurapayInvoice>> {
+    const response = await firstValueFrom(
+      this.httpService.post(
+        `${AURAPAY_API}/invoice/status`,
+        { id: invoiceId },
+        { headers: aurapayHeaders(settings), validateStatus: (status: number) => status === 200 || status === 404 },
+      ),
+    );
+    return response.status === 404 ? null : parseAurapayInvoice(response.data);
+  }
+
+  /**
+   * One operator card for an AuraPay charge that seems taken and was never
+   * delivered: the subscription is active, its access ends within half a day,
+   * and AuraPay's next charge is more than half a period after that end. Each
+   * charge moves `next_pay_at` a period on and its delivery moves the access
+   * the same, so the two only drift apart this far when a charge was taken
+   * whose callback never reached the panel (AuraPay tries five times) — or when
+   * an operator cut the subscription short. Nothing is delivered on a guess:
+   * there is no invoice to key it by, and a callback arriving after would
+   * deliver it again. Once per charge date per process.
+   */
+  private async tellMissedAurapayCharge(
+    row: ProviderSubscription,
+    state: ProviderSubscriptionState,
+    subscriptionId: string | null,
+    lastChargeAt: Date | null,
+  ): Promise<void> {
+    if (state.status !== ProviderSubscriptionStatus.ACTIVE || state.nextChargeAt === null || subscriptionId === null) {
+      return;
+    }
+    const halfPeriodMs = (row.durationDays * DAY_MS) / 2;
+    const now = Date.now();
+    // A charge delivered lately is still being fulfilled: its access has not moved yet.
+    if (lastChargeAt !== null && now - lastChargeAt.getTime() < halfPeriodMs) return;
+    const subscription = await this.prismaService.subscription.findUnique({
+      where: { id: subscriptionId },
+      select: { expiresAt: true },
+    });
+    const expiresAt = subscription?.expiresAt ?? null;
+    if (expiresAt === null || expiresAt.getTime() > now + DAY_MS / 2) return;
+    if (state.nextChargeAt.getTime() - expiresAt.getTime() <= halfPeriodMs) return;
+    const key = `${row.id}:${state.nextChargeAt.toISOString()}`;
+    if (this.missedAurapayChargesTold.has(key)) return;
+    this.missedAurapayChargesTold.add(key);
+    if (this.missedAurapayChargesTold.size > UNMATCHED_DISPUTES_REMEMBERED) {
+      const oldest = this.missedAurapayChargesTold.values().next().value;
+      if (oldest !== undefined) this.missedAurapayChargesTold.delete(oldest);
+    }
+    this.logger.error(
+      `AuraPay subscription ${row.providerSubscriptionId} (${row.id}) charges next at ${state.nextChargeAt.toISOString()}, ` +
+        `but its access ends at ${expiresAt.toISOString()}: a charge seems taken and undelivered`,
+    );
+    this.systemEvents?.warn(
+      EVENT_TYPES.PAYMENT_AUTOPAY_ATTENTION,
+      'PAYMENT',
+      'AuraPay, похоже, списала по автоплатежу, а уведомление не дошло: подписка не продлена',
+      {
+        gatewayType: PaymentGatewayType.AURAPAY,
+        reason: 'AURAPAY_CHARGE_NOT_DELIVERED',
+        providerSubscriptionId: row.providerSubscriptionId,
+        subscriptionId,
+        ...(row.userId === null ? {} : { userId: row.userId }),
+        needsManualReview: true,
+        note:
+          `Подписка AuraPay ${row.providerSubscriptionId} активна, следующее списание — ` +
+          `${state.nextChargeAt.toISOString().slice(0, 10)}, а доступ клиента заканчивается ` +
+          `${expiresAt.toISOString().slice(0, 10)}. Так бывает, когда AuraPay списала деньги, а уведомление о списании ` +
+          'до панели не дошло. Найдите в личном кабинете AuraPay оплаченные счета этой подписки. Если списание есть, ' +
+          'откройте «Пользователи» → этот клиент → вкладка «Подписки» и продлите подписку вручную на срок тарифа. ' +
+          'Если оператор сам сокращал подписку, карточку можно не учитывать.',
+      },
+    );
   }
 
   /**
@@ -2300,9 +2519,56 @@ export class ProviderSubscriptionService {
         return this.fetchRollypayState(row, requireSetting(settings, 'apiKey'));
       case PaymentGatewayType.ANTILOPAY:
         return this.fetchAntilopayState(row, settings);
+      case PaymentGatewayType.AURAPAY:
+        return this.fetchAurapayState(row, settings);
       default:
         throw new Error(`No provider subscription API for ${row.gatewayType}`);
     }
+  }
+
+  /**
+   * AuraPay's `GET /subscription/status` by our `subscription_id`. A sign-up
+   * AuraPay does not know (404) is read as nothing, never as a cancellation.
+   * `lastChargeAt` is the row's own: AuraPay names no charge here, and
+   * {@link applyAurapayCharges} moves it when it delivers one.
+   */
+  private async fetchAurapayState(
+    row: ProviderSubscription,
+    settings: Record<string, unknown>,
+  ): Promise<ProviderSubscriptionState> {
+    const response = await firstValueFrom(
+      this.httpService.get(`${AURAPAY_API}/subscription/status`, {
+        params: { subscription_id: row.providerSubscriptionId },
+        headers: aurapayHeaders(settings),
+        validateStatus: (status: number) => status === 200 || status === 404,
+      }),
+    );
+    if (response.status === 404) {
+      this.logger.warn(`AuraPay has no subscription ${row.providerSubscriptionId} (${row.id})`);
+      return {
+        status: null,
+        providerStatus: null,
+        chargesSuccess: null,
+        nextChargeAt: row.nextChargeAt,
+        lastChargeAt: row.lastChargeAt,
+        activatedAt: null,
+      };
+    }
+    const parsed = parseAurapaySubscription(response.data);
+    if (parsed.status === null) {
+      this.logger.warn(
+        `AuraPay subscription ${row.providerSubscriptionId} has a status this build does not know: ` +
+          `${parsed.providerStatus ?? 'none'}`,
+      );
+    }
+    return {
+      status: parsed.status,
+      providerStatus: parsed.providerStatus,
+      chargesSuccess: null,
+      nextChargeAt: parsed.nextChargeAt,
+      lastChargeAt: row.lastChargeAt,
+      activatedAt: parsed.activatedAt,
+    };
   }
 
   /**
@@ -2435,13 +2701,20 @@ export class ProviderSubscriptionService {
   }
 
   private async cancelAtProvider(
-    row: Pick<ProviderSubscription, 'gatewayType' | 'providerSubscriptionId' | 'providerRecurrentId' | 'firstTransactionId'>,
+    row: Pick<
+      ProviderSubscription,
+      'gatewayType' | 'providerSubscriptionId' | 'providerRecurrentId' | 'firstTransactionId' | 'createdAt'
+    >,
     settingsJson: Prisma.JsonValue,
   ): Promise<void> {
     const { gatewayType, providerSubscriptionId } = row;
     const settings = readGatewaySettings(settingsJson);
     if (gatewayType === PaymentGatewayType.ANTILOPAY) {
       await this.cancelAntilopayAtProvider(row, settings);
+      return;
+    }
+    if (gatewayType === PaymentGatewayType.AURAPAY) {
+      await this.cancelAurapayAtProvider(row, settings);
       return;
     }
     if (gatewayType === PaymentGatewayType.PLATEGA) {
@@ -2469,6 +2742,51 @@ export class ProviderSubscriptionService {
       return;
     }
     throw new Error(`No provider subscription API for ${gatewayType}`);
+  }
+
+  /**
+   * `POST /subscription/cancel`, and only then a cancelled row: the status read
+   * after it is the proof. «Отключение доступно для подписок в статусах active и
+   * waiting_payment» — a sign-up whose first invoice is unpaid (`new`) answers
+   * 409 and cannot be cancelled; once that invoice has outlived the checkout
+   * (30 minutes, `CHECKOUT_LIFETIME_MS`) it can never be paid, and nothing will
+   * be charged. Until then the cancel fails and the sweep tries again.
+   */
+  private async cancelAurapayAtProvider(
+    row: Pick<ProviderSubscription, 'providerSubscriptionId' | 'createdAt'>,
+    settings: Record<string, unknown>,
+  ): Promise<void> {
+    const headers = aurapayHeaders(settings);
+    const cancelled = await firstValueFrom(
+      this.httpService.post(
+        `${AURAPAY_API}/subscription/cancel`,
+        { subscription_id: row.providerSubscriptionId },
+        { headers, validateStatus: () => true },
+      ),
+    );
+    // 409: not active nor waiting — deactivated already, stopped on errors, or
+    // not paid yet; 404: AuraPay never made it. The status below decides.
+    if (cancelled.status !== 200 && cancelled.status !== 404 && cancelled.status !== 409) {
+      throw new Error(`AuraPay subscription/cancel answered HTTP ${cancelled.status} for ${row.providerSubscriptionId}`);
+    }
+    const after = await firstValueFrom(
+      this.httpService.get(`${AURAPAY_API}/subscription/status`, {
+        params: { subscription_id: row.providerSubscriptionId },
+        headers,
+        validateStatus: (status: number) => status === 200 || status === 404,
+      }),
+    );
+    if (after.status === 404) return;
+    const status = parseAurapaySubscription(after.data).status;
+    if (status === ProviderSubscriptionStatus.CANCELLED || status === ProviderSubscriptionStatus.FAILED) return;
+    if (
+      status === ProviderSubscriptionStatus.PENDING &&
+      parseAurapaySubscription(after.data).activatedAt === null &&
+      Date.now() - row.createdAt.getTime() > CHECKOUT_LIFETIME_MS + 5 * 60 * 1000
+    ) {
+      return;
+    }
+    throw new Error(`AuraPay did not stop subscription ${row.providerSubscriptionId}`);
   }
 
   /**
@@ -2579,6 +2897,12 @@ export function delayEndsAtOf(
 const CREATION_CLAIM_PLACEHOLDER = /^(?:__CHECKOUT_PROVIDER_CREATE__:|__RENEWAL_PROVIDER_CREATE__:|claim:)/;
 
 /** `Transaction.idempotencyKey` of the RENEW payment made for one Antilopay charge. */
+/** The charge number a provider charge's RENEW payment was made with (`findOrCreateChargeTransaction`). */
+function readChargeNumber(gatewayData: Prisma.JsonValue | null): number | null {
+  const value = asRecord(gatewayData)['chargeNumber'];
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
 export function keyedChargeKey(rowId: string, providerChargeId: string): string {
   return `provider-subscription:${rowId}:payment:${providerChargeId}`;
 }

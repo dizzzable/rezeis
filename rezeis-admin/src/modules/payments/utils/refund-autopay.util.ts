@@ -227,4 +227,5 @@ const GATEWAY_NAMES: Readonly<Record<string, string>> = {
   PLATEGA: 'Platega',
   ROLLYPAY: 'RollyPay',
   ANTILOPAY: 'Antilopay',
+  AURAPAY: 'AuraPay',
 };

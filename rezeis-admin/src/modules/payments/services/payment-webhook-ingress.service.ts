@@ -17,6 +17,11 @@ import {
 } from '../constants/payment-reconciliation.constant';
 import { PaymentWebhookIngressResultInterface } from '../interfaces/payment-webhook-envelope.interface';
 import {
+  type AurapayCallbackReferences,
+  aurapayPaidInvoiceId,
+  readAurapayCallbackReferences,
+} from '../utils/aurapay-subscription.util';
+import {
   PAYMENT_WEBHOOK_STATUS_ENQUEUED,
   PaymentWebhookInboxService,
 } from './payment-webhook-inbox.service';
@@ -211,6 +216,51 @@ export class PaymentWebhookIngressService {
       return { accepted: true, duplicate: false, lifecycleStatus: PAYMENT_WEBHOOK_STATUS_ENQUEUED };
     }
 
+    // AuraPay posts a subscription's callbacks to the one address too: its own
+    // events (`event`: ACTIVATED, PAID, PAYMENT_ERROR, DEACTIVATED), which name
+    // no order of ours, and the callbacks of its invoices, which carry
+    // `subscription_id` — a later charge's under an order AuraPay made up. Both
+    // are only a reason to look at the subscription, with the invoice a callback
+    // says was paid as the charge to deliver. The first invoice carries OUR
+    // order and goes down the ordinary pipeline too — it completes the checkout
+    // — with the same look queued after it.
+    const aurapayReferences = readAurapayCallbackReferences(input.gatewayType, input.rawBody);
+    let aurapayFollowUp: AurapayCallbackReferences | null = null;
+    if (aurapayReferences !== null) {
+      const ours =
+        aurapayReferences.orderId === null
+          ? null
+          : await this.prismaService.transaction.findUnique({
+              where: { paymentId: aurapayReferences.orderId },
+              select: { id: true },
+            });
+      if (ours === null) {
+        if (input.verifySignature) {
+          this.paymentWebhookNormalizerService.verifyWebhookSignature({
+            gatewayType: input.gatewayType,
+            rawBody: input.rawBody,
+            headers: input.headers,
+            clientIp: input.clientIp,
+            gatewaySettings: gateway.settings,
+          });
+        }
+        const paidInvoiceId = aurapayPaidInvoiceId(aurapayReferences);
+        this.announceWebhook(input.gatewayType, paidInvoiceId === null ? 'subscription-status' : 'subscription-charge', {
+          providerSubscriptionId: aurapayReferences.subscriptionRef,
+          ...(aurapayReferences.event === null ? {} : { providerEvent: aurapayReferences.event }),
+          ...(aurapayReferences.invoiceId === null ? {} : { providerPaymentId: aurapayReferences.invoiceId }),
+        });
+        await this.providerSubscriptionService.enqueueSync(
+          input.gatewayType,
+          aurapayReferences.subscriptionRef,
+          0,
+          paidInvoiceId,
+        );
+        return { accepted: true, duplicate: false, lifecycleStatus: PAYMENT_WEBHOOK_STATUS_ENQUEUED };
+      }
+      aurapayFollowUp = aurapayReferences;
+    }
+
     // An Antilopay refund's callback (`type: refund`) names the refund and the
     // payment, and no order. It used to run the pipeline below as a payment
     // notice with an unknown status and change nothing, so a refund made in the
@@ -318,6 +368,24 @@ export class PaymentWebhookIngressService {
           PAYMENT_RECONCILIATION_ENQUEUE_FAILED,
         );
         throw error;
+      }
+    }
+
+    if (aurapayFollowUp !== null) {
+      // As for Antilopay below: after the payment's own work, never at its cost.
+      // The sweep looks at a sign-up not yet active every ten minutes.
+      try {
+        await this.providerSubscriptionService.enqueueSync(
+          input.gatewayType,
+          aurapayFollowUp.subscriptionRef,
+          0,
+          aurapayPaidInvoiceId(aurapayFollowUp),
+        );
+      } catch (error: unknown) {
+        this.logger.warn(
+          `Could not queue the look at AuraPay subscription ${aurapayFollowUp.subscriptionRef}: ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+        );
       }
     }
 

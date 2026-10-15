@@ -33,7 +33,8 @@ import {
 } from '../utils/antilopay-recurrent.util';
 import { isAutopayApproved } from '../utils/gateway-autopay.util';
 import { normalizePaymentProviderError, redactPaymentDiagnosticMessage } from '../utils/payment-provider-error.util';
-import { PLATEGA_INTERVAL_CODE } from '../utils/provider-subscription-period.util';
+import { AURAPAY_API, aurapayHeaders, aurapaySubscriptionRef } from '../utils/aurapay-subscription.util';
+import { aurapayIntervalFor, PLATEGA_INTERVAL_CODE } from '../utils/provider-subscription-period.util';
 import {
   autopayNotAvailable,
   autopayRefusedByGateway,
@@ -1445,6 +1446,19 @@ export class PaymentProviderExecutionService {
     const failUrl = await this.resolveFailUrl(input.transaction.paymentId, input.failUrl, input.successUrl);
     const callbackUrl = this.buildWebhookUrl(PaymentGatewayType.AURAPAY);
 
+    const subscriptionTerms = readProviderSubscriptionTerms(input.transaction.planSnapshot);
+    if (subscriptionTerms !== null) {
+      return this.createAurapaySubscription({
+        transaction: input.transaction,
+        description: input.description,
+        settings,
+        terms: subscriptionTerms,
+        successUrl,
+        failUrl,
+        callbackUrl,
+      });
+    }
+
     const payload = {
       amount: Number(input.transaction.amount),
       order_id: input.transaction.paymentId,
@@ -1473,6 +1487,124 @@ export class PaymentProviderExecutionService {
       providerStatus: readOptionalString(data, ['status']) ?? 'PENDING',
       gatewayData: { provider: 'AURAPAY', providerResponse: this.redactProviderResponse(data), checkoutUrl },
     };
+  }
+
+  /**
+   * A card subscription AuraPay runs (`POST /subscription/create`, API 1.2.1):
+   * the payer pays its first invoice on AuraPay's form, and AuraPay charges the
+   * same sum every period after that. Our `subscription_id` is chosen here
+   * (`aurapaySubscriptionRef`) and is the checkout's `gatewayId`, so the row
+   * `ProviderSubscriptionService` records, every callback and the cancel all
+   * go by it. The first invoice carries OUR order, and its callback completes
+   * the checkout down the ordinary pipeline.
+   *
+   * AuraPay asks for the payer's email or a contact id. The panel sends the
+   * same per-payment address Antilopay gets (`resolveCustomerEmail`): no
+   * customer's address or Telegram id is handed to the provider.
+   */
+  private async createAurapaySubscription(input: {
+    readonly transaction: Transaction;
+    readonly description: string;
+    readonly settings: Record<string, unknown>;
+    readonly terms: ProviderSubscriptionTerms;
+    readonly successUrl: string;
+    readonly failUrl: string;
+    readonly callbackUrl: string;
+  }): Promise<ProviderCheckoutResult> {
+    // Re-checked here, not only when the draft was made: a draft outlives the
+    // operator's switch, and nothing may sign a payer up the shop is not
+    // approved for.
+    if (!isAutopayApproved(PaymentGatewayType.AURAPAY, input.settings)) {
+      throw autopayNotAvailable('NOT_APPROVED');
+    }
+    const interval = aurapayIntervalFor(input.terms);
+    if (interval === null) {
+      throw autopayNotAvailable('DURATION');
+    }
+    const subscriptionRef = aurapaySubscriptionRef(input.transaction.paymentId);
+    const response = await firstValueFrom(
+      this.httpService.post(
+        `${AURAPAY_API}/subscription/create`,
+        {
+          subscription_id: subscriptionRef,
+          order_id: input.transaction.paymentId,
+          amount: input.terms.amount,
+          period: input.terms.count,
+          interval,
+          description: input.description.slice(0, 300),
+          service: 'card',
+          email: await this.resolveCustomerEmail({ transaction: input.transaction }),
+          success_url: input.successUrl,
+          fail_url: input.failUrl,
+          callback_url: input.callbackUrl,
+          comment: input.description.slice(0, 500),
+          // Minutes, as for an invoice: the first payment's link lives as long
+          // as the checkout does.
+          lifetime: CHECKOUT_LIFETIME_MINUTES,
+        },
+        // AuraPay's refusals (400, 422) are bodies with an `error`: read here,
+        // not thrown as a bare HTTP error.
+        { headers: aurapayHeaders(input.settings), validateStatus: () => true },
+      ),
+    );
+    const data = readRecord(response.data);
+    const status = typeof response.status === 'number' ? response.status : 0;
+    if (status >= 400 && status < 500) {
+      // A shop without subscriptions switched on at AuraPay, or terms it will
+      // not take: the payer is offered the ordinary payment, and the operator
+      // is told once what to switch off meanwhile.
+      const providerError = redactPaymentDiagnosticMessage(String(data.error ?? 'unknown'), 120) ?? 'unknown';
+      this.tellAurapaySubscriptionRefused(status, providerError);
+      throw autopayRefusedByGateway(`AURAPAY_SUBSCRIPTION_REFUSED_${status}`);
+    }
+    if (status < 200 || status >= 300) {
+      throw new ServiceUnavailableException(`AuraPay create subscription: HTTP ${status}`);
+    }
+    const checkoutUrl = readOptionalString(readRecord(data.payment_data), ['url']);
+    if (checkoutUrl === null) {
+      throw new ServiceUnavailableException('AuraPay create subscription: missing checkout url');
+    }
+    return {
+      gatewayId: subscriptionRef,
+      checkoutUrl,
+      providerMode: 'REDIRECT',
+      providerStatus: readOptionalString(data, ['status']) ?? 'PENDING',
+      gatewayData: {
+        provider: 'AURAPAY',
+        providerResponse: this.redactProviderResponse(data),
+        checkoutUrl,
+        providerSubscriptionId: subscriptionRef,
+        invoiceId: readOptionalString(data, ['id']),
+      },
+    };
+  }
+
+  /**
+   * Tells the operator AuraPay refused a subscription — once per HTTP status per
+   * six hours (`payment.autopay_attention`), as Antilopay's refusals are told.
+   */
+  private tellAurapaySubscriptionRefused(status: number, providerError: string): void {
+    this.logger.error(`AuraPay refused a subscription with HTTP ${status}: ${providerError}`);
+    const key = `${PaymentGatewayType.AURAPAY}:${status}`;
+    const now = Date.now();
+    const last = this.refusedAutopayTold.get(key);
+    if (last !== undefined && now - last < OPERATOR_TOLD_EVERY_MS) return;
+    this.refusedAutopayTold.set(key, now);
+    this.systemEvents?.warn(
+      EVENT_TYPES.PAYMENT_AUTOPAY_ATTENTION,
+      'PAYMENT',
+      'AuraPay отклонила автосписание: покупатели уходят на обычную оплату',
+      {
+        gatewayType: PaymentGatewayType.AURAPAY,
+        reason: `AURAPAY_SUBSCRIPTION_REFUSED_${status}`,
+        providerError,
+        note:
+          `AuraPay ответила HTTP ${status} на создание подписки: «${providerError}». Чаще всего это значит, что ` +
+          'подписки для вашей кассы в AuraPay не включены. Попросите AuraPay их включить. Пока этого нет, откройте ' +
+          '«Платёжные шлюзы» → AuraPay → «Открыть настройки» и выключите «Автоплатежи одобрены провайдером»: ' +
+          'тогда пункт «для автоматического списания» перестанет предлагаться покупателям.',
+      },
+    );
   }
 
   // ═══════════════════════════════════════════════════════════════════════════

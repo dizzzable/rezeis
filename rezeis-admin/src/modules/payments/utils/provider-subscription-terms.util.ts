@@ -8,8 +8,10 @@ import {
   isAntilopayAutopayMethod,
   makeAntilopayDelay,
 } from './antilopay-recurrent.util';
+import { AURAPAY_SUBSCRIPTION_MAX_AMOUNT } from './aurapay-subscription.util';
 import {
   antilopayPeriodForDays,
+  aurapayPeriodForDays,
   plategaPeriodForDays,
   type ProviderIntervalUnit,
   type ProviderPeriod,
@@ -27,6 +29,7 @@ export const PROVIDER_SUBSCRIPTION_GATEWAY_TYPES: ReadonlySet<PaymentGatewayType
   PaymentGatewayType.PLATEGA,
   PaymentGatewayType.ROLLYPAY,
   PaymentGatewayType.ANTILOPAY,
+  PaymentGatewayType.AURAPAY,
 ]);
 
 function providerPeriodForDays(gatewayType: PaymentGatewayType, durationDays: number): ProviderPeriod | null {
@@ -37,6 +40,8 @@ function providerPeriodForDays(gatewayType: PaymentGatewayType, durationDays: nu
       return rollypayPeriodForDays(durationDays);
     case PaymentGatewayType.ANTILOPAY:
       return antilopayPeriodForDays(durationDays);
+    case PaymentGatewayType.AURAPAY:
+      return aurapayPeriodForDays(durationDays);
     default:
       return null;
   }
@@ -142,6 +147,10 @@ export function resolveProviderSubscriptionTerms(input: {
   if (period === null) return { refusal: 'DURATION' };
   const amount = wholeRoubles(input.amount);
   if (amount === null) return { refusal: 'AMOUNT' };
+  // «Сумма от 1 до 50 000 ₽»: AuraPay takes no larger regular charge.
+  if (input.gatewayType === PaymentGatewayType.AURAPAY && amount > AURAPAY_SUBSCRIPTION_MAX_AMOUNT) {
+    return { refusal: 'AMOUNT' };
+  }
   // Antilopay repeats a charge either on a card or over SBP, and the payer
   // must have said which before the payment form opened.
   const method = input.gatewayType === PaymentGatewayType.ANTILOPAY ? input.method : undefined;

@@ -331,6 +331,7 @@ function providerName(gatewayType: string): string {
   if (gatewayType === PaymentGatewayType.PLATEGA) return 'Platega';
   if (gatewayType === PaymentGatewayType.ROLLYPAY) return 'RollyPay';
   if (gatewayType === PaymentGatewayType.ANTILOPAY) return 'Antilopay';
+  if (gatewayType === PaymentGatewayType.AURAPAY) return 'AuraPay';
   return gatewayType;
 }
 

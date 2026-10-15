@@ -646,6 +646,14 @@ const GATEWAY_META: ReadonlyArray<GatewayMeta> = [
         secret: true,
         hintKey: 'paymentGateways.hints.aurapaySecret',
       },
+      {
+        // Card subscriptions AuraPay runs (aurapay-subscription.util.ts on the server).
+        key: 'savePaymentMethod',
+        labelKey: 'paymentGateways.fields.savePaymentMethod',
+        placeholder: '',
+        type: 'toggle',
+        hintKey: 'paymentGateways.hints.aurapayAutopay',
+      },
     ],
   },
   {
@@ -1532,7 +1540,7 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
                     <p className="text-xs text-muted-foreground">{t(field.hintKey)}</p>
                   )}
                   {((field.key === 'savePaymentMethod' &&
-                    (gateway.type === 'PLATEGA' || gateway.type === 'ROLLYPAY')) ||
+                    (gateway.type === 'PLATEGA' || gateway.type === 'ROLLYPAY' || gateway.type === 'AURAPAY')) ||
                     field.key === 'autopayCardApproved') && (
                     <ProviderAutopaySummary gatewayType={gateway.type} />
                   )}
