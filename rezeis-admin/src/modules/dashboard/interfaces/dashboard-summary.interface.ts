@@ -158,6 +158,28 @@ export interface DashboardRevenueInterface {
   readonly payments: number;
 }
 
+/** The windows the dashboard tiles can be read over besides the whole history. */
+export const DASHBOARD_PERIOD_MONTHS = [1, 2, 3] as const;
+export type DashboardPeriodMonths = (typeof DASHBOARD_PERIOD_MONTHS)[number];
+
+/**
+ * «За 1 / 2 / 3 мес» on the dashboard: the tiles that have a period, over the
+ * last N calendar months up to now. The rest of the summary is a state of
+ * things now and has none. Revenue is the rule of «Выручка за всё время»
+ * windowed by the payment's date, as «Бизнес-аналитика» windows it.
+ */
+export interface DashboardPeriodSummaryInterface {
+  readonly months: DashboardPeriodMonths;
+  /** Where the window starts, ISO; it ends now. */
+  readonly from: string;
+  readonly checkedAt: string;
+  /** Registered in the window, deleted accounts' anonymous holders left out. */
+  readonly newUsers: number;
+  readonly revenue: DashboardRevenueInterface;
+  /** Payments created in the window that ended FAILED. */
+  readonly failedPayments: number;
+}
+
 export interface DashboardOperationsSummaryInterface {
   readonly broadcastDrafts: number;
   readonly importDryRunAvailable: boolean;

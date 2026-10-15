@@ -1,12 +1,12 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 
 import { i18n, i18nReady, loadFeatureBundle } from '@/i18n/i18n'
 import { renderWithProviders } from '@/test/test-utils'
 
-import type { DashboardRevenue, DashboardSummaryInterface } from './dashboard-api'
-import { DashboardKpiGrid } from './dashboard-kpi-grid'
+import { dashboardApi, type DashboardPeriodMonths, type DashboardRevenue, type DashboardSummaryInterface } from './dashboard-api'
+import { DASHBOARD_PERIOD_PREFERENCE_KEY, DashboardKpiGrid } from './dashboard-kpi-grid'
 
 /**
  * «Выручка за всё время»: the money of «Бизнес-аналитика» → «Выручка» over the
@@ -116,5 +116,78 @@ describe('«Выручка за всё время»', () => {
     expect(plain(revenue.querySelector('[data-dashboard-kpi-value]')?.textContent)).toBe('—')
     expect(screen.queryByText('7810')).toBeNull()
     expect(screen.queryByRole('button', { name: 'Подробнее: Выручка за всё время' })).toBeNull()
+  })
+})
+
+describe('«Всё время · 1 мес · 2 мес · 3 мес» over the tiles', () => {
+  beforeAll(async () => {
+    await i18nReady
+    await i18n.changeLanguage('ru')
+    await loadFeatureBundle('dashboard')
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    window.localStorage.removeItem(DASHBOARD_PERIOD_PREFERENCE_KEY)
+  })
+
+  afterAll(async () => {
+    await i18n.changeLanguage('en')
+  })
+
+  const kpi = (id: string) => document.querySelector<HTMLElement>(`[data-dashboard-kpi="${id}"]`)
+  const valueOf = (id: string) => plain(kpi(id)?.querySelector('[data-dashboard-kpi-value]')?.textContent)
+  const descriptionOf = (id: string) => plain(kpi(id)?.querySelector('[data-dashboard-kpi-description]')?.textContent)
+
+  function windowOf(months: DashboardPeriodMonths) {
+    return {
+      months,
+      from: '2026-09-15T09:00:00.000Z',
+      checkedAt: '2026-10-15T09:00:00.000Z',
+      newUsers: 3 * months,
+      revenue: {
+        figure: { value: 1500 * months, byCurrency: [{ currency: 'RUB', amount: 1500 * months }] },
+        money: { currency: 'RUB', converted: false, rates: [], unconverted: [] },
+        payments: 2 * months,
+      },
+      failedPayments: months,
+    }
+  }
+
+  it('reads new users, revenue and failed payments over the window, and leaves the tiles of now alone', async () => {
+    const user = userEvent.setup()
+    const fetch = vi.spyOn(dashboardApi, 'getPeriodSummary').mockImplementation(async (months) => windowOf(months))
+    renderWithProviders(<DashboardKpiGrid summary={summary(MIXED)} />)
+
+    expect(screen.getByRole('button', { name: 'Всё время' })).toHaveAttribute('aria-pressed', 'true')
+    expect(fetch).not.toHaveBeenCalled()
+
+    await user.click(screen.getByRole('button', { name: '2 мес' }))
+    await waitFor(() => expect(kpi('revenue')?.textContent).toContain('Выручка за 2 мес'))
+    await waitFor(() => expect(valueOf('revenue')).toBe('3 тыс. ₽'))
+    expect(descriptionOf('revenue')).toBe('4 платежа')
+    expect(descriptionOf('total-users')).toBe('Новых за 2 мес: 6')
+    expect(kpi('failed-payments')?.textContent).toContain('Неудачные платежи за 2 мес')
+    expect(valueOf('failed-payments')).toBe('2')
+    expect(fetch).toHaveBeenCalledWith(2)
+    // A state of things now has no period.
+    expect(valueOf('active-subscriptions')).toBe('11')
+    expect(valueOf('pending-payments')).toBe('4')
+
+    await user.hover(screen.getByRole('button', { name: 'Подробнее: Выручка за 2 мес' }))
+    expect(plain((await screen.findByRole('tooltip')).textContent)).toContain('последние 2 мес по дате платежа')
+
+    await user.click(screen.getByRole('button', { name: 'Всё время' }))
+    await waitFor(() => expect(kpi('revenue')?.textContent).toContain('Выручка за всё время'))
+    expect(valueOf('revenue')).toBe('≈ 2,4 тыс. ₽')
+    expect(descriptionOf('total-users')).toBe('Зарегистрировано за 7 дней: 5')
+  })
+
+  it('remembers the choice in this browser', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(dashboardApi, 'getPeriodSummary').mockImplementation(async (months) => windowOf(months))
+    renderWithProviders(<DashboardKpiGrid summary={summary(MIXED)} />)
+    await user.click(screen.getByRole('button', { name: '3 мес' }))
+    expect(window.localStorage.getItem(DASHBOARD_PERIOD_PREFERENCE_KEY)).toBe('3')
   })
 })

@@ -206,11 +206,38 @@ export interface SystemHealthResponse {
   readonly process: ProcessHealthSnapshot
 }
 
+/**
+ * What the KPI tiles are read over: the whole history, or the last 1, 2 or 3
+ * calendar months. Only new users, revenue and failed payments have a period;
+ * the other tiles are a state of things now.
+ */
+export const DASHBOARD_PERIODS = ['all', 1, 2, 3] as const
+export type DashboardPeriod = (typeof DASHBOARD_PERIODS)[number]
+export type DashboardPeriodMonths = Exclude<DashboardPeriod, 'all'>
+
+/** `/admin/dashboard/period?months=`: the tiles that have a period, over the window up to now. */
+export interface DashboardPeriodSummary {
+  readonly months: DashboardPeriodMonths
+  /** Where the window starts, ISO. */
+  readonly from: string
+  readonly checkedAt: string
+  readonly newUsers: number
+  readonly revenue: DashboardRevenue
+  readonly failedPayments: number
+}
+
+export const dashboardPeriodKey = (months: DashboardPeriodMonths) => ['admin', 'dashboard', 'period', months] as const
+
 // ── API surface ──────────────────────────────────────────────────────────────
 
 export const dashboardApi = {
   async getSummary(): Promise<DashboardSummaryInterface> {
     const response = await api.get<DashboardSummaryInterface>('/admin/dashboard/summary')
+    return response.data
+  },
+
+  async getPeriodSummary(months: DashboardPeriodMonths): Promise<DashboardPeriodSummary> {
+    const response = await api.get<DashboardPeriodSummary>('/admin/dashboard/period', { params: { months } })
     return response.data
   },
 

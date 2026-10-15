@@ -140,6 +140,18 @@ export const en = {
       expiring7d: 'Subscriptions expiring in 7 days',
       pendingPayments: 'Pending payments',
       failedPayments: 'Failed payments',
+      periodLabel: 'Period for new users, revenue and failed payments',
+      period: {
+        all: 'All time',
+        1: '1 mo',
+        2: '2 mo',
+        3: '3 mo',
+      },
+      newUsersInPeriod: 'New in the last {{period}}: {{count, number}}',
+      revenueInPeriod: 'Revenue, last {{period}}',
+      revenueInfoPeriod:
+        'Money from {{from}} until now — the last {{period}}, by payment date: completed payments above zero, less refunds (a partial refund is subtracted). Purchases paid from a partner’s balance are left out. Counted exactly as “Revenue” in Business analytics.',
+      failedPaymentsInPeriod: 'Failed payments, last {{period}}',
       financeCorrections: 'Finance corrections',
       financeCorrectionsDescription: '{{disputes}} dispute records · {{exceptions}} reconciliation exceptions',
     },

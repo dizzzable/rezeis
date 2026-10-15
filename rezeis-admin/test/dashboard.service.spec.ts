@@ -6,9 +6,13 @@ import { type Prisma, SubscriptionStatus, TransactionStatus } from '@prisma/clie
 import {
   assembleLifetimeRevenue,
   buildOperationsTimeline,
+  calendarMonthsBefore,
   DashboardService,
 } from '../src/modules/dashboard/services/dashboard.service';
 import type { FxSnapshot } from '../src/modules/business-analytics/utils/analytics-money.util';
+import { plainToInstance } from 'class-transformer';
+import { validateSync } from 'class-validator';
+import { DashboardPeriodQueryDto } from '../src/modules/dashboard/dto/dashboard-period-query.dto';
 
 describe('DashboardService', () => {
   it('aggregates the current bounded KPI summary and caches the result briefly', async () => {
@@ -309,5 +313,27 @@ describe('«Выручка за всё время»', () => {
       money: { currency: 'RUB', converted: false, rates: [], unconverted: [] },
       payments: 0,
     });
+  });
+});
+
+describe('«За 1 / 2 / 3 мес» on the dashboard', () => {
+  const at = (iso: string) => new Date(iso);
+
+  it('starts the same day N calendar months back, at the same time', () => {
+    assert.equal(calendarMonthsBefore(at('2026-10-15T09:30:00.000Z'), 1).toISOString(), '2026-09-15T09:30:00.000Z');
+    assert.equal(calendarMonthsBefore(at('2026-10-15T09:30:00.000Z'), 3).toISOString(), '2026-07-15T09:30:00.000Z');
+    assert.equal(calendarMonthsBefore(at('2026-02-10T00:00:00.000Z'), 2).toISOString(), '2025-12-10T00:00:00.000Z');
+  });
+
+  it('clamps to the last day of a shorter month — 31 May less three months is February, not 3 March', () => {
+    assert.equal(calendarMonthsBefore(at('2026-05-31T12:00:00.000Z'), 3).toISOString(), '2026-02-28T12:00:00.000Z');
+    assert.equal(calendarMonthsBefore(at('2028-05-31T12:00:00.000Z'), 3).toISOString(), '2028-02-29T12:00:00.000Z');
+    assert.equal(calendarMonthsBefore(at('2026-03-31T12:00:00.000Z'), 1).toISOString(), '2026-02-28T12:00:00.000Z');
+  });
+
+  it('takes ?months=1, 2 or 3 and refuses anything else', () => {
+    const errors = (months: unknown) => validateSync(plainToInstance(DashboardPeriodQueryDto, { months })).length;
+    assert.deepEqual(['1', '2', '3'].map(errors), [0, 0, 0]);
+    assert.ok(['0', '4', '12', '1.5', 'all', undefined].every((months) => errors(months) > 0));
   });
 });

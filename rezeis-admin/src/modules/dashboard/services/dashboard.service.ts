@@ -18,6 +18,8 @@ import {
   DashboardAttentionItemInterface,
   DashboardAttentionSeverity,
   DashboardMetricInterface,
+  DashboardPeriodMonths,
+  DashboardPeriodSummaryInterface,
   DashboardRevenueInterface,
   DashboardSummaryInterface,
   DashboardTimelineEntryInterface,
@@ -35,6 +37,9 @@ const ONE_DAY_MS = 24 * ONE_HOUR_MS;
  * v3: system events left the AUDIT lane and carry `eventType`/`eventTitle`.
  */
 const DASHBOARD_SUMMARY_CACHE_KEY = 'dashboard:summary:v3';
+
+/** «За N мес», one entry per window: `dashboard:period:v1:1` … `:3`. */
+const DASHBOARD_PERIOD_CACHE_KEY_PREFIX = 'dashboard:period:v1:';
 
 /** What `transactions.grossVolume` holds since the tile became `revenue`. */
 const GROSS_VOLUME_WITHDRAWN = '—';
@@ -58,14 +63,31 @@ export interface LifetimeRevenueRow {
  * Money received over the panel's whole history, per currency — the rule of
  * «Бизнес-аналитика» (`analytics-money-received.util.ts`): completed, for more
  * than nothing, not paid from a partner's balance, net of a partial refund.
- * «Выручка» there is the same sum over a window.
+ * «Выручка» there is the same sum over a window. With `since`, the same sum
+ * from that moment on, windowed by the payment's date as analytics does.
  */
-export function lifetimeRevenueSql(): Prisma.Sql {
+export function lifetimeRevenueSql(since?: Date): Prisma.Sql {
+  const window = since === undefined ? Prisma.empty : Prisma.sql` AND t."created_at" >= ${since}`;
   return Prisma.sql`
     SELECT t."currency"::text AS "currency", SUM(${netAmountSql()}) AS "amount", COUNT(*)::int AS "payments"
       FROM "transactions" t
-     WHERE ${moneyReceivedSql()}
+     WHERE ${moneyReceivedSql()}${window}
      GROUP BY 1`;
+}
+
+/**
+ * The start of «за N мес»: the same day N calendar months back, at the same
+ * time — clamped to the last day of a shorter month, so 31 May less three
+ * months is 28/29 February and not 3 March.
+ */
+export function calendarMonthsBefore(now: Date, months: number): Date {
+  const start = new Date(now.getTime());
+  const day = start.getUTCDate();
+  start.setUTCDate(1);
+  start.setUTCMonth(start.getUTCMonth() - months);
+  const lastDay = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 0)).getUTCDate();
+  start.setUTCDate(Math.min(day, lastDay));
+  return start;
 }
 
 /**
@@ -122,6 +144,39 @@ export class DashboardService {
       () => this.computeSummary(),
       DASHBOARD_SUMMARY_TTL_SECONDS,
     );
+  }
+
+  /**
+   * «За 1 / 2 / 3 мес»: new users, revenue and failed payments over the last
+   * N calendar months. Cached per window for as long as the summary is.
+   */
+  public async getPeriodSummary(months: DashboardPeriodMonths): Promise<DashboardPeriodSummaryInterface> {
+    return this.cacheService.getOrSet<DashboardPeriodSummaryInterface>(
+      `${DASHBOARD_PERIOD_CACHE_KEY_PREFIX}${months}`,
+      () => this.computePeriodSummary(months),
+      DASHBOARD_SUMMARY_TTL_SECONDS,
+    );
+  }
+
+  private async computePeriodSummary(months: DashboardPeriodMonths): Promise<DashboardPeriodSummaryInterface> {
+    const now = new Date();
+    const from = calendarMonthsBefore(now, months);
+    const [newUsers, revenueRows, fx, failedPayments] = await Promise.all([
+      this.prismaService.user.count({ where: { ...NOT_ANONYMIZED_USER, createdAt: { gte: from } } }),
+      this.prismaService.$queryRaw<LifetimeRevenueRow[]>(lifetimeRevenueSql(from)),
+      readFxSnapshot(this.prismaService, this.fxRateService.getBaseCurrency()),
+      this.prismaService.transaction.count({
+        where: { status: TransactionStatus.FAILED, createdAt: { gte: from } },
+      }),
+    ]);
+    return {
+      months,
+      from: from.toISOString(),
+      checkedAt: now.toISOString(),
+      newUsers,
+      revenue: assembleLifetimeRevenue(revenueRows, fx),
+      failedPayments,
+    };
   }
 
   private async computeSummary(): Promise<DashboardSummaryInterface> {

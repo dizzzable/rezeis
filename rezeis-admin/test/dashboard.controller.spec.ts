@@ -36,6 +36,7 @@ describe('AdminDashboardController', () => {
     // controller fails here rather than slipping past an outdated list — which
     // is exactly how `system-health/reiwa` escaped this suite.
     assertRouteHandlers(AdminDashboardController, [
+      'getPeriodSummary',
       'getReiwaSystemHealth',
       'getSummary',
       'getSystemHealth',
@@ -43,6 +44,7 @@ describe('AdminDashboardController', () => {
 
     const routes: readonly DashboardRoute[] = [
       { handler: AdminDashboardController.prototype.getSummary, path: 'summary' },
+      { handler: AdminDashboardController.prototype.getPeriodSummary, path: 'period' },
       { handler: AdminDashboardController.prototype.getSystemHealth, path: 'system-health' },
       {
         handler: AdminDashboardController.prototype.getReiwaSystemHealth,

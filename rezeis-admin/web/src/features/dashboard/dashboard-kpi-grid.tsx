@@ -1,4 +1,5 @@
-import { type JSX } from 'react'
+import { type JSX, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import type { TFunction } from 'i18next'
 import {
@@ -20,7 +21,16 @@ import { Noise } from '@/components/effects/Noise'
 import { approx } from '@/features/analytics/analytics-chart-support'
 import { formatAmounts, formatMoney, formatShortDate } from '@/features/analytics/analytics-format'
 
-import type { DashboardRevenue, DashboardSummaryInterface } from './dashboard-api'
+import { cn } from '@/lib/utils'
+
+import {
+  dashboardApi,
+  dashboardPeriodKey,
+  DASHBOARD_PERIODS,
+  type DashboardPeriod,
+  type DashboardRevenue,
+  type DashboardSummaryInterface,
+} from './dashboard-api'
 
 /**
  * «Выручка за всё время» as the tile states it: the figure in its currency
@@ -31,7 +41,11 @@ import type { DashboardRevenue, DashboardSummaryInterface } from './dashboard-ap
  * currencies and printed the sum with no unit — 1 000 ₽ and 10 USDT read
  * «1010», a partner's balance spend and a partial refund at face value.
  */
-function revenueTile(t: TFunction, revenue: DashboardRevenue | undefined): Pick<KpiItem, 'value' | 'description' | 'info'> {
+function revenueTile(
+  t: TFunction,
+  revenue: DashboardRevenue | undefined,
+  about: string = t('dashboardPage.kpis.revenueInfo'),
+): Pick<KpiItem, 'value' | 'description' | 'info'> {
   if (revenue === undefined) return { value: '—' }
   const { figure, money } = revenue
   const unconverted = figure.byCurrency.filter((slice) => money.unconverted.includes(slice.currency))
@@ -42,7 +56,7 @@ function revenueTile(t: TFunction, revenue: DashboardRevenue | undefined): Pick<
       ? [t('dashboardPage.kpis.revenueUnconverted', { amount: unconverted.map((slice) => formatMoney(slice.amount, slice.currency, { compact: true })).join(', ') })]
       : []),
   ].join(' · ')
-  const paragraphs = [t('dashboardPage.kpis.revenueInfo')]
+  const paragraphs = [about]
   if (money.converted) {
     const oldest = money.rates.reduce<string | null>(
       (earliest, rate) => (earliest === null || rate.fetchedAt < earliest ? rate.fetchedAt : earliest),
@@ -68,17 +82,58 @@ function revenueTile(t: TFunction, revenue: DashboardRevenue | undefined): Pick<
   return { value, description, info: paragraphs.join('\n\n') }
 }
 
+/** The viewer's last choice of period, kept in this browser only. */
+export const DASHBOARD_PERIOD_PREFERENCE_KEY = 'rezeis.dashboard.kpiPeriod'
+
+function readPeriod(): DashboardPeriod {
+  try {
+    const raw = window.localStorage.getItem(DASHBOARD_PERIOD_PREFERENCE_KEY)
+    return DASHBOARD_PERIODS.find((known) => String(known) === raw) ?? 'all'
+  } catch {
+    return 'all'
+  }
+}
+
+function writePeriod(period: DashboardPeriod): void {
+  try {
+    window.localStorage.setItem(DASHBOARD_PERIOD_PREFERENCE_KEY, String(period))
+  } catch {
+    // Private window or blocked storage: the choice lasts this page only.
+  }
+}
+
 export function DashboardKpiGrid({ summary }: { readonly summary: DashboardSummaryInterface }): JSX.Element {
   const { t } = useTranslation()
+  const [period, setPeriodState] = useState<DashboardPeriod>(readPeriod)
+  const setPeriod = (next: DashboardPeriod): void => {
+    setPeriodState(next)
+    writePeriod(next)
+  }
+  const months = period === 'all' ? null : period
+  const windowed = useQuery({
+    queryKey: dashboardPeriodKey(months ?? 1),
+    queryFn: () => dashboardApi.getPeriodSummary(months ?? 1),
+    enabled: months !== null,
+    staleTime: 60_000,
+    refetchInterval: 60_000,
+  })
+  // Only the figures of the window asked for: while another loads, a dash.
+  const inWindow = months !== null && windowed.data?.months === months ? windowed.data : undefined
+  const periodName = months === null ? '' : t(`dashboardPage.kpis.period.${months}`)
 
   const kpis: KpiItem[] = [
     {
       id: 'total-users',
       title: t('dashboardPage.kpis.totalUsers'),
       value: summary.users.total,
-      description: t('dashboardPage.kpis.totalUsersDescription', { count: summary.users.recentRegistered7d }),
+      description:
+        months === null
+          ? t('dashboardPage.kpis.totalUsersDescription', { count: summary.users.recentRegistered7d })
+          : inWindow === undefined
+            ? undefined
+            : t('dashboardPage.kpis.newUsersInPeriod', { count: inWindow.newUsers, period: periodName }),
       icon: Users,
-      trend: summary.users.recentRegistered7d > 0 ? 'up' : 'neutral',
+      trend: (inWindow?.newUsers ?? summary.users.recentRegistered7d) > 0 ? 'up' : 'neutral',
     },
     {
       id: 'active-subscriptions',
@@ -90,8 +145,16 @@ export function DashboardKpiGrid({ summary }: { readonly summary: DashboardSumma
     },
     {
       id: 'revenue',
-      title: t('dashboardPage.kpis.revenue'),
-      ...revenueTile(t, summary.revenue),
+      title: months === null ? t('dashboardPage.kpis.revenue') : t('dashboardPage.kpis.revenueInPeriod', { period: periodName }),
+      ...(months === null
+        ? revenueTile(t, summary.revenue)
+        : revenueTile(
+            t,
+            inWindow?.revenue,
+            inWindow === undefined
+              ? undefined
+              : t('dashboardPage.kpis.revenueInfoPeriod', { period: periodName, from: formatShortDate(inWindow.from) }),
+          )),
       icon: Wallet,
       // A sum over all time only ever grows: an arrow beside it would say nothing.
       trend: 'neutral',
@@ -120,10 +183,13 @@ export function DashboardKpiGrid({ summary }: { readonly summary: DashboardSumma
     },
     {
       id: 'failed-payments',
-      title: t('dashboardPage.kpis.failedPayments'),
-      value: summary.transactions.failed,
+      title:
+        months === null
+          ? t('dashboardPage.kpis.failedPayments')
+          : t('dashboardPage.kpis.failedPaymentsInPeriod', { period: periodName }),
+      value: months === null ? summary.transactions.failed : (inWindow?.failedPayments ?? '—'),
       icon: AlertCircle,
-      trend: summary.transactions.failed > 0 ? 'down' : 'neutral',
+      trend: (months === null ? summary.transactions.failed : (inWindow?.failedPayments ?? 0)) > 0 ? 'down' : 'neutral',
     },
     {
       id: 'finance-corrections',
@@ -139,10 +205,60 @@ export function DashboardKpiGrid({ summary }: { readonly summary: DashboardSumma
   ]
 
   return (
-    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-      {kpis.map((kpi) => (
-        <KpiCard key={kpi.id} {...kpi} />
-      ))}
+    <div className="space-y-2">
+      <div className="flex justify-end">
+        <PeriodSwitch value={period} busy={months !== null && inWindow === undefined} onChange={setPeriod} />
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        {kpis.map((kpi) => (
+          <KpiCard key={kpi.id} {...kpi} />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * «Всё время · 1 мес · 2 мес · 3 мес» — the look of the online card's range
+ * switch. The group's name says which tiles follow it: the rest are a state of
+ * things now and have no period.
+ */
+function PeriodSwitch({
+  value,
+  busy,
+  onChange,
+}: {
+  readonly value: DashboardPeriod
+  readonly busy: boolean
+  readonly onChange: (period: DashboardPeriod) => void
+}): JSX.Element {
+  const { t } = useTranslation()
+  return (
+    <div
+      role="group"
+      aria-label={t('dashboardPage.kpis.periodLabel')}
+      title={t('dashboardPage.kpis.periodLabel')}
+      aria-busy={busy || undefined}
+      className="inline-flex h-8 max-w-full items-center overflow-x-auto rounded-md border bg-muted/50 p-0.5"
+    >
+      {DASHBOARD_PERIODS.map((option) => {
+        const selected = option === value
+        return (
+          <button
+            key={option}
+            type="button"
+            aria-pressed={selected}
+            data-period={option}
+            onClick={() => onChange(option)}
+            className={cn(
+              'relative h-7 shrink-0 rounded-[5px] px-2.5 text-xs font-medium outline-none focus-visible:ring-2 focus-visible:ring-ring motion-safe:transition-colors',
+              selected ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground',
+            )}
+          >
+            {t(`dashboardPage.kpis.period.${option}`)}
+          </button>
+        )
+      })}
     </div>
   )
 }

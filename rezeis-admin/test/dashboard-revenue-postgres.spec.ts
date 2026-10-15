@@ -144,4 +144,29 @@ run('the dashboard’s revenue on PostgreSQL', () => {
     assert.equal(observed.summary.revenue.figure.value, 2400 + 2500 + 5000);
     assert.equal(observed.summary.revenue.payments, observed.year.payments + 2);
   });
+
+  it('«за 1 / 2 / 3 мес»: the new users, revenue and failed payments of the window, by the rule of the whole history', async () => {
+    const windows = await onCleanSlate(async (tx, { dashboard }) => {
+      // 10 days is inside any month, 45 outside one and inside two, 75 inside
+      // three and outside two, 120 outside three — whatever today's date is.
+      for (const age of [10, 45, 75, 120]) {
+        const id = `u${age}`;
+        await tx.user.create({ data: { id, referralCode: `${id}-ref`, name: id, createdAt: daysAgo(age) } });
+        await pay(tx, { userId: id, amount: String(age * 10), createdAt: daysAgo(age) });
+        await pay(tx, { userId: id, amount: '100', status: 'FAILED', createdAt: daysAgo(age) });
+      }
+      // Not money received, in the window all the same.
+      await pay(tx, { userId: 'u10', amount: '300', gatewayType: 'PARTNER_BALANCE', createdAt: daysAgo(5) });
+      await pay(tx, { userId: 'u10', amount: '0', createdAt: daysAgo(5) });
+      const out = [];
+      for (const months of [1, 2, 3] as const) out.push(await dashboard.getPeriodSummary(months));
+      return out;
+    });
+    assert.deepEqual(windows.map((w) => w.months), [1, 2, 3]);
+    assert.deepEqual(windows.map((w) => w.newUsers), [1, 2, 3]);
+    assert.deepEqual(windows.map((w) => w.revenue.figure.value), [100, 550, 1300]);
+    assert.deepEqual(windows.map((w) => w.revenue.payments), [1, 2, 3]);
+    assert.deepEqual(windows.map((w) => w.failedPayments), [1, 2, 3]);
+    assert.equal(windows[0]!.revenue.money.currency, 'RUB');
+  });
 });
