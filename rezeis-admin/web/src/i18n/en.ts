@@ -3219,7 +3219,7 @@ export const en = {
     },
     upgrade: {
       title: 'Plan change',
-      hint: 'Which plans a customer on this plan can move to with "Change plan" in the cabinet — dearer or cheaper. None selected means any plan on sale. What is left of the paid old plan is added to the new one as days.',
+      hint: 'Which plans a customer on this plan can move to with "Change plan" in the cabinet — dearer or cheaper. None selected closes the change; on a trial plan it opens any plan on sale. A trial plan cannot be picked. What is left of the paid old plan is added to the new one as days.',
       noPlans: 'No plans available',
     },
     transitions: {

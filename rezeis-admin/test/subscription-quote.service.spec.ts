@@ -1035,13 +1035,18 @@ describe('SubscriptionQuoteService', () => {
       return { open: policy.actions.UPGRADE, targets: quote.availablePlans.map((plan) => plan.id).sort() };
     };
 
-    it('opens every plan on sale, cheaper ones too, when the operator listed none', async () => {
-      // Never the plan it is on, and never a trial.
-      assert.deepEqual(await changeTargets([]), { open: true, targets: ['plan-cheap', 'plan-dear'] });
+    // «в рамках выбранного изначально в конфигураторе тарифов» (the owner):
+    // nothing listed on a paid plan is no plan change at all.
+    it('stays closed when the operator listed none', async () => {
+      assert.deepEqual(await changeTargets([]), { open: false, targets: [] });
     });
 
-    it('keeps to the plans the operator listed', async () => {
+    it('keeps to the plans the operator listed, a cheaper one included', async () => {
       assert.deepEqual(await changeTargets(['plan-cheap']), { open: true, targets: ['plan-cheap'] });
+      assert.deepEqual(await changeTargets(['plan-cheap', 'plan-dear']), {
+        open: true,
+        targets: ['plan-cheap', 'plan-dear'],
+      });
     });
 
     it('stays closed when every listed plan has gone off sale', async () => {
