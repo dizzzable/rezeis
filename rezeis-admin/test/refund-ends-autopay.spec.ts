@@ -307,7 +307,7 @@ describe('the refund policy', () => {
       failed: [{ gatewayType: UNKNOWN_AUTOPAY_GATEWAY, providerSubscriptionId: '' }],
     });
     assert.match(String(unread), /Проверить автосписания клиента не удалось/);
-    assert.match(String(unread), /личном кабинете Platega, RollyPay или Antilopay/);
+    assert.match(String(unread), /личном кабинете Platega, RollyPay, Antilopay или AuraPay/);
     assert.doesNotMatch(String(unread), /повторяет отмену/);
   });
 

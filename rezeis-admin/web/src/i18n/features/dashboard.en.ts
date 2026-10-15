@@ -401,7 +401,7 @@ export const en = {
         payments_transaction_refund: 'Payment refunded',
         payments_transaction_withheld_refund_recorded: 'Refund of an unapplied payment recorded',
         payments_transaction_provider_refund_recorded: 'Refund made at the provider recorded',
-        payments_autopay_provider_subscription_cancelled: 'Customer autopay cancelled (Platega, RollyPay or Antilopay)',
+        payments_autopay_provider_subscription_cancelled: 'Customer autopay cancelled (Platega, RollyPay, Antilopay or AuraPay)',
         payments_autopay_yookassa_disabled: 'Customer autopay through YooKassa turned off',
         payments_webhook_replay_requested: 'Payment webhook replayed',
         payments_webhook_payload_revealed: 'Webhook payload revealed',

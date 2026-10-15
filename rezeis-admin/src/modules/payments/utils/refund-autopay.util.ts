@@ -2,7 +2,7 @@ import type { PaymentGatewayType, Prisma } from '@prisma/client';
 
 /**
  * What a refund does to the payer's autopay — the provider subscriptions
- * Platega, RollyPay and Antilopay charge on their own schedule.
+ * Platega, RollyPay, Antilopay and AuraPay charge on their own schedule.
  *
  * The owner's rule, in their words: «все возвраты, которые захочет
  * пользователь, удаляют автосписания» — a refund ends the autopay. Until it
@@ -169,7 +169,7 @@ export function describeAutopayOutcome(outcome: AutopayRefundOutcome): string | 
   if (unread.length > 0) {
     parts.push(
       'Проверить автосписания клиента не удалось: панель не смогла прочитать их и могла не отменить. ' +
-        'Проверьте подписку клиента в личном кабинете Platega, RollyPay или Antilopay и при необходимости отмените её там.',
+        'Проверьте подписку клиента в личном кабинете Platega, RollyPay, Antilopay или AuraPay и при необходимости отмените её там.',
     );
   }
   if (outcome.providerCancelInterrupted === true) {

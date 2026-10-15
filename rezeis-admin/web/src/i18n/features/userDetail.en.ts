@@ -603,7 +603,7 @@ export const en = {
       consequenceNew: 'the subscription this payment created is switched off, if nothing else paid for it;',
       consequenceOther: 'the subscription does not change: adjust a renewal or a plan change by hand if needed; an add-on this payment bought ends at once;',
       consequenceAutopay:
-        'the customer’s autopay ends: at Platega, RollyPay and Antilopay for the subscription this payment paid for, through YooKassa on every saved payment method;',
+        'the customer’s autopay ends: at Platega, RollyPay, Antilopay and AuraPay for the subscription this payment paid for, through YooKassa on every saved payment method;',
       consequenceMoney:
         'the partner commission, the referral reward and the cashback of this payment are taken back. The panel files «Мой налог» receipts for YooKassa payments only, so it has none for this one: if you declared this income in «Мой налог» yourself, cancel that receipt there.',
       confirmAfter:
@@ -635,7 +635,7 @@ export const en = {
       description:
         'How the customer’s subscriptions renew without them. Turning it off here returns no money — it only stops the next charges.',
       loadFailed: 'Could not load the customer’s autopays',
-      none: 'No autopay: no Platega, RollyPay or Antilopay subscription and no saved YooKassa payment method.',
+      none: 'No autopay: no Platega, RollyPay, Antilopay or AuraPay subscription and no saved YooKassa payment method.',
       noPermission: 'Turning autopay off needs the payments:edit permission.',
       planUnnamed: 'subscription',
       providerTitle: '{{provider}} · {{plan}}',

@@ -212,7 +212,7 @@ describe('«Отметить возврат» in the payment’s details', () =>
     const items = within(consequences).getAllByRole('listitem').map((item) => item.textContent)
     expect(items).toEqual([
       'the subscription this payment created is switched off, if nothing else paid for it;',
-      'the customer’s autopay ends: at Platega, RollyPay and Antilopay for the subscription this payment paid for, through YooKassa on every saved payment method;',
+      'the customer’s autopay ends: at Platega, RollyPay, Antilopay and AuraPay for the subscription this payment paid for, through YooKassa on every saved payment method;',
       // The panel files «Мой налог» receipts for YooKassa payments only, and a
       // refund can be recorded here only for the others: there is no receipt
       // of the panel's to cancel, and the dialog must not say there is.

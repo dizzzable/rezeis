@@ -305,7 +305,7 @@ export const en = {
         actions: {
           view: 'The transaction list, reconciliation with the providers, and payment notifications for admins.',
           create: 'Create an unpaid payment draft for a customer. The panel has no button for it yet; it only matters for direct API requests.',
-          edit: 'End a customer’s autopay: “Users” → customer → “Subscriptions” tab → “Autopay” → “Cancel autopay” (Platega, RollyPay) and “Turn off YooKassa autopay”. No money is returned, the paid term is unchanged, and the customer is not told.',
+          edit: 'End a customer’s autopay: “Users” → customer → “Subscriptions” tab → “Autopay” → “Cancel autopay” (Platega, RollyPay, Antilopay, AuraPay) and “Turn off YooKassa autopay”. No money is returned, the paid term is unchanged, and the customer is not told.',
           delete: 'Has no effect yet: nothing in the panel checks this permission.',
           export: 'Has no effect yet: nothing in the panel checks this permission.',
           refund: 'Refund a payment through the provider, in full or in part. And record a refund made at the provider outside the panel (“Record refund”): the panel sends nothing to the provider and undoes on its side what the payment gave.',

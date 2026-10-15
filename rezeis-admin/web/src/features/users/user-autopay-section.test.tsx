@@ -306,7 +306,7 @@ describe('what the section lists', () => {
     grant([VIEW, EDIT])
     serve({ providerSubscriptions: [], yookassaMethods: [] })
     const { unmount } = renderWithProviders(<UserAutopaySection userId={USER_ID} />)
-    expect(await screen.findByText(/^No autopay: no Platega, RollyPay or Antilopay subscription/)).toBeInTheDocument()
+    expect(await screen.findByText(/^No autopay: no Platega, RollyPay, Antilopay or AuraPay subscription/)).toBeInTheDocument()
     unmount()
 
     vi.restoreAllMocks()
@@ -527,14 +527,14 @@ describe('the operator’s switch in the dashboard’s audit timeline', () => {
   it('names both actions in both languages, not by their codes', async () => {
     await loadFeatureBundle('dashboard')
     const { unmount } = renderWithProviders(<DashboardTimelinesSection summary={summary} />)
-    expect(screen.getByText('Customer autopay cancelled (Platega, RollyPay or Antilopay)')).toBeInTheDocument()
+    expect(screen.getByText('Customer autopay cancelled (Platega, RollyPay, Antilopay or AuraPay)')).toBeInTheDocument()
     expect(screen.getByText('Customer autopay through YooKassa turned off')).toBeInTheDocument()
     unmount()
 
     await i18n.changeLanguage('ru')
     await loadFeatureBundle('dashboard')
     renderWithProviders(<DashboardTimelinesSection summary={summary} />)
-    expect(screen.getByText('Отменено автосписание клиента (Platega, RollyPay или Antilopay)')).toBeInTheDocument()
+    expect(screen.getByText('Отменено автосписание клиента (Platega, RollyPay, Antilopay или AuraPay)')).toBeInTheDocument()
     expect(screen.getByText('Выключено автосписание клиента через ЮKassa')).toBeInTheDocument()
     expect(screen.queryByText('payments.autopay.yookassa_disabled')).not.toBeInTheDocument()
   })
