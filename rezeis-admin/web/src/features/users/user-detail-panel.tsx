@@ -4445,7 +4445,9 @@ function InviteSettingsTab({
     Number(linkTtlSeconds) < MIN_LINK_TTL_SECONDS
 
   const saveMutation = useMutation({
-    mutationFn: () => {
+    // Typed: axios 1.20 carries the request body in the response type, and the
+    // two bodies below made the two branches two different promises.
+    mutationFn: (): Promise<unknown> => {
       if (useGlobal) {
         return api.patch(`/admin/users/${telegramId}/invite-settings`, {
           useGlobalSettings: true,

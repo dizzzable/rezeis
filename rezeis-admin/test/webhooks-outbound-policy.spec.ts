@@ -24,6 +24,13 @@ import { WebhookDispatcherService } from '../src/modules/webhooks/services/webho
 import { WebhookSubscriptionsService } from '../src/modules/webhooks/services/webhook-subscriptions.service';
 
 /**
+ * axios 1.20 ships its typings twice (ESM and CommonJS) and @nestjs/axios reads the
+ * other copy, so TypeScript calls two views of one instance unrelated. At run time
+ * it is the same object; the production code builds it through HttpModule.
+ */
+type AxiosForNest = ConstructorParameters<typeof HttpService>[0];
+
+/**
  * The panel's own outgoing webhooks follow the outbound policy
  * ═══════════════════════════════════════════════════════════
  *
@@ -397,7 +404,7 @@ describe('through the real HTTP client, against a real socket', () => {
     const before = hits;
     const run = dispatchTo(`http://rebind.example.test:${port}/hook`, {
       dns: { 'rebind.example.test': ['127.0.0.1'] },
-      http: new HttpService(axios.create(buildBoundedOutboundHttpOptions())),
+      http: new HttpService(axios.create(buildBoundedOutboundHttpOptions()) as unknown as AxiosForNest),
     });
 
     await run.dispatcher.processDelivery('delivery-1');

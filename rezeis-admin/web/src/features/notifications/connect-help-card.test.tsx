@@ -7,6 +7,7 @@
  * broadcast link, and the log a page at a time. Every request is asserted on
  * what was actually sent, and the answers are what the server really returns.
  */
+import type { AxiosRequestConfig } from 'axios'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -72,7 +73,7 @@ function mockApi(script: ApiScript) {
   logCalls.length = 0
   // The server keeps what a PATCH saved, and a later GET reads it back.
   let stored: Record<string, unknown> = { ...((script.settings as Record<string, unknown> | undefined) ?? {}) }
-  vi.spyOn(api, 'get').mockImplementation(async (path: string, config?: { params?: Record<string, unknown> }) => {
+  vi.spyOn(api, 'get').mockImplementation(async (path: string, config?: AxiosRequestConfig) => {
     if (path === '/admin/connect-help/settings') {
       if (script.settingsFails === true) throw new Error('500')
       return { data: stored }

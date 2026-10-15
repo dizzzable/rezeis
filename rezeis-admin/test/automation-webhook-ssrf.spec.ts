@@ -18,6 +18,13 @@ import {
 } from './helpers/automation-http-harness';
 
 /**
+ * axios 1.20 ships its typings twice (ESM and CommonJS) and @nestjs/axios reads the
+ * other copy, so TypeScript calls two views of one instance unrelated. At run time
+ * it is the same object; the production code builds it through HttpModule.
+ */
+type AxiosForNest = ConstructorParameters<typeof HttpService>[0];
+
+/**
  * `webhook_post` must never reach the machine itself or a metadata service
  * ═════════════════════════════════════════════════════════════════════════
  *
@@ -208,7 +215,7 @@ describe('through the real HTTP client, against a real socket', () => {
       },
     };
     return new AutomationActionRegistry(
-      new HttpService(axios.create(buildBoundedOutboundHttpOptions())),
+      new HttpService(axios.create(buildBoundedOutboundHttpOptions()) as unknown as AxiosForNest),
       {} as never,
       {} as never,
       {} as never,

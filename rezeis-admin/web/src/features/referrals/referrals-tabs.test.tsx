@@ -18,6 +18,7 @@
  * in a fixture is a statement about the day it was typed: this tree has already
  * had one quietly turn into an "expired" assertion five months later.
  */
+import type { AxiosRequestConfig } from 'axios'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { cleanup, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -357,7 +358,7 @@ describe('rewards tab', () => {
     const person = userEvent.setup()
     const requests: Array<Record<string, unknown> | undefined> = []
     vi.spyOn(api, 'get').mockImplementation(
-      async (path: string, config?: { params?: Record<string, unknown> }) => {
+      async (path: string, config?: AxiosRequestConfig) => {
         if (path === '/admin/referrals/stats') return { data: STATS }
         if (path === '/admin/referrals/rewards') {
           requests.push(config?.params)
