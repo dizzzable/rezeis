@@ -109,10 +109,10 @@ export const MINI_APP_TERMINALS: ReadonlyArray<MiniAppTerminal> = [
   },
   {
     route: '/upgrade',
-    nameRu: 'Улучшение тарифа',
-    nameEn: 'Plan upgrade',
-    descriptionRu: 'Переход на тариф выше.',
-    descriptionEn: 'Moving to a higher plan.',
+    nameRu: 'Смена тарифа',
+    nameEn: 'Plan change',
+    descriptionRu: 'Переход на другой тариф — дороже или дешевле.',
+    descriptionEn: 'Moving to another plan, dearer or cheaper.',
   },
   {
     route: '/addons',

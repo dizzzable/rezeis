@@ -3765,7 +3765,8 @@ export const EVENT_PRESENTATION: Record<string, EventPresentation> = {
   // Subscription
   'subscription.created': { emoji: '✅', title: 'Подписка создана' },
   'subscription.renewed': { emoji: '🔄', title: 'Подписка продлена' },
-  'subscription.upgraded': { emoji: '⬆️', title: 'Подписка улучшена' },
+  // «Сменить тариф» moves a subscription up or down (the owner, 15.10.2026).
+  'subscription.upgraded': { emoji: '🔀', title: 'Тариф подписки изменён' },
   'subscription.expired': { emoji: '⌛', title: 'Подписка истекла' },
   'subscription.deleted': { emoji: '🗑', title: 'Подписка удалена' },
   'subscription.synced': {

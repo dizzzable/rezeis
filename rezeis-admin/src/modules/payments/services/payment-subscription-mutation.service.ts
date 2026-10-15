@@ -933,7 +933,7 @@ export class PaymentSubscriptionMutationService {
       this.events.info(
         type,
         'SUBSCRIPTION',
-        purchaseType === PurchaseType.RENEW ? 'Подписка продлена' : 'Подписка улучшена',
+        purchaseType === PurchaseType.RENEW ? 'Подписка продлена' : 'Тариф подписки изменён',
         {
           subscriptionId: input.subscription.id,
           userId: input.subscription.userId,

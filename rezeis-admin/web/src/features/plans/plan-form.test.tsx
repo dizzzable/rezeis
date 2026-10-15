@@ -417,7 +417,7 @@ describe('PlanForm transition targets', () => {
     await user.click(screen.getByRole('button', { name: 'Update plan' }))
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
-      'These upgrade targets can no longer be used: Legacy Pro',
+      'These plans can no longer be changed to: Legacy Pro',
     )
     expect(onSubmit).not.toHaveBeenCalled()
   })

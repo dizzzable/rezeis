@@ -5,6 +5,7 @@ import {
   PurchaseChannel,
   PurchaseType,
   Subscription,
+  SubscriptionStatus,
   Transaction,
   TransactionStatus,
   TrialClaimStatus,
@@ -388,19 +389,35 @@ export class PaymentsTransactionsService {
       // will: the plan's full price for one whole term of it.
       //
       // A new subscription (NEW, ADDITIONAL) is created by its first charge and
-      // renewed by the later ones; a RENEW renews the one it names. So is the
-      // UPGRADE of a trial the buyer holds — what buying beside a trial is
-      // (`isConvertibleTrial`). It is priced like a new purchase, the target
-      // plan's full price with nothing credited for the trial, and its term
-      // starts at payment (`UPGRADE_RESETS_EXPIRY`); the subscription it
-      // converts is the one the later charges renew. Any other UPGRADE stays
-      // refused: a change of a plan somebody already pays for was never
-      // offered this way. A paid trial is a one-off by definition.
+      // renewed by the later ones; a RENEW renews the one it names. So is an
+      // UPGRADE — «Сменить тариф», up or down, and what buying beside a trial
+      // is (`isConvertibleTrial`). It is priced like a new purchase, the target
+      // plan's full price (what the old plan had left is added as days, never
+      // taken off the price), and its term starts at payment
+      // (`UPGRADE_RESETS_EXPIRY`); the subscription it moves is the one the
+      // later charges renew. Until its first charge lands that subscription is
+      // still on the old plan — `strandedReason` knows (`planChangeOf`), and an
+      // autopay left on the old plan is stopped by the sweep once it lands.
+      // A paid trial is a one-off by definition.
+      //
+      // The subscription changed must be the buyer's own, and one they may
+      // change: not a subscription the operator froze (the change would write
+      // it ACTIVE — `isConvertibleTrial` keeps a frozen trial out for the same
+      // reason) nor a deleted one. Every later charge renews it, so naming
+      // anything else would renew somebody else's, or a frozen one, forever.
       if (
         input.purchaseType !== PurchaseType.NEW &&
         input.purchaseType !== PurchaseType.ADDITIONAL &&
         input.purchaseType !== PurchaseType.RENEW &&
-        !convertsTrial
+        input.purchaseType !== PurchaseType.UPGRADE
+      ) {
+        throw autopayNotAvailable('PURCHASE_TYPE');
+      }
+      if (
+        input.purchaseType === PurchaseType.UPGRADE &&
+        (source === null ||
+          source.status === SubscriptionStatus.DISABLED ||
+          source.status === SubscriptionStatus.DELETED)
       ) {
         throw autopayNotAvailable('PURCHASE_TYPE');
       }
@@ -426,12 +443,15 @@ export class PaymentsTransactionsService {
         durationDays: quote.selectedDuration.days,
         discountSource: price.discountSource,
         planId: selectedPlan.id,
-        // The trial is named from the start: it is the subscription the later
-        // charges renew, and the checkout refuses a second live provider
-        // subscription on it. Until its first charge lands the trial is still
-        // on the trial's plan — `strandedReason` knows (`trialConversion`).
+        // The subscription a plan change moves is named from the start: it is
+        // the one the later charges renew, and the checkout refuses a second
+        // live provider subscription on it. Until its first charge lands it is
+        // still on the old plan — `strandedReason` knows (`trialConversion` for
+        // a trial, `planChange` for any other).
         subscriptionId:
-          input.purchaseType === PurchaseType.RENEW || convertsTrial ? sourceSubscriptionId : null,
+          input.purchaseType === PurchaseType.RENEW || input.purchaseType === PurchaseType.UPGRADE
+            ? sourceSubscriptionId
+            : null,
         method: autopayMethod,
         delay,
       });

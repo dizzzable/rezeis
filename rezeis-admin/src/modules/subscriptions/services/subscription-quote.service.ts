@@ -1007,14 +1007,19 @@ export class SubscriptionQuoteService {
     }
     if (input.purchaseType === PurchaseType.UPGRADE) {
       let targets = await this.getTransitionPlans(sourcePlan.upgradeToPlanIds);
-      // Trial → regular fallback: a TRIAL plan with no explicitly configured
-      // `upgradeToPlanIds` can still be upgraded to ANY active non-trial
-      // catalog plan, so a trial user is never stuck without an upgrade path.
-      // Applies to both free and paid trials. Operators who want to restrict
-      // the targets simply set explicit `upgradeToPlanIds` on the trial plan.
+      // «Сменить тариф» (the owner, 15.10.2026): a subscriber may move to any
+      // plan on sale, up or down, at any time — the paid remainder of the old
+      // plan is converted either way (`paid-remainder-conversion.util.ts`). So
+      // a plan with NO `upgradeToPlanIds` opens the whole active non-trial
+      // catalogue; an operator who lists targets restricts the change to them,
+      // and a list whose targets have all gone off sale stays closed.
+      //
+      // A TRIAL plan opens the catalogue also when its listed targets are gone,
+      // as it always did, so a trial user is never stuck without a way onto a
+      // paid plan. Applies to both free and paid trials.
       if (
-        targets.length === 0 &&
-        sourcePlan.availability === PlanAvailability.TRIAL &&
+        (sourcePlan.upgradeToPlanIds.length === 0 ||
+          (targets.length === 0 && sourcePlan.availability === PlanAvailability.TRIAL)) &&
         input.userId !== undefined
       ) {
         const catalog = await this.getCatalogOptionPlans({

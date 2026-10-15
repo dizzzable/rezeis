@@ -228,6 +228,9 @@ function world(options: {
       subscriptionId: TRIAL,
       fulfilledAt: null,
       idempotencyKey: null,
+      createdAt: new Date(),
+      // What a draft converting a trial carries (`TRIAL_CONVERSION_SNAPSHOT_KEY`).
+      planSnapshot: { id: 'plan-1', convertsTrial: true },
     },
   ];
   const checkout = transactions[0]!;

@@ -72,7 +72,7 @@ import {
   refundEndsAutopay,
   UNKNOWN_AUTOPAY_GATEWAY,
 } from '../utils/refund-autopay.util';
-import { isWithheldConversion } from '../utils/trial-conversion.util';
+import { isTrialConversionSnapshot, isWithheldConversion } from '../utils/trial-conversion.util';
 import {
   autopayNotAvailable,
   PROVIDER_SUBSCRIPTION_CONSENT_VERSION,
@@ -985,21 +985,30 @@ export class ProviderSubscriptionService {
    * would charge every period for the same access. A failed one (PAST_DUE) does
    * not block signing up again.
    *
-   * `pendingOtherThan` — the checkout asking, when it converts a trial — also
-   * refuses while another sign-up for the same subscription is still waiting to
-   * be confirmed. A trial converts once: two sign-ups confirmed together both
-   * converted it, and both kept renewing it. Only a sign-up inside its
-   * checkout's lifetime counts, so one the payer walked away from stops
-   * blocking when its checkout expires; the asking checkout's own row (a
-   * re-tap of the same link) never does.
+   * `pendingOtherThan` — the checkout asking, when it changes the plan (or
+   * converts a trial) — also refuses while another sign-up for the same
+   * subscription is still waiting to be confirmed. A plan changes once per
+   * payment: two sign-ups confirmed together both moved it, and both kept
+   * renewing it. Only a sign-up inside its checkout's lifetime counts, so one
+   * the payer walked away from stops blocking when its checkout expires; the
+   * asking checkout's own row (a re-tap of the same link) never does.
+   *
+   * `planChangeTo` — the plan a plan change moves to — lets through a live one
+   * on ANOTHER plan: the sweep stops it once the change lands («moved to
+   * another plan»), so the two never renew the same plan together. One on the
+   * very plan being bought still refuses.
    */
   public async assertNoLiveSubscriptionFor(
     subscriptionId: string | null,
-    options: { readonly pendingOtherThan?: string } = {},
+    options: { readonly pendingOtherThan?: string; readonly planChangeTo?: string } = {},
   ): Promise<void> {
     if (subscriptionId === null) return;
     const live = await this.prismaService.providerSubscription.findFirst({
-      where: { subscriptionId, status: ProviderSubscriptionStatus.ACTIVE },
+      where: {
+        subscriptionId,
+        status: ProviderSubscriptionStatus.ACTIVE,
+        ...(options.planChangeTo === undefined ? {} : { planId: options.planChangeTo }),
+      },
       select: { id: true },
     });
     if (live !== null) {
@@ -1883,7 +1892,8 @@ export class ProviderSubscriptionService {
     // conversion this row's own charge made has its payment COMPLETED before
     // fulfilment converts anything, so a subscription seen converted is never
     // paired with that payment still unpaid.
-    const conversions = await this.readTrialConversions(rows);
+    const conversions = await this.readUpgradeCheckouts(rows);
+    const now = new Date();
     let cancelled = 0;
     for (const row of rows) {
       const subscription = row.subscriptionId === null ? undefined : byId.get(row.subscriptionId);
@@ -1902,6 +1912,7 @@ export class ProviderSubscriptionService {
                   planId: readSnapshotPlanId(subscription.planSnapshot),
                   lifetime: isLifetimeSubscription(subscription),
                   ...trialConversionOf(conversions.get(row.firstTransactionId), row.subscriptionId, subscription.isTrial),
+                  ...planChangeOf(conversions.get(row.firstTransactionId), row.subscriptionId, subscription.isTrial, now),
                 },
         planId: row.planId,
       });
@@ -1928,19 +1939,27 @@ export class ProviderSubscriptionService {
   }
 
   /**
-   * The checkouts of the rows whose first charge converts a trial (an
-   * UPGRADE), by id. Every other row's first charge creates or renews a
-   * subscription and is left out, so this reads only what `trialConversionOf`
-   * needs.
+   * The checkouts of the rows whose first charge changes a plan (an UPGRADE:
+   * «Сменить тариф», or a trial's conversion), by id. Every other row's first
+   * charge creates or renews a subscription and is left out, so this reads only
+   * what `trialConversionOf` and `planChangeOf` need.
    */
-  private async readTrialConversions(
+  private async readUpgradeCheckouts(
     rows: readonly Pick<ProviderSubscription, 'subscriptionId' | 'firstTransactionId'>[],
-  ): Promise<Map<string, TrialConversionCheckout>> {
+  ): Promise<Map<string, UpgradeCheckout>> {
     const ids = rows.flatMap((row) => (row.subscriptionId === null ? [] : [row.firstTransactionId]));
     if (ids.length === 0) return new Map();
     const checkouts = await this.prismaService.transaction.findMany({
       where: { id: { in: ids }, purchaseType: PurchaseType.UPGRADE },
-      select: { id: true, subscriptionId: true, status: true, fulfilledAt: true, gatewayData: true },
+      select: {
+        id: true,
+        subscriptionId: true,
+        status: true,
+        fulfilledAt: true,
+        gatewayData: true,
+        createdAt: true,
+        planSnapshot: true,
+      },
     });
     return new Map(checkouts.map((checkout) => [checkout.id, checkout]));
   }
@@ -2699,6 +2718,14 @@ export function strandedReason(input: {
          */
         readonly trialConversion?: 'PENDING' | 'LOST';
         /**
+         * Only for a row whose first charge changes the plan of this subscription
+         * when it is not a trial («Сменить тариф», see `planChangeOf`). PENDING:
+         * that charge has not landed, so the subscription is still on the plan
+         * it is leaving, and that is not a move. LOST: it never landed, so the
+         * later charges would renew a plan the subscription is not on.
+         */
+        readonly planChange?: 'PENDING' | 'LOST';
+        /**
          * The subscription has no end date. It is never renewed
          * (`lifetime-renewal.util.ts`), so every charge would be money taken
          * for nothing, to be handed back by hand. Absent reads as dated.
@@ -2717,6 +2744,8 @@ export function strandedReason(input: {
   if (input.subscription.trialConversion === 'LOST') return 'trial converted without its first charge';
   if (input.subscription.trialConversion === 'PENDING') return null;
   if (input.subscription.lifetime === true) return 'subscription has no end date: nothing to renew';
+  if (input.subscription.planChange === 'LOST') return 'plan change without its first charge';
+  if (input.subscription.planChange === 'PENDING') return null;
   if (input.subscription.planId !== null && input.subscription.planId !== input.planId) {
     return 'subscription moved to another plan';
   }
@@ -2763,6 +2792,51 @@ export function trialConversionOf(
     !isWithheldConversion(checkout.gatewayData)
     ? {}
     : { trialConversion: 'LOST' };
+}
+
+/** The checkout of a row whose first charge is an UPGRADE, as the sweep reads it. */
+interface UpgradeCheckout extends TrialConversionCheckout {
+  readonly createdAt: Date;
+  /** Carries the trial-conversion mark (`isTrialConversionSnapshot`) when the UPGRADE converts a trial. */
+  readonly planSnapshot: unknown;
+}
+
+/**
+ * How long a plan change's sign-up may wait for its first charge to land before
+ * the sweep stops it. The payer confirms within the checkout's lifetime (half an
+ * hour), the provider charges at confirmation, and fulfilment takes seconds — a
+ * day is a wide margin, and a sign-up still waiting after it will not land.
+ */
+export const PLAN_CHANGE_SIGN_UP_HOLD_MS = DAY_MS;
+
+/**
+ * Where the plan change a row's first charge pays for stands, for
+ * `strandedReason`: «Сменить тариф» with «для автоматического списания», on a
+ * subscription that is not a trial (a trial's conversion is
+ * `trialConversionOf`'s). Nothing for a row whose first charge creates or
+ * renews a subscription.
+ *
+ * Until that charge is applied the subscription is on the plan it is leaving,
+ * while the row is on the plan it moves to — which the sweep would otherwise
+ * read as "moved to another plan" and cancel within ten minutes, before the
+ * payer even confirmed. Applied (fulfilled), the row is read like any other: a
+ * later move stops it. Not applied within {@link PLAN_CHANGE_SIGN_UP_HOLD_MS},
+ * it is LOST, and its later charges must not renew the old plan.
+ */
+export function planChangeOf(
+  checkout: UpgradeCheckout | undefined,
+  subscriptionId: string | null,
+  subscriptionIsTrial: boolean,
+  now: Date,
+): { readonly planChange?: 'PENDING' | 'LOST' } {
+  if (checkout === undefined || subscriptionId === null || checkout.subscriptionId !== subscriptionId) {
+    return {};
+  }
+  if (subscriptionIsTrial || isTrialConversionSnapshot(checkout.planSnapshot)) return {};
+  if (checkout.status === TransactionStatus.COMPLETED && checkout.fulfilledAt !== null) return {};
+  return now.getTime() - checkout.createdAt.getTime() < PLAN_CHANGE_SIGN_UP_HOLD_MS
+    ? { planChange: 'PENDING' }
+    : { planChange: 'LOST' };
 }
 
 function readSnapshotPlanId(snapshot: Prisma.JsonValue): string | null {

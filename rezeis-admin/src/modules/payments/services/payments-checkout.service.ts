@@ -225,11 +225,16 @@ export class PaymentsCheckoutService {
     // charge twice a period. Before the stored link is handed back, too: a
     // link made earlier can still be confirmed.
     if (providerSubscription) {
+      const terms = readProviderSubscriptionTerms(transaction.planSnapshot);
       await this.providerSubscriptionService.assertNoLiveSubscriptionFor(
-        readProviderSubscriptionTerms(transaction.planSnapshot)?.subscriptionId ?? null,
-        // A trial converts once: while another sign-up converting it waits for
-        // its payer, this one would convert it a second time.
-        transaction.purchaseType === PurchaseType.UPGRADE ? { pendingOtherThan: transaction.id } : {},
+        terms?.subscriptionId ?? null,
+        // A plan changes once per payment (a trial converts once): while another
+        // sign-up changing it waits for its payer, this one would change it a
+        // second time. An autopay still renewing the OLD plan is not a second
+        // one: the sweep stops it once this change lands.
+        transaction.purchaseType === PurchaseType.UPGRADE
+          ? { pendingOtherThan: transaction.id, ...(terms === null ? {} : { planChangeTo: terms.planId }) }
+          : {},
       );
     }
 

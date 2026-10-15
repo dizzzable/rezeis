@@ -1011,6 +1011,47 @@ describe('SubscriptionQuoteService', () => {
     assert.deepStrictEqual(actualQuote.warnings, []);
   });
 
+  // «Сменить тариф» (the owner, 15.10.2026): up or down, at any time.
+  describe('the plans a paid plan may change to', () => {
+    const changeTargets = async (upgradeToPlanIds: string[], extra: Parameters<typeof createPlan>[0][] = []) => {
+      const service = createService({
+        user: createUser({ maxSubscriptions: 2 }),
+        subscriptions: [createSubscription({ id: 'sub-1', isTrial: false, planId: 'plan-mid' })],
+        plans: [
+          createPlan({ id: 'plan-mid', availability: PlanAvailability.ALL, upgradeToPlanIds }),
+          createPlan({ id: 'plan-cheap', availability: PlanAvailability.ALL }),
+          createPlan({ id: 'plan-dear', availability: PlanAvailability.ALL }),
+          createPlan({ id: 'plan-trial', availability: PlanAvailability.TRIAL }),
+          ...extra.map((plan) => createPlan(plan)),
+        ],
+      });
+      const policy = await service.getActionPolicy({ userId: 'user-1', subscriptionId: 'sub-1', channel: PurchaseChannel.WEB });
+      const quote = await service.getQuote({
+        userId: 'user-1',
+        subscriptionId: 'sub-1',
+        purchaseType: PurchaseType.UPGRADE,
+        channel: PurchaseChannel.WEB,
+      });
+      return { open: policy.actions.UPGRADE, targets: quote.availablePlans.map((plan) => plan.id).sort() };
+    };
+
+    it('opens every plan on sale, cheaper ones too, when the operator listed none', async () => {
+      // Never the plan it is on, and never a trial.
+      assert.deepEqual(await changeTargets([]), { open: true, targets: ['plan-cheap', 'plan-dear'] });
+    });
+
+    it('keeps to the plans the operator listed', async () => {
+      assert.deepEqual(await changeTargets(['plan-cheap']), { open: true, targets: ['plan-cheap'] });
+    });
+
+    it('stays closed when every listed plan has gone off sale', async () => {
+      assert.deepEqual(
+        await changeTargets(['plan-gone'], [{ id: 'plan-gone', availability: PlanAvailability.ALL, deleted: true }]),
+        { open: false, targets: [] },
+      );
+    });
+  });
+
   it('filters TRIAL plans out of configured upgrade targets', async () => {
     const service = createService({
       user: createUser({ maxSubscriptions: 2 }),

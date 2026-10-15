@@ -414,10 +414,10 @@ describe('PaymentsTransactionsService', () => {
 
   // «для автоматического списания» on Platega/RollyPay: the provider repeats
   // the first charge's sum every period, and every later charge renews one
-  // subscription. A trial's conversion is priced like a new purchase — the
-  // plan's full price, the term from payment — so the provider may repeat it,
-  // and the later charges renew the converted trial. A change of a paid plan
-  // is still refused.
+  // subscription. A plan change — «Сменить тариф», and a trial's conversion —
+  // is priced like a new purchase: the plan's full price, the term from
+  // payment. So the provider may repeat it, and the later charges renew the
+  // subscription it changed. Not one the operator froze, nor somebody else's.
   describe('a provider subscription on an UPGRADE', () => {
     const upgradeToPlanOne = (sourceSubscriptionId: string) =>
       ({
@@ -456,13 +456,44 @@ describe('PaymentsTransactionsService', () => {
       });
     });
 
+    for (const status of [SubscriptionStatus.ACTIVE, SubscriptionStatus.LIMITED, SubscriptionStatus.EXPIRED]) {
+      it(`is made on a change of a paid plan (${status}), for the subscription it changes`, async () => {
+        const { service, state } = createService({
+          quoteResult: createProviderSubscriptionQuote('source-sub'),
+          subscriptions: [{ id: 'source-sub', userId: 'user-1', isTrial: false, status }],
+        });
+
+        const draft = await service.createCheckoutDraft(upgradeToPlanOne('source-sub'), { providerSubscription: true });
+
+        assert.equal(draft.purchaseType, PurchaseType.UPGRADE);
+        assert.equal(state.transactionCreateCalls.length, 1);
+        const created = state.transactionCreateCalls[0]!;
+        assert.equal(created.subscriptionId, 'source-sub');
+        const snapshot = created.planSnapshot as Record<string, unknown>;
+        assert.deepStrictEqual(snapshot['providerSubscription'], {
+          unit: 'month',
+          count: 1,
+          amount: 299,
+          durationDays: 30,
+          planId: 'plan-1',
+          subscriptionId: 'source-sub',
+        });
+        // Not a trial's conversion: nothing for fulfilment to withhold.
+        assert.equal(snapshot['convertsTrial'], undefined);
+      });
+    }
+
     const refused: ReadonlyArray<{
       readonly name: string;
       readonly subscriptions: ReadonlyArray<{ id: string; userId: string; isTrial: boolean; status: SubscriptionStatus }>;
     }> = [
       {
-        name: 'a change of a paid plan',
-        subscriptions: [{ id: 'source-sub', userId: 'user-1', isTrial: false, status: SubscriptionStatus.ACTIVE }],
+        name: 'a paid plan the operator froze, which the change would lift',
+        subscriptions: [{ id: 'source-sub', userId: 'user-1', isTrial: false, status: SubscriptionStatus.DISABLED }],
+      },
+      {
+        name: "somebody else's paid plan",
+        subscriptions: [{ id: 'source-sub', userId: 'user-2', isTrial: false, status: SubscriptionStatus.ACTIVE }],
       },
       {
         name: 'a trial the operator froze, which the upgrade would lift',

@@ -631,9 +631,9 @@ export const en = {
         referralEligibility:
           'The referral program: this is the only plan whose purchase counts a referral. Check the referral settings.',
         transitions_one:
-          '{{count}} plan that lists it as an upgrade or replacement (it will be removed from there)',
+          '{{count}} plan that lists it as a plan change or replacement (it will be removed from there)',
         transitions_other:
-          '{{count}} plans that list it as an upgrade or replacement (it will be removed from there)',
+          '{{count}} plans that list it as a plan change or replacement (it will be removed from there)',
         replacementOrphans_one:
           '{{count}} archived plan that renews its subscribers onto it and has no other replacement on sale',
         replacementOrphans_other:
@@ -3218,8 +3218,8 @@ export const en = {
       noPlans: 'No plans available for replacement',
     },
     upgrade: {
-      title: 'Available upgrades',
-      hint: 'Users on this plan will see an "Upgrade" button leading to the selected plans.',
+      title: 'Plan change',
+      hint: 'Which plans a customer on this plan can move to with "Change plan" in the cabinet — dearer or cheaper. None selected means any plan on sale. What is left of the paid old plan is added to the new one as days.',
       noPlans: 'No plans available',
     },
     transitions: {
@@ -3227,7 +3227,7 @@ export const en = {
         'These plans are still selected but can no longer be used as targets. Click one to take it off.',
       strandedRemoveAria: 'Remove {{plan}} — {{reason}}',
       strandedUpgradeError:
-        'These upgrade targets can no longer be used: {{plans}}. Take them off above, then save.',
+        'These plans can no longer be changed to: {{plans}}. Take them off above, then save.',
       strandedReplacementError:
         'These replacement plans can no longer be used: {{plans}}. Take them off above, then save.',
       strandedReason: {
@@ -3311,15 +3311,15 @@ export const en = {
     currencyDuplicate:
       'A currency is listed twice inside one duration. Leave one price per currency, then save again.',
     transitionSelfReference:
-      'A plan cannot be its own upgrade or replacement target. Remove this plan from those lists and save again.',
+      'A plan cannot be its own plan-change or replacement target. Remove this plan from those lists and save again.',
     transitionReplacementRequired:
       '"Replace on renewal" needs at least one replacement plan. Pick one, or switch the renewal mode back to "Self-renew".',
     transitionRenewModeNotArchived:
       'A renewal mode can only be set on an archived plan. Turn "Archived plan" on, or leave the renewal mode alone.',
     transitionTargetNotFound:
-      'One of the selected upgrade or replacement plans no longer exists. Remove the plans marked in red, then save again.',
+      'One of the selected plan-change or replacement plans no longer exists. Remove the plans marked in red, then save again.',
     transitionTargetNotAssignable:
-      'An upgrade or replacement target must be an active, non-archived, non-trial plan. Remove the plans marked in red, then save again.',
+      'A plan-change or replacement target must be an active, non-archived, non-trial plan. Remove the plans marked in red, then save again.',
     trialConversionForbidden:
       'An existing plan cannot be switched to "TRIAL" availability. Create a separate trial plan instead.',
     trialAlreadyExists:
@@ -4232,7 +4232,7 @@ export const en = {
     purchaseTypes: {
       NEW: 'New',
       RENEW: 'Renewal',
-      UPGRADE: 'Upgrade',
+      UPGRADE: 'Plan change',
       ADDITIONAL: 'Additional',
     },
     pagination: {
@@ -5537,7 +5537,7 @@ export const en = {
         actions: {
           buy: 'Buy',
           connect: 'Connect',
-          upgrade: 'Upgrade',
+          upgrade: 'Change plan',
         },
         nav: 'Subs',
       },

@@ -355,7 +355,8 @@ describe('PaymentsCheckoutService', () => {
     assert.deepEqual(checked, ['trial-sub'])
     // A trial converts once: another sign-up still waiting for its payer holds
     // this one back — though never its own row, when the same link is opened again.
-    assert.deepEqual(guardOptions, [{ pendingOtherThan: 'transaction-1' }])
+    // An autopay on another plan does not: the sweep stops it once this lands.
+    assert.deepEqual(guardOptions, [{ pendingOtherThan: 'transaction-1', planChangeTo: 'plan-1' }])
     assert.deepEqual(recorded, ['provider-1'])
     assert.equal(state.providerCreateCalls, 1)
   })
