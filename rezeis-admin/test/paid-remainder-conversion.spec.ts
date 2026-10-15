@@ -133,17 +133,31 @@ describe('the owner’s worked examples', () => {
     assert.equal(result.sources[0]?.value, '111.11');
   });
 
-  it('Премиум, 10 days left → Базовый: never more than the 10 days still paid for', () => {
+  // «как с улучшением, только в обратном порядке» (the owner, 15.10.2026).
+  it('Премиум, 10 days left → Базовый: the money left buys more of the cheaper days', () => {
     const result = convert({
       candidates: [payment({ type: 'NEW', paidAt: -20, days: 30, amount: '650' })],
       expiresInDays: 10,
       target: BASIC,
     });
 
-    // 216.67 ₽ at 6.67 ₽ a day would be 32 days.
+    // 216.67 ₽ at 6.67 ₽ a day.
     assert.equal(result.fractionalDays, '32.5000');
-    assert.equal(result.days, 10, 'capped at the whole days still paid for');
+    assert.equal(result.days, 32, 'no cap at the 10 days still paid for');
     assert.equal(result.remainingPaidDays, 10);
+  });
+
+  it("600 ₽ / 30 d, 20 days left → 240 ₽ / 30 d: 400 ₽ is 50 of the cheaper plan's days", () => {
+    const result = convert({
+      candidates: [payment({ type: 'NEW', paidAt: -10, days: 30, amount: '600' })],
+      expiresInDays: 20,
+      target: plan([30, '240']),
+    });
+
+    assert.equal(result.sources[0]?.value, '400.00');
+    assert.equal(result.fractionalDays, '50.0000');
+    assert.equal(result.days, 50);
+    assert.equal(result.remainingPaidDays, 20);
   });
 
   it('divides by the most expensive day even when a long duration is cheaper (180 d for 3 000 ₽ = 16.67 ₽ a day)', () => {
@@ -372,7 +386,7 @@ describe('the rule', () => {
       target: plan([30, '0']),
     });
 
-    assert.equal(result.days, 0, 'dividing by a free day would reach the cap of 20');
+    assert.equal(result.days, 0, 'dividing by a free day would give endless days');
   });
 
   it('gives nothing when the new plan has no finite duration', () => {

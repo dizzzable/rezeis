@@ -44,9 +44,11 @@ import { isWithheldConversion, MANUAL_REFUND_RECORDED_AT_KEY } from '../../payme
  *    `max(price_C / days)` over its active finite durations, usually the
  *    shortest. No exchange rates: a currency the new plan has no price in
  *    converts to nothing.
- * 5. SUM, FLOOR, CAP: the fractional days are summed, floored, and capped at
- *    the whole days still paid for — a plan with a cheaper day never makes the
- *    time longer than it was.
+ * 5. SUM, FLOOR: the fractional days are summed and floored. No cap: onto a
+ *    plan with a cheaper day the same money buys MORE days than were left —
+ *    «как с улучшением, только в обратном порядке» (the owner, 15.10.2026, for
+ *    a change to a cheaper plan). Up to then the result was capped at the
+ *    whole days still paid for, and a move down lost part of what was paid.
  *
  * Money is `Prisma.Decimal` throughout, and each chunk's days are ONE fraction
  * (`amount × overlapMs × planDays / (chunkDays × DAY_MS × planPrice)`), so a
@@ -270,11 +272,14 @@ export interface PaidRemainderSource {
 
 /** The outcome: whole days to add to the new term, and where they came from. */
 export interface PaidRemainderConversion {
-  /** Whole days added to the new term: floored, then capped. Never negative. */
+  /** Whole days added to the new term: floored. Never negative. */
   readonly days: number;
-  /** The sum before the floor and the cap, 4 decimal places. */
+  /** The sum before the floor, 4 decimal places. */
   readonly fractionalDays: string;
-  /** The whole days still paid for — the cap. */
+  /**
+   * The whole days still paid for on the old plan. Recorded beside
+   * {@link days}, no longer a cap on it: onto a cheaper plan they differ.
+   */
   readonly remainingPaidDays: number;
   readonly paidThrough: Date | null;
   readonly sources: readonly PaidRemainderSource[];
@@ -437,8 +442,8 @@ export function reconstructPaidWindow(input: {
 
 /**
  * Turns the window into whole days on the new plan: each chunk's unused money
- * divided by the new plan's most expensive day in its currency, summed,
- * floored, capped at the whole days still paid for. Pure.
+ * divided by the new plan's most expensive day in its currency, summed and
+ * floored — more days than were left when the new plan's day is cheaper. Pure.
  */
 export function convertPaidRemainder(input: {
   readonly window: PaidRemainderWindow;
@@ -500,7 +505,7 @@ export function convertPaidRemainder(input: {
   }
   const floored = total.floor().toNumber();
   return {
-    days: Math.max(0, Math.min(floored, remainingPaidDays)),
+    days: Math.max(0, floored),
     fractionalDays: total.toFixed(4),
     remainingPaidDays,
     paidThrough: input.window.paidThrough,
