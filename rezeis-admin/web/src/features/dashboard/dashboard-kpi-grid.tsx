@@ -222,6 +222,12 @@ export function DashboardKpiGrid({ summary }: { readonly summary: DashboardSumma
  * «Всё время · 1 мес · 2 мес · 3 мес» — the look of the online card's range
  * switch. The group's name says which tiles follow it: the rest are a state of
  * things now and have no period.
+ *
+ * No `overflow-x-auto`, as on the online card's switch. The buttons are 28px
+ * inside 2px of padding and a 1px border — 34px in a 32px box — and
+ * `overflow-x: auto` turns `overflow-y` to `auto` with it, so the browser drew a
+ * vertical scrollbar beside four labels that never needed one. Reported from
+ * the dashboard as "не могу понять, зачем там нужен скролл".
  */
 function PeriodSwitch({
   value,
@@ -239,7 +245,7 @@ function PeriodSwitch({
       aria-label={t('dashboardPage.kpis.periodLabel')}
       title={t('dashboardPage.kpis.periodLabel')}
       aria-busy={busy || undefined}
-      className="inline-flex h-8 max-w-full items-center overflow-x-auto rounded-md border bg-muted/50 p-0.5"
+      className="inline-flex h-8 max-w-full items-center rounded-md border bg-muted/50 p-0.5"
     >
       {DASHBOARD_PERIODS.map((option) => {
         const selected = option === value

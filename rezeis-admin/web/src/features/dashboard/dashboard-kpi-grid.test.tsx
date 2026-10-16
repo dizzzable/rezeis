@@ -190,4 +190,16 @@ describe('«Всё время · 1 мес · 2 мес · 3 мес» over the til
     await user.click(screen.getByRole('button', { name: '3 мес' }))
     expect(window.localStorage.getItem(DASHBOARD_PERIOD_PREFERENCE_KEY)).toBe('3')
   })
+
+  it('draws no scrollbar beside four labels that always fit', () => {
+    // 34px of buttons in a 32px box: with `overflow-x: auto` the browser also
+    // made `overflow-y` auto and drew a vertical scrollbar. jsdom has no
+    // layout, so the class is what can be held — the same box as the online
+    // card's switch, which never scrolled.
+    vi.spyOn(dashboardApi, 'getPeriodSummary').mockImplementation(async (months) => windowOf(months))
+    renderWithProviders(<DashboardKpiGrid summary={summary(MIXED)} />)
+    const group = screen.getByRole('button', { name: '3 мес' }).parentElement
+    expect(group?.getAttribute('role')).toBe('group')
+    expect(group?.className).not.toMatch(/overflow-(x-|y-)?(auto|scroll)/)
+  })
 })
