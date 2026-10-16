@@ -824,8 +824,8 @@ type Half = 'panel' | 'cabinet';
  * that release delivered into its number.
  */
 const TABLE_RELEASES: Readonly<Record<Half, readonly string[]>> = {
-  panel: ['0.9.7.70', '0.9.7.71', '0.9.7.72', '0.9.7.73', '0.9.7.74'],
-  cabinet: ['0.9.7.52', '0.9.7.53', '0.9.7.54', '0.9.7.55', '0.9.7.56'],
+  panel: ['0.9.7.70', '0.9.7.71', '0.9.7.72', '0.9.7.73', '0.9.7.74', '0.9.7.75'],
+  cabinet: ['0.9.7.52', '0.9.7.53', '0.9.7.54', '0.9.7.55', '0.9.7.56', '0.9.7.57'],
 };
 
 /**
@@ -833,6 +833,12 @@ const TABLE_RELEASES: Readonly<Record<Half, readonly string[]>> = {
  * first to know (`panel.knows-autopay-ids`, `cabinet.declares-autopay-ids`).
  */
 const AUTOPAY_CAPABILITY_IDS = ['web.autopay-first-charge-delay', 'web.aurapay-autopay'] as const;
+
+/**
+ * The capability id Reiwa 0.9.7.57 declares and Rezeis Admin 0.9.7.75 is the
+ * first to know (`panel.knows-connect-walk-id`, `cabinet.declares-connect-walk-id`).
+ */
+const CONNECT_WALK_CAPABILITY_IDS = ['web.connect-interactive'] as const;
 
 /** Each feature: the half that has it and the first release that did. */
 const PAIR_FEATURES = {
@@ -905,6 +911,14 @@ const PAIR_FEATURES = {
   'panel.knows-autopay-ids': { half: 'panel', since: '0.9.7.74' },
   /** The cabinet declares {@link AUTOPAY_CAPABILITY_IDS} on every internal call. */
   'cabinet.declares-autopay-ids': { half: 'cabinet', since: '0.9.7.56' },
+  /**
+   * The panel's capability registry knows {@link CONNECT_WALK_CAPABILITY_IDS}
+   * (the guided «Интерактивный» connect walk); an older panel counts it as
+   * unknown, the same way as the autopay ids above.
+   */
+  'panel.knows-connect-walk-id': { half: 'panel', since: '0.9.7.75' },
+  /** The cabinet declares {@link CONNECT_WALK_CAPABILITY_IDS} on every internal call. */
+  'cabinet.declares-connect-walk-id': { half: 'cabinet', since: '0.9.7.57' },
 } as const satisfies Record<string, { readonly half: Half; readonly since: string }>;
 
 type PairFeature = keyof typeof PAIR_FEATURES;
@@ -1881,10 +1895,11 @@ async function scenarioPanelKnowsItsCabinet(ctx: ScenarioContext): Promise<strin
   assert(api.behind === missing.length > 0, `behind=${String(api.behind)} with missing [${missing.join(', ')}]`);
   // A cabinet newer than its panel declares ids the panel has never heard of,
   // and the panel counts and ignores them: exactly those, and none otherwise.
+  const unknownIds = (declares: PairFeature, knows: PairFeature, ids: readonly string[]): number =>
+    pairHas(pair, declares) && !pairHas(pair, knows) ? ids.length : 0;
   const unknown =
-    pairHas(pair, 'cabinet.declares-autopay-ids') && !pairHas(pair, 'panel.knows-autopay-ids')
-      ? AUTOPAY_CAPABILITY_IDS.length
-      : 0;
+    unknownIds('cabinet.declares-autopay-ids', 'panel.knows-autopay-ids', AUTOPAY_CAPABILITY_IDS) +
+    unknownIds('cabinet.declares-connect-walk-id', 'panel.knows-connect-walk-id', CONNECT_WALK_CAPABILITY_IDS);
   assert(
     api.unknownToPanel === unknown,
     `the cabinet declares ${api.unknownToPanel} capability ids this panel does not know, the table expects ${unknown}`,
