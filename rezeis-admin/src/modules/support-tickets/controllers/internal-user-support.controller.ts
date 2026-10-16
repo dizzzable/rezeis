@@ -9,6 +9,7 @@ import {
   HttpException,
   HttpStatus,
   NotFoundException,
+  Optional,
   Param,
   Post,
   StreamableFile,
@@ -27,6 +28,7 @@ import { InternalAdminAuthGuard } from '../../auth/guards/internal-admin-auth.gu
 import { buildUserReferenceWhere } from '../../internal-user/utils/user-reference.util';
 import { UploadAttachmentDto } from '../dto/attachment.dto';
 import { AttachmentValidationError } from '../utils/support-attachment.util';
+import { SupportAiDispatchService, type SupportAiRouting } from '../services/support-ai-dispatch.service';
 import { SupportAttachmentService } from '../services/support-attachment.service';
 import { SupportTicketsService } from '../services/support-tickets.service';
 
@@ -61,6 +63,13 @@ export class InternalUserSupportController {
     private readonly supportTicketsService: SupportTicketsService,
     private readonly supportAttachments: SupportAttachmentService,
     private readonly systemEvents: SystemEventsService,
+    /**
+     * The AI assistant's dispatch. Last and `@Optional()` so positional
+     * construction in the specs keeps working; without it every ticket is
+     * an operator's, as before the assistant moved into tickets.
+     */
+    @Optional()
+    private readonly supportAi?: SupportAiDispatchService,
   ) {}
 
   @Get(':userRef/tickets')
@@ -141,17 +150,18 @@ export class InternalUserSupportController {
       throw new BadRequestException('Subject and message are required');
     }
     const created = await this.supportTicketsService.create({ userId, subject });
-    await this.supportTicketsService.addMessage({
+    const opening = await this.supportTicketsService.addMessage({
       ticketId: created.id,
       authorType: 'USER',
       authorId: userId,
       content: message,
     });
-    this.systemEvents.info(
+    const routing = (await this.supportAi?.takeNewTicket(created.id, opening.id)) ?? 'operator';
+    this.announce(
       EVENT_TYPES.SUPPORT_TICKET_CREATED,
-      'SUPPORT',
       `Новый тикет: ${subject}`,
       { ticketId: created.id, userId, subject },
+      routing,
     );
     return serializeTicket(await this.supportTicketsService.getById(created.id));
   }
@@ -196,8 +206,9 @@ export class InternalUserSupportController {
       throw new BadRequestException('Support ticket is closed');
     }
 
+    let stored: { readonly messageId: string };
     try {
-      await this.supportAttachments.storeForMessage({
+      stored = await this.supportAttachments.storeForMessage({
         ticketId,
         authorType: 'USER',
         authorId: userId,
@@ -210,11 +221,14 @@ export class InternalUserSupportController {
       throw mapAttachmentError(err);
     }
 
-    this.systemEvents.info(
+    // The assistant cannot see a file; it reads the name and usually hands
+    // the thread over. That is its call, not this route's.
+    const routing = (await this.supportAi?.onClientMessage(ticketId, stored.messageId)) ?? 'operator';
+    this.announce(
       EVENT_TYPES.SUPPORT_TICKET_USER_REPLY,
-      'SUPPORT',
       'Пользователь прикрепил файл в обращении',
       { ticketId, userId },
+      routing,
     );
     return serializeTicket(await this.supportTicketsService.getById(ticketId));
   }
@@ -235,19 +249,49 @@ export class InternalUserSupportController {
     if (ticket.userId !== userId) {
       throw new ForbiddenException('Ticket does not belong to this user');
     }
-    await this.supportTicketsService.addMessage({
+    const written = await this.supportTicketsService.addMessage({
       ticketId,
       authorType: 'USER',
       authorId: userId,
       content,
     });
-    this.systemEvents.info(
+    const routing = (await this.supportAi?.onClientMessage(ticketId, written.id)) ?? 'operator';
+    this.announce(
       EVENT_TYPES.SUPPORT_TICKET_USER_REPLY,
-      'SUPPORT',
       `Ответ пользователя в тикете: ${ticket.subject}`,
       { ticketId, userId, subject: ticket.subject },
+      routing,
     );
     return serializeTicket(await this.supportTicketsService.getById(ticketId));
+  }
+
+  /**
+   * Log the client's message and, on the ordinary path, alert the operators.
+   *
+   * On a thread the AI assistant leads the event is still written — it is the
+   * audit log's trace and what refreshes an open «Тикеты» page — but without
+   * the Telegram card (`skipTelegram`) and marked `aiHandling`, which keeps it
+   * out of the push and the bell (`resolveNotificationRoute`). The operators
+   * hear about such a thread when the assistant hands it over.
+   */
+  private announce(
+    type: string,
+    message: string,
+    metadata: Record<string, unknown>,
+    routing: SupportAiRouting,
+  ): void {
+    if (routing === 'operator') {
+      this.systemEvents.info(type, 'SUPPORT', message, metadata);
+      return;
+    }
+    this.systemEvents.emit({
+      type,
+      category: 'SUPPORT',
+      severity: 'INFO',
+      message,
+      metadata: { ...metadata, aiHandling: true },
+      skipTelegram: true,
+    });
   }
 
   private async resolveUserId(userRef: string): Promise<string> {
@@ -288,6 +332,15 @@ interface SerializedTicket {
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly messages: readonly SerializedTicketMessage[];
+  /**
+   * Support is writing the answer to the client's last message: the AI
+   * assistant leads this open thread and the client had the last word. The
+   * cabinet shows «Поддержка печатает…». An older cabinet ignores the field.
+   *
+   * The assistant's own replies go out as `admin`, like any support reply —
+   * the owner's rule is that the client sees one support, not two.
+   */
+  readonly replyPending: boolean;
 }
 
 interface AttachmentRow {
@@ -308,7 +361,14 @@ type MessageWithAttachments = SupportTicketMessage & {
 type TicketWithMessages = SupportTicket & { messages?: MessageWithAttachments[] };
 
 function serializeTicket(ticket: TicketWithMessages): SerializedTicket {
+  const messages = ticket.messages ?? [];
+  const last = messages[messages.length - 1];
   return {
+    replyPending:
+      ticket.aiActive === true &&
+      ticket.status !== SupportTicketStatus.CLOSED &&
+      last !== undefined &&
+      last.authorType === 'USER',
     id: ticket.id,
     subject: ticket.subject,
     status: ticket.status.toLowerCase(),

@@ -43,4 +43,9 @@ export class UpdateSupportSettingsDto {
   @IsString()
   @MaxLength(500)
   public readonly turnstileSecret?: string;
+
+  /** The Telegram button on the cabinet's «Поддержка» page. */
+  @IsOptional()
+  @IsBoolean()
+  public readonly cabinetTelegramButton?: boolean;
 }

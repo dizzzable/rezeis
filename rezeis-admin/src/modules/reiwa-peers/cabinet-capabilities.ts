@@ -84,6 +84,12 @@ export const CABINET_CAPABILITY = {
    * (subscription, device, app, adding, the first connection).
    */
   connectInteractive: 'web.connect-interactive',
+  /**
+   * One support: «Поддержка» has no separate AI chat (✨, `/support/ai`) —
+   * the assistant answers in the tickets — and hides the Telegram button when
+   * the operator switched it off.
+   */
+  supportUnified: 'web.support-unified',
   /** A subscription with no end date: no dead «Продлить», no «Улучшить» that ends in an error. */
   lifetimeSubscription: 'web.lifetime-subscription',
   /** The bell's «Докупка не применена» opens «Поддержка». */
@@ -180,6 +186,20 @@ export const CABINET_CAPABILITY_REGISTRY: readonly CabinetCapabilityRow[] = [
       'режим «Интерактивный» не включается: «Подключить» открывает обычный экран подключения со всеми инструкциями',
     operatorTextEn:
       'the “Interactive” connect mode does not start: “Connect” opens the ordinary connect screen with every instruction',
+  },
+  {
+    id: CABINET_CAPABILITY.supportUnified,
+    surface: 'web',
+    since: '0.9.7.58',
+    kind: 'degraded',
+    // Nothing is withheld: the assistant answers in the tickets of every
+    // cabinet, an older one shows its replies as support replies. What an
+    // older cabinet keeps is its own separate AI chat and the Telegram button
+    // (reiwa `web/src/features/support/support-page.tsx`).
+    operatorText:
+      'в «Поддержке» у клиентов остаются отдельный ИИ-чат (✨) и кнопка Telegram, даже если она выключена',
+    operatorTextEn:
+      'the “Support” page keeps the separate AI chat (✨) and the Telegram button, even when the button is switched off',
   },
   {
     id: CABINET_CAPABILITY.lifetimeSubscription,

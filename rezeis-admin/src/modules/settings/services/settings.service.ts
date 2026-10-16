@@ -1446,6 +1446,7 @@ export class SettingsService {
         purgeAttachmentsOnClose: input.patch.purgeAttachmentsOnClose,
         turnstileSiteKey: input.patch.turnstileSiteKey,
         turnstileSecretEnc: secretEnc,
+        cabinetTelegramButton: input.patch.cabinetTelegramButton,
       });
 
       const updated = await write({ supportSettings: next as unknown as Prisma.InputJsonValue });
@@ -1463,6 +1464,11 @@ export class SettingsService {
       });
       return updated;
     });
+    // The Telegram button rides in the cabinet's public config: drop the
+    // cabinet's copy now rather than at its next version poll.
+    if (input.patch.cabinetTelegramButton !== undefined && this.reiwaCacheInvalidator !== undefined) {
+      void this.reiwaCacheInvalidator.invalidateBranding('settings.supportSettings.cabinetTelegramButton');
+    }
     return toSupportSettingsView(readJsonObject(settings.supportSettings) as StoredSupportSettings);
   }
 

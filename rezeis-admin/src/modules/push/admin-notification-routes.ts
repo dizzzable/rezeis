@@ -90,6 +90,14 @@ const EVENT_ROUTES: Readonly<Record<string, CategoryRoute>> = {
     },
     title: 'Поддержка',
   },
+  [EVENT_TYPES.SUPPORT_TICKET_HANDED_OFF]: {
+    category: 'support',
+    url: (e) => {
+      const id = metaString(e, 'ticketId');
+      return id ? `/support-tickets?ticket=${encodeURIComponent(id)}` : '/support-tickets';
+    },
+    title: 'Поддержка: нужен оператор',
+  },
   [EVENT_TYPES.PAYMENT_FAILED]: {
     category: 'payment',
     url: () => '/payments',
@@ -121,6 +129,11 @@ export function resolveNotificationRoute(event: SystemEventPayload): CategoryRou
       ? { category: 'system', url: () => '/', title: ruleEventTitle(event) }
       : null;
   }
+  // A ticket the AI assistant leads: the client's message is logged and
+  // refreshes the open «Тикеты» page, but nobody is called — the operators
+  // hear about the thread when the assistant hands it over
+  // (`support.ticket_handed_off`). The owner's rule of 16.10.2026.
+  if (event.metadata?.['aiHandling'] === true) return null;
   const mapped = EVENT_ROUTES[event.type];
   if (mapped) return mapped;
   // Any ERROR-severity SYSTEM event becomes a low-noise `system` alert.

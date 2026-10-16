@@ -87,6 +87,7 @@ import { ReiwaPeersModule } from './modules/reiwa-peers/reiwa-peers.module';
 import { SettingsModule } from './modules/settings/settings.module';
 import { SubpageConfigModule } from './modules/subpage-config/subpage-config.module';
 import { SubscriptionsModule } from './modules/subscriptions/subscriptions.module';
+import { SupportAiModule } from './modules/support-ai/support-ai.module';
 import { SupportTicketsModule } from './modules/support-tickets/support-tickets.module';
 import { SystemLogsModule } from './modules/system-logs/system-logs.module';
 import { ThemePresetsModule } from './modules/theme-presets/theme-presets.module';
@@ -218,6 +219,7 @@ import { WebhooksModule } from './modules/webhooks/webhooks.module';
     PlansModule,
     SubscriptionsModule,
     SupportTicketsModule,
+    SupportAiModule,
     SystemLogsModule,
     ThemePresetsModule,
     TwoFactorModule,

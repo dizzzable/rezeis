@@ -1,15 +1,14 @@
 import { randomUUID } from 'node:crypto';
 
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
-import type { PurchaseChannel } from '@prisma/client';
 import OpenAI from 'openai';
 import type { ChatCompletionTool } from 'openai/resources/chat/completions';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
-import type { PlanCatalogQueryContextInterface } from '../../plans/interfaces/plan-catalog.interface';
 import { PlanCatalogService } from '../../plans/services/plan-catalog.service';
 import { FaqService } from '../../faq/services/faq.service';
 import { AiConfigService } from '../../ai-config/services/ai-config.service';
+import { describeFaqForModel, describeTariffsForModel } from './ai-public-tools';
 
 // ── Exported types / constants ──────────────────────────────────────────────
 
@@ -454,33 +453,7 @@ export class AiChatService {
    */
   private async executeGetTariffs(): Promise<string> {
     try {
-      const query: PlanCatalogQueryContextInterface = {
-        channel: 'WEB' as PurchaseChannel,
-      };
-      const plans = await this.planCatalogService.getCatalogPlans(query);
-      const summary = plans.map((p) => ({
-        name: p.name,
-        description: p.description,
-        type: p.type,
-        trafficLimit: p.trafficLimit,
-        deviceLimit: p.deviceLimit,
-        isTrial: p.isTrial,
-        trialFree: p.trialFree,
-        durations: p.durations.map((d) => ({
-          days: d.days,
-          prices: d.prices.map((pr) => ({
-            price: pr.price,
-            currency: pr.currency,
-            gatewayType: pr.gatewayType,
-          })),
-        })),
-        displayPrices: p.displayPrices.map((dp) => ({
-          price: dp.price,
-          currency: dp.currency,
-          days: dp.days,
-        })),
-      }));
-      return JSON.stringify(summary);
+      return await describeTariffsForModel(this.planCatalogService);
     } catch (err) {
       this.logger.error(`getTariffs failed: ${(err as Error).message}`);
       return JSON.stringify({ error: 'Не удалось получить список тарифов.' });
@@ -493,12 +466,7 @@ export class AiChatService {
    */
   private async executeGetFaq(locale?: string): Promise<string> {
     try {
-      const items = await this.faqService.getPublicFaq(locale ?? null);
-      const summary = items.map((item) => ({
-        question: item.question,
-        answer: item.answer,
-      }));
-      return JSON.stringify(summary);
+      return await describeFaqForModel(this.faqService, locale);
     } catch (err) {
       this.logger.error(`getFaq failed: ${(err as Error).message}`);
       return JSON.stringify({ error: 'Не удалось получить FAQ.' });

@@ -139,7 +139,7 @@ export interface RouteContext {
 export const CALLBACK_VOCABULARY = {
   builtInScreens: ['help', 'rules', 'invite'],
   mainMenu: ['menu:main', 'menu', 'menu:new', 'back_to_menu'],
-  answered: ['close', 'ai_support_exit'],
+  answered: ['close'],
   answeredPatterns: [
     { source: '^check_channel(?::q:([a-z][a-z0-9]{19,31}))?$', flags: 'i' },
     { source: '^lang:(.+)$', flags: '' },

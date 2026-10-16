@@ -164,11 +164,6 @@ const PLAIN_TEXT_KEYS: ReadonlySet<string> = new Set([
   'payments.stars.unknown_invoice',
   'payments.stars.already_handled',
   'payments.stars.unavailable',
-  // AI support's three messages sent with `parse_mode: 'Markdown'`, which takes
-  // no entities and has no custom-emoji syntax — reiwa `bot/pages/ai-support.ts`.
-  'ai_support.unavailable',
-  'ai_support.intro',
-  'ai_support.exited',
   // The `/` command list — `slashCommands`, reiwa `bot/lib/slash-commands.ts`
   // (`setMyCommands`).
   'commands.start.description',

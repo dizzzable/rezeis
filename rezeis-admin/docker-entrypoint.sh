@@ -114,6 +114,9 @@ is_auto_recoverable_migration() {
     20261014120000_provider_subscription_sbp_delay)
       return 0
       ;;
+    20261016200000_support_ticket_ai)
+      return 0
+      ;;
     *)
       return 1
       ;;

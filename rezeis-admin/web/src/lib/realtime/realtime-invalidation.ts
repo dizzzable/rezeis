@@ -99,6 +99,8 @@ const TYPE_TO_QUERY_KEYS: Record<string, readonly InvalidationKey[]> = {
   // 5s poll. Polling remains as the fallback when the socket is down.
   'support.ticket_created': [['support-tickets'] as const, adminQueryKeys.dashboard.summary],
   'support.ticket_user_reply': [['support-tickets'] as const, ['support-ticket'] as const],
+  // The AI assistant handed a thread to the operators.
+  'support.ticket_handed_off': [['support-tickets'] as const, ['support-ticket'] as const],
 }
 
 /**

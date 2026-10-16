@@ -351,6 +351,12 @@ export const EVENT_TYPES = {
   // Support
   SUPPORT_TICKET_CREATED: 'support.ticket_created',
   SUPPORT_TICKET_USER_REPLY: 'support.ticket_user_reply',
+  /**
+   * The assistant passed a ticket to a human: it could not help, the client
+   * asked for a person, it failed, or it was switched off under a thread it
+   * led. THE moment the operators are told about such a thread.
+   */
+  SUPPORT_TICKET_HANDED_OFF: 'support.ticket_handed_off',
 
   // Anti-fraud
   FRAUD_SIGNAL_OPENED: 'fraud.signal_opened',
@@ -3912,6 +3918,7 @@ export const EVENT_PRESENTATION: Record<string, EventPresentation> = {
   // Support
   'support.ticket_created': { emoji: '🆘', title: 'Новое обращение в поддержку' },
   'support.ticket_user_reply': { emoji: '💬', title: 'Ответ пользователя в тикете' },
+  'support.ticket_handed_off': { emoji: '🙋', title: 'ИИ передал обращение оператору' },
 
   // Anti-fraud
   'fraud.signal_opened': { emoji: '🚨', title: 'Антифрод: новый сигнал' },

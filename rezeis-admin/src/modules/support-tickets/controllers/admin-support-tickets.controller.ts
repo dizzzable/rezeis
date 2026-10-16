@@ -11,6 +11,7 @@ import {
   HttpStatus,
   Logger,
   NotFoundException,
+  Optional,
   Param,
   ParseIntPipe,
   Post,
@@ -36,6 +37,7 @@ import { SettingsService } from '../../settings/services/settings.service';
 import { UpdateSupportSettingsDto } from '../../settings/dto/update-support-settings.dto';
 import { UploadAttachmentDto } from '../dto/attachment.dto';
 import { CreateDocumentRequestDto } from '../dto/document-request.dto';
+import { SupportAiDispatchService } from '../services/support-ai-dispatch.service';
 import { SupportAttachmentService } from '../services/support-attachment.service';
 import { SupportNotificationsService } from '../services/support-notifications.service';
 import { BlockedIdentityService } from '../../blocked-identities/services/blocked-identity.service';
@@ -70,6 +72,12 @@ export class AdminSupportTicketsController {
     private readonly prismaService: PrismaService,
     private readonly rbacService: RbacService,
     private readonly settingsService: SettingsService,
+    /**
+     * The AI assistant's switch on a ticket. Last and `@Optional()` so the
+     * specs' positional construction keeps working.
+     */
+    @Optional()
+    private readonly supportAi?: SupportAiDispatchService,
   ) {}
 
   @Get()
@@ -229,6 +237,39 @@ export class AdminSupportTicketsController {
     // or a resume email for a guest). Fire-and-forget — never block the reply.
     this.notifyTicketOwner(ticket);
     return serializeTicket(ticket);
+  }
+
+  /**
+   * The AI assistant on one ticket, switched by the operator.
+   *
+   * Off: it stops answering here, with no card — the operator is already on
+   * the thread. On: it leads the thread again and, when the client had the
+   * last word, answers that now. Switching on is refused while the assistant
+   * is off or keyless, on a closed thread and on a guest's.
+   *
+   * An operator's own reply switches it off by itself
+   * (`SupportTicketsService.addMessage`); this is for taking the thread
+   * without writing, or giving it back.
+   */
+  @Post(':ticketId/ai')
+  @RequirePermission('support_tickets', 'edit')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Switch the AI assistant on or off for one ticket' })
+  public async setAi(
+    @Param('ticketId') ticketId: string,
+    @Body() body: { active?: unknown },
+    @CurrentAdmin() admin: CurrentAdminInterface,
+    @Req() req: Request,
+  ): Promise<unknown> {
+    if (typeof body?.active !== 'boolean') {
+      throw new BadRequestException('active must be true or false');
+    }
+    if (this.supportAi === undefined) {
+      throw new BadRequestException('The AI assistant is not available in this panel');
+    }
+    await this.supportAi.setActive(ticketId, body.active);
+    await this.audit(admin, req, body.active ? 'support_ticket.ai_on' : 'support_ticket.ai_off', { ticketId });
+    return serializeTicket(await this.supportTicketsService.getById(ticketId));
   }
 
   @Post(':ticketId/close')
@@ -681,6 +722,14 @@ function serializeTicket(ticket: TicketWithRelations): Record<string, unknown> {
     closedBy: ticket.closedBy,
     createdAt: ticket.createdAt,
     updatedAt: ticket.updatedAt,
+    // The AI assistant on this thread: whether it still answers, and if it
+    // passed the thread on, when and why. Its replies are the messages whose
+    // `metadata.ai` is true.
+    ai: {
+      active: ticket.aiActive,
+      handedOffAt: ticket.aiHandedOffAt,
+      handoffReason: ticket.aiHandoffReason,
+    },
     guest: ticket.guest
       ? {
           id: ticket.guest.id,

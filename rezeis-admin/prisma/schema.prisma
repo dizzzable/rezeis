@@ -4042,6 +4042,15 @@ model SupportTicket {
   closedBy   String?              @map("closed_by")
   createdAt  DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt  DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
+  /// The AI assistant answers this thread. Set when a cabinet ticket is
+  /// opened while the assistant is on and configured; cleared by an
+  /// operator's own message, by the operator's switch, and by a hand-over.
+  aiActive        Boolean   @default(false) @map("ai_active")
+  /// When the assistant passed the thread to a human — the moment the
+  /// operators were told. `null` while it never did.
+  aiHandedOffAt   DateTime? @map("ai_handed_off_at") @db.Timestamptz(3)
+  /// Why, in the assistant's words or the panel's (`ai_error`, `ai_off`…).
+  aiHandoffReason String?   @map("ai_handoff_reason")
 
   user        User?                    @relation("SupportTicketUser", fields: [userId], references: [id], onDelete: Cascade)
   guest       SupportGuest?            @relation(fields: [guestId], references: [id], onDelete: SetNull)

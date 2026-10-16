@@ -219,13 +219,18 @@ describe('the main-menu node', () => {
     expect(isRed('Акция')).toBe(false)
   })
 
-  it.each(['close', 'check_channel', 'ai_support_exit'])(
+  it.each(['close', 'check_channel'])(
     'does not call `%s` dead: the bot answers it',
     (buttonId) => {
       renderMenu([menuButton({ buttonId, label: 'Кнопка', actionType: 'CALLBACK' })])
       expect(under('Кнопка').textContent).not.toContain(i18n.t('botFlow.replyTargets.unhandled'))
     },
   )
+
+  it('calls `ai_support_exit` dead now: the bot has no AI-support mode to leave (16.10.2026)', () => {
+    renderMenu([menuButton({ buttonId: 'ai_support_exit', label: 'Кнопка', actionType: 'CALLBACK' })])
+    expect(under('Кнопка').textContent).toContain(i18n.t('botFlow.replyTargets.unhandled'))
+  })
 
   it('draws a «Внешняя ссылка» typed as a path, or with none, as a page of the cabinet site — with its slash', () => {
     renderMenu([

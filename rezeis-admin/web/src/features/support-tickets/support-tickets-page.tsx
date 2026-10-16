@@ -18,6 +18,7 @@ import {
   Settings,
   Plus,
   Users,
+  Bot,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api';
@@ -139,9 +140,44 @@ interface Ticket {
   } | null;
   messages: TicketMessage[];
   docRequests?: TicketDocRequest[];
+  /**
+   * The AI assistant on this thread (panel 0.9.7.76+): whether it still
+   * answers, and when and why it handed the thread to the operators.
+   */
+  ai?: {
+    active: boolean;
+    handedOffAt: string | null;
+    handoffReason: string | null;
+  };
 }
 
 const DOC_KINDS = ['PAYMENT_PROOF', 'DOCUMENT', 'LOGIN', 'OTHER'] as const;
+
+/**
+ * A reply the AI assistant wrote: ADMIN with `{ "ai": true }` in `metadata`.
+ * The client sees it as an ordinary support reply; the operator is told.
+ */
+function isAiReply(message: Pick<TicketMessage, 'authorType' | 'metadata'>): boolean {
+  const metadata = message.metadata;
+  return (
+    message.authorType === 'admin' &&
+    typeof metadata === 'object' &&
+    metadata !== null &&
+    (metadata as Record<string, unknown>)['ai'] === true
+  );
+}
+
+/**
+ * The hand-over reason in words: the panel's own codes translated, the
+ * assistant's own sentence as written (i18next answers a missing key with the
+ * key itself).
+ */
+function handoffReasonText(reason: string | null, t: (key: string) => string): string {
+  if (reason === null || reason.trim().length === 0) return '';
+  const key = `supportTicketsPage.detail.ai.reasons.${reason}`;
+  const words = t(key);
+  return words === key ? reason : words;
+}
 
 function statusBadge(status: string, t: (key: string) => string) {
   if (status === 'open') return <Badge variant="warning">{t('supportTicketsPage.statuses.open')}</Badge>;
@@ -303,6 +339,24 @@ export default function SupportTicketsPage() {
     onError: () => toast.error(t('supportTicketsPage.toast.attachmentsPurgeFailed')),
   });
 
+  /**
+   * The AI assistant on the open ticket, switched by the operator. The server
+   * refuses to switch on a silence (assistant off, closed or guest thread) and
+   * says why — shown verbatim.
+   */
+  const aiMutation = useMutation({
+    mutationFn: (active: boolean) => api.post(`/admin/support-tickets/${selectedTicket}/ai`, { active }),
+    onSuccess: (_res, active) => {
+      invalidate();
+      toast.success(t(active ? 'supportTicketsPage.detail.ai.switchedOn' : 'supportTicketsPage.detail.ai.switchedOff'));
+    },
+    onError: (err) =>
+      toast.error(
+        (err as { response?: { data?: { message?: string } } })?.response?.data?.message ??
+          t('supportTicketsPage.detail.ai.switchFailed'),
+      ),
+  });
+
   const silenceMutation = useMutation({
     mutationFn: () => api.post(`/admin/support-tickets/${selectedTicket}/silence-device`),
     onSuccess: () => {
@@ -388,7 +442,19 @@ export default function SupportTicketsPage() {
               >
                 <div className="flex items-start justify-between gap-2">
                   <p className="font-medium text-sm truncate">{ticket.subject}</p>
-                  {statusBadge(ticket.status, t)}
+                  <div className="flex shrink-0 items-center gap-1">
+                    {ticket.ai?.active && (
+                      <Badge
+                        variant="outline"
+                        className="gap-1 text-[10px]"
+                        title={t('supportTicketsPage.list.aiBadgeHint')}
+                      >
+                        <Bot className="h-3 w-3" />
+                        {t('supportTicketsPage.list.aiBadge')}
+                      </Badge>
+                    )}
+                    {statusBadge(ticket.status, t)}
+                  </div>
                 </div>
                 <div className="flex items-center gap-2 mt-1.5">
                   {isGuest(ticket) ? (
@@ -444,6 +510,9 @@ export default function SupportTicketsPage() {
               }}
               purgePending={purgeAttachmentsMutation.isPending}
               canPurge={hasPermission('support_tickets', 'delete')}
+              onSetAi={(active) => aiMutation.mutate(active)}
+              aiPending={aiMutation.isPending}
+              canSwitchAi={hasPermission('support_tickets', 'edit')}
               onChanged={invalidate}
             />
           ) : null}
@@ -569,6 +638,9 @@ interface TicketDetailProps {
   onPurgeAttachments: () => void;
   purgePending: boolean;
   canPurge: boolean;
+  onSetAi: (active: boolean) => void;
+  aiPending: boolean;
+  canSwitchAi: boolean;
   onChanged: () => void;
 }
 
@@ -584,6 +656,9 @@ function TicketDetail({
   onPurgeAttachments,
   purgePending,
   canPurge,
+  onSetAi,
+  aiPending,
+  canSwitchAi,
   onChanged,
 }: TicketDetailProps) {
   // Attachments that still hold bytes. A purged one keeps its row, so counting
@@ -784,6 +859,44 @@ function TicketDetail({
         </div>
       </CardHeader>
 
+      {/* The AI assistant on this thread — only when it is, or was, involved.
+          Taking the thread needs no button press: a reply does it. The button
+          is for taking it without writing, or giving it back. */}
+      {(ticket.ai?.active || ticket.ai?.handedOffAt) && (
+        <div
+          className={cn(
+            'flex flex-wrap items-center gap-2 border-b px-4 py-2 text-xs',
+            ticket.ai.active ? 'bg-primary/5' : 'bg-amber-500/10',
+          )}
+          data-testid="ticket-ai-strip"
+        >
+          <Bot className="h-3.5 w-3.5 shrink-0" />
+          <span className="min-w-0 flex-1">
+            {ticket.ai.active
+              ? t('supportTicketsPage.detail.ai.leading')
+              : handoffReasonText(ticket.ai.handoffReason, t).length > 0
+                ? t('supportTicketsPage.detail.ai.handedOff', {
+                    when: formatDateTime(ticket.ai.handedOffAt ?? ticket.updatedAt),
+                    reason: handoffReasonText(ticket.ai.handoffReason, t),
+                  })
+                : t('supportTicketsPage.detail.ai.handedOffNoReason', {
+                    when: formatDateTime(ticket.ai.handedOffAt ?? ticket.updatedAt),
+                  })}
+          </span>
+          {canSwitchAi && !isClosed && !guest && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-6 px-2 text-xs"
+              disabled={aiPending}
+              onClick={() => onSetAi(!ticket.ai?.active)}
+            >
+              {ticket.ai.active ? t('supportTicketsPage.detail.ai.takeOver') : t('supportTicketsPage.detail.ai.giveBack')}
+            </Button>
+          )}
+        </div>
+      )}
+
       <CardContent className="flex-1 overflow-y-auto py-4 space-y-3 max-h-[400px]">
         {ticket.messages.map((msg) => (
           <MessageBubble
@@ -869,6 +982,12 @@ function MessageBubble({
           isAdmin ? 'bg-primary text-primary-foreground rounded-br-sm' : 'bg-muted rounded-bl-sm',
         )}
       >
+        {isAiReply(message) && (
+          <p className="mb-1 flex items-center gap-1 text-[10px] uppercase tracking-wide text-primary-foreground/70">
+            <Bot className="h-3 w-3" />
+            {t('supportTicketsPage.detail.ai.author')}
+          </p>
+        )}
         {message.content && <p className="text-sm whitespace-pre-wrap">{message.content}</p>}
         {message.attachments && message.attachments.length > 0 && (
           <div className="mt-2 space-y-1">
@@ -1106,6 +1225,8 @@ interface SupportConfig {
   purgeAttachmentsOnClose: boolean;
   turnstileSiteKey: string;
   turnstileConfigured: boolean;
+  /** Absent from a panel older than 0.9.7.76 — read as on. */
+  cabinetTelegramButton?: boolean;
 }
 
 function SupportConfigDialog({
@@ -1142,6 +1263,7 @@ function SupportConfigDialog({
         attachmentMaxPerMsg: value.attachmentMaxPerMsg,
         purgeAttachmentsOnClose: value.purgeAttachmentsOnClose,
         turnstileSiteKey: value.turnstileSiteKey,
+        cabinetTelegramButton: value.cabinetTelegramButton !== false,
       };
       // Only send the secret when the operator typed one (empty = keep as-is).
       if (secret.trim().length > 0) payload.turnstileSecret = secret.trim();
@@ -1243,6 +1365,24 @@ function SupportConfigDialog({
                 id="support-purge-on-close"
                 checked={draft.purgeAttachmentsOnClose}
                 onCheckedChange={(next) => patch({ purgeAttachmentsOnClose: next })}
+              />
+            </div>
+
+            {/* The paper plane on the cabinet's «Поддержка» page. On by
+                default — what every install had before the switch. */}
+            <div className="flex items-center justify-between rounded-lg border px-3 py-2.5">
+              <div className="pr-3">
+                <Label htmlFor="support-telegram-button" className="font-medium">
+                  {t('supportTicketsPage.config.telegramButton')}
+                </Label>
+                <p className="text-xs text-muted-foreground">
+                  {t('supportTicketsPage.config.telegramButtonHint')}
+                </p>
+              </div>
+              <Switch
+                id="support-telegram-button"
+                checked={draft.cabinetTelegramButton !== false}
+                onCheckedChange={(next) => patch({ cabinetTelegramButton: next })}
               />
             </div>
 

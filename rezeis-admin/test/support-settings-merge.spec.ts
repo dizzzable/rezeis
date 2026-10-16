@@ -89,3 +89,18 @@ describe('mergeSupportSettings', () => {
     assert.equal(next.attachmentMaxPerMsg, 3);
   });
 });
+
+describe('the Telegram button on the cabinet\'s «Поддержка» page', () => {
+  it('is shown on an install that never touched the switch — as before it existed', () => {
+    assert.equal(toSupportSettingsView({}).cabinetTelegramButton, true);
+  });
+
+  it('survives the merge both ways, and a later unrelated patch leaves it alone', () => {
+    const off = mergeSupportSettings({}, { cabinetTelegramButton: false });
+    assert.equal(toSupportSettingsView(off).cabinetTelegramButton, false);
+    const still = mergeSupportSettings(off, { guestTokenTtlHours: 24 });
+    assert.equal(toSupportSettingsView(still).cabinetTelegramButton, false);
+    const on = mergeSupportSettings(still, { cabinetTelegramButton: true });
+    assert.equal(toSupportSettingsView(on).cabinetTelegramButton, true);
+  });
+});

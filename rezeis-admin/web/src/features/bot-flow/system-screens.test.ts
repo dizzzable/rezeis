@@ -82,16 +82,13 @@ const REIWA: Record<string, { texts: string[]; buttons: Array<[string, string | 
   },
   // lib/error-handler.ts
   error: { texts: ['error.unknown'], buttons: [['help.contact_button', 'help_contact']] },
-  // pages/ai-support.ts
-  aiSupport: {
-    texts: [
-      'ai_support.intro',
-      'ai_support.unavailable',
-      'ai_support.exited',
-      'ai_support.rate_limited',
-      'ai_support.failed',
+  // pages/support-command.ts
+  supportCommand: {
+    texts: ['support_command.text', 'support.not_configured'],
+    buttons: [
+      ['help.open_app_button', 'help_open_app'],
+      ['back_to_menu', 'back'],
     ],
-    buttons: [['ai_support.exit_button', null]],
   },
   // main.ts → setMyCommands, one per BOT_COMMANDS entry
   commands: {

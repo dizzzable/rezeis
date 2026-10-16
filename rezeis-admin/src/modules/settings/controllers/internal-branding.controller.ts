@@ -48,6 +48,13 @@ export interface InternalPublicConfigInterface {
    * code, so offering it would be a dead end.
    */
   readonly emailEnabled: boolean;
+  /**
+   * Whether the cabinet's «Поддержка» page shows the Telegram button
+   * («Поддержка» → настройки → «Кнопка Telegram в поддержке кабинета»). The
+   * handle itself is the cabinet's own (`BOT_SUPPORT_USERNAME`); this only
+   * says whether to offer it. A cabinet older than 0.9.7.58 ignores it.
+   */
+  readonly telegramSupportButton: boolean;
 }
 
 @Controller('internal/branding')
@@ -90,6 +97,7 @@ export class InternalBrandingController {
     ]);
     const platformBranding = await this.settingsService.getPlatformBranding();
     const smtp = await this.emailDeliveryService.getSmtpSettings();
+    const support = await this.settingsService.getSupportSettings();
     const locales = this.appConfiguration.locales;
     const defaultLocale = this.appConfiguration.defaultLocale;
     return {
@@ -103,6 +111,7 @@ export class InternalBrandingController {
         webTitle: platformBranding.webTitle,
       },
       emailEnabled: smtp.enabled === true && typeof smtp.host === 'string' && smtp.host.trim().length > 0,
+      telegramSupportButton: support.cabinetTelegramButton,
     };
   }
 }

@@ -37,10 +37,6 @@ describe('botTextKeyMode — plain text', () => {
     'payments.stars.unknown_invoice',
     'payments.stars.already_handled',
     'payments.stars.unavailable',
-    // AI support's Markdown messages (`ai-support.ts`).
-    'ai_support.unavailable',
-    'ai_support.intro',
-    'ai_support.exited',
     // The `/` command list (`slash-commands.ts`).
     'commands.start.description',
     'commands.help.description',

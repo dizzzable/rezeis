@@ -5,6 +5,7 @@ import { firstValueFrom } from 'rxjs';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { AiConfigService } from './ai-config.service';
 import { AiInstructionService } from './ai-instruction.service';
+import { isAiMessageMetadata } from '../../support-tickets/utils/ai-message.util';
 import { anonymizeTranscript } from '../utils/anonymize';
 
 export interface LearnFromTicketsResult {
@@ -65,7 +66,7 @@ export class AiLearningService {
         messages: {
           orderBy: { createdAt: 'asc' },
           take: 40,
-          select: { authorType: true, content: true },
+          select: { authorType: true, content: true, metadata: true },
         },
       },
     });
@@ -81,7 +82,15 @@ export class AiLearningService {
           continue;
         }
 
-        const transcript = anonymizeTranscript(this.buildTranscript(ticket.messages));
+        // The assistant learns from what OPERATORS answered. Its own replies
+        // (`metadata.ai`) would teach it to repeat itself, and a thread no
+        // operator ever answered has nothing to teach.
+        const human = ticket.messages.filter((m) => !isAiMessageMetadata(m.metadata));
+        if (!human.some((m) => m.authorType === 'ADMIN')) {
+          skipped += 1;
+          continue;
+        }
+        const transcript = anonymizeTranscript(this.buildTranscript(human));
         if (transcript.trim().length < 20) {
           skipped += 1;
           continue;

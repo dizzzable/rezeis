@@ -306,25 +306,32 @@ export const SYSTEM_SCREENS: readonly SystemScreen[] = [
     texts: [{ key: 'error.unknown' }],
   },
   {
-    // `pages/ai-support.ts`, `/support`.
-    id: 'aiSupport',
-    titleKey: 'botFlow.systemScreens.aiSupport.title',
-    triggerKey: 'botFlow.systemScreens.aiSupport.trigger',
+    // `pages/support-command.ts`, `/support`: opens «Поддержка» — the tickets.
+    // Until 16.10.2026 it entered a separate AI chat in the bot; the AI
+    // assistant now answers inside the tickets.
+    id: 'supportCommand',
+    titleKey: 'botFlow.systemScreens.supportCommand.title',
+    triggerKey: 'botFlow.systemScreens.supportCommand.trigger',
     buttons: [
       {
-        key: 'ai-support-exit',
-        labelKey: 'botFlow.systemScreens.buttons.aiExit',
+        key: 'support-command-open',
+        labelKey: 'botFlow.systemButtons.help.openApp',
         isBack: false,
-        textKey: 'ai_support.exit_button',
-        conditionKey: 'botFlow.systemButtons.conditions.aiExit',
+        iconKey: 'help_open_app',
+        textKey: 'help.open_app_button',
+        conditionKey: 'botFlow.systemButtons.conditions.supportOpen',
+      },
+      {
+        key: 'support-command-back',
+        labelKey: 'botFlow.systemButtons.back',
+        isBack: true,
+        iconKey: 'back',
+        textKey: 'back_to_menu',
       },
     ],
     texts: [
-      { key: 'ai_support.intro', captionKey: `${CAPTION}.aiIntro` },
-      { key: 'ai_support.unavailable', captionKey: `${CAPTION}.aiUnavailable` },
-      { key: 'ai_support.exited', captionKey: `${CAPTION}.aiExited` },
-      { key: 'ai_support.rate_limited', captionKey: `${CAPTION}.aiRateLimited` },
-      { key: 'ai_support.failed', captionKey: `${CAPTION}.aiFailed` },
+      { key: 'support_command.text', captionKey: `${CAPTION}.supportCommandText` },
+      { key: 'support.not_configured', captionKey: `${CAPTION}.supportCommandUnavailable` },
     ],
   },
   {

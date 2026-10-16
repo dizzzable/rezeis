@@ -188,7 +188,8 @@ export const en = {
     modelsLoadedCount: 'Models loaded: {{count}}',
     noModelsHint: 'Click "Load models" to fetch the list available for this key, or type a model name manually.',
     enabledLabel: 'Assistant enabled',
-    enabledHint: 'When off, the AI assistant button is hidden from users (both cabinet and bot).',
+    enabledHint:
+      'On — the assistant answers first in the tickets of clients with an account, as ordinary support. Operators are notified only when it hands a ticket over: it does not know the answer, the client asks for a person, or a refund, renewal or payment is needed. An operator reply takes the ticket from the assistant. Guest tickets without an account stay with the operators.',
     systemPromptLabel: 'System prompt (assistant role)',
     systemPromptHint: 'Defines the assistant behaviour. The security rules (never reveal keys, access, IPs/domains, other users\u2019 data, promo codes) always apply and cannot be disabled by this text.',
     systemPromptPlaceholder: 'e.g. You are a polite service assistant. Help with plan choice and app setup…',
@@ -197,7 +198,7 @@ export const en = {
     learnRunning: 'Analysing tickets…',
     learnResult: 'Done: {{created}} drafts created from {{scanned}} tickets (skipped {{skipped}}).',
     learnError: 'Failed to learn from tickets',
-    pageSubtitle: 'AI assistant settings for user support. The provider key lives only here (not in reiwa .env).',
+    pageSubtitle: 'The AI assistant answers in support tickets. The provider key lives only here (not in reiwa .env).',
     apiCardTitle: 'API settings',
     apiCardDesc:
       'OpenAI-compatible provider. The API key is encrypted at rest (AES-256-GCM via REZEIS_CRYPT_KEY) and never stored in the cabinet .env — reiwa fetches it only over the internal BFF channel.',
@@ -4021,6 +4022,8 @@ export const en = {
     list: {
       empty: 'No tickets found',
       guestBadge: 'Guest',
+      aiBadge: 'AI',
+      aiBadgeHint: 'The AI assistant answers: an operator is called when it hands the ticket over',
     },
     userPicker: {
       title: 'Choose a client',
@@ -4080,6 +4083,23 @@ export const en = {
       replyPlaceholder: 'Type your reply…',
       keyHint: 'Enter to send · Shift+Enter for new line',
       guestBadge: 'Anonymous guest',
+      ai: {
+        author: 'AI assistant',
+        leading:
+          'The AI assistant answers this ticket. Operators are notified when it hands the ticket over. Your reply takes the ticket from the assistant.',
+        handedOff: 'The AI handed the ticket over {{when}}: {{reason}}',
+        handedOffNoReason: 'The AI handed the ticket over {{when}}',
+        takeOver: 'Take from the AI',
+        giveBack: 'Give back to the AI',
+        switchedOn: 'The AI leads the ticket again',
+        switchedOff: 'The AI no longer answers this ticket',
+        switchFailed: 'Could not switch the AI',
+        reasons: {
+          ai_off: 'the assistant is off or has no key',
+          ai_error: 'the model did not answer',
+          ai_limit: 'the assistant answered 12 times and the question is still open',
+        },
+      },
       ctx: {
         blocked: 'Blocked',
         neverConnected: 'Never connected',
@@ -4155,6 +4175,9 @@ export const en = {
       purgeOnClose: 'Delete files when a ticket is closed',
       purgeOnCloseHint:
         'Off by default. Closing a ticket removes its files from disk. The attachment records stay, so the thread still shows a file was sent and removed. The files cannot be recovered.',
+      telegramButton: 'Telegram button in the cabinet support',
+      telegramButtonHint:
+        'The paper plane beside “+” on the cabinet “Support” page: opens the support chat in Telegram. Off — clients write tickets only. Takes effect with Reiwa 0.9.7.58.',
       turnstileSiteKey: 'Turnstile site key (public)',
       turnstileSecret: 'Turnstile secret',
       turnstileConfigured: 'secret configured',
@@ -6154,7 +6177,7 @@ export const en = {
           },
           hint: {
             CALLBACK:
-              'Plain inline button: the bot receives its ID. It answers invite, rules and help with «Invite», «Rules», «Help» (or the canvas screen of the same name), menu and back_to_menu with the main menu, close by deleting the message the button is on, check_channel by checking the channel subscription as «I subscribed» does and sending the greeting, ai_support_exit by leaving AI support, and an ID equal to a canvas screen’s shortId with that screen. With any other ID the button does nothing. A screen of your own is opened more reliably with «Bot screen».',
+              'Plain inline button: the bot receives its ID. It answers invite, rules and help with «Invite», «Rules», «Help» (or the canvas screen of the same name), menu and back_to_menu with the main menu, close by deleting the message the button is on, check_channel by checking the channel subscription as «I subscribed» does and sending the greeting, and an ID equal to a canvas screen’s shortId with that screen. With any other ID the button does nothing. A screen of your own is opened more reliably with «Bot screen».',
             URL: 'Opens a link in Telegram’s in-app browser. The bot sends an http:// or https:// address as typed; a path with no address (such as /plans) is a page of the cabinet website, an empty target its home page. The exception is “Cabinet” with an empty target: it opens the cabinet in the phone browser, already signed in (through the Mini App).',
             WEBAPP:
               'Opens a cabinet page in the Mini App. Pick the page from the list below.',

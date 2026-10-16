@@ -59,7 +59,6 @@ describe('the «Внутренняя кнопка» hint', () => {
       'menu',
       'back_to_menu',
       'close',
-      'ai_support_exit',
       'check_channel',
     ])
   })

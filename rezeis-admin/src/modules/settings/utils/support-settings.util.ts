@@ -17,6 +17,8 @@ export interface StoredSupportSettings {
   purgeAttachmentsOnClose?: boolean;
   turnstileSiteKey?: string;
   turnstileSecretEnc?: string;
+  /** The Telegram button on the cabinet's «Поддержка» page. Absent = shown. */
+  cabinetTelegramButton?: boolean;
 }
 
 /** Admin-safe view returned to the SPA (secret redacted to a flag). */
@@ -28,6 +30,13 @@ export interface SupportSettingsView {
   readonly purgeAttachmentsOnClose: boolean;
   readonly turnstileSiteKey: string;
   readonly turnstileConfigured: boolean;
+  /**
+   * Whether the cabinet's «Поддержка» page shows the Telegram button (the
+   * paper plane beside «+»). On by default — what every install had before
+   * the switch. Off, clients write tickets only; the cabinet hides the button
+   * (reiwa 0.9.7.58+, `telegramSupportButton` in the public config).
+   */
+  readonly cabinetTelegramButton: boolean;
 }
 
 /** Limits consumed by the support services at runtime. */
@@ -85,6 +94,7 @@ function effective(stored: StoredSupportSettings): {
   attachmentMaxPerMsg: number;
   purgeAttachmentsOnClose: boolean;
   turnstileSiteKey: string;
+  cabinetTelegramButton: boolean;
 } {
   return {
     enabled: typeof stored.enabled === 'boolean' ? stored.enabled : true,
@@ -107,6 +117,7 @@ function effective(stored: StoredSupportSettings): {
       typeof stored.turnstileSiteKey === 'string'
         ? stored.turnstileSiteKey
         : (process.env.SUPPORT_TURNSTILE_SITE_KEY ?? ''),
+    cabinetTelegramButton: stored.cabinetTelegramButton !== false,
   };
 }
 
@@ -120,6 +131,7 @@ export function toSupportSettingsView(stored: StoredSupportSettings): SupportSet
     attachmentMaxPerMsg: e.attachmentMaxPerMsg,
     purgeAttachmentsOnClose: e.purgeAttachmentsOnClose,
     turnstileSiteKey: e.turnstileSiteKey,
+    cabinetTelegramButton: e.cabinetTelegramButton,
     turnstileConfigured:
       (typeof stored.turnstileSecretEnc === 'string' && stored.turnstileSecretEnc.length > 0) ||
       envSecret.length > 0,
@@ -146,6 +158,7 @@ export interface SupportSettingsPatch {
   turnstileSiteKey?: string;
   /** Plaintext secret to encrypt (caller supplies the cipher); '' clears it. */
   turnstileSecretEnc?: string | null;
+  cabinetTelegramButton?: boolean;
 }
 
 /**
@@ -173,6 +186,9 @@ export function mergeSupportSettings(
   }
   if (patch.turnstileSiteKey !== undefined) {
     next.turnstileSiteKey = patch.turnstileSiteKey.trim();
+  }
+  if (patch.cabinetTelegramButton !== undefined) {
+    next.cabinetTelegramButton = patch.cabinetTelegramButton;
   }
   if (patch.turnstileSecretEnc !== undefined) {
     if (patch.turnstileSecretEnc === null || patch.turnstileSecretEnc.length === 0) {

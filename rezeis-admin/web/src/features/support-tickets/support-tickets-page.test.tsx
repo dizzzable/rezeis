@@ -256,3 +256,67 @@ describe('SupportTicketsPage — opening a ticket with a client', () => {
     expect(await screen.findByText(/matches more than one account/i)).toBeInTheDocument()
   })
 })
+
+describe('the AI assistant on a ticket (panel 0.9.7.76)', () => {
+  function mockTicket(ai: { active: boolean; handedOffAt: string | null; handoffReason: string | null }) {
+    vi.restoreAllMocks()
+    usePermissionStore.setState({
+      loaded: true,
+      role: null,
+      granted: new Set(['support_tickets:view', 'support_tickets:edit']),
+    })
+    const detail = {
+      id: 'ticket-ai',
+      userTelegramId: '12345',
+      subject: 'VPN is down',
+      status: 'waiting_reply',
+      channel: 'cabinet',
+      createdAt: '2026-10-16T10:00:00.000Z',
+      updatedAt: '2026-10-16T10:01:00.000Z',
+      user: { id: 'u-1', username: 'ann', name: 'Ann', telegramId: '12345' },
+      ai,
+      messages: [
+        { id: 'm-1', authorType: 'user', authorId: 'u-1', content: 'It does not connect', createdAt: '2026-10-16T10:00:00.000Z' },
+        {
+          id: 'm-2',
+          authorType: 'admin',
+          authorId: null,
+          content: 'Re-add the subscription',
+          createdAt: '2026-10-16T10:00:30.000Z',
+          metadata: { ai: true, model: 'gpt-4o-mini' },
+        },
+      ],
+      docRequests: [],
+    }
+    vi.spyOn(api, 'get').mockImplementation(async (path: string) => {
+      if (path === '/admin/support-tickets') return { data: { items: [{ ...detail, messages: [] }], total: 1 } }
+      if (path === '/admin/support-tickets/ticket-ai') return { data: detail }
+      return { data: {} }
+    })
+    return vi.spyOn(api, 'post').mockResolvedValue({ data: detail })
+  }
+
+  it('marks the assistant\'s reply and lets the operator take the thread without writing', async () => {
+    const post = mockTicket({ active: true, handedOffAt: null, handoffReason: null })
+    const user = userEvent.setup()
+    renderWithProviders(<SupportTicketsPage />)
+
+    await user.click(await screen.findByRole('button', { name: /VPN is down/ }))
+    expect(await screen.findByText('AI assistant')).toBeInTheDocument()
+    expect(screen.getByTestId('ticket-ai-strip')).toHaveTextContent(/The AI assistant answers this ticket/)
+
+    await user.click(screen.getByRole('button', { name: 'Take from the AI' }))
+    expect(post).toHaveBeenCalledWith('/admin/support-tickets/ticket-ai/ai', { active: false })
+  })
+
+  it('says why the assistant handed the thread over, in words', async () => {
+    mockTicket({ active: false, handedOffAt: '2026-10-16T10:02:00.000Z', handoffReason: 'ai_error' })
+    const user = userEvent.setup()
+    renderWithProviders(<SupportTicketsPage />)
+
+    await user.click(await screen.findByRole('button', { name: /VPN is down/ }))
+    const strip = await screen.findByTestId('ticket-ai-strip')
+    expect(strip).toHaveTextContent(/the model did not answer/)
+    expect(screen.getByRole('button', { name: 'Give back to the AI' })).toBeInTheDocument()
+  })
+})

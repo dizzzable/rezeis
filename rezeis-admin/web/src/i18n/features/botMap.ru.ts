@@ -160,7 +160,7 @@ export const ru = {
       targetUrl: 'Абсолютный HTTPS URL',
       targetCallback: 'callback_data (например, menu:main)',
       callbackHint:
-        'Бот отвечает на: menu:main, menu или menu:new — главное меню новым сообщением, а уведомление остаётся; screen:<shortId> или сам shortId экрана — этот экран (свой экран надёжнее открывать через screen:<shortId>); invite, rules, help — их экраны; back_to_menu — главное меню; close — удаляет сообщение; check_channel или check_channel:q:<id> — проверка подписки на канал, как «Я подписался»; quest_channel:<id> — проверка задания «Подписка на канал»; lang:<код>, например lang:ru, — смена языка; ai_support_exit — выход из ИИ-поддержки. На другое значение кнопка ничего не сделает.',
+        'Бот отвечает на: menu:main, menu или menu:new — главное меню новым сообщением, а уведомление остаётся; screen:<shortId> или сам shortId экрана — этот экран (свой экран надёжнее открывать через screen:<shortId>); invite, rules, help — их экраны; back_to_menu — главное меню; close — удаляет сообщение; check_channel или check_channel:q:<id> — проверка подписки на канал, как «Я подписался»; quest_channel:<id> — проверка задания «Подписка на канал»; lang:<код>, например lang:ru, — смена языка. На другое значение кнопка ничего не сделает.',
       defaultTargetHint:
         'Без кнопок системa автоматически ведёт пользователя в раздел кабинета — можно увидеть на схеме.',
       lifetimeTopUpHint:
@@ -281,7 +281,8 @@ export const ru = {
         paymentReturnOpen:
           'Открывает мини-приложение; без его адреса https — страницу оплаты на сайте кабинета; без обоих кнопки нет',
         passwordReset: 'Только вместе с выданной ссылкой',
-        aiExit: 'Под каждым ответом ИИ-поддержки и под её ошибками',
+        supportOpen:
+          'Открывает «Поддержку» в мини-приложении; без его адреса https — на сайте кабинета; без обоих кнопки нет',
       },
       // Кнопки главного меню, которых нет в списке кнопок: бот добавляет их сам.
       mainMenu: {
@@ -322,7 +323,6 @@ export const ru = {
         langEn: '🇬🇧 English',
         paymentReturnOpen: '📱 Открыть приложение',
         passwordReset: '🔑 Задать новый пароль',
-        aiExit: '❌ Выйти из поддержки',
       },
       channelGate: {
         title: 'Канал обязателен',
@@ -352,8 +352,8 @@ export const ru = {
         title: 'Сообщение об ошибке',
         trigger: 'Когда бот не смог обработать сообщение или нажатие',
       },
-      aiSupport: {
-        title: 'ИИ-поддержка',
+      supportCommand: {
+        title: 'Поддержка по /support',
         trigger: 'Команда /support',
       },
       commands: {
@@ -389,11 +389,8 @@ export const ru = {
         paysupportBody: 'Текст, если @username поддержки задан',
         paysupportUnavailable: 'Текст, если он не задан',
         paysupportPrefill: 'Готовое первое сообщение в чате поддержки',
-        aiIntro: 'Ответ на /support, когда ИИ-поддержка включена',
-        aiUnavailable: 'Когда ИИ-поддержка выключена или не настроена',
-        aiExited: 'После выхода из ИИ-поддержки',
-        aiRateLimited: 'Слишком много сообщений подряд',
-        aiFailed: 'ИИ не ответил',
+        supportCommandText: 'Ответ на /support: кнопка открывает «Поддержку» с обращениями',
+        supportCommandUnavailable: 'Когда у кабинета нет адреса https',
         accessRestricted: '/start, когда сервис закрыт для всех (режим доступа)',
         accessRegBlocked: '/start нового человека, пока регистрация закрыта',
         accessInvitedNoCode: '/start нового человека без приглашения, пока вход только по приглашениям',

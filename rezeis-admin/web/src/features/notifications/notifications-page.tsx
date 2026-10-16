@@ -220,7 +220,12 @@ const EVENT_TYPE_CATALOG: Readonly<Record<string, readonly string[]>> = {
     'partner.balance_refund_failed',
   ],
   PROMOCODE: ['promocode.activated', 'promocode.created', 'promocode.depleted', 'promocode.archived'],
-  SUPPORT: ['support.ticket_created', 'support.ticket_user_reply'],
+  SUPPORT: [
+    'support.ticket_created', 'support.ticket_user_reply',
+    // The AI assistant handed a ticket to a person — the one moment the
+    // operators hear about a thread it led.
+    'support.ticket_handed_off',
+  ],
   FRAUD: [
     'fraud.signal_opened', 'fraud.connections_dropped',
     // The suppression side of anti-fraud. `candidate_exempted` is the one that

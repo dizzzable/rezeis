@@ -160,7 +160,7 @@ export const en = {
       targetUrl: 'Absolute HTTPS URL',
       targetCallback: 'callback_data (e.g. menu:main)',
       callbackHint:
-        'The bot answers: menu:main, menu or menu:new — the main menu as a new message, and the notification stays; screen:<shortId> or a screen’s shortId itself — that screen (a screen of your own opens more reliably with screen:<shortId>); invite, rules, help — their screens; back_to_menu — the main menu; close — deletes the message; check_channel or check_channel:q:<id> — the channel subscription check, as «I subscribed»; quest_channel:<id> — the «Subscribe to channel» quest check; lang:<code>, such as lang:ru — switches the language; ai_support_exit — leaves AI support. With any other value the button does nothing.',
+        'The bot answers: menu:main, menu or menu:new — the main menu as a new message, and the notification stays; screen:<shortId> or a screen’s shortId itself — that screen (a screen of your own opens more reliably with screen:<shortId>); invite, rules, help — their screens; back_to_menu — the main menu; close — deletes the message; check_channel or check_channel:q:<id> — the channel subscription check, as «I subscribed»; quest_channel:<id> — the «Subscribe to channel» quest check; lang:<code>, such as lang:ru — switches the language. With any other value the button does nothing.',
       defaultTargetHint:
         'With no buttons, the system still deep-links into the most relevant cabinet section — see the diagram.',
       lifetimeTopUpHint:
@@ -275,7 +275,8 @@ export const en = {
         paymentReturnOpen:
           'Opens the Mini App; without its https address, the payment page on the cabinet website; without either there is no button',
         passwordReset: 'Only together with an issued link',
-        aiExit: 'Under every AI support answer and its errors',
+        supportOpen:
+          'Opens Support in the Mini App; without its https address — on the cabinet website; without either there is no button',
       },
       // Main-menu buttons missing from the button list: the bot adds them itself.
       mainMenu: {
@@ -316,7 +317,6 @@ export const en = {
         langEn: '🇬🇧 English',
         paymentReturnOpen: '📱 Open app',
         passwordReset: '🔑 Set a new password',
-        aiExit: '❌ Exit support',
       },
       channelGate: {
         title: 'Channel required',
@@ -346,8 +346,8 @@ export const en = {
         title: 'Error message',
         trigger: 'When the bot failed to handle a message or a tap',
       },
-      aiSupport: {
-        title: 'AI support',
+      supportCommand: {
+        title: 'Support via /support',
         trigger: 'The /support command',
       },
       commands: {
@@ -383,11 +383,8 @@ export const en = {
         paysupportBody: 'The text when a support @username is set',
         paysupportUnavailable: 'The text when it is not',
         paysupportPrefill: 'The ready first message in the support chat',
-        aiIntro: 'The answer to /support when AI support is on',
-        aiUnavailable: 'When AI support is off or not set up',
-        aiExited: 'After leaving AI support',
-        aiRateLimited: 'Too many messages in a row',
-        aiFailed: 'The AI gave no answer',
+        supportCommandText: 'The answer to /support: the button opens Support with the tickets',
+        supportCommandUnavailable: 'When the cabinet has no https address',
         accessRestricted: '/start when the service is closed to everybody (access mode)',
         accessRegBlocked: '/start by a newcomer while sign-up is closed',
         accessInvitedNoCode: '/start by a newcomer without an invitation while it is invitation-only',

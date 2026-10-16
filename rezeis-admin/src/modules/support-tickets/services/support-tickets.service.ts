@@ -2,6 +2,7 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma, SupportTicketStatus } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { isAiMessageMetadata } from '../utils/ai-message.util';
 
 interface ListTicketsQuery {
   readonly userId?: string;
@@ -63,6 +64,16 @@ function nextTicketStatus(
     return SupportTicketStatus.OPEN;
   }
   return current;
+}
+
+/**
+ * An operator acting on the thread: their own reply (ADMIN without the
+ * assistant's mark), or a SYSTEM line they caused — a document request names
+ * the operator who asked in `authorId`.
+ */
+function isOperatorMessage(input: AddMessageInput): boolean {
+  if (input.authorType === 'ADMIN') return !isAiMessageMetadata(input.metadata);
+  return input.authorType === 'SYSTEM' && input.authorId !== null;
 }
 
 interface CreateDocumentRequestInput {
@@ -362,9 +373,15 @@ export class SupportTicketsService {
     // `archivedAt` stayed set: archived by one query, active by another, and
     // present in neither list correctly. So compare-and-swap on the status we
     // actually read.
+    //
+    // An operator's own message also takes the thread from the AI assistant:
+    // a human answered, and the assistant must not talk over them. Same
+    // statement, so there is no instant where the reply is stored and the
+    // assistant still leads.
+    const takeover = isOperatorMessage(input) ? { aiActive: false } : {};
     const moved = await this.prismaService.supportTicket.updateMany({
       where: { id: input.ticketId, status: ticket.status },
-      data: { status: nextTicketStatus(ticket.status, input.authorType) },
+      data: { status: nextTicketStatus(ticket.status, input.authorType), ...takeover },
     });
     if (moved.count === 0) {
       // Somebody moved it. Decide again from what is stored now — a message
@@ -377,7 +394,7 @@ export class SupportTicketsService {
       if (fresh !== null) {
         await this.prismaService.supportTicket.update({
           where: { id: input.ticketId },
-          data: { status: nextTicketStatus(fresh.status, input.authorType) },
+          data: { status: nextTicketStatus(fresh.status, input.authorType), ...takeover },
         });
       }
     }
