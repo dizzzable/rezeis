@@ -408,7 +408,9 @@ describe('the guided walk is a mode of its own, not a third switch position', ()
     const saved = await s.replaceConfig({ ...catalog(), connectScreenMode: 'screen' });
     assert.equal(saved.config.connectScreenMode, 'interactive');
     assert.equal((await s.getEffectiveConfig()).connectScreenMode, 'interactive');
-    assert.equal((store.get('connect-page-v2') as { connectScreenMode?: string }).connectScreenMode, 'screen');
+    // Absent, not 'screen': the catalog schema of 0.9.7.74 is strict, and a
+    // panel rolled back to it must still read the operator's catalog.
+    assert.equal('connectScreenMode' in (store.get('connect-page-v2') as object), false);
   });
 
   it('refuses a value it does not know instead of quietly storing the page', async () => {

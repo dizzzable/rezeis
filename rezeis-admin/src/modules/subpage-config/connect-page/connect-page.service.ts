@@ -417,7 +417,12 @@ export class ConnectPageService {
     // accepts it there. It is stamped from its own row on every read, so a copy
     // here could only ever be stale — and a stale palette sitting in the row an
     // export or a restore would carry is a copy that eventually gets believed.
-    const stored: ConnectPageConfig = { ...config, theme: null };
+    //
+    // Nor is the mode, and for a harder reason: the catalog schema of 0.9.7.74
+    // and older is strict, so a row carrying `connectScreenMode` is a row a
+    // panel rolled back to that release cannot read at all.
+    const { connectScreenMode: _mode, ...withoutMode } = config;
+    const stored = { ...withoutMode, theme: null };
     await this.prisma.subpageConfig.upsert({
       where: { key: ConnectPageService.KEY },
       create: { key: ConnectPageService.KEY, config: stored as unknown as Prisma.InputJsonValue },
