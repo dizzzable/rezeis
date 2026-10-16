@@ -11,11 +11,14 @@ import {
 } from './connect-page.theme';
 import {
   auditConnectPageConfig,
+  CONNECT_SCREEN_MODES,
   connectPageConfigSchema,
+  connectScreenModeSchema,
   MAX_ICON_BYTES,
   normalizeConnectPageConfig,
   type ConnectPageConfig,
   type ConnectPageIssue,
+  type ConnectScreenMode,
 } from './connect-page.schema';
 import { InvalidIconError, sanitizeIconMarkup } from './svg-sanitizer.util';
 
@@ -103,6 +106,19 @@ export class ConnectPageService {
    */
   private static readonly THEME_KEY = 'connect-page-theme';
 
+  /**
+   * Which of the two screens the switch opens — the page with every
+   * instruction, or the guided walk — in a fourth row.
+   *
+   * Not a field of the switch's own row: `setEnabled` writes that row whole,
+   * so turning the screen off and on again would quietly forget the walk. And
+   * not in the catalog, for the reason the switch is not there either.
+   *
+   * Absent means the page, which is what every install had before the walk
+   * existed; a row that cannot be read means the page too.
+   */
+  private static readonly MODE_KEY = 'connect-page-mode';
+
   private readonly logger = new Logger(ConnectPageService.name);
 
   public constructor(private readonly prisma: PrismaService) {}
@@ -112,17 +128,19 @@ export class ConnectPageService {
    * never been edited still has a working catalog.
    */
   public async getEffectiveConfig(): Promise<ConnectPageConfig> {
-    const [row, enabled, theme] = await Promise.all([
+    const [row, enabled, theme, mode] = await Promise.all([
       this.prisma.subpageConfig.findUnique({ where: { key: ConnectPageService.KEY } }),
       this.isEnabled(),
       this.readTheme(),
+      this.readMode(),
     ]);
-    // Both stamped from their own rows, over whatever a stored blob carries.
-    // A config saved while the schema still had these fields inline would
-    // otherwise be able to answer for them.
+    // All three stamped from their own rows, over whatever a stored blob
+    // carries. A config saved while the schema still had these fields inline
+    // would otherwise be able to answer for them.
     const withFlag = (config: ConnectPageConfig): ConnectPageConfig => ({
       ...config,
       connectScreenEnabled: enabled,
+      connectScreenMode: mode,
       theme,
     });
     // Normalized on the way out as well as on the way in, so `encode` is
@@ -168,6 +186,40 @@ export class ConnectPageService {
     });
     this.logger.log(`Connect screen ${enabled ? 'enabled' : 'disabled'}.`);
     return enabled;
+  }
+
+  /** The page or the guided walk — see {@link ConnectPageService.MODE_KEY}. */
+  public async readMode(): Promise<ConnectScreenMode> {
+    const row = await this.prisma.subpageConfig.findUnique({
+      where: { key: ConnectPageService.MODE_KEY },
+    });
+    if (row === null) return 'screen';
+    const parsed = connectScreenModeSchema.safeParse(readJsonObject(row.config)['mode']);
+    if (parsed.success) return parsed.data;
+    // Logged, not thrown: the mode only decides how the screen connects, and
+    // the page is a working answer. Silently reverting an operator's choice
+    // with nothing in the log is the one outcome not allowed.
+    this.logger.error("Stored connect-screen mode no longer parses; serving the page with every instruction.");
+    return 'screen';
+  }
+
+  /**
+   * Store the mode. Refused in front of the operator rather than coerced: a
+   * value the editor did not mean must not quietly become the page.
+   */
+  public async setMode(input: unknown): Promise<ConnectScreenMode> {
+    const parsed = connectScreenModeSchema.safeParse(input);
+    if (!parsed.success) {
+      throw new BadRequestException(`mode: one of ${CONNECT_SCREEN_MODES.join(', ')}`);
+    }
+    const mode = parsed.data;
+    await this.prisma.subpageConfig.upsert({
+      where: { key: ConnectPageService.MODE_KEY },
+      create: { key: ConnectPageService.MODE_KEY, config: { mode } },
+      update: { config: { mode } },
+    });
+    this.logger.log(`Connect screen mode set to ${mode}.`);
+    return mode;
   }
 
   /**
@@ -338,8 +390,14 @@ export class ConnectPageService {
     );
     // The flag is not the editor's to write: a draft branched before the switch
     // was flicked would carry the old value and turn the screen back off under
-    // a green "saved" toast. It is re-read from its own row on the way out.
-    const config = normalizeConnectPageConfig({ ...parsed.data, icons, connectScreenEnabled: false });
+    // a green "saved" toast. It is re-read from its own row on the way out, and
+    // so is the mode, for the same reason.
+    const config = normalizeConnectPageConfig({
+      ...parsed.data,
+      icons,
+      connectScreenEnabled: false,
+      connectScreenMode: 'screen',
+    });
     // The audit runs on the CLEANED config: an icon the sanitizer refused is an
     // icon key that no longer exists, and the audit is what notices that
     // something still points at it.
@@ -366,7 +424,11 @@ export class ConnectPageService {
       update: { config: stored as unknown as Prisma.InputJsonValue },
     });
 
-    const enabled = await this.isEnabled();
+    const [enabled, mode, theme] = await Promise.all([
+      this.isEnabled(),
+      this.readMode(),
+      this.readTheme(),
+    ]);
     this.logger.log(
       `Connect-page catalog updated: ${config.platforms.length} platform(s), ${config.platforms.reduce(
         (sum, platform) => sum + platform.apps.length,
@@ -374,7 +436,7 @@ export class ConnectPageService {
       )} app(s).`,
     );
     return {
-      config: { ...config, connectScreenEnabled: enabled, theme: await this.readTheme() },
+      config: { ...config, connectScreenEnabled: enabled, connectScreenMode: mode, theme },
       cleanedIcons,
     };
   }

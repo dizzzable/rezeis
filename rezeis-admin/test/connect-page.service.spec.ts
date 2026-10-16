@@ -375,3 +375,58 @@ describe('what the cabinet is actually handed', () => {
     assert.equal((await svc.getCabinetConfig()).theme?.presetId, 'concept-ae');
   });
 });
+
+describe('the guided walk is a mode of its own, not a third switch position', () => {
+  it('answers the page with every instruction until an operator picks the walk', async () => {
+    const { service: s } = service();
+    assert.equal((await s.getEffectiveConfig()).connectScreenMode, 'screen');
+  });
+
+  it('keeps `connectScreenEnabled` on in both modes, so an older cabinet opens the page it knows', async () => {
+    // A cabinet older than the walk reads only the switch. Folding the walk
+    // into it would have sent those customers to the external page.
+    const { service: s } = service();
+    await s.setEnabled(true);
+    await s.setMode('interactive');
+    const cabinet = await s.getCabinetConfig();
+    assert.equal(cabinet.connectScreenEnabled, true);
+    assert.equal(cabinet.connectScreenMode, 'interactive');
+  });
+
+  it('is not forgotten when the switch is turned off and on again', async () => {
+    // `setEnabled` writes its row whole; a mode kept inside it would be lost.
+    const { service: s } = service();
+    await s.setMode('interactive');
+    await s.setEnabled(false);
+    await s.setEnabled(true);
+    assert.equal((await s.getEffectiveConfig()).connectScreenMode, 'interactive');
+  });
+
+  it('survives a catalog save drafted before it was picked, and is not stored in the catalog', async () => {
+    const { service: s, store } = service();
+    await s.setMode('interactive');
+    const saved = await s.replaceConfig({ ...catalog(), connectScreenMode: 'screen' });
+    assert.equal(saved.config.connectScreenMode, 'interactive');
+    assert.equal((await s.getEffectiveConfig()).connectScreenMode, 'interactive');
+    assert.equal((store.get('connect-page-v2') as { connectScreenMode?: string }).connectScreenMode, 'screen');
+  });
+
+  it('refuses a value it does not know instead of quietly storing the page', async () => {
+    const { service: s, store } = service();
+    await assert.rejects(() => s.setMode('wizard'), /mode: one of screen, interactive/);
+    await assert.rejects(() => s.setMode(undefined), /mode/);
+    assert.equal(store.has('connect-page-mode'), false);
+  });
+
+  it('reads a row it cannot parse as the page', async () => {
+    const { service: s } = service([{ key: 'connect-page-mode', config: { mode: 'carousel' } }]);
+    assert.equal(await s.readMode(), 'screen');
+  });
+
+  it('does not freeze the built-in default into the database either', async () => {
+    const { service: s, store } = service();
+    await s.setMode('interactive');
+    assert.equal(store.has('connect-page-v2'), false);
+    assert.equal(await s.hasStoredConfig(), false);
+  });
+});

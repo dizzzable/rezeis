@@ -3,6 +3,7 @@ import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
 import { RemnawaveModule } from '../remnawave/remnawave.module';
 import { InternalConnectHelpController } from './controllers/internal-connect-help.controller';
+import { InternalSubscriptionConnectionController } from './controllers/internal-subscription-connection.controller';
 import { ConnectSignalHealthService } from './services/connect-signal-health.service';
 import { ConnectSignalProbeService } from './services/connect-signal-probe.service';
 
@@ -13,8 +14,8 @@ import { ConnectSignalProbeService } from './services/connect-signal-probe.servi
  * The writers the webhook and the cabinet read use are plain functions
  * (`connect-evidence.util.ts`), called without this module, so the remnawave
  * and internal-user modules never import it and no module cycle can form. Only
- * the probe needs the panel adapter, which is why this module imports
- * `RemnawaveModule` and not the other way round.
+ * the probe and the guided walk's live read need the panel adapter, which is
+ * why this module imports `RemnawaveModule` and not the other way round.
  *
  * Exported for the packages that act on the signal: the health for the
  * sender's and the broadcasts' "can we know?" and the probe's `recheck` for
@@ -22,7 +23,7 @@ import { ConnectSignalProbeService } from './services/connect-signal-probe.servi
  */
 @Module({
   imports: [AuthModule, RemnawaveModule],
-  controllers: [InternalConnectHelpController],
+  controllers: [InternalConnectHelpController, InternalSubscriptionConnectionController],
   providers: [ConnectSignalProbeService, ConnectSignalHealthService],
   exports: [ConnectSignalProbeService, ConnectSignalHealthService],
 })

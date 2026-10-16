@@ -79,6 +79,11 @@ export const CABINET_CAPABILITY = {
    * runs the subscription, and sends the consent that makes one.
    */
   aurapayAutopay: 'web.aurapay-autopay',
+  /**
+   * The «Интерактивный» connect mode: «Подключить» opens the guided walk
+   * (subscription, device, app, adding, the first connection).
+   */
+  connectInteractive: 'web.connect-interactive',
   /** A subscription with no end date: no dead «Продлить», no «Улучшить» that ends in an error. */
   lifetimeSubscription: 'web.lifetime-subscription',
   /** The bell's «Докупка не применена» opens «Поддержка». */
@@ -161,6 +166,20 @@ export const CABINET_CAPABILITY_REGISTRY: readonly CabinetCapabilityRow[] = [
     operatorText: 'автосписание AuraPay не предлагается: старый кабинет оформил бы вместо него разовый платёж',
     operatorTextEn: 'automatic charging at AuraPay is not offered: an older cabinet would make a one-off payment instead',
     gatedIn: ['src/modules/payments/controllers/internal-payments.controller.ts'],
+  },
+  {
+    id: CABINET_CAPABILITY.connectInteractive,
+    surface: 'web',
+    since: '0.9.7.57',
+    kind: 'degraded',
+    // Nothing is withheld: the mode rides beside `connectScreenEnabled`, which
+    // stays on, so Reiwa 0.9.7.56 and older open the page with every
+    // instruction instead of the walk — never the external page
+    // (reiwa `web/src/features/connect/wizard/connect-wizard.tsx`).
+    operatorText:
+      'режим «Интерактивный» не включается: «Подключить» открывает обычный экран подключения со всеми инструкциями',
+    operatorTextEn:
+      'the “Interactive” connect mode does not start: “Connect” opens the ordinary connect screen with every instruction',
   },
   {
     id: CABINET_CAPABILITY.lifetimeSubscription,

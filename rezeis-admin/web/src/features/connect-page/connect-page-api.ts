@@ -118,6 +118,8 @@ export const connectPageConfigSchema = z
     // whole page into a permanent skeleton.
     version: z.number(),
     connectScreenEnabled: z.boolean().optional(),
+    /** The page with every instruction, or the guided walk; a value this editor has not met reads as the page. */
+    connectScreenMode: z.enum(['screen', 'interactive']).catch('screen').optional(),
     /** Amber when absent — see `featuredColor` in the server's schema. */
     featuredColor: z.string().nullable().catch(null).optional(),
     theme: connectThemeSchema.nullable().catch(null).optional(),

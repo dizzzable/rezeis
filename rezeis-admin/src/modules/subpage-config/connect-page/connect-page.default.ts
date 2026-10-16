@@ -288,6 +288,8 @@ export const DEFAULT_CONNECT_PAGE_CONFIG: ConnectPageConfig = {
   version: 2,
   // Off until an operator turns it on: this replaces a working flow.
   connectScreenEnabled: false,
+  // Every instruction on one page — the screen as it was before the guided walk.
+  connectScreenMode: 'screen',
   // No concept of its own: the screen wears whatever the cabinet wears. Both
   // this and the flag above are stamped from their own rows on every read — the
   // values here are what an install that has never been edited answers with.

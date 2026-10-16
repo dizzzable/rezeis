@@ -131,6 +131,18 @@ export const en = {
     turnedOff: 'Connect screen is off — the button opens the external page again',
     saveFailed: 'Could not save',
     unknown: 'Could not read the current state. Reload the page.',
+    modeLabel: 'How to guide the customer',
+    modeScreen: 'Every instruction on one screen',
+    modeScreenHint: 'The platform, the apps and the steps all at once. Suits those who know what to do.',
+    modeInteractive: 'Interactive — step by step',
+    modeInteractiveHint:
+      'Walks the customer through: subscription, device, app, adding the subscription and checking the first connection.',
+    modeSavedScreen: '"Connect" shows every instruction on one screen',
+    modeSavedInteractive: '"Connect" walks the customer step by step',
+    modeOffNote: 'The choice takes effect once the connect screen is on.',
+    modeScreenNote: 'The catalog below is shown whole: every app and step on one page.',
+    modeOldCabinet:
+      'The steps come from the catalog below. A cabinet at 0.9.7.56 or older opens the ordinary screen with every instruction — it walks step by step once updated.',
   },
   connectPageEditor: {
     summary: 'Platforms: {{platforms}}, apps: {{apps}}',

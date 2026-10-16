@@ -8,7 +8,7 @@ import { RequirePermission } from '../../rbac/decorators/require-permission.deco
 import { RbacGuard } from '../../rbac/guards/rbac.guard';
 import { ReiwaCacheInvalidatorService } from '../../bot-config/services/reiwa-cache-invalidator.service';
 import { ConnectPageService } from './connect-page.service';
-import type { ConnectPageConfig, ConnectPageIssue } from './connect-page.schema';
+import type { ConnectPageConfig, ConnectPageIssue, ConnectScreenMode } from './connect-page.schema';
 import type { ConnectPageTheme } from './connect-page.theme';
 
 /**
@@ -77,6 +77,21 @@ export class AdminConnectPageController {
     const enabled = await this.connectPage.setEnabled(raw['enabled'] === true);
     void this.reiwaCache.invalidateConnectPage('connect screen toggled');
     return { enabled };
+  }
+
+  /**
+   * The page with every instruction, or the guided walk — on its own, like
+   * the switch, and for the same reason: choosing it is not an edit of the
+   * catalog. It decides nothing while the switch is off.
+   */
+  @Put('mode')
+  @RequirePermission('subpage_config', 'edit')
+  @ApiOperation({ summary: 'Choose how the cabinet connect screen connects' })
+  public async setMode(@Body() body: unknown): Promise<{ mode: ConnectScreenMode }> {
+    const raw = body !== null && typeof body === 'object' ? (body as Record<string, unknown>) : {};
+    const mode = await this.connectPage.setMode(raw['mode']);
+    void this.reiwaCache.invalidateConnectPage('connect screen mode changed');
+    return { mode };
   }
 
   /**

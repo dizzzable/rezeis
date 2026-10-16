@@ -334,6 +334,11 @@ export type ConnectPagePlatform = z.infer<typeof platformSchema>;
 
 // ── The config ───────────────────────────────────────────────────────────────
 
+/** The two ways the cabinet's own screen can connect — see `connectScreenMode`. */
+export const CONNECT_SCREEN_MODES = ['screen', 'interactive'] as const;
+export const connectScreenModeSchema = z.enum(CONNECT_SCREEN_MODES);
+export type ConnectScreenMode = z.infer<typeof connectScreenModeSchema>;
+
 export const connectPageConfigSchema = z
   .object({
     version: z.literal(2),
@@ -367,6 +372,20 @@ export const connectPageConfigSchema = z
      * the off position is the rollback: no deploy, one switch.
      */
     connectScreenEnabled: z.boolean().default(false),
+    /**
+     * HOW the cabinet's own screen connects, once the switch above is on.
+     *
+     *   screen       — every instruction on one page (the screen since 0.9.7.35);
+     *   interactive  — a guided walk: subscription, device, app, adding the
+     *                  subscription, and waiting for the first connection.
+     *
+     * A second field rather than a third position of the switch, and that is
+     * the compatibility story: a cabinet older than the walk reads only
+     * `connectScreenEnabled`, which stays `true` in both modes, so it keeps
+     * opening the page it knows instead of falling back to the external one.
+     * Stamped from its own row like the switch, never stored in the catalog.
+     */
+    connectScreenMode: connectScreenModeSchema.default('screen'),
     /**
      * The dot that marks the recommended app, when the operator wants a colour
      * of their own.
