@@ -380,6 +380,10 @@ const PUSH_TAG_FAMILY_BY_TYPE: Readonly<Record<string, string>> = {
   expires_in_3_days: 'subscription-deadline',
   expires_in_2_days: 'subscription-deadline',
   expires_in_1_days: 'subscription-deadline',
+  // The last hours (off until the operator turns them on): the same deadline,
+  // closer — the newest reminder replaces the one before it.
+  expires_in_3_hours: 'subscription-deadline',
+  expires_in_1_hour: 'subscription-deadline',
   expired: 'subscription-deadline',
   expired_1_day_ago: 'subscription-deadline',
   // «Возврат покупателя»: the same deadline, long passed — the newest reminder

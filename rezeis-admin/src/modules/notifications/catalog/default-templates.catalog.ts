@@ -136,6 +136,33 @@ const DURATION_TEMPLATES: ReadonlyArray<DefaultNotificationTemplate> = [
     bodyEn: 'Hi, {{name}}! Your subscription expires tomorrow ⚠️' + SUBSCRIPTION_CARD_EN,
     buttons: EXPIRY_BUTTONS,
   },
+  // The last hours (the owner, 17.10.2026): 3 hours and 1 hour before the end.
+  // Off until the operator turns each on (`notification-toggle.util.ts`). «Less
+  // than»: the 3-hour one covers 3 h down to 1 h before the end.
+  {
+    type: 'expires_in_3_hours',
+    title: '⏳ Подписка закончится через 3 часа',
+    titleEn: '⏳ Subscription ends in 3 hours',
+    body:
+      'Привет, {{name}}! Твоя подписка закончится меньше чем через 3 часа ⏳ Продли её заранее, чтобы VPN не отключился.' +
+      SUBSCRIPTION_CARD_RU,
+    bodyEn:
+      'Hi, {{name}}! Your subscription ends in less than 3 hours ⏳ Renew it now so the VPN does not switch off.' +
+      SUBSCRIPTION_CARD_EN,
+    buttons: EXPIRY_BUTTONS,
+  },
+  {
+    type: 'expires_in_1_hour',
+    title: '⏰ Подписка закончится через час',
+    titleEn: '⏰ Subscription ends in an hour',
+    body:
+      'Привет, {{name}}! Твоя подписка закончится меньше чем через час ⏰ Продли её сейчас, чтобы VPN не отключился.' +
+      SUBSCRIPTION_CARD_RU,
+    bodyEn:
+      'Hi, {{name}}! Your subscription ends in less than an hour ⏰ Renew it now so the VPN does not switch off.' +
+      SUBSCRIPTION_CARD_EN,
+    buttons: EXPIRY_BUTTONS,
+  },
   {
     type: 'expired',
     title: '⛔ Подписка закончилась',

@@ -72,11 +72,34 @@ export const WINBACK_NOTICE_DAYS: Readonly<Record<WinbackNotificationType, numbe
 };
 
 /**
+ * The last hours before the end (the owner, 17.10.2026): 3 hours and 1 hour
+ * before the subscription ends (`AutoRenewService.createExpiryWarnings`).
+ * Extra reminders, OFF until the operator turns each on, like «Возврат
+ * покупателя»: an install updated to this release sends none of them unless
+ * somebody asked.
+ */
+export const LAST_HOURS_NOTIFICATION_TYPES = ['expires_in_3_hours', 'expires_in_1_hour'] as const;
+
+export type LastHoursNotificationType = (typeof LAST_HOURS_NOTIFICATION_TYPES)[number];
+
+/** How many hours before the end each reminder goes out. */
+export const LAST_HOURS_NOTICE_HOURS: Readonly<Record<LastHoursNotificationType, number>> = {
+  expires_in_3_hours: 3,
+  expires_in_1_hour: 1,
+};
+
+/** The types that stay off until the operator switches them on. */
+const DEFAULT_OFF_NOTIFICATION_TYPES: readonly string[] = [
+  ...WINBACK_NOTIFICATION_TYPES,
+  ...LAST_HOURS_NOTIFICATION_TYPES,
+];
+
+/**
  * Whether `type` stays off until the operator switches it on: an absent key
  * reads as OFF for these, where it reads as ON for every other type.
  */
 export function isDefaultOffNotificationType(type: string): boolean {
-  return (WINBACK_NOTIFICATION_TYPES as readonly string[]).includes(resolveToggleKey(type));
+  return DEFAULT_OFF_NOTIFICATION_TYPES.includes(resolveToggleKey(type));
 }
 
 /**
@@ -140,6 +163,9 @@ export const SUBSCRIBER_MUTABLE_NOTIFICATION_TYPES = [
   'expires_in_3_days',
   'expires_in_2_days',
   'expires_in_1_days',
+  // The last hours: offered to the subscriber only while the operator has
+  // them on (`subscriberSwitchesOffered`).
+  ...LAST_HOURS_NOTIFICATION_TYPES,
   'expired',
   'expired_1_day_ago',
   // «Возврат покупателя»: offered to the subscriber only while the operator

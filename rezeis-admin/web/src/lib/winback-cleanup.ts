@@ -41,13 +41,22 @@ function isWinbackKey(key: string): key is WinbackNotificationKey {
 }
 
 /**
+ * The last hours before the end (the owner, 17.10.2026): 3 hours and 1 hour
+ * before the subscription ends. Extra reminders, OFF until switched on.
+ */
+export const LAST_HOURS_NOTIFICATION_KEYS = ['expires_in_3_hours', 'expires_in_1_hour'] as const
+
+/**
  * Whether a user-notification switch is on. An absent key is ON — the opt-out
- * rule every switch follows — but for the «Возврат покупателя» reminders, which
- * are OFF until switched on. The server reads the map the same way.
+ * rule every switch follows — but for the «Возврат покупателя» and last-hours
+ * reminders, which are OFF until switched on. The server reads the map the
+ * same way (`isDefaultOffNotificationType`).
  */
 export function isUserNotificationOn(toggles: Readonly<Record<string, unknown>>, key: string): boolean {
   const value = toggles[key]
-  if (value === undefined || value === null) return !isWinbackKey(key)
+  if (value === undefined || value === null) {
+    return !isWinbackKey(key) && !(LAST_HOURS_NOTIFICATION_KEYS as readonly string[]).includes(key)
+  }
   return value !== false
 }
 

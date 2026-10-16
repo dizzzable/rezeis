@@ -4,6 +4,7 @@ import { describe, it } from 'node:test';
 import { InternalUserEdgeService } from '../src/modules/internal-user/services/internal-user-edge.service';
 import {
   SUBSCRIBER_MUTABLE_NOTIFICATION_TYPES,
+  LAST_HOURS_NOTIFICATION_TYPES,
   WINBACK_NOTIFICATION_TYPES,
   isNotificationDeliveryEnabled,
   isSubscriberMailableType,
@@ -104,6 +105,8 @@ describe('reading a subscriber switch', () => {
       'expires_in_3_days',
       'expires_in_2_days',
       'expires_in_1_days',
+      'expires_in_3_hours',
+      'expires_in_1_hour',
       'expired',
       'expired_1_day_ago',
       'expired_3_days_ago',
@@ -180,12 +183,14 @@ describe('the internal preferences route', () => {
     const { service } = buildService({ expired: false });
     const result = await service.getNotificationPrefs('42');
     assert.deepEqual(result.prefs, { expired: false });
-    // Every switch but the «Возврат покупателя» reminders, which the operator
-    // has not turned on here.
+    // Every switch but the reminders that stay off until the operator turns
+    // them on — «Возврат покупателя» and the last hours — none on here.
     assert.deepEqual(
       [...result.available],
       SUBSCRIBER_MUTABLE_NOTIFICATION_TYPES.filter(
-        (type) => !(WINBACK_NOTIFICATION_TYPES as readonly string[]).includes(type),
+        (type) =>
+          !(WINBACK_NOTIFICATION_TYPES as readonly string[]).includes(type) &&
+          !(LAST_HOURS_NOTIFICATION_TYPES as readonly string[]).includes(type),
       ),
     );
     // The cabinet draws «Помощь с подключением» only when this lists it.

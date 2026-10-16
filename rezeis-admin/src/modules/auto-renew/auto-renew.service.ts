@@ -11,6 +11,8 @@ import { EVENT_TYPES, SystemEventsService } from '../../common/services/system-e
 import { planNamesMetadata } from '../../common/utils/plan-snapshot.util';
 import { UserNotificationsService } from '../notifications/services/user-notifications.service';
 import {
+  LAST_HOURS_NOTICE_HOURS,
+  LAST_HOURS_NOTIFICATION_TYPES,
   WINBACK_NOTICE_DAYS,
   WINBACK_NOTIFICATION_TYPES,
   isDefaultOffNotificationType,
@@ -31,6 +33,7 @@ const WARNING_BATCH_SIZE = 200;
 
 const BATCH_SIZE = 100;
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+const ONE_HOUR_MS = 60 * 60 * 1000;
 /** Start charging this long before expiresAt. */
 const AUTOPAY_WINDOW_MS = 5 * 60 * 1000;
 /** Max off-session charge attempts per subscription expiry epoch. */
@@ -574,12 +577,25 @@ export class AutoRenewService {
   }
 
   public async createExpiryWarnings(input: {
-    readonly daysAhead: number;
+    /** Days before the end — the 3-, 2- and 1-day warnings. */
+    readonly daysAhead?: number;
+    /**
+     * Hours before the end instead — the last-hours reminders
+     * (`LAST_HOURS_NOTIFICATION_TYPES`).
+     */
+    readonly hoursAhead?: number;
     readonly notificationType: string;
   }): Promise<number> {
+    // A reminder that is off until the operator turns it on writes NOTHING
+    // while it is off — the same rule as `createExpiredNotices`.
+    if (isDefaultOffNotificationType(input.notificationType)) {
+      const toggles = await readUserNotificationToggleMap(this.prismaService);
+      if (!isNotificationDeliveryEnabled(toggles, input.notificationType)) return 0;
+    }
     const now = new Date();
-    const horizon = new Date(now.getTime() + input.daysAhead * ONE_DAY_MS);
-    const windowStart = new Date(horizon.getTime() - 3 * 60 * 60 * 1000);
+    const { leadMs, windowMs } = expiryWarningWindow(input);
+    const horizon = new Date(now.getTime() + leadMs);
+    const windowStart = new Date(horizon.getTime() - windowMs);
     const recentThreshold = new Date(now.getTime() - 20 * 60 * 60 * 1000);
 
     const alreadyNotifiedIds = await this.recentlyNotifiedUserIds(
@@ -655,7 +671,7 @@ export class AutoRenewService {
       await this.userNotifications.create({
         userId: sub.userId,
         type: input.notificationType,
-        payload: await this.noticePayload.build(sub, { daysLeft: input.daysAhead }),
+        payload: await this.noticePayload.build(sub, { daysLeft: input.daysAhead ?? 0 }),
       });
       created++;
     }
@@ -818,6 +834,8 @@ export class AutoRenewService {
     readonly expiredYesterdayNotices: number;
     /** «Возврат покупателя», per type; 0 while the operator has it off. */
     readonly winBackNotices: Readonly<Record<string, number>>;
+    /** The last-hours reminders, per type; 0 while the operator has them off. */
+    readonly lastHoursNotices: Readonly<Record<string, number>>;
     readonly autopayAttempted: number;
     readonly autopaySucceeded: number;
     readonly autopayFailed: number;
@@ -850,6 +868,14 @@ export class AutoRenewService {
     const warnings1d = await this.runEmitter('expires_in_1_days', () =>
       this.createExpiryWarnings({ daysAhead: 1, notificationType: 'expires_in_1_days' }),
     );
+    // The last hours: 3 hours and 1 hour before the end — each only while the
+    // operator has it on (the owner, 17.10.2026).
+    const lastHoursNotices: Record<string, number> = {};
+    for (const type of LAST_HOURS_NOTIFICATION_TYPES) {
+      lastHoursNotices[type] = await this.runEmitter(type, () =>
+        this.createExpiryWarnings({ hoursAhead: LAST_HOURS_NOTICE_HOURS[type], notificationType: type }),
+      );
+    }
     const expiredNotices = await this.runEmitter('expired', () =>
       this.createExpiredNotices({ daysAgo: 0, notificationType: 'expired' }),
     );
@@ -876,6 +902,7 @@ export class AutoRenewService {
       expiredNotices,
       expiredYesterdayNotices,
       winBackNotices,
+      lastHoursNotices,
       autopayAttempted: autopay.attempted,
       autopaySucceeded: autopay.succeeded,
       autopayFailed: autopay.failed,
@@ -969,3 +996,25 @@ function isRefusedBeforePayment(error: unknown): boolean {
   return status >= 400 && status < 500;
 }
 
+/**
+ * Where a warning looks: `leadMs` ahead of now, and `windowMs` back from there.
+ *
+ * Days: a three-hour window before the mark, as the warnings always had.
+ *
+ * Hours: the window reaches down to the NEXT reminder's mark and no further —
+ * «за 3 часа» covers 3 h to 1 h before the end, «за 1 час» the last hour — so a
+ * subscription with forty minutes left is never told «через 3 часа», whatever
+ * a slow tick or a restart did to the timing. A subscription bought for less
+ * than three hours gets the one that fits.
+ */
+export function expiryWarningWindow(input: {
+  readonly daysAhead?: number;
+  readonly hoursAhead?: number;
+}): { readonly leadMs: number; readonly windowMs: number } {
+  if (input.hoursAhead !== undefined) {
+    const hours = input.hoursAhead;
+    const lower = Math.max(0, ...Object.values(LAST_HOURS_NOTICE_HOURS).filter((mark) => mark < hours));
+    return { leadMs: hours * ONE_HOUR_MS, windowMs: (hours - lower) * ONE_HOUR_MS };
+  }
+  return { leadMs: (input.daysAhead ?? 0) * ONE_DAY_MS, windowMs: 3 * ONE_HOUR_MS };
+}

@@ -86,6 +86,10 @@ const USER_NOTIFICATION_KEYS = [
   'expires_in_3_days',
   'expires_in_2_days',
   'expires_in_1_days',
+  // The last hours (the owner, 17.10.2026): 3 hours and 1 hour before the
+  // end. OFF until switched on (`isUserNotificationOn`).
+  'expires_in_3_hours',
+  'expires_in_1_hour',
   'expired',
   'limited',
   'expired_1_day_ago',
@@ -503,6 +507,9 @@ function UserNotificationsTab() {
                   </div>
                   <Switch checked={enabled} onCheckedChange={() => handleToggle(key, enabled)} />
                 </div>
+                {key === 'expires_in_1_hour' && (
+                  <p className="text-xs text-muted-foreground">{t('notificationsPage.lastHours.hint')}</p>
+                )}
                 {/* Right under the last «Возврат» switch: who they reach, and
                     the reminders the Remnawave clean-up would cut short. */}
                 {key === 'expired_14_days_ago' && (

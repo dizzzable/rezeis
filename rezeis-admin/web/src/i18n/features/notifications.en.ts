@@ -19,6 +19,8 @@ export const en = {
       expires_in_3_days: 'Subscription expires in 3 days',
       expires_in_2_days: 'Subscription expires in 2 days',
       expires_in_1_days: 'Subscription expires tomorrow',
+      expires_in_3_hours: 'Subscription ends in 3 hours',
+      expires_in_1_hour: 'Subscription ends in an hour',
       expired: 'Subscription expired',
       limited: 'Traffic exhausted',
       expired_1_day_ago: 'Subscription expired 1 day ago',
@@ -229,6 +231,9 @@ export const en = {
           },
         },
       },
+    },
+    lastHours: {
+      hint: '“In 3 hours” and “in an hour” are extra reminders right before the end. Off to begin with; while off they are not written to the cabinet feed and the client sees no switch for them. “In 3 hours” goes out when 3 to 1 hours are left, “in an hour” in the last hour.',
     },
     winback: {
       hint: '«Win-back» reminders go to customers who have paid at least once, are not blocked and have not bought a new subscription. Off to begin with, and while off they are not written to the cabinet feed either. They arrive only while the Remnawave profile has not been deleted.',
