@@ -14,6 +14,7 @@ import {
 import { of } from 'rxjs';
 
 import { PAYMENT_RECONCILIATION_JOB, PROVIDER_SUBSCRIPTION_SYNC_JOB } from '../src/modules/payments/constants/payment-reconciliation.constant';
+import { InternalPaymentsController } from '../src/modules/payments/controllers/internal-payments.controller';
 import { PaymentProviderExecutionService } from '../src/modules/payments/services/payment-provider-execution.service';
 import { PaymentWebhookIngressService } from '../src/modules/payments/services/payment-webhook-ingress.service';
 import { PaymentWebhookNormalizerService } from '../src/modules/payments/services/payment-webhook-normalizer.service';
@@ -34,6 +35,11 @@ import {
   PROVIDER_SUBSCRIPTION_SNAPSHOT_KEY,
   resolveProviderSubscriptionTerms,
 } from '../src/modules/payments/utils/provider-subscription-terms.util';
+import {
+  CABINET_CAPABILITY,
+  CABINET_CAPABILITY_REGISTRY,
+  CabinetView,
+} from '../src/modules/reiwa-peers/cabinet-capabilities';
 
 const DAY = 24 * 60 * 60 * 1000;
 const SETTINGS = { apiKey: 'api-1', shopId: 'shop-1', secretKey: 'secret-2', savePaymentMethod: true };
@@ -42,6 +48,46 @@ const SETTINGS = { apiKey: 'api-1', shopId: 'shop-1', secretKey: 'secret-2', sav
  * AuraPay's card subscriptions (the owner, 15.10.2026: «автоматические
  * списания есть ещё у … aurapay»), on the terms of docs.aurapay.tech API 1.2.1.
  */
+describe('AuraPay in the list of gateways a cabinet sees', () => {
+  function entry(audience: CabinetView | undefined, settings: Record<string, unknown> = SETTINGS) {
+    const controller = new InternalPaymentsController(
+      {} as never,
+      {} as never,
+      {
+        listGateways: async () => [
+          { id: 'aura', type: PaymentGatewayType.AURAPAY, currency: Currency.RUB, isActive: true, isConfigured: true, orderIndex: 1, settings },
+        ],
+      } as never,
+      {} as never,
+      { getInternalPlatformPolicy: async () => ({ defaultCurrency: Currency.RUB }) } as never,
+      {} as never,
+      { viewOfRequest: async () => audience } as never,
+      {} as never,
+    );
+    return controller.listEnabledGateways('WEB', 'user-1', {}).then((list) => list[0]);
+  }
+  const KNOWS = CabinetView.of([CABINET_CAPABILITY.aurapayAutopay], 'a cabinet that knows AuraPay runs the subscription');
+
+  it('offers «для автоматического списания» only to a cabinet that declares it, and only when the operator turned it on', async () => {
+    assert.equal((await entry(KNOWS))?.autopay, true);
+    // Reiwa 0.9.7.55 would offer it as a kept card, send no consent, and the
+    // payer would get a one-off payment they took for autopay.
+    assert.equal((await entry(CabinetView.floor()))?.autopay, false);
+    assert.equal((await entry(CabinetView.of([], 'declares nothing')))?.autopay, false);
+    assert.equal((await entry(undefined))?.autopay, false);
+    assert.equal((await entry(KNOWS, { ...SETTINGS, savePaymentMethod: false }))?.autopay, false);
+  });
+
+  it('is a gate from the cabinet of this release, never implied for an older one', () => {
+    const row = CABINET_CAPABILITY_REGISTRY.find((candidate) => candidate.id === 'web.aurapay-autopay');
+    assert.ok(row);
+    assert.equal(row.kind, 'gate');
+    assert.equal(row.since, '0.9.7.56');
+    assert.equal(CABINET_CAPABILITY.aurapayAutopay, 'web.aurapay-autopay');
+    assert.equal(CabinetView.floor().can(CABINET_CAPABILITY.aurapayAutopay), false);
+  });
+});
+
 describe('AuraPay subscription terms', () => {
   const base = {
     gatewayType: PaymentGatewayType.AURAPAY as PaymentGatewayType,

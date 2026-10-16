@@ -3,7 +3,7 @@ import { SkipThrottle } from '@nestjs/throttler';
 import { PaymentGatewayType, PurchaseChannel } from '@prisma/client';
 
 import { InternalAdminAuthGuard } from '../../auth/guards/internal-admin-auth.guard';
-import type { CabinetView } from '../../reiwa-peers/cabinet-capabilities';
+import { CABINET_CAPABILITY, type CabinetView } from '../../reiwa-peers/cabinet-capabilities';
 import type { HeaderBag } from '../../reiwa-peers/reiwa-client-headers';
 import { ReiwaPeerRegistry } from '../../reiwa-peers/reiwa-peer-registry.service';
 import { SettingsService } from '../../settings/services/settings.service';
@@ -175,6 +175,18 @@ export class InternalPaymentsController {
               autopay: false,
               autopayMethods: approvedAutopayMethods(gateway.type, gateway.settings),
               ...(autopayDelay === null ? {} : { autopayDelay }),
+            };
+          }
+          // AuraPay's subscription only to a cabinet that knows AuraPay runs it
+          // (`web.aurapay-autopay`): an older one offers it as a kept card,
+          // sends no consent, and the payer gets a one-off payment instead.
+          if (gateway.type === PaymentGatewayType.AURAPAY) {
+            return {
+              ...base,
+              autopay:
+                isAutopayApproved(gateway.type, gateway.settings) &&
+                audience !== undefined &&
+                audience.can(CABINET_CAPABILITY.aurapayAutopay),
             };
           }
           return { ...base, autopay: isAutopayApproved(gateway.type, gateway.settings) };

@@ -74,6 +74,11 @@ export const CABINET_CAPABILITY = {
    * first charge comes, and sends back the delay it showed.
    */
   autopayFirstChargeDelay: 'web.autopay-first-charge-delay',
+  /**
+   * AuraPay «картой, для автоматического списания»: the cabinet knows AuraPay
+   * runs the subscription, and sends the consent that makes one.
+   */
+  aurapayAutopay: 'web.aurapay-autopay',
   /** A subscription with no end date: no dead «Продлить», no «Улучшить» that ends in an error. */
   lifetimeSubscription: 'web.lifetime-subscription',
   /** The bell's «Докупка не применена» opens «Поддержка». */
@@ -142,6 +147,20 @@ export const CABINET_CAPABILITY_REGISTRY: readonly CabinetCapabilityRow[] = [
     operatorTextEn:
       'the delay of the first SBP charge at Antilopay is not offered: an older cabinet would tell the customer “charged at once”, so the charge stays at once',
     gatedIn: ['src/modules/payments/utils/antilopay-delay-policy.util.ts'],
+  },
+  {
+    id: CABINET_CAPABILITY.aurapayAutopay,
+    surface: 'web',
+    since: '0.9.7.56',
+    kind: 'gate',
+    // Reiwa 0.9.7.55 and older take AuraPay for a gateway that keeps the card,
+    // as ЮKassa does: they offer «для автоматического списания» on any purchase,
+    // with «Способ оплаты сохранится…», then send no consent, and the panel
+    // makes a one-off payment the customer takes for autopay
+    // (reiwa `web/src/lib/autopay-offer.ts`, `PROVIDER_SUBSCRIPTION_GATEWAYS`).
+    operatorText: 'автосписание AuraPay не предлагается: старый кабинет оформил бы вместо него разовый платёж',
+    operatorTextEn: 'automatic charging at AuraPay is not offered: an older cabinet would make a one-off payment instead',
+    gatedIn: ['src/modules/payments/controllers/internal-payments.controller.ts'],
   },
   {
     id: CABINET_CAPABILITY.lifetimeSubscription,
