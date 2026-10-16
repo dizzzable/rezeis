@@ -824,9 +824,15 @@ type Half = 'panel' | 'cabinet';
  * that release delivered into its number.
  */
 const TABLE_RELEASES: Readonly<Record<Half, readonly string[]>> = {
-  panel: ['0.9.7.70'],
-  cabinet: ['0.9.7.52', '0.9.7.53'],
+  panel: ['0.9.7.70', '0.9.7.71', '0.9.7.72', '0.9.7.73', '0.9.7.74'],
+  cabinet: ['0.9.7.52', '0.9.7.53', '0.9.7.54', '0.9.7.55', '0.9.7.56'],
 };
+
+/**
+ * The capability ids Reiwa 0.9.7.56 declares and Rezeis Admin 0.9.7.74 is the
+ * first to know (`panel.knows-autopay-ids`, `cabinet.declares-autopay-ids`).
+ */
+const AUTOPAY_CAPABILITY_IDS = ['web.autopay-first-charge-delay', 'web.aurapay-autopay'] as const;
 
 /** Each feature: the half that has it and the first release that did. */
 const PAIR_FEATURES = {
@@ -853,13 +859,13 @@ const PAIR_FEATURES = {
    * silent one only on live evidence of a 0.9.7.53 cabinet (its version poll or
    * heartbeat), and without evidence nothing — the floor.
    */
-  'panel.knows-cabinet': { half: 'panel', since: 'next' },
+  'panel.knows-cabinet': { half: 'panel', since: '0.9.7.71' },
   /**
    * The cabinet declares itself on every internal call (`x-reiwa-client`,
    * `x-reiwa-capabilities`) and keeps what the panel says about itself at
    * `reiwa:panel-capabilities:v1` in its Redis.
    */
-  'cabinet.declares': { half: 'cabinet', since: 'next' },
+  'cabinet.declares': { half: 'cabinet', since: '0.9.7.54' },
   /**
    * The cabinet polls `/api/internal/config-versions` (first 5 s after boot,
    * then every 20 s). A silent cabinet's poll is what tells a newer panel it is
@@ -880,7 +886,7 @@ const PAIR_FEATURES = {
    * shim that always answers `{"enabled":false}` — whatever the tables hold —
    * with the `landing` settings-version group computed from that constant.
    */
-  'panel.landing-retired': { half: 'panel', since: 'next' },
+  'panel.landing-retired': { half: 'panel', since: '0.9.7.71' },
   /**
    * The cabinet shows no landing (D2): no `/api/v1/landing` (404), no landing
    * head on `/` and `/welcome`, no landing version group, no read of its saved
@@ -888,7 +894,17 @@ const PAIR_FEATURES = {
    * landing's place every document it serves is named after the operator:
    * `<title>`, `og:title` and `og:site_name` (`document-title.ts`).
    */
-  'cabinet.landing-retired': { half: 'cabinet', since: 'next' },
+  'cabinet.landing-retired': { half: 'cabinet', since: '0.9.7.54' },
+  /**
+   * The panel's capability registry knows {@link AUTOPAY_CAPABILITY_IDS}
+   * (Antilopay's delayed first charge, AuraPay's subscription). An older panel
+   * counts a cabinet's declaration of them as ids it does not know
+   * (`unknownToPanel`) and ignores them — what an operator who updates the
+   * cabinet first runs until the panel follows.
+   */
+  'panel.knows-autopay-ids': { half: 'panel', since: '0.9.7.74' },
+  /** The cabinet declares {@link AUTOPAY_CAPABILITY_IDS} on every internal call. */
+  'cabinet.declares-autopay-ids': { half: 'cabinet', since: '0.9.7.56' },
 } as const satisfies Record<string, { readonly half: Half; readonly since: string }>;
 
 type PairFeature = keyof typeof PAIR_FEATURES;
@@ -1863,13 +1879,23 @@ async function scenarioPanelKnowsItsCabinet(ctx: ScenarioContext): Promise<strin
     `missing [${missing.join(', ')}], the table says web.addon-reset-end is ${lacksResetEnd ? '' : 'not '}missing`,
   );
   assert(api.behind === missing.length > 0, `behind=${String(api.behind)} with missing [${missing.join(', ')}]`);
-  assert(api.unknownToPanel === 0, `the cabinet declares ${api.unknownToPanel} capability ids this panel does not know`);
+  // A cabinet newer than its panel declares ids the panel has never heard of,
+  // and the panel counts and ignores them: exactly those, and none otherwise.
+  const unknown =
+    pairHas(pair, 'cabinet.declares-autopay-ids') && !pairHas(pair, 'panel.knows-autopay-ids')
+      ? AUTOPAY_CAPABILITY_IDS.length
+      : 0;
+  assert(
+    api.unknownToPanel === unknown,
+    `the cabinet declares ${api.unknownToPanel} capability ids this panel does not know, the table expects ${unknown}`,
+  );
   const sources = [...new Set(api.instances.filter((i) => i.live).map((i) => i.source))].sort();
   if (declares) assert(sources.join() === 'declared', `a declaring cabinet filed through ${sources.join(', ')}`);
   assert(peers.surfaces.bot.state === 'never', `a bot surface is ${peers.surfaces.bot.state}, and no bot runs here`);
   return (
     `api ${api.version} ${declares ? 'declared' : `silent (${sources.join(' + ')})`} · ` +
-    `missing [${missing.join(', ')}] · behind ${String(api.behind)} · bot never (no bot in this stack) · ` +
+    `missing [${missing.join(', ')}] · behind ${String(api.behind)} · unknown to the panel ${api.unknownToPanel} · ` +
+    'bot never (no bot in this stack) · ' +
     `floor ${peers.floorVersion}`
   );
 }
