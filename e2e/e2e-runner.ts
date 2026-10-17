@@ -824,8 +824,8 @@ type Half = 'panel' | 'cabinet';
  * that release delivered into its number.
  */
 const TABLE_RELEASES: Readonly<Record<Half, readonly string[]>> = {
-  panel: ['0.9.7.70', '0.9.7.71', '0.9.7.72', '0.9.7.73', '0.9.7.74', '0.9.7.75'],
-  cabinet: ['0.9.7.52', '0.9.7.53', '0.9.7.54', '0.9.7.55', '0.9.7.56', '0.9.7.57'],
+  panel: ['0.9.7.70', '0.9.7.71', '0.9.7.72', '0.9.7.73', '0.9.7.74', '0.9.7.75', '0.9.7.76'],
+  cabinet: ['0.9.7.52', '0.9.7.53', '0.9.7.54', '0.9.7.55', '0.9.7.56', '0.9.7.57', '0.9.7.58'],
 };
 
 /**
@@ -839,6 +839,12 @@ const AUTOPAY_CAPABILITY_IDS = ['web.autopay-first-charge-delay', 'web.aurapay-a
  * first to know (`panel.knows-connect-walk-id`, `cabinet.declares-connect-walk-id`).
  */
 const CONNECT_WALK_CAPABILITY_IDS = ['web.connect-interactive'] as const;
+
+/**
+ * The capability id Reiwa 0.9.7.58 declares and Rezeis Admin 0.9.7.76 is the
+ * first to know (`panel.knows-support-unified-id`, `cabinet.declares-support-unified-id`).
+ */
+const SUPPORT_UNIFIED_CAPABILITY_IDS = ['web.support-unified'] as const;
 
 /** Each feature: the half that has it and the first release that did. */
 const PAIR_FEATURES = {
@@ -919,6 +925,14 @@ const PAIR_FEATURES = {
   'panel.knows-connect-walk-id': { half: 'panel', since: '0.9.7.75' },
   /** The cabinet declares {@link CONNECT_WALK_CAPABILITY_IDS} on every internal call. */
   'cabinet.declares-connect-walk-id': { half: 'cabinet', since: '0.9.7.57' },
+  /**
+   * The panel's capability registry knows {@link SUPPORT_UNIFIED_CAPABILITY_IDS}
+   * (the AI assistant answers in the tickets; the separate AI chat is gone);
+   * an older panel counts it as unknown, the same way as the ids above.
+   */
+  'panel.knows-support-unified-id': { half: 'panel', since: '0.9.7.76' },
+  /** The cabinet declares {@link SUPPORT_UNIFIED_CAPABILITY_IDS} on every internal call. */
+  'cabinet.declares-support-unified-id': { half: 'cabinet', since: '0.9.7.58' },
 } as const satisfies Record<string, { readonly half: Half; readonly since: string }>;
 
 type PairFeature = keyof typeof PAIR_FEATURES;
@@ -1899,7 +1913,8 @@ async function scenarioPanelKnowsItsCabinet(ctx: ScenarioContext): Promise<strin
     pairHas(pair, declares) && !pairHas(pair, knows) ? ids.length : 0;
   const unknown =
     unknownIds('cabinet.declares-autopay-ids', 'panel.knows-autopay-ids', AUTOPAY_CAPABILITY_IDS) +
-    unknownIds('cabinet.declares-connect-walk-id', 'panel.knows-connect-walk-id', CONNECT_WALK_CAPABILITY_IDS);
+    unknownIds('cabinet.declares-connect-walk-id', 'panel.knows-connect-walk-id', CONNECT_WALK_CAPABILITY_IDS) +
+    unknownIds('cabinet.declares-support-unified-id', 'panel.knows-support-unified-id', SUPPORT_UNIFIED_CAPABILITY_IDS);
   assert(
     api.unknownToPanel === unknown,
     `the cabinet declares ${api.unknownToPanel} capability ids this panel does not know, the table expects ${unknown}`,
