@@ -266,6 +266,49 @@ function createMergeWorld() {
       upsert: async () => undefined,
     },
     webAccount: { update: async () => ({ id: 'w' }), delete: async () => ({ id: 'w' }) },
+    // The tables the merge moves since 17.10.2026; empty here.
+    providerSubscription: {
+      updateMany: noopUpdateMany('providerSubscription'),
+    },
+    wheelKey: {
+      updateMany: noopUpdateMany('wheelKey'),
+    },
+    userHintDelivery: {
+      updateMany: noopUpdateMany('userHintDelivery'),
+    },
+    fraudExemption: {
+      updateMany: noopUpdateMany('fraudExemption'),
+    },
+    wheelSpin: {
+      findMany: async () => [],
+      update: async () => ({}),
+      updateMany: noopUpdateMany('wheelSpin'),
+    },
+    contestEntry: {
+      findMany: async () => [],
+      deleteMany: async () => ({ count: 0 }),
+      updateMany: noopUpdateMany('contestEntry'),
+    },
+    contestWinner: {
+      findMany: async () => [],
+      deleteMany: async () => ({ count: 0 }),
+      updateMany: noopUpdateMany('contestWinner'),
+    },
+    deviceObservation: {
+      findMany: async () => [],
+      deleteMany: async () => ({ count: 0 }),
+      updateMany: noopUpdateMany('deviceObservation'),
+    },
+    userIpObservation: {
+      findMany: async () => [],
+      deleteMany: async () => ({ count: 0 }),
+      updateMany: noopUpdateMany('userIpObservation'),
+    },
+    userReviewFlag: {
+      findMany: async () => [],
+      deleteMany: async () => ({ count: 0 }),
+      updateMany: noopUpdateMany('userReviewFlag'),
+    },
     profileSyncJob: { create: async () => ({ id: `sync-${++sequence}` }) },
   };
 

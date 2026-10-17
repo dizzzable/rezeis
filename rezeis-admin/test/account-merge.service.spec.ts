@@ -186,6 +186,49 @@ function createMergeMock(fx: MergeFixtures): { prisma: PrismaService; calls: Cal
     authChallenge: {
       updateMany: async (a: Record<string, unknown>) => { rec('authChallenge', 'updateMany', a); return { count: 0 }; },
     },
+    // The tables the schema grew after the merge was written (17.10.2026).
+    providerSubscription: {
+      updateMany: async (a: Record<string, unknown>) => { rec('providerSubscription', 'updateMany', a); return { count: 0 }; },
+    },
+    wheelKey: {
+      updateMany: async (a: Record<string, unknown>) => { rec('wheelKey', 'updateMany', a); return { count: 0 }; },
+    },
+    userHintDelivery: {
+      updateMany: async (a: Record<string, unknown>) => { rec('userHintDelivery', 'updateMany', a); return { count: 0 }; },
+    },
+    fraudExemption: {
+      updateMany: async (a: Record<string, unknown>) => { rec('fraudExemption', 'updateMany', a); return { count: 0 }; },
+    },
+    wheelSpin: {
+      findMany: async () => [],
+      update: async (a: Record<string, unknown>) => { rec('wheelSpin', 'update', a); return {}; },
+      updateMany: async (a: Record<string, unknown>) => { rec('wheelSpin', 'updateMany', a); return { count: 0 }; },
+    },
+    contestEntry: {
+      findMany: async () => [],
+      deleteMany: async (a: Record<string, unknown>) => { rec('contestEntry', 'deleteMany', a); return { count: 0 }; },
+      updateMany: async (a: Record<string, unknown>) => { rec('contestEntry', 'updateMany', a); return { count: 0 }; },
+    },
+    contestWinner: {
+      findMany: async () => [],
+      deleteMany: async (a: Record<string, unknown>) => { rec('contestWinner', 'deleteMany', a); return { count: 0 }; },
+      updateMany: async (a: Record<string, unknown>) => { rec('contestWinner', 'updateMany', a); return { count: 0 }; },
+    },
+    deviceObservation: {
+      findMany: async () => [],
+      deleteMany: async (a: Record<string, unknown>) => { rec('deviceObservation', 'deleteMany', a); return { count: 0 }; },
+      updateMany: async (a: Record<string, unknown>) => { rec('deviceObservation', 'updateMany', a); return { count: 0 }; },
+    },
+    userIpObservation: {
+      findMany: async () => [],
+      deleteMany: async (a: Record<string, unknown>) => { rec('userIpObservation', 'deleteMany', a); return { count: 0 }; },
+      updateMany: async (a: Record<string, unknown>) => { rec('userIpObservation', 'updateMany', a); return { count: 0 }; },
+    },
+    userReviewFlag: {
+      findMany: async () => [],
+      deleteMany: async (a: Record<string, unknown>) => { rec('userReviewFlag', 'deleteMany', a); return { count: 0 }; },
+      updateMany: async (a: Record<string, unknown>) => { rec('userReviewFlag', 'updateMany', a); return { count: 0 }; },
+    },
   };
 
   const prisma = {

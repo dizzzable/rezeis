@@ -3,8 +3,9 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
-import { PointsLedgerSource, Prisma, SyncAction, SyncJobStatus } from '@prisma/client';
+import { PointsLedgerSource, Prisma, SpinLedgerSource, SyncAction, SyncJobStatus } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import {
@@ -13,11 +14,28 @@ import {
 } from '../../../common/services/system-events.service';
 import { PointsWalletService } from '../../points/services/points-wallet.service';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
+import { SpinWalletService } from '../../wheel/services/spin-wallet.service';
 import { AccountMergeInput, AccountMergeResult } from '../interfaces/account-merge.interface';
 import { lockTrialClaimUser } from '../../subscriptions/services/trial-claim-ledger.util';
 import { RECOVERY_WITHDRAWAL_HOLD_PURPOSE } from '../../web-auth/utils/recovery-withdrawal-hold.util';
 
 type Tx = Prisma.TransactionClient;
+
+/**
+ * The child tables of `User` the merge leaves to the source's delete, on
+ * purpose. Everything else is moved — `test/account-merge-relations.spec.ts`
+ * holds the schema to that.
+ *
+ * Both are wallet journals: every `balance_after` in them is relative to a
+ * wallet that will no longer exist, and re-pointed they would stop the
+ * survivor's own rows summing to its balance. The balance itself moves
+ * through the wallet, journaled on both sides (`ACCOUNT_MERGE` for the points,
+ * `MANUAL_ADJUSTMENT` for the spins).
+ */
+export const MERGE_DROPS: Readonly<Record<string, string>> = {
+  PointsLedgerEntry: 'the points journal of the deleted wallet; the balance moves through PointsWalletService',
+  SpinLedgerEntry: 'the spins journal of the deleted wallet; the balance moves through SpinWalletService',
+};
 
 /**
  * AccountMergeService
@@ -40,6 +58,14 @@ export class AccountMergeService {
     private readonly systemEventsService: SystemEventsService,
     private readonly profileSyncQueueService: ProfileSyncQueueService,
     private readonly pointsWallet: PointsWalletService,
+    /**
+     * The wheel's spin balance moves through its own wallet, as the points do.
+     * Last, `@Optional()` and defaulted, so a positional construction or a
+     * testing module that predates it keeps working; it has no dependencies of
+     * its own.
+     */
+    @Optional()
+    private readonly spinWallet: SpinWalletService = new SpinWalletService(),
   ) {}
 
   public async merge(input: AccountMergeInput): Promise<AccountMergeResult> {
@@ -58,6 +84,7 @@ export class AccountMergeService {
           telegramId: true,
           email: true,
           points: true,
+          spinBalance: true,
           personalDiscount: true,
           purchaseDiscount: true,
           maxSubscriptions: true,
@@ -80,6 +107,7 @@ export class AccountMergeService {
           telegramId: true,
           email: true,
           points: true,
+          spinBalance: true,
           personalDiscount: true,
           purchaseDiscount: true,
           maxSubscriptions: true,
@@ -319,6 +347,15 @@ export class AccountMergeService {
         where: { userId: source.id, consumedAt: null },
         data: { userId: target.id },
       });
+
+      // 8c. The wheel's spins move like the points: the source emptied and the
+      //     survivor credited, a journal row on each side. Until 17.10.2026 the
+      //     balance was not read at all and died with the source.
+      await this.moveSpinBalance(tx, source.id, source.spinBalance, target.id);
+
+      // 8d. Everything the schema grew after this service was written, which
+      //     the delete below would have taken (Cascade) or orphaned (SetNull).
+      await this.moveLaterChildren(tx, source.id, target.id);
 
       // 9. Delete the now-drained source.
       await tx.user.delete({ where: { id: source.id } });
@@ -622,6 +659,132 @@ export class AccountMergeService {
    * target (after re-point); returns it, or null to leave the target's current
    * pointer untouched.
    */
+  /**
+   * The source's spins on the wheel, onto the survivor.
+   *
+   * Through the spin wallet, so each side gets a journal row and both balances
+   * keep summing to their journals — the reason the source's own journal rows
+   * are NOT re-pointed (see `MERGE_DROPS`). `MANUAL_ADJUSTMENT`, not a new
+   * source: a merge is an operator's hand on the balance, and a new enum value
+   * would be a row a panel rolled back to an earlier release cannot read.
+   */
+  private async moveSpinBalance(tx: Tx, sourceId: string, spins: number, targetId: string): Promise<void> {
+    // A legacy row may hold none at all; nothing below zero is moved either.
+    if (!(spins > 0)) return;
+    const emptied = await this.spinWallet.apply(tx, {
+      userId: sourceId,
+      delta: -spins,
+      source: SpinLedgerSource.MANUAL_ADJUSTMENT,
+      referenceKey: null,
+      details: { accountMerge: true, mergedInto: targetId },
+    });
+    if (!emptied.applied) {
+      throw new BadRequestException(`Account merge could not move the spins of ${sourceId}: ${emptied.reason}`);
+    }
+    const credited = await this.spinWallet.apply(tx, {
+      userId: targetId,
+      delta: spins,
+      source: SpinLedgerSource.MANUAL_ADJUSTMENT,
+      referenceKey: null,
+      details: { accountMerge: true, mergedFrom: sourceId },
+    });
+    if (!credited.applied) {
+      throw new BadRequestException(
+        `Account merge could not credit the spins of ${sourceId} to ${targetId}: ${credited.reason}`,
+      );
+    }
+  }
+
+  /**
+   * Every child table the schema grew after this service was written.
+   *
+   * They were neither moved nor named, so the source's delete decided for them:
+   *  - `ProviderSubscription` (SetNull) — the customer's autopay at the provider
+   *    lost its owner, and the sweep that cancels an owner-less one stopped the
+   *    survivor's autopay, though the subscription it renews had moved;
+   *  - `WheelKey.claimedByUserId` (SetNull) — a key the customer won lost its owner;
+   *  - wheel spins, contest entries and wins, hint deliveries, device and
+   *    address observations, review flags, fraud exemptions (Cascade) — gone.
+   *
+   * `test/account-merge-relations.spec.ts` holds every relation onto `User` to
+   * this method, the steps above, or `MERGE_DROPS`, so the next table cannot
+   * be forgotten the same way.
+   */
+  private async moveLaterChildren(tx: Tx, sourceId: string, targetId: string): Promise<void> {
+    // Nothing unique on the user: a plain move.
+    await tx.providerSubscription.updateMany({ where: { userId: sourceId }, data: { userId: targetId } });
+    await tx.wheelKey.updateMany({ where: { claimedByUserId: sourceId }, data: { claimedByUserId: targetId } });
+    await tx.userHintDelivery.updateMany({ where: { userId: sourceId }, data: { userId: targetId } });
+    await tx.fraudExemption.updateMany({ where: { userId: sourceId }, data: { userId: targetId } });
+
+    // `(userId, idempotencyKey)`: the spin is kept, a key the survivor already
+    // used is suffixed — the key only replays a request, and neither request
+    // is replayable after the accounts become one.
+    const targetSpinKeys = (
+      await tx.wheelSpin.findMany({ where: { userId: targetId }, select: { idempotencyKey: true } })
+    ).map((row) => row.idempotencyKey);
+    const clashingSpins =
+      targetSpinKeys.length === 0
+        ? []
+        : await tx.wheelSpin.findMany({
+            where: { userId: sourceId, idempotencyKey: { in: targetSpinKeys } },
+            select: { id: true, idempotencyKey: true },
+          });
+    for (const spin of clashingSpins) {
+      await tx.wheelSpin.update({
+        where: { id: spin.id },
+        data: { idempotencyKey: `${spin.idempotencyKey}~merged-${sourceId}` },
+      });
+    }
+    await tx.wheelSpin.updateMany({ where: { userId: sourceId }, data: { userId: targetId } });
+
+    // Unique per user and something else: the survivor's own row stands, the
+    // source's duplicate goes — as the delete would have taken it — and the
+    // rest move.
+    const enteredByTarget = (
+      await tx.contestEntry.findMany({ where: { userId: targetId }, select: { contestId: true } })
+    ).map((row) => row.contestId);
+    await tx.contestEntry.deleteMany({ where: { userId: sourceId, contestId: { in: enteredByTarget } } });
+    await tx.contestEntry.updateMany({ where: { userId: sourceId }, data: { userId: targetId } });
+
+    const wonByTarget = (
+      await tx.contestWinner.findMany({ where: { userId: targetId }, select: { contestId: true } })
+    ).map((row) => row.contestId);
+    await tx.contestWinner.deleteMany({ where: { userId: sourceId, contestId: { in: wonByTarget } } });
+    await tx.contestWinner.updateMany({ where: { userId: sourceId }, data: { userId: targetId } });
+
+    const targetDevices = await tx.deviceObservation.findMany({
+      where: { userId: targetId },
+      select: { kind: true, value: true },
+    });
+    if (targetDevices.length > 0) {
+      await tx.deviceObservation.deleteMany({
+        where: { userId: sourceId, OR: targetDevices.map((row) => ({ kind: row.kind, value: row.value })) },
+      });
+    }
+    await tx.deviceObservation.updateMany({ where: { userId: sourceId }, data: { userId: targetId } });
+
+    const targetAddresses = (
+      await tx.userIpObservation.findMany({ where: { userId: targetId }, select: { address: true } })
+    ).map((row) => row.address);
+    await tx.userIpObservation.deleteMany({ where: { userId: sourceId, address: { in: targetAddresses } } });
+    await tx.userIpObservation.updateMany({ where: { userId: sourceId }, data: { userId: targetId } });
+
+    const targetFlags = await tx.userReviewFlag.findMany({
+      where: { userId: targetId },
+      select: { kind: true, fingerprint: true },
+    });
+    if (targetFlags.length > 0) {
+      await tx.userReviewFlag.deleteMany({
+        where: {
+          userId: sourceId,
+          OR: targetFlags.map((row) => ({ kind: row.kind, fingerprint: row.fingerprint })),
+        },
+      });
+    }
+    await tx.userReviewFlag.updateMany({ where: { userId: sourceId }, data: { userId: targetId } });
+  }
+
   private async resolveCurrentSubscription(
     tx: Tx,
     targetId: string,

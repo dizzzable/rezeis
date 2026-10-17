@@ -20,6 +20,13 @@ import { renderWithProviders } from '@/test/test-utils'
 
 vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() } }))
 
+// Where the card sends the operator after a merge; the rest of the router is real.
+const navigateSpy = vi.hoisted(() => vi.fn())
+vi.mock('react-router', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('react-router')>()),
+  useNavigate: () => navigateSpy,
+}))
+
 import { MergeAccountsCard } from './user-detail-panel'
 
 const HOUR_MS = 60 * 60 * 1000
@@ -93,5 +100,47 @@ describe('the merge preview and a hold on a partner balance', () => {
 
     expect(screen.queryByText(i18n.t('userDetailPanel.web.merge.holdCarriesOver'))).toBeNull()
     expect(screen.queryByText(/until/i)).toBeNull()
+  })
+})
+
+describe('after the merge', () => {
+  beforeAll(async () => {
+    await loadFeatureBundle('userDetail')
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.restoreAllMocks()
+    navigateSpy.mockReset()
+  })
+
+  it('opens the account that stayed when it is the other one — this one no longer exists', async () => {
+    await findCounterpart({
+      current: side({}),
+      counterpart: side({ userId: 'user-2', login: 'bob', telegramId: null }),
+      conflicts: [],
+    })
+    const post = vi.spyOn(api, 'post').mockResolvedValue(
+      answer({ mergedUserId: 'user-2', movedCounts: { subscriptions: 1, transactions: 3, partnerTransactions: 0 }, remnawaveSubscriptionIds: [] }),
+    )
+
+    await userEvent.click(screen.getByRole('button', { name: /bob/ }))
+    await userEvent.type(screen.getByPlaceholderText(i18n.t('userDetailPanel.web.merge.confirmPlaceholder')), 'MERGE')
+    await userEvent.click(screen.getByRole('button', { name: i18n.t('userDetailPanel.web.merge.execute') }))
+
+    await vi.waitFor(() => expect(navigateSpy).toHaveBeenCalledWith('/users/user-2'))
+    expect(post).toHaveBeenCalledWith('/admin/users/merge', expect.objectContaining({ sourceId: 'user-1', targetId: 'user-2' }))
+  })
+
+  it('opens this account by its id when it is the one that stays — the address it was opened by may be gone', async () => {
+    await findCounterpart({ current: side({}), counterpart: side({ userId: 'user-2', login: 'bob' }), conflicts: [] })
+    vi.spyOn(api, 'post').mockResolvedValue(
+      answer({ mergedUserId: 'user-1', movedCounts: { subscriptions: 0, transactions: 0, partnerTransactions: 0 }, remnawaveSubscriptionIds: [] }),
+    )
+
+    await userEvent.type(screen.getByPlaceholderText(i18n.t('userDetailPanel.web.merge.confirmPlaceholder')), 'MERGE')
+    await userEvent.click(screen.getByRole('button', { name: i18n.t('userDetailPanel.web.merge.execute') }))
+
+    await vi.waitFor(() => expect(navigateSpy).toHaveBeenCalledWith('/users/user-1'))
   })
 })

@@ -270,3 +270,4 @@ jobs:
           test/reset-add-on-end-to-end-postgres.spec.ts
           test/cabinet-capability-gate-postgres.spec.ts
           test/landing-retired-postgres.spec.ts
+          test/account-merge-children-postgres.spec.ts

@@ -13,7 +13,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
-import { Link } from 'react-router'
+import { Link, useNavigate } from 'react-router'
 import {
   AtSign,
   Apple,
@@ -5067,6 +5067,7 @@ export function MergeAccountsCard({
 }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
   const [refValue, setRefValue] = useState('')
   const [preview, setPreview] = useState<AccountMergePreview | null>(null)
   const [survivor, setSurvivor] = useState<'current' | 'counterpart'>('current')
@@ -5115,7 +5116,13 @@ export function MergeAccountsCard({
       setPreview(null)
       setRefValue('')
       setConfirmText('')
+      // Open the account that stayed, by its internal id. This card's address
+      // may no longer lead anywhere: when the other account stays this one is
+      // deleted, and when this one stays with the other's Telegram ID kept, the
+      // Telegram ID it was opened by is gone. Either way a refetch here said
+      // «Пользователь не найден» right under the success message.
       queryClient.invalidateQueries({ queryKey })
+      navigate(`/users/${encodeURIComponent(res.mergedUserId)}`)
     },
     onError: (err) => toast.error(getErrorMessage(err, t('userDetailPanel.web.merge.failed'))),
   })

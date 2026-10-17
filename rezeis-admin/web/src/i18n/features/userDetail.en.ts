@@ -522,7 +522,7 @@ export const en = {
       tempExpires: 'Valid until {{expiresAt}}',
       merge: {
         title: 'Merge accounts',
-        description: 'Consolidate this account with another (by login, Telegram ID, reiwa_id or email). Subscriptions and transactions move over, partner balances are summed. This is irreversible.',
+        description: 'Consolidate this account with another (by login, Telegram ID, reiwa_id or email). Subscriptions, payments, points, wheel spins and autopay move to the account that stays, partner balances are summed. This is irreversible.',
         refPlaceholder: 'login / Telegram ID / reiwa_id / email',
         find: 'Find',
         notFound: 'No account matches that reference',
