@@ -27,7 +27,8 @@ const HOUR_MS = 60 * 60 * 1000;
 const NOW = Date.now();
 
 function build(options: { readonly toggles?: unknown; readonly expiresInMs?: number } = {}) {
-  const created: Array<{ type: string }> = [];
+  const created: Array<{ type: string; payload?: unknown }> = [];
+  const contexts: unknown[] = [];
   const queries: Array<Record<string, unknown>> = [];
   const expiresAt = new Date(NOW + (options.expiresInMs ?? 2 * HOUR_MS));
   const prisma = {
@@ -44,17 +45,22 @@ function build(options: { readonly toggles?: unknown; readonly expiresInMs?: num
   const service = new AutoRenewService(
     prisma as never,
     {
-      create: async (input: { type: string }) => {
+      create: async (input: { type: string; payload?: unknown }) => {
         created.push(input);
       },
     } as never,
     {} as never,
     { findPreferredForCharge: async () => null } as never,
-    { build: async () => ({}) } as never,
+    {
+      build: async (_sub: unknown, context: unknown) => {
+        contexts.push(context);
+        return { ...(context as object) };
+      },
+    } as never,
     { requiresPlanSelection: async () => false } as never,
     { info: () => undefined } as never,
   );
-  return { service, created, queries };
+  return { service, created, queries, contexts };
 }
 
 describe('the last-hours reminders are off until the operator turns them on', () => {
@@ -78,6 +84,21 @@ describe('the last-hours reminders are off until the operator turns them on', ()
     const { service, created } = build({ toggles: { expires_in_3_hours: true } });
     assert.equal(await service.createExpiryWarnings({ hoursAhead: 3, notificationType: 'expires_in_3_hours' }), 1);
     assert.equal(created[0]?.type, 'expires_in_3_hours');
+  });
+
+  it('tells the cabinet the hours left, and no days — «через 0 дней» is what daysLeft: 0 read as', async () => {
+    for (const [type, hours, expiresInMs] of [
+      ['expires_in_3_hours', 3, 2 * HOUR_MS],
+      ['expires_in_1_hour', 1, 30 * 60 * 1000],
+    ] as const) {
+      const { service, created, contexts } = build({ toggles: { [type]: true }, expiresInMs });
+      await service.createExpiryWarnings({ hoursAhead: hours, notificationType: type });
+      assert.deepEqual(contexts, [{ hoursLeft: hours }], type);
+      assert.deepEqual(created[0]?.payload, { hoursLeft: hours }, type);
+    }
+    const days = build({ expiresInMs: 23 * HOUR_MS });
+    await days.service.createExpiryWarnings({ daysAhead: 1, notificationType: 'expires_in_1_days' });
+    assert.deepEqual(days.contexts, [{ daysLeft: 1 }]);
   });
 
   it('leaves the day warnings as they were: on unless switched off', async () => {

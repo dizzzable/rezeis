@@ -58,7 +58,7 @@ export class SubscriptionNoticePayloadService {
 
   public async build(
     subscription: SubscriptionNoticeSource,
-    context: { readonly daysLeft: number },
+    context: NoticeContext,
   ): Promise<Record<string, unknown>> {
     const planName = readPlanName(subscription.planSnapshot);
     const payload: Record<string, unknown> = {
@@ -66,7 +66,7 @@ export class SubscriptionNoticePayloadService {
       expiresAt: subscription.expiresAt?.toISOString() ?? null,
       plan: planName,
       planName,
-      daysLeft: context.daysLeft,
+      ...('hoursLeft' in context ? { hoursLeft: context.hoursLeft } : { daysLeft: context.daysLeft }),
       // Local columns. `0` means unlimited by the product rule, and the
       // renderer applies that rule — it is not translated here.
       trafficLimitGb: subscription.trafficLimit,
@@ -137,7 +137,7 @@ export class SubscriptionNoticePayloadService {
   /** Loads the row and builds in one step, for callers holding only an id. */
   public async buildForSubscription(
     subscriptionId: string,
-    context: { readonly daysLeft: number },
+    context: NoticeContext,
   ): Promise<Record<string, unknown> | null> {
     const subscription = await this.prismaService.subscription.findUnique({
       where: { id: subscriptionId },
@@ -147,6 +147,17 @@ export class SubscriptionNoticePayloadService {
     return this.build(subscription, context);
   }
 }
+
+/**
+ * How far the deadline is, in the unit the notice speaks in.
+ *
+ * The cabinet writes the expiry family's sentence itself from these (reiwa
+ * `web/src/lib/notification-presenter.ts`). A reminder hours before the end
+ * carries `hoursLeft` and NO `daysLeft`: `daysLeft: 0` read as «истекает
+ * через 0 дней», and a cabinet that predates `hoursLeft` falls back to its
+ * «скоро истекает» line when `daysLeft` is absent.
+ */
+export type NoticeContext = { readonly daysLeft: number } | { readonly hoursLeft: number };
 
 export interface SubscriptionNoticeSource {
   readonly id: string;

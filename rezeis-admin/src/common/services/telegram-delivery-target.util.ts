@@ -127,6 +127,11 @@ export function isEventTelegramAllowed(
  * or money taken for a subscription the panel cannot place. Both are payments
  * gone wrong, so whoever ticked `payment.failed` or `payment.amount_mismatch`
  * gets it.
+ *
+ * `support.ticket_handed_off` is new with the AI assistant in the tickets: on
+ * a thread the assistant leads, the new-ticket and client-reply cards are not
+ * sent, and the hand-over is the only card the operators get. Whoever ticked
+ * either support card gets it, or they would never hear about such a thread.
  */
 export const DELIVERED_WITH: ReadonlyMap<string, readonly string[]> = new Map([
   ['payment.withheld', ['payment.completed']],
@@ -134,6 +139,7 @@ export const DELIVERED_WITH: ReadonlyMap<string, readonly string[]> = new Map([
   ['payment.chargeback_unmatched', ['payment.refunded', 'payment.refund_partial']],
   ['payment.autopay_stopped_by_operator', ['payment.method_autopay_updated']],
   ['payment.autopay_attention', ['payment.failed', 'payment.amount_mismatch']],
+  ['support.ticket_handed_off', ['support.ticket_created', 'support.ticket_user_reply']],
 ]);
 
 /**

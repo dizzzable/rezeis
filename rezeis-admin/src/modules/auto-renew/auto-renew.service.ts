@@ -671,7 +671,10 @@ export class AutoRenewService {
       await this.userNotifications.create({
         userId: sub.userId,
         type: input.notificationType,
-        payload: await this.noticePayload.build(sub, { daysLeft: input.daysAhead ?? 0 }),
+        payload: await this.noticePayload.build(
+          sub,
+          input.hoursAhead !== undefined ? { hoursLeft: input.hoursAhead } : { daysLeft: input.daysAhead ?? 0 },
+        ),
       });
       created++;
     }

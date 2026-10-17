@@ -219,6 +219,18 @@ describe('isEventTelegramAllowed', () => {
     assert.equal(isEventTelegramAllowed('payment.completed', { eventsMode: 'selected', events: [], knownTypes: KNOWN }), false);
   });
 
+  it('in "selected" mode delivers the AI hand-over to whoever ticked a support card', () => {
+    // On a thread the AI assistant leads the hand-over is the ONLY card, and a
+    // saved selection never ticks a new type.
+    const known = new Set(['support.ticket_created', 'support.ticket_user_reply', 'support.ticket_handed_off', 'user.blocked']);
+    for (const ticked of ['support.ticket_created', 'support.ticket_user_reply']) {
+      const filter = { eventsMode: 'selected' as const, events: [ticked], knownTypes: known };
+      assert.equal(isEventTelegramAllowed('support.ticket_handed_off', filter), true, ticked);
+    }
+    const elsewhere = { eventsMode: 'selected' as const, events: ['user.blocked'], knownTypes: known };
+    assert.equal(isEventTelegramAllowed('support.ticket_handed_off', elsewhere), false);
+  });
+
   it('always allows the manual delivery test regardless of mode', () => {
     assert.equal(isEventTelegramAllowed('settings.telegram.test', { eventsMode: 'selected', events: [], knownTypes: KNOWN }), true);
   });

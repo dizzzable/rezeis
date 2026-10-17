@@ -50,9 +50,9 @@ export interface InternalPublicConfigInterface {
   readonly emailEnabled: boolean;
   /**
    * Whether the cabinet's «Поддержка» page shows the Telegram button
-   * («Поддержка» → настройки → «Кнопка Telegram в поддержке кабинета»). The
-   * handle itself is the cabinet's own (`BOT_SUPPORT_USERNAME`); this only
-   * says whether to offer it. A cabinet older than 0.9.7.58 ignores it.
+   * («Тикеты поддержки» → «Настройки» → «Кнопка Telegram в поддержке
+   * кабинета»). The handle itself is the cabinet's own
+   * (`BOT_SUPPORT_USERNAME`); this only says whether to offer it. A cabinet older than 0.9.7.58 ignores it.
    */
   readonly telegramSupportButton: boolean;
 }

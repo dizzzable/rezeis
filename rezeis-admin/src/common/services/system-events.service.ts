@@ -354,7 +354,8 @@ export const EVENT_TYPES = {
   /**
    * The assistant passed a ticket to a human: it could not help, the client
    * asked for a person, it failed, or it was switched off under a thread it
-   * led. THE moment the operators are told about such a thread.
+   * led. THE moment the operators are told about such a thread. Delivered to
+   * whoever ticked either support card (`DELIVERED_WITH`).
    */
   SUPPORT_TICKET_HANDED_OFF: 'support.ticket_handed_off',
 
