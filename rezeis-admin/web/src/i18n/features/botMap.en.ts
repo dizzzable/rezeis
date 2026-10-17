@@ -384,7 +384,7 @@ export const en = {
         paysupportUnavailable: 'The text when it is not',
         paysupportPrefill: 'The ready first message in the support chat',
         supportCommandText: 'The answer to /support: the button opens Support with the tickets',
-        supportCommandUnavailable: 'When the cabinet has no https address',
+        supportCommandUnavailable: 'When neither the mini app nor the cabinet site has an https address',
         accessRestricted: '/start when the service is closed to everybody (access mode)',
         accessRegBlocked: '/start by a newcomer while sign-up is closed',
         accessInvitedNoCode: '/start by a newcomer without an invitation while it is invitation-only',

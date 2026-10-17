@@ -8,6 +8,9 @@
 --                      operator's switch on the ticket, and by a hand-over.
 --                      Every existing ticket starts at false: no thread an
 --                      operator already owns is handed to the assistant.
+--   ai_active_since    when the assistant last took the thread (opened with
+--                      it, or given back by the operator). Its reply limit
+--                      counts from here.
 --   ai_handed_off_at   when the assistant passed the thread to a human — the
 --                      moment the operators were told. NULL while it never did.
 --   ai_handoff_reason  why, in the assistant's words or the panel's own code
@@ -18,7 +21,7 @@
 -- (a panel rolled back to 0.9.7.75, any cabinet) reads them as support replies
 -- instead of failing on an enum value it has never seen.
 --
--- LIVE DATABASE. A NOT NULL column with a constant default and two nullable
+-- LIVE DATABASE. A NOT NULL column with a constant default and three nullable
 -- ones are catalogue changes on PostgreSQL 11+, not a table rewrite. Timed
 -- out, the next start replays this file (`is_auto_recoverable_migration` in
 -- `docker-entrypoint.sh`): `IF NOT EXISTS` makes the replay change nothing that
@@ -27,6 +30,8 @@
 SET lock_timeout = '5s';
 
 ALTER TABLE "support_tickets" ADD COLUMN IF NOT EXISTS "ai_active" BOOLEAN NOT NULL DEFAULT false;
+
+ALTER TABLE "support_tickets" ADD COLUMN IF NOT EXISTS "ai_active_since" TIMESTAMPTZ(3);
 
 ALTER TABLE "support_tickets" ADD COLUMN IF NOT EXISTS "ai_handed_off_at" TIMESTAMPTZ(3);
 

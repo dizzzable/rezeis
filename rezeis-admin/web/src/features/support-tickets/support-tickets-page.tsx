@@ -341,8 +341,9 @@ export default function SupportTicketsPage() {
 
   /**
    * The AI assistant on the open ticket, switched by the operator. The server
-   * refuses to switch on a silence (assistant off, closed or guest thread) and
-   * says why — shown verbatim.
+   * refuses to switch on a silence (assistant off, closed or guest thread); the
+   * button is not offered on the last two, so a refused «Вернуть ИИ» is the
+   * assistant being off — said in the operator's language, not the server's.
    */
   const aiMutation = useMutation({
     mutationFn: (active: boolean) => api.post(`/admin/support-tickets/${selectedTicket}/ai`, { active }),
@@ -350,11 +351,8 @@ export default function SupportTicketsPage() {
       invalidate();
       toast.success(t(active ? 'supportTicketsPage.detail.ai.switchedOn' : 'supportTicketsPage.detail.ai.switchedOff'));
     },
-    onError: (err) =>
-      toast.error(
-        (err as { response?: { data?: { message?: string } } })?.response?.data?.message ??
-          t('supportTicketsPage.detail.ai.switchFailed'),
-      ),
+    onError: (_err, active) =>
+      toast.error(t(active ? 'supportTicketsPage.detail.ai.giveBackFailed' : 'supportTicketsPage.detail.ai.switchFailed')),
   });
 
   const silenceMutation = useMutation({

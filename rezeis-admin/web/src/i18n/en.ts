@@ -4094,6 +4094,8 @@ export const en = {
         switchedOn: 'The AI leads the ticket again',
         switchedOff: 'The AI no longer answers this ticket',
         switchFailed: 'Could not switch the AI',
+        giveBackFailed:
+          'Could not give the ticket back to the AI: check that the assistant is on and has a key on the “AI-Support” page, then try again.',
         reasons: {
           ai_off: 'the assistant is off or has no key',
           ai_error: 'the model did not answer',

@@ -390,7 +390,7 @@ export const ru = {
         paysupportUnavailable: 'Текст, если он не задан',
         paysupportPrefill: 'Готовое первое сообщение в чате поддержки',
         supportCommandText: 'Ответ на /support: кнопка открывает «Поддержку» с обращениями',
-        supportCommandUnavailable: 'Когда у кабинета нет адреса https',
+        supportCommandUnavailable: 'Когда ни у мини-приложения, ни у сайта кабинета нет адреса https',
         accessRestricted: '/start, когда сервис закрыт для всех (режим доступа)',
         accessRegBlocked: '/start нового человека, пока регистрация закрыта',
         accessInvitedNoCode: '/start нового человека без приглашения, пока вход только по приглашениям',

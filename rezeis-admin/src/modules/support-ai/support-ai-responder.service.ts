@@ -58,6 +58,8 @@ interface TicketForAnswer {
   readonly subject: string;
   readonly status: SupportTicketStatus;
   readonly aiActive: boolean;
+  /** When the assistant took the thread this time; its reply limit counts from here. */
+  readonly aiActiveSince: Date | null;
   readonly user: { readonly id: string; readonly language: string | null } | null;
   /** Oldest first, at most {@link HISTORY_MESSAGES}. */
   readonly messages: ReadonlyArray<TicketTurn & { readonly id: string }>;
@@ -105,8 +107,16 @@ export class SupportAiResponderService {
     const lastClientText = ticket.messages[ticket.messages.length - 1]?.content ?? '';
     const language = clientLanguage(lastClientText, ticket.user?.language);
 
+    // Its replies since it took the thread this time — not its replies ever:
+    // the hand-over lines and an earlier stint would hand a thread the
+    // operator gave back after the limit straight over again.
     const answered = await this.prisma.supportTicketMessage.count({
-      where: { ticketId: ticket.id, authorType: 'ADMIN', metadata: { path: ['ai'], equals: true } },
+      where: {
+        ticketId: ticket.id,
+        authorType: 'ADMIN',
+        metadata: { path: ['ai'], equals: true },
+        ...(ticket.aiActiveSince !== null ? { createdAt: { gte: ticket.aiActiveSince } } : {}),
+      },
     });
     if (answered >= SUPPORT_AI_MAX_REPLIES_PER_TICKET) {
       await this.handOverWithNote(ticket, SUPPORT_AI_HANDOFF.LIMIT, language);
@@ -274,6 +284,7 @@ export class SupportAiResponderService {
         subject: true,
         status: true,
         aiActive: true,
+        aiActiveSince: true,
         user: { select: { id: true, language: true } },
         messages: {
           orderBy: { createdAt: 'desc' },
@@ -294,6 +305,7 @@ export class SupportAiResponderService {
       subject: row.subject,
       status: row.status,
       aiActive: row.aiActive,
+      aiActiveSince: row.aiActiveSince,
       user: row.user === null ? null : { id: row.user.id, language: row.user.language ?? null },
       messages: [...row.messages].reverse(),
     };

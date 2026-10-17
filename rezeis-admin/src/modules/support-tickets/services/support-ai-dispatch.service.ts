@@ -97,7 +97,7 @@ export class SupportAiDispatchService {
     if (!(await this.isReady())) return 'operator';
     await this.prismaService.supportTicket.update({
       where: { id: ticketId },
-      data: { aiActive: true },
+      data: { aiActive: true, aiActiveSince: new Date() },
     });
     if (await this.enqueueReply({ ticketId, messageId })) return 'assistant';
     await this.prismaService.supportTicket.update({ where: { id: ticketId }, data: { aiActive: false } });
@@ -208,7 +208,9 @@ export class SupportAiDispatchService {
     }
     await this.prismaService.supportTicket.update({
       where: { id: ticketId },
-      data: { aiActive: true, aiHandedOffAt: null, aiHandoffReason: null },
+      // A fresh reply count: a thread given back after the limit would
+      // otherwise be handed over again on the client's next message.
+      data: { aiActive: true, aiActiveSince: new Date(), aiHandedOffAt: null, aiHandoffReason: null },
     });
     const last = ticket.messages[0];
     if (last !== undefined && last.authorType === 'USER') {

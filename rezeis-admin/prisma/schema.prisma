@@ -4046,6 +4046,10 @@ model SupportTicket {
   /// opened while the assistant is on and configured; cleared by an
   /// operator's own message, by the operator's switch, and by a hand-over.
   aiActive        Boolean   @default(false) @map("ai_active")
+  /// When the assistant last took the thread: opened with it, or given back
+  /// («Вернуть ИИ»). Its reply limit counts from here, so a thread given back
+  /// after the limit starts a fresh count. `null` while it never led it.
+  aiActiveSince   DateTime? @map("ai_active_since") @db.Timestamptz(3)
   /// When the assistant passed the thread to a human — the moment the
   /// operators were told. `null` while it never did.
   aiHandedOffAt   DateTime? @map("ai_handed_off_at") @db.Timestamptz(3)

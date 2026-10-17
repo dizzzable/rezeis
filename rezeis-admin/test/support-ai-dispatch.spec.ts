@@ -14,6 +14,7 @@ import { SUPPORT_AI_JOBS } from '../src/modules/support-tickets/support-ai.const
 
 interface TicketRow {
   aiActive: boolean;
+  aiActiveSince?: Date | null;
   status: string;
   userId: string | null;
   subject: string;
@@ -85,6 +86,7 @@ describe('a new cabinet ticket', () => {
     const { service, ticket, jobs } = build();
     assert.equal(await service.takeNewTicket('t-1', 'm-1'), 'assistant');
     assert.equal(ticket.aiActive, true);
+    assert.ok(ticket.aiActiveSince instanceof Date, 'its reply limit counts from here');
     assert.equal(jobs.length, 1);
     assert.equal(jobs[0].name, SUPPORT_AI_JOBS.REPLY);
     assert.deepEqual(jobs[0].data, { ticketId: 't-1', messageId: 'm-1' });
@@ -169,6 +171,13 @@ describe('the operator\'s switch on a ticket', () => {
     assert.deepEqual(await service.setActive('t-1', true), { aiActive: true });
     assert.equal(ticket.aiActive, true);
     assert.equal(jobs.length, 1);
+  });
+
+  it('starts a fresh reply count — a thread given back after the limit is not handed over again at once', async () => {
+    const earlier = new Date('2026-10-16T10:00:00.000Z');
+    const { service, ticket } = build({ ticket: { aiActive: false, aiActiveSince: earlier } });
+    await service.setActive('t-1', true);
+    assert.ok(ticket.aiActiveSince instanceof Date && ticket.aiActiveSince > earlier);
   });
 
   it('does not queue an answer when support had the last word', async () => {

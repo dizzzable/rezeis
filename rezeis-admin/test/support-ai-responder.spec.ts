@@ -28,6 +28,10 @@ function build(opts: {
   readonly aiActive?: boolean;
   readonly completions?: Completion[];
   readonly aiReplies?: number;
+  /** When the assistant took the thread this time (`aiActiveSince`). */
+  readonly since?: Date | null;
+  /** When each of its earlier replies was written; counted against `since`. */
+  readonly aiReplyTimes?: readonly Date[];
   readonly enabled?: boolean;
   /** Runs while the model "thinks" — an operator answering, the client writing. */
   readonly duringModel?: (state: { aiActive: boolean; messages: Message[] }) => void;
@@ -50,11 +54,17 @@ function build(opts: {
         subject: 'VPN',
         status: 'OPEN',
         aiActive: state.aiActive,
+        aiActiveSince: opts.since ?? null,
         user: { id: 'u-1', language: 'EN' },
         messages: [...state.messages].reverse(),
       }),
     },
-    supportTicketMessage: { count: async () => opts.aiReplies ?? 0 },
+    supportTicketMessage: {
+      count: async ({ where }: { where: { createdAt?: { gte: Date } } }) =>
+        opts.aiReplyTimes === undefined
+          ? (opts.aiReplies ?? 0)
+          : opts.aiReplyTimes.filter((at) => where.createdAt === undefined || at >= where.createdAt.gte).length,
+    },
   };
   const aiConfig = {
     getSettings: async (): Promise<AiConfigSettings> => ({
@@ -222,6 +232,18 @@ describe('the assistant hands the thread over', () => {
     assert.equal(written.length, 1, 'one line to the client');
     // Back in the operators' queue AFTER that line, which moved it to «ждёт ответа клиента».
     assert.deepEqual(reopened, [1]);
+  });
+
+  it('counts only this stint: given back after the limit, it answers again', async () => {
+    const yesterday = new Date('2026-10-16T10:00:00.000Z');
+    const twelve = Array.from({ length: 12 }, (_, i) => new Date(yesterday.getTime() + i * 60_000));
+    const givenBack = build({ aiReplyTimes: twelve, since: new Date('2026-10-17T09:00:00.000Z') });
+    assert.equal(await givenBack.service.answer({ ticketId: 't-1', messageId: 'm-1' }), 'answered');
+    assert.deepEqual(givenBack.handOffs, []);
+    // The same twelve inside the stint are the limit.
+    const spent = build({ aiReplyTimes: twelve, since: yesterday });
+    assert.equal(await spent.service.answer({ ticketId: 't-1', messageId: 'm-1' }), 'handed_off');
+    assert.deepEqual(spent.handOffs, ['ai_limit']);
   });
 
   it('when it was switched off under the thread', async () => {
