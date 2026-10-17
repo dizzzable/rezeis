@@ -142,6 +142,7 @@ export class SupportAiDispatchService {
       data: { aiActive: false, aiHandedOffAt: new Date(), aiHandoffReason: stored.length > 0 ? stored : null },
     });
     if (moved.count === 0) return false;
+    await this.reopenForOperator(ticketId);
     const ticket = await this.prismaService.supportTicket.findUnique({
       where: { id: ticketId },
       select: { subject: true, userId: true },
@@ -154,6 +155,22 @@ export class SupportAiDispatchService {
       { ticketId, userId: ticket?.userId ?? null, subject: ticket?.subject ?? null, reason: stored },
     );
     return true;
+  }
+
+  /**
+   * Put a handed-over thread back in the operators' queue.
+   *
+   * Every reply of the assistant moves the ticket to `WAITING_REPLY` («ждёт
+   * ответа клиента») — right after an answer, wrong after a hand-over: the
+   * thread waits on a person, and in «ждёт ответа клиента» it drops out of
+   * the queue an operator works from. Called by the hand-over itself and
+   * again after the line that tells the client a person will answer.
+   */
+  public async reopenForOperator(ticketId: string): Promise<void> {
+    await this.prismaService.supportTicket.updateMany({
+      where: { id: ticketId, status: SupportTicketStatus.WAITING_REPLY },
+      data: { status: SupportTicketStatus.OPEN },
+    });
   }
 
   /**

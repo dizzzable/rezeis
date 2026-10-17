@@ -261,6 +261,9 @@ export class SupportAiResponderService {
   private async handOverWithNote(ticket: TicketForAnswer, reason: string, language: string): Promise<void> {
     if (!(await this.dispatch.handOff(ticket.id, reason))) return;
     await this.writeReply(ticket, handoffNote(language), null);
+    // The line is a support reply, and it moved the ticket to «ждёт ответа
+    // клиента»; the thread waits on an operator.
+    await this.dispatch.reopenForOperator(ticket.id);
   }
 
   private async readTicket(ticketId: string): Promise<TicketForAnswer | null> {

@@ -39,6 +39,8 @@ function build(opts: {
   const written: Array<{ authorType: string; authorId: string | null; content: string; metadata: unknown }> = [];
   const notified: string[] = [];
   const handOffs: string[] = [];
+  /** How many messages were written when the ticket was put back in the queue. */
+  const reopened: number[] = [];
   const modelCalls: unknown[] = [];
 
   const prisma = {
@@ -76,6 +78,9 @@ function build(opts: {
       state.aiActive = false;
       handOffs.push(reason);
       return true;
+    },
+    reopenForOperator: async () => {
+      reopened.push(written.length);
     },
   };
   const completions = [...(opts.completions ?? [{ content: 'Переустановите профиль.' }])];
@@ -133,7 +138,7 @@ function build(opts: {
     { notifyAdminReply: async (input: { ticketId: string }) => void notified.push(input.ticketId) } as never,
     dispatch as never,
   );
-  return { service, state, written, notified, handOffs, modelCalls };
+  return { service, state, written, notified, handOffs, reopened, modelCalls };
 }
 
 describe('the assistant answers in the ticket', () => {
@@ -210,11 +215,13 @@ describe('the assistant hands the thread over', () => {
   });
 
   it('after its answers run out, without calling the model again', async () => {
-    const { service, written, handOffs, modelCalls } = build({ aiReplies: 12 });
+    const { service, written, handOffs, reopened, modelCalls } = build({ aiReplies: 12 });
     assert.equal(await service.answer({ ticketId: 't-1', messageId: 'm-1' }), 'handed_off');
     assert.deepEqual(handOffs, ['ai_limit']);
     assert.equal(modelCalls.length, 0);
     assert.equal(written.length, 1, 'one line to the client');
+    // Back in the operators' queue AFTER that line, which moved it to «ждёт ответа клиента».
+    assert.deepEqual(reopened, [1]);
   });
 
   it('when it was switched off under the thread', async () => {
@@ -224,10 +231,11 @@ describe('the assistant hands the thread over', () => {
   });
 
   it('when every attempt failed, with a line to the client — once', async () => {
-    const { service, written, handOffs } = build();
+    const { service, written, handOffs, reopened } = build();
     await service.giveUp({ ticketId: 't-1', messageId: 'm-1' });
     await service.giveUp({ ticketId: 't-1', messageId: 'm-1' });
     assert.deepEqual(handOffs, ['ai_error']);
     assert.equal(written.length, 1);
+    assert.deepEqual(reopened, [1]);
   });
 });

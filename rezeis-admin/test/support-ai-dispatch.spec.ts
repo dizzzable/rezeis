@@ -42,9 +42,10 @@ function build(opts: {
         Object.assign(ticket, data);
         return { id: 't-1', ...ticket };
       },
-      // Compare-and-swap on `aiActive`, as the service relies on.
-      updateMany: async ({ where, data }: { where: { aiActive?: boolean }; data: Partial<TicketRow> }) => {
+      // Compare-and-swap on `aiActive` and `status`, as the service relies on.
+      updateMany: async ({ where, data }: { where: { aiActive?: boolean; status?: string }; data: Partial<TicketRow> }) => {
         if (where.aiActive !== undefined && ticket.aiActive !== where.aiActive) return { count: 0 };
+        if (where.status !== undefined && ticket.status !== where.status) return { count: 0 };
         Object.assign(ticket, data);
         return { count: 1 };
       },
@@ -143,6 +144,16 @@ describe('the hand-over', () => {
     assert.equal(events.length, 1);
     assert.equal(ticket.aiActive, false);
     assert.match(events[0].message, /ИИ передал обращение «Не подключается» оператору: клиент просит оператора/);
+  });
+
+  it('puts the thread back in the operators\' queue — not «ждёт ответа клиента»', async () => {
+    // The assistant's last reply moved it to WAITING_REPLY; it now waits on a person.
+    const { service, ticket } = build({ ticket: { aiActive: true, status: 'WAITING_REPLY' } });
+    assert.equal(await service.handOff('t-1', 'нужен возврат'), true);
+    assert.equal(ticket.status, 'OPEN');
+    const closed = build({ ticket: { aiActive: true, status: 'CLOSED' } });
+    await closed.service.handOff('t-1', 'ai_off');
+    assert.equal(closed.ticket.status, 'CLOSED');
   });
 
   it('prints the panel\'s own reasons in words', async () => {
