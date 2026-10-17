@@ -633,6 +633,7 @@ export const ru = {
         supportUsername: 'Аккаунт поддержки',
         platformBranding: 'Название проекта и заголовок сайта (настройки платформы)',
         emailEnabled: 'Отправка писем (SMTP)',
+        telegramSupportButton: 'Кнопка Telegram в поддержке кабинета (страница «Тикеты поддержки»)',
       },
       reasons: {
         'not-an-object': 'значение не того вида: кабинет ждёт набор настроек',

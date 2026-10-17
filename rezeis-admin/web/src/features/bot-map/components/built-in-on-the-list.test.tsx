@@ -187,8 +187,8 @@ describe('the bot’s screens without a block on «Список»', () => {
 
   it('are found by the key of a button caption too', () => {
     // A BUTTON's key, which no screen lists among its texts.
-    const found = filterNodesByQuery(withBuiltInNodes([], t), 'ai_support.exit_button')
-    expect(found.map((node) => node.id)).toEqual([systemScreenNodeId('aiSupport')])
+    const found = filterNodesByQuery(withBuiltInNodes([], t), 'payment_return.open_app')
+    expect(found.map((node) => node.id)).toEqual([systemScreenNodeId('paymentReturn')])
   })
 
   it('show their buttons on the list, with when the bot shows them', () => {

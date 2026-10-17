@@ -75,6 +75,7 @@ export const BRANDING_DELIVERY_FIELD_LABELS: Readonly<Record<string, BrandingDel
   supportUsername: elsewhere('brandingPage.deliveryNotice.elsewhere.supportUsername'),
   platformBranding: elsewhere('brandingPage.deliveryNotice.elsewhere.platformBranding'),
   emailEnabled: elsewhere('brandingPage.deliveryNotice.elsewhere.emailEnabled'),
+  telegramSupportButton: elsewhere('brandingPage.deliveryNotice.elsewhere.telegramSupportButton'),
 }
 
 const BRANDING_PREFIX = 'branding.'

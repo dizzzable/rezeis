@@ -633,6 +633,7 @@ export const en = {
         supportUsername: 'Support account',
         platformBranding: 'Project name and site title (platform settings)',
         emailEnabled: 'E-mail delivery (SMTP)',
+        telegramSupportButton: 'Telegram button in the cabinet support (“Support tickets” page)',
       },
       reasons: {
         'not-an-object': 'not the right kind of value: the cabinet expects a set of settings',

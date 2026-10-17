@@ -31,6 +31,8 @@ import { PaymentWebhookOpsService } from '../src/modules/payments/services/payme
 import { ProviderSubscriptionService } from '../src/modules/payments/services/provider-subscription.service';
 import { PROFILE_SYNC_QUEUE } from '../src/modules/profile-sync/profile-sync.constants';
 import { ProfileSyncQueueService } from '../src/modules/profile-sync/profile-sync-queue.service';
+import { SupportAiDispatchService } from '../src/modules/support-tickets/services/support-ai-dispatch.service';
+import { SUPPORT_AI_QUEUE } from '../src/modules/support-tickets/support-ai.constants';
 import { WebhookQueueService } from '../src/modules/webhooks/services/webhook-queue.service';
 import { WEBHOOK_DELIVERY_QUEUE } from '../src/modules/webhooks/webhooks.constants';
 import { admitThroughBullMq, OfflineBullMqQueue } from './helpers/bullmq-offline-queue';
@@ -362,6 +364,25 @@ describe('every producer mints ids BullMQ accepts and dedups on', () => {
 
     assertAdmittedAndDistinct(queue, 1, 'payment webhook replay');
   });
+
+  it('SupportAiDispatchService, one answer per client message', async () => {
+    const queue = new OfflineBullMqQueue<unknown>(SUPPORT_AI_QUEUE);
+    const service = new SupportAiDispatchService(
+      { supportTicket: { findUnique: async () => ({ aiActive: true }), updateMany: async () => ({ count: 0 }) } } as never,
+      { getSettings: async () => ({ enabled: true, apiKey: 'sk-test' }) } as never,
+      { info: () => undefined } as never,
+      queue.asQueue(),
+    );
+
+    for (const [ticketId, messageId] of [[CUID, CUID], [CUID, '12345'], ['12345', CUID]]) {
+      assert.equal(await service.onClientMessage(ticketId, messageId), 'assistant', `${ticketId} / ${messageId}`);
+      // The same message twice (a retried request) is still one answer.
+      await service.onClientMessage(ticketId, messageId);
+    }
+
+    assertAdmittedAndDistinct(queue, 3, 'support AI answer');
+    assert.equal(queue.admitted.filter((call) => call.collapsed).length, 3);
+  });
 });
 
 // ── The tree ─────────────────────────────────────────────────────────────────
@@ -383,6 +404,7 @@ const DRIVEN_PRODUCERS: readonly string[] = [
   'src/modules/payments/services/payment-webhook-ops.service.ts',
   'src/modules/payments/services/provider-subscription.service.ts',
   'src/modules/profile-sync/profile-sync-queue.service.ts',
+  'src/modules/support-tickets/services/support-ai-dispatch.service.ts',
   'src/modules/webhooks/services/webhook-queue.service.ts',
 ];
 
