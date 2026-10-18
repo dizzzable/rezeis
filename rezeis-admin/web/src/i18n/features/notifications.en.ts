@@ -37,6 +37,8 @@ export const en = {
       addon_devices_auto_ended: 'Device add-on has ended (automatic disconnection)',
       addon_not_applied: 'Add-on paid but not applied (subscription not active)',
       addon_not_applied_other: 'Add-on paid but not applied (another reason)',
+      autopay_first_charge_failed: 'Automatic SBP charge failed: subscription not renewed',
+      autopay_first_charge_failed_new: 'Automatic SBP charge failed: subscription not set up',
       referral_attached: 'Referral attached',
       referral_reward: 'Referral reward',
       referral_qualified: 'Referral qualified',

@@ -166,6 +166,15 @@ export class PaymentPendingExpiryService {
       });
       if (result.count === 0) continue;
       cancelled += 1;
+      if (providerVerified === 'awaiting-charge') {
+        // The payer confirmed an SBP subscription whose first charge is still
+        // to come (with a delay, days away): not an abandoned cart, so no
+        // «Платёж истёк». The charge revives this row and delivers the plan.
+        this.logger.log(
+          `Antilopay sign-up ${tx.paymentId} is waiting for its first charge; its checkout is closed until then`,
+        );
+        continue;
+      }
       // INFO (not WARNING) and intentionally NOT mapped to admin push — an
       // abandoned-cart expiry is routine and would be noisy. It still lands in
       // the audit log + realtime feed.
@@ -207,6 +216,9 @@ export class PaymentPendingExpiryService {
    *                         sanctioned provider-terminal release.
    * - `local-ttl`         — no provider verdict available (non-YooKassa, or no
    *                         provider id yet). The cancel rests on our own TTL.
+   * - `awaiting-charge`   — Antilopay: a confirmed SBP sign-up whose first charge
+   *                         is still to come. Cancelled like `local-ttl`, without
+   *                         the «Платёж истёк» event; the charge revives it.
    *
    * The distinction is recorded in the release reason rather than used to skip
    * the release: leaving a reservation held forever is a certain harm (the
@@ -214,7 +226,9 @@ export class PaymentPendingExpiryService {
    * row still fulfils — reconciliation revives the transaction and
    * `consumePaidTrialClaim` revives the released claim with it.
    */
-  private async isProviderTerminal(tx: StalePendingRow): Promise<'keep' | 'provider-terminal' | 'local-ttl'> {
+  private async isProviderTerminal(
+    tx: StalePendingRow,
+  ): Promise<'keep' | 'provider-terminal' | 'local-ttl' | 'awaiting-charge'> {
     // Antilopay is asked by OUR payment id, so a row with no provider id yet is
     // still asked: its invoice may exist, and its callback may be the one that
     // was lost. What it says decides; see `AntilopayStatusService`.

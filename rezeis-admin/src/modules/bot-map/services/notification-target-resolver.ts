@@ -32,6 +32,10 @@ export function resolveTerminalRouteFor(type: string): MiniAppRoute {
   if (isConnectHelpType(t)) return '/dashboard';
   // «Докупка не применена», for either reason: support, where «мы разберёмся» happens.
   if (t === ADD_ON_NOT_APPLIED_TYPE || t === ADD_ON_NOT_APPLIED_OTHER_TYPE) return '/support';
+  // «Автосписание не прошло»: where the customer can pay — kept in step with
+  // `resolveNotificationPushUrl`.
+  if (t === AUTOPAY_FIRST_CHARGE_FAILED_NEW_TYPE) return '/plans';
+  if (t === AUTOPAY_FIRST_CHARGE_FAILED_TYPE) return '/renew';
   // An add-on's end, or its approach: the add-on page, where it is bought again.
   if (isAddOnNoticeType(t)) return '/addons';
   if (t.includes('support')) return '/support';
@@ -69,6 +73,8 @@ export function resolveNotificationCategory(type: string): NotificationCategory 
   if (isConnectHelpType(t)) return 'expires';
   // An add-on of a subscription ending: with the subscription's own notices.
   if (isAddOnNoticeType(t)) return 'expires';
+  // A subscription its automatic charge did not pay for: with them too.
+  if (t === AUTOPAY_FIRST_CHARGE_FAILED_TYPE || t === AUTOPAY_FIRST_CHARGE_FAILED_NEW_TYPE) return 'expires';
   if (t.startsWith('expires_') || t === 'expired' || t === 'limited' || t.startsWith('expired_')) {
     return 'expires';
   }
@@ -113,3 +119,9 @@ const ADD_ON_NOT_APPLIED_TYPE = 'addon_not_applied';
 
 /** «Докупка не применена» for any other reason: the catalogue's `ADD_ON_NOT_APPLIED_OTHER_NOTICE_TYPE`. */
 const ADD_ON_NOT_APPLIED_OTHER_TYPE = 'addon_not_applied_other';
+
+/** «Автосписание не прошло» for a subscription the customer has: the catalogue's `AUTOPAY_FIRST_CHARGE_FAILED_NOTICE_TYPE`. */
+const AUTOPAY_FIRST_CHARGE_FAILED_TYPE = 'autopay_first_charge_failed';
+
+/** The same for a subscription never made: the catalogue's `AUTOPAY_FIRST_CHARGE_FAILED_NEW_NOTICE_TYPE`. */
+const AUTOPAY_FIRST_CHARGE_FAILED_NEW_TYPE = 'autopay_first_charge_failed_new';

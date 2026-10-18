@@ -72,13 +72,30 @@ export interface ProviderSubscriptionTerms {
    */
   readonly method?: AntilopayAutopayMethod;
   /**
-   * Antilopay SBP only: «Отсрочка первого списания по СБП». The payer holds the
-   * plan for `delay.days` and is charged after them; nothing is charged at
-   * activation. Present only when the cabinet showed it and the panel decided on
-   * it (`antilopay-delay-policy.util.ts`); absent is today's behaviour, the
-   * first charge made at activation.
+   * Antilopay SBP only: «Отсрочка первого списания по СБП». Nothing is charged
+   * at activation: the first charge comes after `delay.days`. Present only when
+   * the cabinet showed it and the panel decided on it
+   * (`antilopay-delay-policy.util.ts`); absent, the first charge is made at
+   * activation. A draft made before 18.10.2026 gave the plan for the delay at
+   * once (`antilopay-delay-grant.util.ts`); one marked
+   * {@link ProviderSubscriptionTerms.deliversOnCharge} gives nothing until the
+   * first charge.
    */
   readonly delay?: AntilopayDelay;
+  /**
+   * Antilopay SBP only, on every draft made since 18.10.2026: the checkout is
+   * delivered by the first CHARGE of the subscription, never by its start.
+   *
+   * The start of an SBP subscription is the payer confirming it in their bank,
+   * and Antilopay calls that payment of OUR order paid — but no money moves with
+   * it («Нельзя сделать возврат у начала подписки, отмените подписку или
+   * сделайте возврат платежа, созданного по подписке»): the money is in a
+   * separate payment the subscription makes, at activation or after the delay.
+   * A draft without the mark was delivered by the start, so a payer whose
+   * first charge failed kept a full term nobody paid for; it keeps the rules it
+   * was made with (`assignAntilopayChargeRoles`).
+   */
+  readonly deliversOnCharge?: true;
 }
 
 /**
@@ -168,8 +185,25 @@ export function resolveProviderSubscriptionTerms(input: {
       ...(isAntilopayAutopayMethod(method) ? { method } : {}),
       // A delay belongs to SBP alone: a card's first payment is charged on the form.
       ...(method === 'SBP' && input.delay !== undefined && input.delay !== null ? { delay: input.delay } : {}),
+      // An SBP subscription's start is not a payment: its first charge is.
+      ...(method === 'SBP' ? { deliversOnCharge: true as const } : {}),
     },
   };
+}
+
+/**
+ * Whether a payment is the checkout of an Antilopay SBP sign-up delivered by
+ * the subscription's first charge ({@link ProviderSubscriptionTerms.deliversOnCharge}):
+ * nothing that says only that the sign-up's own order is paid may fulfil it.
+ */
+export function isChargeDeliveredCheckout(transaction: {
+  readonly gatewayType: PaymentGatewayType;
+  readonly planSnapshot: unknown;
+}): boolean {
+  return (
+    transaction.gatewayType === PaymentGatewayType.ANTILOPAY &&
+    readProviderSubscriptionTerms(transaction.planSnapshot)?.deliversOnCharge === true
+  );
 }
 
 /**
@@ -256,6 +290,7 @@ export function readProviderSubscriptionTerms(planSnapshot: unknown): ProviderSu
     subscriptionId,
     ...(isAntilopayAutopayMethod(method) ? { method } : {}),
     ...(method === 'SBP' && delay !== null ? { delay } : {}),
+    ...(method === 'SBP' && terms['deliversOnCharge'] === true ? { deliversOnCharge: true as const } : {}),
   };
 }
 

@@ -421,6 +421,24 @@ run('gatewayData written by two paths at once, on PostgreSQL', () => {
     }
   });
 
+  it('a once-only claim: lands while the key is absent, and never again, a null value included', async () => {
+    const id = await payment({ status: 'PENDING', gatewayData: { kept: 1 } });
+    const claim = (value: unknown) =>
+      writeTransactionGatewayData(prisma, id, { merge: { told: value }, onlyIfAbsent: 'told' });
+    assert.equal(await claim('first'), 1);
+    assert.equal(await claim('second'), 0);
+    assert.deepEqual((await stored(id)).gatewayData, { kept: 1, told: 'first' });
+    // Two at the same moment: one lands.
+    const other = await payment({ status: 'PENDING' });
+    const raced = await Promise.all(
+      ['a', 'b', 'c'].map((value) => writeTransactionGatewayData(prisma, other, { merge: { told: value }, onlyIfAbsent: 'told' })),
+    );
+    assert.deepEqual(raced.sort(), [0, 0, 1]);
+    // A key held as JSON null is there.
+    const nulled = await payment({ status: 'PENDING', gatewayData: { told: null } });
+    assert.equal(await writeTransactionGatewayData(prisma, nulled, { merge: { told: 'x' }, onlyIfAbsent: 'told' }), 0);
+  });
+
   it('a manual-review hold keeps what the sweep recorded while the notification was being verified', async () => {
     const id = await payment({ status: 'PENDING' });
 

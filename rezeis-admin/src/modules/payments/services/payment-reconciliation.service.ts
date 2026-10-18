@@ -70,6 +70,7 @@ import { AdConversionService } from '../../advertising/services/ad-conversion.se
 import { SavedPaymentMethodService } from './saved-payment-method.service';
 import { YookassaPaymentVerificationService } from './yookassa-payment-verification.service';
 import { isDelayedCheckout, isDelayGrant } from '../utils/antilopay-delay-grant.util';
+import { isChargeDeliveredCheckout } from '../utils/provider-subscription-terms.util';
 import { ProviderSubscriptionService, readProviderSubscriptionDispute } from './provider-subscription.service';
 import { releasePaidTrialClaim } from '../../subscriptions/services/trial-claim-ledger.util';
 import { findDaysConvertedFromPayment } from '../../subscriptions/services/paid-remainder-conversion.util';
@@ -277,6 +278,29 @@ export class PaymentReconciliationService implements OnModuleDestroy {
             `PROVIDER_TERMINAL_${nextStatus}`,
           );
         }
+        await this.paymentWebhookInboxService.markProcessed(event.id);
+        return;
+      }
+      // An Antilopay SBP sign-up drafted since 18.10.2026 is delivered by the
+      // first CHARGE of its subscription, and only that. Antilopay calls the
+      // payment of OUR order paid when the payer confirms the subscription in
+      // their bank, and no money moves with it («Нельзя сделать возврат у начала
+      // подписки»): fulfilled on that, a payer whose first charge then failed
+      // kept a full term nobody paid for (18.10.2026, the operator's complaint).
+      // So whatever says only that — the callback, the status sweep — is held:
+      // acknowledged, nothing written but the moment, and the subscription
+      // looked at. The charge comes as the subscription's own settlement
+      // (`PROVIDER_SUBSCRIPTION`), which passes, and revives a checkout that
+      // lapsed meanwhile like any late payment.
+      if (
+        nextStatus === TransactionStatus.COMPLETED &&
+        isChargeDeliveredCheckout(transaction) &&
+        !isProviderSubscriptionSettlement(event)
+      ) {
+        if (this.providerSubscriptions === undefined) {
+          throw new ServiceUnavailableException('Provider subscriptions are not available to hold an SBP sign-up');
+        }
+        await this.providerSubscriptions.holdSignUpStart(transaction);
         await this.paymentWebhookInboxService.markProcessed(event.id);
         return;
       }
@@ -526,8 +550,9 @@ export class PaymentReconciliationService implements OnModuleDestroy {
         this.alertNotifiedAmountShortfall(transaction, event.eventStatus, notifiedAmountShortfall);
       }
 
-      // The checkout of an Antilopay SBP sign-up with a delayed first charge is
-      // the plan GRANTED for the delay, never a paid term: whatever made this
+      // The checkout of an Antilopay SBP sign-up with a delayed first charge,
+      // drafted before 18.10.2026 (one since is held above until its first
+      // charge), is the plan GRANTED for the delay, never a paid term: whatever made this
       // notice complete it (Antilopay calling the payment of OUR order paid, the
       // status sweep, the grant's own settlement), it is rewritten into the grant
       // before anything is fulfilled — by the same claim a look at the recurrent
@@ -3048,6 +3073,15 @@ export const AFTER_RESPONSE_SHUTDOWN_WAIT_MS = 5_000;
  * (`chargeLockHoldMs(CHARGE_LOCK_TIMING)`). See `yookassaChargesAroundRefund`.
  */
 const CHARGE_IN_FLIGHT_WINDOW_MS = 2 * 60 * 1000;
+
+/**
+ * A notice the subscription itself queued for a charge it took
+ * (`ProviderSubscriptionService.enqueueSettlement`): its own source and a key
+ * of its own. A provider callback, or a status check, is neither.
+ */
+function isProviderSubscriptionSettlement(event: { readonly rawPayload: unknown; readonly providerEventId: string }): boolean {
+  return asRecord(event.rawPayload)?.['source'] === 'PROVIDER_SUBSCRIPTION' && event.providerEventId.startsWith('subscription:');
+}
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null;

@@ -68,7 +68,8 @@ export class InternalPaymentsController {
   /**
    * The delay of the first SBP charge this customer would be offered on the
    * Antilopay gateway, or null: none configured, the cabinet cannot show it, the
-   * customer has used it, or the caller named no customer (nothing is promised to
+   * customer has paid before or has used it (`mayNotTakeDelay`: new customers
+   * only, once), or the caller named no customer (nothing is promised to
    * somebody the panel cannot count). Asks the database only when a delay is
    * otherwise on offer.
    */
@@ -80,7 +81,7 @@ export class InternalPaymentsController {
     if (userId === undefined || userId.length === 0 || this.providerSubscriptionService === undefined) return null;
     const offered = decideAntilopayDelay({ settings, method: 'SBP', audience, alreadyUsed: false });
     if (offered === null) return null;
-    return (await this.providerSubscriptionService.hasUsedDelay(userId)) ? null : offered;
+    return (await this.providerSubscriptionService.mayNotTakeDelay(userId)) ? null : offered;
   }
 
   /**

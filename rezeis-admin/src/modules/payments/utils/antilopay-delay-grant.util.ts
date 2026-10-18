@@ -4,7 +4,11 @@ import { readProviderSubscriptionTerms } from './provider-subscription-terms.uti
 
 /**
  * The access a delayed Antilopay SBP subscription grants while its first charge
- * waits («Отсрочка первого списания по СБП»).
+ * waits («Отсрочка первого списания по СБП») — for sign-ups drafted BEFORE
+ * 18.10.2026 only. Since then the owner's rule is «без доступа на время
+ * отсрочки»: a draft marked `deliversOnCharge` is never rewritten, and its plan
+ * comes with the first charge. What follows describes the sign-ups that still
+ * hold a grant, or are owed one by the terms they were shown.
  *
  * Nothing is charged at activation, so the sign-up's own checkout — the payment
  * that would have been the first charge — is REWRITTEN into the grant, once, at
@@ -62,14 +66,15 @@ export function isDelayGrant(gatewayData: unknown): boolean {
 
 /**
  * Whether a payment is the checkout of an Antilopay SBP sign-up made with a
- * delay: the payment that is rewritten into the grant, and must never be
- * fulfilled as a paid term. Read off the terms the draft was made with.
+ * delay BEFORE 18.10.2026: the payment that is rewritten into the grant, and
+ * must never be fulfilled as a paid term. Read off the terms the draft was made
+ * with. A delayed draft made since then (`deliversOnCharge`) is no grant: the
+ * owner's rule «без доступа на время отсрочки» — the plan comes with the first
+ * charge, as for any other SBP sign-up.
  */
 export function isDelayedCheckout(transaction: Pick<Transaction, 'gatewayType' | 'planSnapshot'>): boolean {
-  return (
-    transaction.gatewayType === PaymentGatewayType.ANTILOPAY &&
-    readProviderSubscriptionTerms(transaction.planSnapshot)?.delay !== undefined
-  );
+  const terms = transaction.gatewayType === PaymentGatewayType.ANTILOPAY ? readProviderSubscriptionTerms(transaction.planSnapshot) : null;
+  return terms !== null && terms.delay !== undefined && terms.deliversOnCharge !== true;
 }
 
 /**

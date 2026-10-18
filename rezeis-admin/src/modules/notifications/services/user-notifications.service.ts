@@ -19,6 +19,8 @@ import { TelegramDirectQueueService } from './telegram-direct-queue.service';
 import { NotificationTemplatesService } from './notification-templates.service';
 import {
   ADD_ON_NOT_APPLIED_NOTICE_TYPE,
+  AUTOPAY_FIRST_CHARGE_FAILED_NEW_NOTICE_TYPE,
+  AUTOPAY_FIRST_CHARGE_FAILED_NOTICE_TYPE,
   ADD_ON_NOT_APPLIED_OTHER_NOTICE_TYPE,
 } from '../catalog/default-templates.catalog';
 import {
@@ -2498,6 +2500,11 @@ function resolveNotificationPushUrl(type: string, payload?: unknown): string {
   ) {
     return '/support';
   }
+  // «Автосписание не прошло»: where the customer can pay — the plans for a
+  // subscription that was never made, the renewal for one they have. Ahead of
+  // the substring rules, which would send neither there.
+  if (resolveToggleKey(type) === AUTOPAY_FIRST_CHARGE_FAILED_NEW_NOTICE_TYPE) return '/plans';
+  if (resolveToggleKey(type) === AUTOPAY_FIRST_CHARGE_FAILED_NOTICE_TYPE) return '/renew';
   // «Трафик исчерпан» for a subscription that is never renewed and can buy
   // nothing that brings traffic back (N1 gap 4): not an empty add-on page, and
   // not the renewal it cannot take — the dashboard, like any other notice.

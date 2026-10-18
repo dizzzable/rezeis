@@ -25,7 +25,8 @@ import {
  *   - SBP: `category: SUBSCRIPTION`, SBP only. The payer subscribes on the
  *     form; with `delay: 0` the first charge is made at activation, and with
  *     the operator's «Отсрочка первого списания по СБП» (`AntilopayDelay`) it
- *     is made after the delay, the payer holding the plan meanwhile.
+ *     is made after the delay. The subscribing is no payment: the plan comes
+ *     with the first charge (`deliversOnCharge`, since 18.10.2026).
  */
 export type AntilopayAutopayMethod = 'CARD' | 'SBP';
 
@@ -321,11 +322,19 @@ const ANTILOPAY_CLOCK_SLACK_MS = 12 * 60 * 60 * 1000;
  * earliest charge is given to it — money was taken and nothing else can
  * deliver it, and a renewal would wait for a delivery that never comes.
  *
- * A DELAYED SBP subscription (`delayed`) has no charge at activation, and the
- * first transaction is the access it grants for the delay, not a charge: the
- * start is never FIRST, and every charge that is not the start renews — a
- * weekly subscription with a one-day delay charges within the window above,
- * and that charge is the first renewal, not the checkout.
+ * A DELAYED SBP subscription whose checkout was made the grant for the delay
+ * (`delayed`, sign-ups drafted before 18.10.2026) has no charge at activation,
+ * and the first transaction is that grant, not a charge: the start is never
+ * FIRST, and every charge that is not the start renews — a weekly subscription
+ * with a one-day delay charges within the window above, and that charge is the
+ * first renewal, not the checkout.
+ *
+ * An SBP sign-up drafted since 18.10.2026 (`deliversOnCharge`), delayed or
+ * not, takes neither rule: its checkout is delivered by the first CHARGE, so
+ * the start is never FIRST and the earliest charge that is not the start is,
+ * whenever it comes — a first charge that failed at activation and went through
+ * on a later attempt pays for the term the payer was waiting for, it does not
+ * renew one they never had. Every later charge renews.
  */
 export function assignAntilopayChargeRoles(input: {
   readonly charges: readonly AntilopayCharge[];
@@ -335,12 +344,24 @@ export function assignAntilopayChargeRoles(input: {
   readonly signedUpAt: Date;
   readonly firstDelivered: boolean;
   readonly delayed?: boolean;
+  readonly deliversOnCharge?: boolean;
 }): ReadonlyMap<string, AntilopayChargeRole> {
   const isStart = (charge: AntilopayCharge): boolean =>
     charge.id === input.providerSubscriptionId ||
     (input.firstOrderId !== null && charge.orderId === input.firstOrderId);
   if (input.delayed === true) {
     return new Map(input.charges.map((charge) => [charge.id, isStart(charge) ? 'START' : 'RENEW'] as const));
+  }
+  if (input.deliversOnCharge === true) {
+    // The earliest charge, disputed or not: a first charge given back later is
+    // still the one that delivered the checkout, and its refund reverses that
+    // delivery (`handleKeyedDispute`) — the next charge must not take its place.
+    const first = input.charges.find((charge) => !isStart(charge)) ?? null;
+    return new Map(
+      input.charges.map(
+        (charge) => [charge.id, isStart(charge) ? 'START' : charge.id === first?.id ? 'FIRST' : 'RENEW'] as const,
+      ),
+    );
   }
   const start = input.charges.find(isStart) ?? null;
   let first: AntilopayCharge | null = start;

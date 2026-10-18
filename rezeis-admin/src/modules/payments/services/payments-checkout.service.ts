@@ -637,13 +637,14 @@ export class PaymentsCheckoutService {
       null;
     const failureReason =
       rawFailureReason === null ? null : normalizePaymentProviderError(rawFailureReason);
-    // A sign-up with a delayed first charge charges nothing at activation, so
-    // there is no payment for Antilopay to call back about: the payer returning
-    // from the bank and asking how it stands is what starts the look that
-    // grants their plan (at most one look every 30 seconds, whatever the polling).
+    // An SBP sign-up is delivered by its first charge (a sign-up with a delayed
+    // first charge drafted before 18.10.2026, by the grant): the payer returning
+    // from the bank and asking how it stands is what starts a look at the
+    // subscription, which finds the charge even when its callback is late (at
+    // most one look every 30 seconds, whatever the polling).
     if (transaction.status === TransactionStatus.PENDING && transaction.gatewayType === PaymentGatewayType.ANTILOPAY) {
-      const delayed = readProviderSubscriptionTerms(transaction.planSnapshot)?.delay !== undefined;
-      if (delayed) {
+      const terms = readProviderSubscriptionTerms(transaction.planSnapshot);
+      if (terms !== null && (terms.delay !== undefined || terms.deliversOnCharge === true)) {
         void this.providerSubscriptionService.pokeDelayedSignUp(transaction).catch((error: unknown) => {
           this.logger.warn(
             `Could not queue the look at delayed sign-up ${transaction.paymentId}: ${error instanceof Error ? error.message : String(error)}`,
@@ -655,6 +656,11 @@ export class PaymentsCheckoutService {
     return {
       paymentId: transaction.paymentId,
       cashbackPoints: await this.resolveCashbackPoints(transaction),
+      // Asked of Antilopay payments only: no other gateway has a sign-up that waits for its first charge.
+      autopaySignUp:
+        transaction.gatewayType === PaymentGatewayType.ANTILOPAY
+          ? await this.providerSubscriptionService.describeSignUpForPayer(transaction)
+          : null,
       status: transaction.status,
       gatewayType: transaction.gatewayType,
       purchaseType: transaction.purchaseType,

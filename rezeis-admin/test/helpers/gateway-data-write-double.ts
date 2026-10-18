@@ -64,7 +64,17 @@ export function executeGatewayDataWrites(options: {
 }): (statement: unknown) => Promise<number> {
   return async (statement: unknown) => {
     const write = gatewayDataWriteOf(statement);
-    const args = gatewayDataUpdateArgs(write, options.currentGatewayData(write.transactionId));
+    const current = options.currentGatewayData(write.transactionId);
+    if (
+      write.onlyIfAbsent !== undefined &&
+      typeof current === 'object' &&
+      current !== null &&
+      !Array.isArray(current) &&
+      (current as Record<string, unknown>)[write.onlyIfAbsent] !== undefined
+    ) {
+      return 0;
+    }
+    const args = gatewayDataUpdateArgs(write, current);
     if (write.onlyIfStatus !== undefined) {
       if (options.updateMany === undefined) throw new Error('this double has no updateMany for a claim');
       return (await options.updateMany(args)).count;

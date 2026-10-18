@@ -119,6 +119,11 @@ const USER_NOTIFICATION_KEYS = [
   // The same notice for any other reason: paid after the add-on end, no term,
   // no end, a catalogue value that adds nothing.
   'addon_not_applied_other',
+  // The first automatic SBP charge (Antilopay) did not go through, so the plan
+  // was not given: renewing a subscription the customer has («Продлить
+  // подписку»), and making a new one («Оформить подписку»).
+  'autopay_first_charge_failed',
+  'autopay_first_charge_failed_new',
   'referral_attached',
   'referral_reward',
   'referral_qualified',

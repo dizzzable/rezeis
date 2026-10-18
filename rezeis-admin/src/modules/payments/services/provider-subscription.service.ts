@@ -22,6 +22,13 @@ import { toBullMqJobId } from '../../../common/queue/bullmq-job-id';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { shouldRunSchedules } from '../../../common/runtime/process-role.util';
 import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
+import { planNameFromSnapshot, planNamesFromTransactionSnapshot } from '../../../common/utils/plan-snapshot.util';
+import {
+  AUTOPAY_FIRST_CHARGE_FAILED_NEW_NOTICE_TYPE,
+  AUTOPAY_FIRST_CHARGE_FAILED_NOTICE_TYPE,
+} from '../../notifications/catalog/default-templates.catalog';
+import { UserNotificationsService } from '../../notifications/services/user-notifications.service';
+import { releasePaidTrialClaim } from '../../subscriptions/services/trial-claim-ledger.util';
 import { CHECKOUT_LIFETIME_MS } from '../constants/checkout-lifetime.constant';
 import type { CabinetView } from '../../reiwa-peers/cabinet-capabilities';
 import {
@@ -81,6 +88,7 @@ import {
 import { isTrialConversionSnapshot, isWithheldConversion } from '../utils/trial-conversion.util';
 import {
   autopayNotAvailable,
+  isChargeDeliveredCheckout,
   PROVIDER_SUBSCRIPTION_CONSENT_VERSION,
   ProviderSubscriptionTerms,
   readProviderSubscriptionTerms,
@@ -142,6 +150,24 @@ export interface RecurrentCallbackHints {
 }
 
 const NO_CALLBACK_HINTS: RecurrentCallbackHints = { paymentId: null, status: null };
+
+/**
+ * On the checkout of a charge-delivered SBP sign-up (`deliversOnCharge`): when
+ * Antilopay first said the payment of OUR order is paid — the payer confirmed
+ * the subscription in their bank. Nothing is delivered for it
+ * ({@link ProviderSubscriptionService.holdSignUpStart}); it tells the payment
+ * page and the failure notice that the sign-up did start.
+ */
+export const SIGN_UP_CONFIRMED_KEY = 'autopaySignUpConfirmedAt';
+
+/** On the same checkout: the once-only claim of the notice that its first charge did not come. */
+export const UNPAID_SIGN_UP_KEY = 'autopayFirstChargeMissed';
+
+/** The `failureReason` of a checkout whose first SBP charge did not come (a bounded code the cabinet reads). */
+export const AUTOPAY_FIRST_CHARGE_FAILED = 'AUTOPAY_FIRST_CHARGE_FAILED';
+
+/** The second look after a confirmed SBP sign-up: past the charge made at activation and its callback. */
+const SIGN_UP_SECOND_LOOK_MS = 3 * 60 * 1000;
 
 /** `rawPayload.source` of a Platega subscription dispute in the inbox (`recordDispute`). */
 export const PROVIDER_SUBSCRIPTION_DISPUTE = 'PROVIDER_SUBSCRIPTION_DISPUTE';
@@ -287,6 +313,9 @@ export class ProviderSubscriptionService {
      */
     @Optional()
     private readonly savedPaymentMethods?: SavedPaymentMethodService,
+    /** The customer's notice that the first SBP charge did not come ({@link settleUnpaidSignUp}). Optional for the same reason. */
+    @Optional()
+    private readonly userNotifications?: UserNotificationsService,
   ) {}
 
   /**
@@ -774,6 +803,119 @@ export class ProviderSubscriptionService {
       // row keeps the refund's mark (`recordCancelledBy`).
       await this.recordCancelledBy(current, 'PROVIDER');
     }
+    if (state.charges !== undefined) {
+      await this.settleUnpaidSignUp(
+        { ...current, status, cancelledBy: providerCancelled ? (current.cancelledBy ?? 'PROVIDER') : current.cancelledBy },
+        state,
+      );
+    }
+  }
+
+  /**
+   * An Antilopay SBP sign-up delivered by its first charge (`deliversOnCharge`)
+   * whose first charge did not come, and nothing was delivered for it:
+   *
+   *  - Antilopay reports the attempt failed (`ACTIVE_FAILED`), or ended the
+   *    subscription after failed attempts (`ERROR`);
+   *  - or the subscription ended at Antilopay after the payer confirmed it —
+   *    cancelled in the bank, or by Antilopay. A cancel the panel made (the
+   *    customer's «Отключить автосписание», the operator's, a refund's, the
+   *    sweep's) is not: whoever asked for it knows.
+   *
+   * The owner's rules (18.10.2026): no access until the first charge, and
+   * «Клиенту и оператору»: the customer is told the charge did not go through,
+   * with the way to pay, and the operator gets the «Платёж не прошёл» card with
+   * the customer and the plan. Once per sign-up: the claim is a key on the
+   * checkout written only while it is absent (`onlyIfAbsent`), so a look every
+   * few minutes, the callback repeated for an hour and the daily run tell it
+   * once between them. A checkout still waiting is FAILED with it, so the
+   * payment page says so; the first charge, if Antilopay still makes it, revives
+   * it and delivers the plan as for any late payment.
+   */
+  private async settleUnpaidSignUp(
+    row: ProviderSubscription,
+    state: ProviderSubscriptionState,
+  ): Promise<void> {
+    if (row.gatewayType !== PaymentGatewayType.ANTILOPAY || row.method !== 'SBP' || row.userId === null) return;
+    const ended = row.status === ProviderSubscriptionStatus.CANCELLED;
+    const providerWord = (state.providerStatus ?? '').toUpperCase();
+    const failed = providerWord === 'ACTIVE_FAILED' || providerWord === 'ERROR';
+    const endedAtProvider = ended && (row.cancelledBy === null || row.cancelledBy === 'PROVIDER');
+    if (!failed && !endedAtProvider) return;
+    const first = await this.prismaService.transaction.findUnique({ where: { id: row.firstTransactionId } });
+    if (first === null || !isChargeDeliveredCheckout(first)) return;
+    if (first.status === TransactionStatus.COMPLETED && first.fulfilledAt !== null) return;
+    if (!failed) {
+      // Ended without a failed charge: only a sign-up the payer had confirmed
+      // (its start listed, or Antilopay's notice of it held) is one that did
+      // not get paid. One abandoned on the payment form never started.
+      const startListed = (state.charges ?? []).some(
+        (charge) => charge.id === row.providerSubscriptionId || charge.orderId === first.paymentId,
+      );
+      if (!startListed && asRecord(first.gatewayData)[SIGN_UP_CONFIRMED_KEY] === undefined) return;
+    }
+    const at = new Date();
+    const claimed = await writeTransactionGatewayData(this.prismaService, first.id, {
+      merge: {
+        [UNPAID_SIGN_UP_KEY]: { providerStatus: state.providerStatus, at: at.toISOString() },
+      },
+      onlyIfAbsent: UNPAID_SIGN_UP_KEY,
+    });
+    if (claimed !== 1) return;
+    if (first.status === TransactionStatus.PENDING) {
+      await this.prismaService.$transaction(async (db) => {
+        const written = await writeTransactionGatewayData(db, first.id, {
+          status: TransactionStatus.FAILED,
+          onlyIfStatus: TransactionStatus.PENDING,
+          merge: { failureReason: AUTOPAY_FIRST_CHARGE_FAILED },
+        });
+        if (written === 1) await releasePaidTrialClaim(db, first.id, 'PROVIDER_TERMINAL_FAILED');
+      });
+    }
+    const planName = planNameFromSnapshot(first.planSnapshot);
+    const amount = row.amount.toString();
+    this.logger.warn(
+      `Antilopay SBP sign-up ${row.id} (${row.providerSubscriptionId}) got no first charge ` +
+        `(${state.providerStatus ?? 'no status'}); checkout ${first.paymentId} not delivered, customer and operator told`,
+    );
+    // A sign-up that would have made the subscription offers to buy it again;
+    // one for a subscription the customer has offers to renew that one.
+    const createsSubscription = first.purchaseType === PurchaseType.NEW || first.purchaseType === PurchaseType.ADDITIONAL;
+    const subscriptionId = row.subscriptionId ?? first.subscriptionId;
+    if (this.userNotifications !== undefined) {
+      try {
+        await this.userNotifications.create({
+          userId: row.userId,
+          type: createsSubscription ? AUTOPAY_FIRST_CHARGE_FAILED_NEW_NOTICE_TYPE : AUTOPAY_FIRST_CHARGE_FAILED_NOTICE_TYPE,
+          payload: {
+            plan: planName ?? '',
+            amount,
+            paymentId: first.paymentId,
+            ...(createsSubscription || subscriptionId === null ? {} : { subscriptionId }),
+          },
+        });
+      } catch (error: unknown) {
+        this.logger.warn(
+          `Sign-up ${row.id}: the customer was not told the first charge did not come: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
+    this.systemEvents?.warn(EVENT_TYPES.PAYMENT_FAILED, 'PAYMENT', `Автосписание не прошло: ${first.purchaseType}`, {
+      userId: row.userId,
+      paymentId: first.paymentId,
+      ...planNamesFromTransactionSnapshot(first.planSnapshot),
+      gatewayType: row.gatewayType,
+      amount,
+      currency: row.currency,
+      providerSubscriptionId: row.providerSubscriptionId,
+      providerStatus: state.providerStatus,
+      autopayFirstChargeFailed: true,
+      note:
+        'Первое списание по автоплатежу СБП (Antilopay) не прошло, и тариф клиенту не выдан. ' +
+        'Клиенту отправлено уведомление с кнопкой оплаты. Если Antilopay всё же спишет позже, тариф выдастся сам.',
+    });
   }
 
   /**
@@ -806,6 +948,9 @@ export class ProviderSubscriptionService {
     const firstTransaction = await this.prismaService.transaction.findUnique({
       where: { id: row.firstTransactionId },
     });
+    // Since 18.10.2026 an SBP sign-up is delivered by its first charge, delayed
+    // or not; one drafted before keeps the rules it was made with.
+    const deliversOnCharge = firstTransaction !== null && isChargeDeliveredCheckout(firstTransaction);
     const roles = assignAntilopayChargeRoles({
       charges,
       providerSubscriptionId: row.providerSubscriptionId,
@@ -818,7 +963,8 @@ export class ProviderSubscriptionService {
         firstTransaction.fulfilledAt !== null,
       // No charge is made at activation of a delayed subscription: the checkout
       // is the grant, and every charge there is renews it.
-      delayed: (row.delayDays ?? 0) > 0,
+      delayed: (row.delayDays ?? 0) > 0 && !deliversOnCharge,
+      deliversOnCharge,
     });
     // The number a charge carries on its renewal and its notice is informational
     // (the keys are payment ids): the start of an SBP subscription takes none.
@@ -827,6 +973,12 @@ export class ProviderSubscriptionService {
       const role = roles.get(charge.id) ?? 'RENEW';
       if (role === 'START' && !charge.disputed) continue;
       if (role !== 'START') chargeNumber += 1;
+      if (charge.disputed && role === 'START' && deliversOnCharge) {
+        // The start of such a sign-up delivered nothing and holds no money, so
+        // nothing is given back for it; a start undone still ends the autopay.
+        await this.cancelLive({ ids: [row.id] }, REFUND_CANCELLED_BY);
+        continue;
+      }
       if (charge.disputed) {
         await this.handleKeyedDispute(row, charge, role);
         continue;
@@ -1261,7 +1413,18 @@ export class ProviderSubscriptionService {
     // A refund asked for this autopay to end: nothing is given on its way out.
     if (row.cancelledBy === REFUND_CANCELLED_BY) return false;
     const active = state.status === ProviderSubscriptionStatus.ACTIVE || state.status === ProviderSubscriptionStatus.PAST_DUE;
-    return active || (state.charges ?? []).some((charge) => !charge.disputed);
+    if (!active && !(state.charges ?? []).some((charge) => !charge.disputed)) return false;
+    // «Без доступа на время отсрочки» (the owner, 18.10.2026): a sign-up drafted
+    // since then is given nothing before its first charge. A claim already taken
+    // is a grant made before, which the look still mends (`ensureDelayGrant`).
+    if (row.delayGrantedAt === null) {
+      const first = await this.prismaService.transaction.findUnique({
+        where: { id: row.firstTransactionId },
+        select: { gatewayType: true, planSnapshot: true },
+      });
+      if (first !== null && isChargeDeliveredCheckout(first)) return false;
+    }
+    return true;
   }
 
   /**
@@ -1412,17 +1575,73 @@ export class ProviderSubscriptionService {
   }
 
   /**
-   * Queues a look at the sign-up of a delayed checkout the payer is waiting on.
+   * Antilopay said the payment of OUR order of a charge-delivered SBP sign-up
+   * (`deliversOnCharge`) is paid — a callback, or the status sweep's check. That
+   * is the payer confirming the subscription in their bank, and no money moved
+   * with it: nothing is fulfilled. The notice is acknowledged, the checkout keeps
+   * the moment (`SIGN_UP_CONFIRMED_KEY`, for the payment page and the failure
+   * notice), and the subscription is looked at — now, and again in a few
+   * minutes, for the charge made at activation, which is what delivers the
+   * plan (`assignAntilopayChargeRoles`). With a delay, that charge comes after
+   * it, and the daily look finds it if its own callback is lost.
+   */
+  public async holdSignUpStart(transaction: Pick<Transaction, 'id' | 'paymentId' | 'gatewayId'>): Promise<void> {
+    await writeTransactionGatewayData(this.prismaService, transaction.id, {
+      merge: { [SIGN_UP_CONFIRMED_KEY]: new Date().toISOString() },
+      onlyIfAbsent: SIGN_UP_CONFIRMED_KEY,
+    });
+    const gatewayId = transaction.gatewayId;
+    if (gatewayId === null || gatewayId.length === 0 || CREATION_CLAIM_PLACEHOLDER.test(gatewayId)) {
+      // No sign-up to look at yet: the callback that said so queued its own look
+      // by the recurrent it names, and the sweep finds a sign-up not yet linked.
+      this.logger.log(`Antilopay sign-up ${transaction.paymentId} is confirmed; its first charge delivers it`);
+      return;
+    }
+    this.logger.log(`Antilopay sign-up ${transaction.paymentId} is confirmed; waiting for its first charge`);
+    await this.enqueueSync(PaymentGatewayType.ANTILOPAY, gatewayId);
+    await this.enqueueSync(PaymentGatewayType.ANTILOPAY, gatewayId, SIGN_UP_SECOND_LOOK_MS);
+  }
+
+  /**
+   * How an Antilopay SBP sign-up stands for the payer on the payment page,
+   * while its checkout is not delivered: the subscription is confirmed and its
+   * first charge is awaited (at activation, or on the date after the delay), or
+   * that charge did not come. Null for every other payment, and for a sign-up
+   * the payer has not confirmed yet.
+   */
+  public async describeSignUpForPayer(
+    transaction: Pick<Transaction, 'id' | 'gatewayType' | 'planSnapshot' | 'gatewayData' | 'status' | 'fulfilledAt'>,
+  ): Promise<{ readonly state: 'AWAITING_FIRST_CHARGE' | 'FIRST_CHARGE_FAILED'; readonly firstChargeAt: string | null } | null> {
+    if (!isChargeDeliveredCheckout(transaction)) return null;
+    if (transaction.status === TransactionStatus.COMPLETED && transaction.fulfilledAt !== null) return null;
+    const data = asRecord(transaction.gatewayData);
+    const row = await this.prismaService.providerSubscription.findUnique({
+      where: { firstTransactionId: transaction.id },
+      select: { status: true, nextChargeAt: true },
+    });
+    if (data[UNPAID_SIGN_UP_KEY] !== undefined) {
+      return { state: 'FIRST_CHARGE_FAILED', firstChargeAt: null };
+    }
+    const live = row !== null && (row.status === ProviderSubscriptionStatus.ACTIVE || row.status === ProviderSubscriptionStatus.PAST_DUE);
+    if (data[SIGN_UP_CONFIRMED_KEY] === undefined && !live) return null;
+    if (row !== null && row.status === ProviderSubscriptionStatus.CANCELLED) return null;
+    return { state: 'AWAITING_FIRST_CHARGE', firstChargeAt: row?.nextChargeAt?.toISOString() ?? null };
+  }
+
+  /**
+   * Queues a look at the sign-up of a checkout the payer is waiting on: one with
+   * a delayed first charge, or any SBP sign-up delivered by its first charge.
    * The payer returns from the bank to a page that asks how the payment stands,
-   * and nothing is paid with a delay for Antilopay to call back about, so the
-   * ask is what starts the look. At most one look every 30 seconds per
-   * checkout: the job's id carries the half-minute, and BullMQ adds a job id
-   * once (built with `toBullMqJobId`, which keeps the colon out of it).
+   * and the ask is what starts the look (with a delay nothing is paid for
+   * Antilopay to call back about; without one, the look finds the charge made at
+   * activation even when its callback is late). At most one look every 30
+   * seconds per checkout: the job's id carries the half-minute, and BullMQ adds
+   * a job id once (built with `toBullMqJobId`, which keeps the colon out of it).
    */
   public async pokeDelayedSignUp(transaction: Pick<Transaction, 'id' | 'gatewayId' | 'planSnapshot'>, now: Date = new Date()): Promise<void> {
     const terms = readProviderSubscriptionTerms(transaction.planSnapshot);
     const gatewayId = transaction.gatewayId;
-    if (terms === null || terms.delay === undefined) return;
+    if (terms === null || (terms.delay === undefined && terms.deliversOnCharge !== true)) return;
     if (gatewayId === null || gatewayId.length === 0 || CREATION_CLAIM_PLACEHOLDER.test(gatewayId)) return;
     await runPaymentReconciliationEnqueueWithTimeout(() =>
       this.paymentReconciliationQueue.add(
@@ -1489,6 +1708,35 @@ export class ProviderSubscriptionService {
   }
 
   /**
+   * Whether this customer has paid the panel anything before: a payment with a
+   * sum that was completed, or delivered and given back since (a refund leaves
+   * the delivery stamp). A free one — a trial, a 100 % discount, a delay's
+   * grant — is not paying, and nor is a checkout still open.
+   */
+  public async hasPaidBefore(userId: string): Promise<boolean> {
+    const paid = await this.prismaService.transaction.findFirst({
+      where: {
+        userId,
+        amount: { gt: 0 },
+        OR: [{ status: TransactionStatus.COMPLETED }, { fulfilledAt: { not: null } }],
+      },
+      select: { id: true },
+    });
+    return paid !== null;
+  }
+
+  /**
+   * Whether «Отсрочка первого списания по СБП» is no longer for this customer.
+   * It is for a NEW customer only (the operator's question, 18.10.2026: «делей
+   * только для новых пользователей, а кто уже оплачивал — деньги сразу»), and
+   * once: one who has paid before, or has used the delay, signs up and is
+   * charged at once, and is not told about a delay.
+   */
+  public async mayNotTakeDelay(userId: string): Promise<boolean> {
+    return (await this.hasUsedDelay(userId)) || (await this.hasPaidBefore(userId));
+  }
+
+  /**
    * The delay an Antilopay SBP sign-up is made with: what the panel decides now
    * (`decideAntilopayDelay`) put beside what the payer was shown
    * (`settleDelayWithConsent`). Null when none was shown — the payer was told the
@@ -1508,7 +1756,7 @@ export class ProviderSubscriptionService {
       settings: input.settings,
       method: input.method,
       audience: input.audience,
-      alreadyUsed: await this.hasUsedDelay(input.userId),
+      alreadyUsed: await this.mayNotTakeDelay(input.userId),
     });
     const verdict = settleDelayWithConsent(input.shown, decided);
     if (verdict.kind === 'REFUSE') throw autopayNotAvailable('DELAY_CHANGED');

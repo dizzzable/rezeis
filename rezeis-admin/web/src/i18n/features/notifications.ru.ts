@@ -37,6 +37,8 @@ export const ru = {
       addon_devices_auto_ended: 'Докупка устройств закончилась (автоотключение)',
       addon_not_applied: 'Докупка оплачена, но не применена (подписка не активна)',
       addon_not_applied_other: 'Докупка оплачена, но не применена (другая причина)',
+      autopay_first_charge_failed: 'Автосписание по СБП не прошло: подписка не продлена',
+      autopay_first_charge_failed_new: 'Автосписание по СБП не прошло: подписка не оформлена',
       referral_attached: 'Реферал привязан',
       referral_reward: 'Реферальное вознаграждение',
       referral_qualified: 'Реферал квалифицирован',

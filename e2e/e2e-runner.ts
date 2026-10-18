@@ -846,6 +846,14 @@ const CONNECT_WALK_CAPABILITY_IDS = ['web.connect-interactive'] as const;
  */
 const SUPPORT_UNIFIED_CAPABILITY_IDS = ['web.support-unified'] as const;
 
+/**
+ * The capability id Reiwa 0.9.7.59 declares and Rezeis Admin 0.9.7.77 is the
+ * first to know (`panel.knows-delay-after-charge-id`,
+ * `cabinet.declares-delay-after-charge-id`): the SBP consent says the plan comes
+ * with the first charge, not for the delay (18.10.2026).
+ */
+const DELAY_AFTER_CHARGE_CAPABILITY_IDS = ['web.autopay-delay-access-after-charge'] as const;
+
 /** Each feature: the half that has it and the first release that did. */
 const PAIR_FEATURES = {
   /** «Доп. услуги» → «Настройки»: the stage switches answer at PATCH /admin/add-on-settings. */
@@ -933,6 +941,14 @@ const PAIR_FEATURES = {
   'panel.knows-support-unified-id': { half: 'panel', since: '0.9.7.76' },
   /** The cabinet declares {@link SUPPORT_UNIFIED_CAPABILITY_IDS} on every internal call. */
   'cabinet.declares-support-unified-id': { half: 'cabinet', since: '0.9.7.58' },
+  /**
+   * The panel's capability registry knows {@link DELAY_AFTER_CHARGE_CAPABILITY_IDS}
+   * (the plan with the first SBP charge, not for the delay); an older panel
+   * counts it as unknown, the same way as the ids above.
+   */
+  'panel.knows-delay-after-charge-id': { half: 'panel', since: '0.9.7.77' },
+  /** The cabinet declares {@link DELAY_AFTER_CHARGE_CAPABILITY_IDS} on every internal call. */
+  'cabinet.declares-delay-after-charge-id': { half: 'cabinet', since: '0.9.7.59' },
 } as const satisfies Record<string, { readonly half: Half; readonly since: string }>;
 
 type PairFeature = keyof typeof PAIR_FEATURES;
@@ -1914,7 +1930,8 @@ async function scenarioPanelKnowsItsCabinet(ctx: ScenarioContext): Promise<strin
   const unknown =
     unknownIds('cabinet.declares-autopay-ids', 'panel.knows-autopay-ids', AUTOPAY_CAPABILITY_IDS) +
     unknownIds('cabinet.declares-connect-walk-id', 'panel.knows-connect-walk-id', CONNECT_WALK_CAPABILITY_IDS) +
-    unknownIds('cabinet.declares-support-unified-id', 'panel.knows-support-unified-id', SUPPORT_UNIFIED_CAPABILITY_IDS);
+    unknownIds('cabinet.declares-support-unified-id', 'panel.knows-support-unified-id', SUPPORT_UNIFIED_CAPABILITY_IDS) +
+    unknownIds('cabinet.declares-delay-after-charge-id', 'panel.knows-delay-after-charge-id', DELAY_AFTER_CHARGE_CAPABILITY_IDS);
   assert(
     api.unknownToPanel === unknown,
     `the cabinet declares ${api.unknownToPanel} capability ids this panel does not know, the table expects ${unknown}`,

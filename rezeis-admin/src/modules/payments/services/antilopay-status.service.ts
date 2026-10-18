@@ -28,6 +28,7 @@ import {
   readAntilopayRefunds,
 } from '../utils/antilopay-refund.util';
 import { isDelayGrant } from '../utils/antilopay-delay-grant.util';
+import { isChargeDeliveredCheckout } from '../utils/provider-subscription-terms.util';
 import { readGatewaySettings } from '../utils/payment-gateway-settings.util';
 import { redactPaymentDiagnosticMessage } from '../utils/payment-provider-error.util';
 import { writeTransactionGatewayData } from '../utils/transaction-gateway-data.util';
@@ -119,10 +120,17 @@ export interface AntilopayCheckedRow {
   readonly gatewayData: Prisma.JsonValue | null;
   /** Read for a completed payment: a refund is settled only against a payment whose fulfilment is done. */
   readonly fulfilledAt?: Date | null;
+  /** Read by the expiry sweep: the terms tell an SBP sign-up delivered by its first charge (`deliversOnCharge`). */
+  readonly planSnapshot?: Prisma.JsonValue;
 }
 
-/** What the expiry sweep does with a row after the check: see `PaymentPendingExpiryService`. */
-export type AntilopayExpiryVerdict = 'keep' | 'provider-terminal' | 'local-ttl';
+/**
+ * What the expiry sweep does with a row after the check: see `PaymentPendingExpiryService`.
+ * `awaiting-charge`: an SBP sign-up delivered by its first charge whose start is
+ * paid — confirmed, and no payment. It is cancelled on our clock without the
+ * «Платёж истёк» event, and its first charge revives it.
+ */
+export type AntilopayExpiryVerdict = 'keep' | 'provider-terminal' | 'local-ttl' | 'awaiting-charge';
 
 /**
  * Asks Antilopay what became of a payment (`payment/check`), because its
@@ -295,6 +303,8 @@ export class AntilopayStatusService {
    *  - `provider-terminal` Antilopay itself calls it dead.
    *  - `local-ttl`         still open there, never created there, or a check
    *                        that has kept failing: cancel on our own clock.
+   *  - `awaiting-charge`   the start of an SBP sign-up delivered by its first
+   *                        charge is paid: nothing was, so cancel it quietly.
    */
   public async verdictBeforeExpiry(row: AntilopayCheckedRow, now: Date = new Date()): Promise<AntilopayExpiryVerdict> {
     // Three failed checks in a row open a breaker: the expiry sweep asks one row
@@ -313,6 +323,13 @@ export class AntilopayStatusService {
       this.expiryFailures = 0;
       switch (verdict) {
         case 'PAID':
+          // The start of an SBP sign-up delivered by its first charge: Antilopay
+          // calls it paid, and nothing was paid. Kept PENDING, it would be asked
+          // about every five minutes for as long as the delay lasts.
+          return row.planSnapshot !== undefined &&
+            isChargeDeliveredCheckout({ gatewayType: PaymentGatewayType.ANTILOPAY, planSnapshot: row.planSnapshot })
+            ? 'awaiting-charge'
+            : 'keep';
         case 'REVERSED':
           return 'keep';
         case 'DEAD':
@@ -474,13 +491,22 @@ export class AntilopayStatusService {
           createdAt: { gte: since },
           ...(cursor === null ? {} : { id: { gt: cursor } }),
         },
-        select: { id: true, paymentId: true, createdAt: true, gatewayData: true, fulfilledAt: true },
+        select: { id: true, paymentId: true, createdAt: true, gatewayData: true, fulfilledAt: true, planSnapshot: true },
         orderBy: { id: 'asc' },
         take: COMPLETED_PAGE,
       });
       // A charge the autopay took is one of OUR payments for a payment id
-      // Antilopay never heard: it is asked about through its autopay.
-      rows.push(...page.filter((row) => !isProviderSubscriptionCharge(row.gatewayData)));
+      // Antilopay never heard: it is asked about through its autopay. So is the
+      // checkout of an SBP sign-up delivered by its first charge: OUR order is
+      // the start of the subscription, which moved no money, and the money it
+      // was delivered for is that charge's, read with the subscription.
+      rows.push(
+        ...page.filter(
+          (row) =>
+            !isProviderSubscriptionCharge(row.gatewayData) &&
+            !isChargeDeliveredCheckout({ gatewayType: PaymentGatewayType.ANTILOPAY, planSnapshot: row.planSnapshot }),
+        ),
+      );
       if (page.length < COMPLETED_PAGE || rows.length >= COMPLETED_MAX_READ) break;
       cursor = page[page.length - 1]?.id ?? null;
     }

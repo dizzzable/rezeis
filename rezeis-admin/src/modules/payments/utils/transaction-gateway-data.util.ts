@@ -42,6 +42,12 @@ export interface GatewayDataWrite {
    * in the same statement as the write.
    */
   readonly onlyIfStatus?: TransactionStatus;
+  /**
+   * A claim: the write lands only while `gatewayData` holds no such key, decided
+   * in the same statement — for something that must happen once per payment
+   * however many workers get there.
+   */
+  readonly onlyIfAbsent?: string;
 }
 
 /** Anything that can run one statement: the pooled client or an interactive transaction's. */
@@ -92,6 +98,10 @@ export async function writeTransactionGatewayData(
   const conditions: Prisma.Sql[] = [Prisma.sql`"id" = ${transactionId}`];
   if (write.onlyIfStatus !== undefined) {
     conditions.push(Prisma.sql`"status" = ${write.onlyIfStatus}::"TransactionStatus"`);
+  }
+  if (write.onlyIfAbsent !== undefined) {
+    // `->` on anything that is not an object, and on NULL, is NULL: absent.
+    conditions.push(Prisma.sql`("gateway_data" -> ${write.onlyIfAbsent}::text) IS NULL`);
   }
   const statement = Prisma.sql`UPDATE "transactions" SET ${Prisma.join(assignments, ', ')} WHERE ${Prisma.join(conditions, ' AND ')}`;
   described.set(statement, { transactionId, ...write });

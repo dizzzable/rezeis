@@ -190,7 +190,7 @@ export const en = {
       sbpDelayUnit:
         '"Delay of the first SBP charge": pick a unit (days, weeks, months, quarters or years) — without one the number means nothing.',
       sbpDelayTooLong:
-        '"Delay of the first SBP charge" cannot be longer than a year: the customer gets the plan free for the whole delay. Lower the number.',
+        '"Delay of the first SBP charge" cannot be longer than a year. Lower the number.',
     },
     selectPlaceholder: 'Select a value',
     hints: {
@@ -213,7 +213,7 @@ export const en = {
       antilopayIp:
         'If your Antilopay project restricts API access by IP, add the panel server\'s outgoing IP there: otherwise every request fails with error 22.',
       antilopaySbpDelay:
-        'Optional. How long to wait before the first charge when a customer subscribes by SBP: a whole number and the unit below (days, weeks, months, quarters of 3 months or years). Empty or 0 keeps today\'s behaviour: the first charge is made at activation. SBP only (that is how Antilopay works), so a card\'s first payment is charged at once on the form. During the delay the customer gets the chosen plan for that time straight away and pays nothing; the first charge for the full sum comes after it, then every period. If the customer turns autopay off before the first charge, the delay days stay theirs. The delay is given once per customer: someone who has used it pays at once on their next SBP subscription and is not told about a delay. At most a year. It only takes effect when the cabinet is updated to a version that supports the delay: an older cabinet tells the customer "charged at once", so the charge stays at once.',
+        'Optional. How long to wait before the first charge when a customer subscribes by SBP: a whole number and the unit below (days, weeks, months, quarters of 3 months or years). Empty or 0 keeps today\'s behaviour: the first charge is made at activation. SBP only (that is how Antilopay works), so a card\'s first payment is charged at once on the form. During the delay the customer has no access to the plan: the plan is given only after the first successful charge for the full sum, then a charge every period. Without a delay it is the same: a subscription confirmed in the bank is not yet a payment, and the plan comes after the charge. If the first charge fails, the customer gets the "Automatic charge failed" notice with a button to pay, and you get the "Payment failed" card. The delay is given to new customers only, and once: someone who has paid in the panel before (any paid payment, a refunded one too) or has used the delay pays at once on an SBP subscription and is not told about a delay. At most a year. It only takes effect when the cabinet is updated to 0.9.7.59 or later: an older cabinet would tell the customer "charged at once" or "access opens at once", so there the charge stays at once.',
       antilopayRecurrentPaymentCount:
         'How many charges in all (the first included) a subscription makes. Optional: left empty, Antilopay is sent no such number. A whole number of at least 2. Once every charge is made, Antilopay completes the subscription and the customer\'s autopay ends.',
       plategaAutopay:

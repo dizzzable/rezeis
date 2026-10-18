@@ -40,5 +40,17 @@ export interface InternalPaymentStatusInterface {
    * "a panel too old to say".
    */
   readonly cashbackPoints: number | null;
+  /**
+   * An Antilopay SBP sign-up whose plan comes with its first charge, while that
+   * plan is not delivered: the payer confirmed the subscription and its first
+   * charge is awaited (`firstChargeAt`: Antilopay's date for it, the delay's end
+   * when there is one; null when it does not say), or that charge did not come.
+   * Null for every other payment. A cabinet that does not read it shows the
+   * payment by `status` alone, as before.
+   */
+  readonly autopaySignUp: {
+    readonly state: 'AWAITING_FIRST_CHARGE' | 'FIRST_CHARGE_FAILED';
+    readonly firstChargeAt: string | null;
+  } | null;
   readonly updatedAt: string;
 }

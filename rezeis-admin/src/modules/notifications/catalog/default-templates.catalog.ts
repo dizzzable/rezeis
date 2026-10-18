@@ -831,10 +831,62 @@ const ADD_ON_PAYMENT_TEMPLATES: ReadonlyArray<DefaultNotificationTemplate> = [
   },
 ];
 
+/**
+ * The notice to a customer whose first automatic SBP charge (Antilopay) did not
+ * come: it failed, or the subscription ended at the bank before it. Since
+ * 18.10.2026 the plan comes with that charge and only with it
+ * (`deliversOnCharge`), so nothing was given — the owner's words: «Автосписание
+ * не прошло, доступ закрыт» with «Продлить подписку». Two types, as the button
+ * must go where the customer can pay:
+ *  - `autopay_first_charge_failed` — the sign-up renewed (or changed the plan
+ *    of) a subscription the customer has: «🔄 Продлить подписку» → `/renew`;
+ *  - `autopay_first_charge_failed_new` — it would have made a new one, and the
+ *    renewal page has nothing to renew: «🛒 Оформить подписку» → `/plans`.
+ * `{{plan}}` and `{{amount}}` are the plan and the sum of the charge. Not a
+ * switch the customer may turn off: it is about their access and their money
+ * (`MAILABLE_WITHOUT_SWITCH_TYPES`). Sent once per sign-up
+ * (`ProviderSubscriptionService.settleUnpaidSignUp`).
+ */
+export const AUTOPAY_FIRST_CHARGE_FAILED_NOTICE_TYPE = 'autopay_first_charge_failed';
+
+/** The same notice for a sign-up that would have made a new subscription. */
+export const AUTOPAY_FIRST_CHARGE_FAILED_NEW_NOTICE_TYPE = 'autopay_first_charge_failed_new';
+
+const AUTOPAY_FIRST_CHARGE_FAILED_TEMPLATES: ReadonlyArray<DefaultNotificationTemplate> = [
+  {
+    type: AUTOPAY_FIRST_CHARGE_FAILED_NOTICE_TYPE,
+    title: '⚠️ Автосписание не прошло',
+    titleEn: '⚠️ Automatic charge failed',
+    body:
+      'Привет, {{name}}! Первое автосписание {{amount}} ₽ через СБП не прошло, поэтому подписка «{{plan}}» не продлена. ' +
+      'Продлите её, чтобы VPN продолжил работать.',
+    bodyEn:
+      'Hi, {{name}}! The first automatic charge of {{amount}} RUB via SBP did not go through, so your subscription ' +
+      '“{{plan}}” was not renewed. Renew it to keep the VPN working.',
+    buttons: EXPIRY_BUTTONS,
+  },
+  {
+    type: AUTOPAY_FIRST_CHARGE_FAILED_NEW_NOTICE_TYPE,
+    title: '⚠️ Автосписание не прошло',
+    titleEn: '⚠️ Automatic charge failed',
+    body:
+      'Привет, {{name}}! Первое автосписание {{amount}} ₽ через СБП не прошло, поэтому подписка «{{plan}}» не оформлена ' +
+      'и доступа к VPN нет. Оформите подписку снова — это пара минут.',
+    bodyEn:
+      'Hi, {{name}}! The first automatic charge of {{amount}} RUB via SBP did not go through, so the subscription ' +
+      '“{{plan}}” was not set up and there is no VPN access. Set it up again — it takes a couple of minutes.',
+    buttons: [
+      { labelRu: '🛒 Оформить подписку', labelEn: '🛒 Get a subscription', kind: 'webApp', target: '/plans' },
+      { labelRu: '🏠 Главное меню', labelEn: '🏠 Main menu', kind: 'callback', target: 'menu:main' },
+    ],
+  },
+];
+
 export const DEFAULT_NOTIFICATION_TEMPLATES: ReadonlyArray<DefaultNotificationTemplate> = [
   ...DURATION_TEMPLATES,
   ...ADD_ON_TEMPLATES,
   ...ADD_ON_PAYMENT_TEMPLATES,
+  ...AUTOPAY_FIRST_CHARGE_FAILED_TEMPLATES,
   ...REFERRAL_TEMPLATES,
   ...POINTS_TEMPLATES,
   ...PARTNER_TEMPLATES,

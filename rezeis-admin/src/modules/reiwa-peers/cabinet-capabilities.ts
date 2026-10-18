@@ -75,6 +75,12 @@ export const CABINET_CAPABILITY = {
    */
   autopayFirstChargeDelay: 'web.autopay-first-charge-delay',
   /**
+   * The same consent says the plan comes with the first charge, not for the
+   * delay (the owner, 18.10.2026: «без доступа на время отсрочки»), and the
+   * payment page tells a sign-up waiting for its first charge from an unpaid one.
+   */
+  autopayDelayAccessAfterCharge: 'web.autopay-delay-access-after-charge',
+  /**
    * AuraPay «картой, для автоматического списания»: the cabinet knows AuraPay
    * runs the subscription, and sends the consent that makes one.
    */
@@ -157,6 +163,21 @@ export const CABINET_CAPABILITY_REGISTRY: readonly CabinetCapabilityRow[] = [
       'отсрочка первого списания по СБП в Antilopay не предлагается: старый кабинет написал бы клиенту «спишется сразу», и списание остаётся сразу',
     operatorTextEn:
       'the delay of the first SBP charge at Antilopay is not offered: an older cabinet would tell the customer “charged at once”, so the charge stays at once',
+    gatedIn: ['src/modules/payments/utils/antilopay-delay-policy.util.ts'],
+  },
+  {
+    id: CABINET_CAPABILITY.autopayDelayAccessAfterCharge,
+    surface: 'web',
+    since: '0.9.7.59',
+    kind: 'gate',
+    // Reiwa 0.9.7.58 and older promise «доступ на N дней откроется сразу» in the
+    // consent of a delayed sign-up, and since 18.10.2026 the plan comes with the
+    // first charge: the customer would agree to access they do not get
+    // (reiwa `web/src/lib/autopay-delay.ts`).
+    operatorText:
+      'отсрочка первого списания по СБП в Antilopay не предлагается: старый кабинет пообещал бы клиенту доступ сразу, а тариф теперь выдаётся только после первого списания',
+    operatorTextEn:
+      'the delay of the first SBP charge at Antilopay is not offered: an older cabinet would promise access at once, and the plan now comes only with the first charge',
     gatedIn: ['src/modules/payments/utils/antilopay-delay-policy.util.ts'],
   },
   {

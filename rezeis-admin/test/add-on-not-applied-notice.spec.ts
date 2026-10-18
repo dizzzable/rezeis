@@ -401,9 +401,16 @@ describe('the notices are in the templates catalogue, so «Карта бота»
       assert.equal(isSubscriberMailableType(type), true, type);
       assert.equal((SUBSCRIBER_MUTABLE_NOTIFICATION_TYPES as readonly string[]).includes(type), false, `${type} became a switch`);
     }
+    // Beside them only «Автосписание не прошло» (18.10.2026), for the same reason:
+    // the answer to the customer's own purchase (`antilopay-sbp-first-charge.spec.ts`).
     assert.deepEqual(
       [...MAILABLE_WITHOUT_SWITCH_TYPES].sort(),
-      [ADD_ON_NOT_APPLIED_NOTICE_TYPE, ADD_ON_NOT_APPLIED_OTHER_NOTICE_TYPE].sort(),
+      [
+        ADD_ON_NOT_APPLIED_NOTICE_TYPE,
+        ADD_ON_NOT_APPLIED_OTHER_NOTICE_TYPE,
+        'autopay_first_charge_failed',
+        'autopay_first_charge_failed_new',
+      ].sort(),
     );
   });
 });

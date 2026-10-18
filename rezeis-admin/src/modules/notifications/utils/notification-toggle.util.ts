@@ -242,7 +242,16 @@ export function isSubscriberNotificationEnabled(prefs: unknown, type: string): b
  * (`UserNotificationsService.deliverEmail`): SMTP on, «Слать уведомления
  * клиентам на почту» on, a verified address.
  */
-export const MAILABLE_WITHOUT_SWITCH_TYPES = ['addon_not_applied', 'addon_not_applied_other'] as const;
+export const MAILABLE_WITHOUT_SWITCH_TYPES = [
+  'addon_not_applied',
+  'addon_not_applied_other',
+  // The first automatic SBP charge did not come, so the plan the customer signed
+  // up for was not given (`autopay_first_charge_failed`, `…_new`): the answer to
+  // their own purchase, as above, and the only word a customer with no Telegram
+  // would get that their VPN is not paid for.
+  'autopay_first_charge_failed',
+  'autopay_first_charge_failed_new',
+] as const;
 
 /**
  * The switches the cabinet draws for this install: every one the subscriber

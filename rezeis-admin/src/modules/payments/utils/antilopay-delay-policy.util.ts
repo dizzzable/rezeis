@@ -20,10 +20,13 @@ import { isAutopayApproved } from './gateway-autopay.util';
  *  - the payer chose SBP. A card has no delay: Antilopay's `PAYMENT_TEMPLATE`
  *    has none, and its first payment is charged on the form;
  *  - the operator approved SBP and set a delay (`readAntilopayDelay`);
- *  - the cabinet that asks can show it (`web.autopay-first-charge-delay`). An
- *    older cabinet writes «спишется сразу» over the consent; a delay sent for
- *    it would charge nothing the payer was told about, and give them access
- *    for nothing they were told about. It does what it always did;
+ *  - the cabinet that asks can show it (`web.autopay-first-charge-delay`), and
+ *    says the plan comes with the first charge
+ *    (`web.autopay-delay-access-after-charge`, 18.10.2026: «без доступа на
+ *    время отсрочки»). An older cabinet writes «спишется сразу» over the
+ *    consent, or promises access for the delay at once; a delay sent for it
+ *    would be a promise the panel does not keep. It does what it always did:
+ *    the first charge at activation;
  *  - the customer has not used the delay before. It is given once.
  *
  * The one place the capability is read for this behaviour: the registry names
@@ -41,6 +44,7 @@ export function decideAntilopayDelay(input: {
   if (input.method !== 'SBP') return null;
   if (!isAutopayApproved(PaymentGatewayType.ANTILOPAY, input.settings, 'SBP')) return null;
   if (input.audience === undefined || !input.audience.can(CABINET_CAPABILITY.autopayFirstChargeDelay)) return null;
+  if (!input.audience.can(CABINET_CAPABILITY.autopayDelayAccessAfterCharge)) return null;
   if (input.alreadyUsed) return null;
   return readAntilopayDelay(input.settings);
 }

@@ -11,6 +11,7 @@ import {
   ProviderSubscriptionStatus,
   PurchaseChannel,
   PurchaseType,
+  TransactionStatus,
 } from '@prisma/client';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
@@ -57,7 +58,14 @@ const SBP_SETTINGS = {
   sbpDelayCount: 7,
   sbpDelayUnit: 'DAY',
 };
-const CAN_DELAY = CabinetView.of([CABINET_CAPABILITY.autopayFirstChargeDelay], 'a cabinet that shows the delay');
+// A cabinet that shows the delay and says the plan comes with the first charge
+// (0.9.7.59): the owner's rule of 18.10.2026, «без доступа на время отсрочки».
+const CAN_DELAY = CabinetView.of(
+  [CABINET_CAPABILITY.autopayFirstChargeDelay, CABINET_CAPABILITY.autopayDelayAccessAfterCharge],
+  'a cabinet that shows the delay',
+);
+/** Reiwa 0.9.7.56–0.9.7.58: shows the delay, and promises access for it at once. */
+const PROMISES_ACCESS = CabinetView.of([CABINET_CAPABILITY.autopayFirstChargeDelay], 'a cabinet that promises access for the delay');
 const SEVEN_DAYS = { count: 7, unit: 'DAY', days: 7 } as const;
 
 // ── the decision: who is offered the delay, and what is sent ─────────────────
@@ -84,6 +92,8 @@ describe('who is offered the delay of the first SBP charge', () => {
   it('offers nothing to a cabinet that cannot show it: an older one keeps charging at once', () => {
     assert.equal(decide({ audience: CabinetView.floor() }), null);
     assert.equal(decide({ audience: CabinetView.of([], 'declares nothing') }), null);
+    // One that would promise access for the delay, which the plan no longer gives.
+    assert.equal(decide({ audience: PROMISES_ACCESS }), null);
     assert.equal(decide({ audience: undefined }), null, 'a caller that is not a cabinet');
     assert.deepEqual(decide({ audience: CabinetView.all() }), SEVEN_DAYS);
   });
@@ -138,6 +148,15 @@ describe('the capability that gates the delay', () => {
     assert.equal(CABINET_CAPABILITY.autopayFirstChargeDelay, 'web.autopay-first-charge-delay');
     // No version implies it: only a cabinet that declares it has it.
     assert.equal(CabinetView.floor().can(CABINET_CAPABILITY.autopayFirstChargeDelay), false);
+  });
+
+  it('is joined by the one that says the plan comes with the first charge, gated in the same file', () => {
+    const row = CABINET_CAPABILITY_REGISTRY.find((candidate) => candidate.id === 'web.autopay-delay-access-after-charge');
+    assert.ok(row);
+    assert.equal(row.kind, 'gate');
+    assert.equal(row.since, '0.9.7.59');
+    assert.deepEqual(row.gatedIn, ['src/modules/payments/utils/antilopay-delay-policy.util.ts']);
+    assert.equal(CabinetView.floor().can(CABINET_CAPABILITY.autopayDelayAccessAfterCharge), false);
   });
 });
 
@@ -314,10 +333,37 @@ type DelayRow = {
   readonly status: ProviderSubscriptionStatus;
 };
 
-/** Evaluates the one `where` `hasUsedDelay` asks, over rows, so what it asks is what is tested. */
-function delayService(rows: readonly DelayRow[]) {
+/** A payment of the customer, as `hasPaidBefore` reads it. */
+type PaidRow = {
+  readonly userId: string;
+  readonly amount: number;
+  readonly status: TransactionStatus;
+  readonly fulfilledAt: Date | null;
+};
+
+/**
+ * Evaluates the one `where` `hasUsedDelay` asks, and the one `hasPaidBefore`
+ * asks, over rows, so what they ask is what is tested.
+ */
+function delayService(rows: readonly DelayRow[], payments: readonly PaidRow[] = []) {
   const asked: unknown[] = [];
   const prisma = {
+    transaction: {
+      findFirst: async ({ where }: { where: Record<string, unknown> }) => {
+        const gt = (where['amount'] as { gt: number }).gt;
+        const or = where['OR'] as Array<Record<string, unknown>>;
+        return (
+          payments.find(
+            (payment) =>
+              payment.userId === where['userId'] &&
+              payment.amount > gt &&
+              or.some((clause) =>
+                'status' in clause ? payment.status === clause['status'] : payment.fulfilledAt !== null,
+              ),
+          ) ?? null
+        );
+      },
+    },
     providerSubscription: {
       findFirst: async ({ where }: { where: Record<string, unknown> }) => {
         asked.push(where);
@@ -378,6 +424,57 @@ describe('the delay is given once per customer', () => {
       row({ gatewayType: PaymentGatewayType.PLATEGA }),
     ]);
     assert.equal(await service.hasUsedDelay('user-1'), false);
+  });
+});
+
+describe('the delay is for new customers only (the operator, 18.10.2026)', () => {
+  const paid = (overrides: Partial<PaidRow> = {}): PaidRow => ({
+    userId: 'user-1',
+    amount: 299,
+    status: TransactionStatus.COMPLETED,
+    fulfilledAt: new Date(),
+    ...overrides,
+  });
+
+  it('counts a customer who has paid before: a completed payment, or one delivered and refunded since', async () => {
+    assert.equal(await delayService([], [paid()]).service.mayNotTakeDelay('user-1'), true);
+    assert.equal(
+      await delayService([], [paid({ status: TransactionStatus.CANCELED })]).service.mayNotTakeDelay('user-1'),
+      true,
+      'delivered, then refunded',
+    );
+    assert.equal(await delayService([], [paid({ fulfilledAt: null })]).service.hasPaidBefore('user-1'), true, 'an import not yet stamped');
+  });
+
+  it('does not count a free payment, one still open, one abandoned, or another customer\'s', async () => {
+    const { service } = delayService(
+      [],
+      [
+        paid({ amount: 0 }),
+        paid({ status: TransactionStatus.PENDING, fulfilledAt: null }),
+        paid({ status: TransactionStatus.CANCELED, fulfilledAt: null }),
+        paid({ userId: 'user-2' }),
+      ],
+    );
+    assert.equal(await service.hasPaidBefore('user-1'), false);
+    assert.equal(await service.mayNotTakeDelay('user-1'), false);
+  });
+
+  it('refuses a delay shown to a customer who has paid since, so nobody is charged at once after being told otherwise', async () => {
+    const { service } = delayService([], [paid()]);
+    const outcome = await service
+      .settleAntilopayDelay({
+        userId: 'user-1',
+        settings: SBP_SETTINGS,
+        method: 'SBP',
+        audience: CAN_DELAY,
+        shown: readShownDelay({ autopayDelayCount: 7, autopayDelayUnit: 'DAY' }),
+      })
+      .then(
+        () => null,
+        (error: { getResponse?: () => { reason?: string } }) => error.getResponse?.().reason,
+      );
+    assert.equal(outcome, 'DELAY_CHANGED');
   });
 });
 
@@ -498,7 +595,7 @@ describe('the list of gateways a customer sees', () => {
       {} as never,
       { viewOfRequest: async () => input.audience } as never,
       {
-        hasUsedDelay: async (userId: string) => {
+        mayNotTakeDelay: async (userId: string) => {
           asked.push(userId);
           return input.used;
         },
