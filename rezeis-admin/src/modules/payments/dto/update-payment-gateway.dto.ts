@@ -1,6 +1,6 @@
 import { Type } from 'class-transformer';
 import { Currency, PaymentGatewayType } from '@prisma/client';
-import { IsBoolean, IsEnum, IsInt, IsOptional, Min } from 'class-validator';
+import { IsBoolean, IsEnum, IsInt, IsOptional, IsString, Min } from 'class-validator';
 
 export class UpdatePaymentGatewayDto {
   @IsOptional()
@@ -30,4 +30,22 @@ export class UpdatePaymentGatewayDto {
 
   @IsOptional()
   public settings?: unknown;
+
+  /**
+   * How the cabinet shows this gateway to the customer: the name, the line under
+   * it and the SVG icon. Absent — unchanged; `null` or empty — back to the
+   * provider's own. Checked and normalized by `gateway-presentation.util.ts`,
+   * which refuses with its own codes; the type is all this layer checks.
+   */
+  @IsOptional()
+  @IsString()
+  public displayName?: string | null;
+
+  @IsOptional()
+  @IsString()
+  public displayDescription?: string | null;
+
+  @IsOptional()
+  @IsString()
+  public displayIconSvg?: string | null;
 }

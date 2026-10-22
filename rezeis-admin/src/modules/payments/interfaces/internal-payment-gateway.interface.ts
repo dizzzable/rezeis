@@ -20,6 +20,24 @@ export interface InternalPaymentGatewayInterface {
   readonly currency: Currency;
   readonly orderIndex: number;
   /**
+   * The operator's name for this gateway in the payment step («Карта или СБП»),
+   * present only where one is set. The cabinet has read `displayName` since
+   * long before the panel sent it, so an older cabinet shows the name too.
+   */
+  readonly displayName?: string;
+  /**
+   * Up to three lines under the name, in place of the currency code. Present
+   * only where set; a cabinet older than 0.9.7.60 shows the currency code.
+   */
+  readonly displayDescription?: string;
+  /**
+   * The operator's SVG in place of the provider's logo, checked on save
+   * (`gateway-presentation.util.ts`). The cabinet shows it ONLY as an image
+   * (`<img>` with a `data:` URL), where an SVG runs nothing. Present only where
+   * set; a cabinet older than 0.9.7.60 shows the provider's logo.
+   */
+  readonly displayIconSvg?: string;
+  /**
    * The operator switched «Автоплатежи одобрены провайдером» on, and this build
    * can run the gateway's repeat charges. The cabinet then offers a second
    * option, «для автоматического списания». See `gateway-autopay.util.ts`.

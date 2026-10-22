@@ -110,4 +110,59 @@ describe('InternalPaymentsController', () => {
       { id: 'usd', type: PaymentGatewayType.HELEKET, currency: Currency.USD, orderIndex: 1, autopay: false },
     ]);
   });
+
+  it('hands the cabinet the name, the line and the icon the operator set — and nothing where they set none', async () => {
+    const icon = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M0 0h24v24H0z"/></svg>';
+    const controller = new InternalPaymentsController(
+      {} as never,
+      {} as never,
+      {
+        listGateways: async () => [
+          {
+            id: 'wata',
+            type: PaymentGatewayType.WATA,
+            currency: Currency.RUB,
+            isActive: true,
+            isConfigured: true,
+            orderIndex: 1,
+            settings: {},
+            displayName: 'Карта или СБП',
+            displayDescription: 'Любая карта РФ\nили QR-код СБП',
+            displayIconSvg: icon,
+          },
+          {
+            id: 'platega',
+            type: PaymentGatewayType.PLATEGA,
+            currency: Currency.RUB,
+            isActive: true,
+            isConfigured: true,
+            orderIndex: 2,
+            settings: {},
+            displayName: null,
+            displayDescription: null,
+            displayIconSvg: null,
+          },
+        ],
+      } as never,
+      {} as never,
+      {
+        getInternalPlatformPolicy: async () => ({ defaultCurrency: Currency.RUB }),
+      } as never,
+      {} as never,
+    );
+
+    assert.deepStrictEqual(await controller.listEnabledGateways('web'), [
+      {
+        id: 'wata',
+        type: PaymentGatewayType.WATA,
+        currency: Currency.RUB,
+        orderIndex: 1,
+        displayName: 'Карта или СБП',
+        displayDescription: 'Любая карта РФ\nили QR-код СБП',
+        displayIconSvg: icon,
+        autopay: false,
+      },
+      { id: 'platega', type: PaymentGatewayType.PLATEGA, currency: Currency.RUB, orderIndex: 2, autopay: false },
+    ]);
+  });
 });

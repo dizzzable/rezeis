@@ -117,6 +117,9 @@ is_auto_recoverable_migration() {
     20261016200000_support_ticket_ai)
       return 0
       ;;
+    20261022120000_payment_gateway_presentation)
+      return 0
+      ;;
     *)
       return 1
       ;;

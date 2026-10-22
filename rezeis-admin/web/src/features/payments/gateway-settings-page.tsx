@@ -95,6 +95,13 @@ import { useHasPermission } from '@/features/rbac'
 
 import { AntilopayKeyCheck } from './antilopay-key-check'
 import { CURRENCY_DISPLAY_NAMES, getCurrencyIcon } from './currency-icons'
+import {
+  GatewayCustomerPresentation,
+  PRESENTATION_REFUSAL_MESSAGES,
+  presentationOf,
+  presentationPatch,
+  samePresentation,
+} from './gateway-customer-presentation'
 import { getPaymentGatewayIcon } from './payment-gateway-icons'
 
 // ── Gateway metadata ────────────────────────────────────────────────────────
@@ -803,6 +810,13 @@ interface AdminGateway {
   webhookUrl: string
   isUsedInPricing?: boolean
   updatedAt: string
+  /**
+   * How the cabinet shows this gateway to the customer — `null` where the
+   * provider's own is shown. See `gateway-customer-presentation.tsx`.
+   */
+  displayName?: string | null
+  displayDescription?: string | null
+  displayIconSvg?: string | null
 }
 
 /**
@@ -1096,6 +1110,13 @@ function GatewayRow({
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
           <p className="truncate text-sm font-medium">{meta.displayName}</p>
+          {gateway.displayName ? (
+            // The operator's name for it in the cabinet, so the row that says
+            // «Wata» also says what customers press.
+            <span className="truncate text-xs text-muted-foreground">
+              {t('paymentGateways.presentation.rowName', { name: gateway.displayName })}
+            </span>
+          ) : null}
           {isFirst && gateway.isActive && (
             // The badge is kept on a faulted gateway on purpose — that the
             // broken rail is the one buyers meet first is the worst part of
@@ -1351,6 +1372,8 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
   const [values, setValues] = useState<Record<string, string>>(initialValues)
   const [showSecrets, setShowSecrets] = useState<Record<string, boolean>>({})
   const [currency, setCurrency] = useState<string>(gateway.currency)
+  const initialPresentation = presentationOf(gateway)
+  const [presentation, setPresentation] = useState(initialPresentation)
 
   // Static map fetched once per page-mount; cached by react-query so the
   // settings dialog reads it without an extra round-trip.
@@ -1372,6 +1395,7 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
     setValues(initialValues)
     setShowSecrets({})
     setCurrency(gateway.currency)
+    setPresentation(initialPresentation)
   }
 
   const supportedCurrencies = supportedMap?.[gateway.type] ?? [gateway.currency]
@@ -1400,6 +1424,9 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
       api.patch(`/admin/payments/gateways/${gateway.id}`, {
         settings: withoutBlankEntries(values),
         ...(currencyChanged ? { currency } : {}),
+        // Only when changed: an operator saving new keys must not be refused
+        // over an icon stored before a later, stricter check.
+        ...(samePresentation(presentation, initialPresentation) ? {} : presentationPatch(presentation)),
     }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: adminQueryKeys.payments.gateways.all })
@@ -1411,9 +1438,13 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
     onError: (err: unknown) => {
       const data = (err as { response?: { data?: { message?: string; code?: string } } })
         ?.response?.data
-      // A key refused for what is wrong with it has a sentence of its own; any
-      // other refusal is shown as the panel worded it.
-      const keyRefusal = data?.code === undefined ? undefined : KEY_REFUSAL_MESSAGES.get(data.code)
+      // A key refused for what is wrong with it has a sentence of its own, and
+      // so does a name, a line or an icon for customers; any other refusal is
+      // shown as the panel worded it.
+      const keyRefusal =
+        data?.code === undefined
+          ? undefined
+          : (KEY_REFUSAL_MESSAGES.get(data.code) ?? PRESENTATION_REFUSAL_MESSAGES.get(data.code))
       toast.error(
         keyRefusal === undefined ? (data?.message ?? t('paymentGateways.saveFailed')) : t(keyRefusal),
       )
@@ -1665,6 +1696,21 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
         <AntilopayKeyCheck gatewayId={gateway.id} hasUnsavedChanges={hasUnsavedChanges} />
       )}
 
+      <GatewayCustomerPresentation
+        providerName={meta.displayName}
+        currency={currency}
+        providerIcon={
+          BrandIcon ? (
+            // eslint-disable-next-line react-hooks/static-components
+            <BrandIcon className="h-7 w-7 object-contain" />
+          ) : (
+            <FallbackIcon className={cn('h-6 w-6', meta.iconColor)} />
+          )
+        }
+        values={presentation}
+        onChange={setPresentation}
+      />
+
       <div className="flex flex-wrap items-center justify-end gap-2 pt-2">
         <Button
           variant="ghost"
@@ -1672,6 +1718,7 @@ function GatewaySettingsForm({ gateway, onClose }: GatewaySettingsFormProps) {
           onClick={(): void => {
             setValues(initialValues)
             setCurrency(gateway.currency)
+            setPresentation(initialPresentation)
           }}
         >
           <RotateCcw className="mr-2 h-4 w-4" /> {t('paymentGateways.revert')}

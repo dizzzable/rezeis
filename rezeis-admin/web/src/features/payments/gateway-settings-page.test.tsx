@@ -492,6 +492,141 @@ describe('GatewaySettingsPage Platega payment method', () => {
   })
 })
 
+describe('GatewaySettingsPage — how customers see a gateway', () => {
+  // Operators, 22.10.2026: customers were afraid to press «Platega» and «Wata»
+  // with «RUB» under them. The name, the line and the icon the cabinet shows.
+  const ICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M0 0h24v24H0z"/></svg>'
+
+  beforeAll(async () => {
+    await loadFeatureBundle('payments')
+  })
+
+  beforeEach(() => {
+    usePermissionStore.getState().reset()
+    vi.restoreAllMocks()
+  })
+
+  function grantEdit(): void {
+    grantPermissions([
+      { resource: 'payment_gateways', action: 'view' },
+      { resource: 'payment_gateways', action: 'edit' },
+    ])
+  }
+
+  it('saves the name, the line and an uploaded SVG, and previews them as the cabinet shows them', async () => {
+    mockGatewayList([createGateway({ type: 'WATA', isConfigured: true, settings: { apiKey: 'k', publicKey: 'p' } })])
+    const patchSpy = vi.spyOn(api, 'patch').mockResolvedValue({ data: {} })
+    grantEdit()
+    const user = userEvent.setup()
+
+    renderWithProviders(<GatewaySettingsPage />)
+    await user.click(await screen.findByRole('button', { name: 'Open settings' }))
+    await user.type(await screen.findByLabelText('Name for customers'), 'Card or SBP')
+    await user.type(screen.getByLabelText('Caption under the name'), 'Any Russian card')
+    await user.upload(screen.getByTestId('gateway-icon-file'), new File([ICON], 'card.svg', { type: 'image/svg+xml' }))
+
+    const preview = screen.getByTestId('gateway-customer-preview')
+    await waitFor(() => expect(screen.getByTestId('gateway-custom-icon').getAttribute('src')).toBe(
+      `data:image/svg+xml;charset=utf-8,${encodeURIComponent(ICON)}`,
+    ))
+    expect(preview).toHaveTextContent('Card or SBP')
+    expect(preview).toHaveTextContent('Any Russian card')
+
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(patchSpy).toHaveBeenCalled())
+    expect(patchSpy.mock.calls[0]![1]).toMatchObject({
+      displayName: 'Card or SBP',
+      displayDescription: 'Any Russian card',
+      displayIconSvg: ICON,
+    })
+  })
+
+  it('previews the provider\'s own name and currency while nothing is set, and saves an untouched form without them', async () => {
+    mockGatewayList([createGateway({ type: 'WATA', isConfigured: true, settings: { apiKey: 'k', publicKey: 'p' } })])
+    const patchSpy = vi.spyOn(api, 'patch').mockResolvedValue({ data: {} })
+    grantEdit()
+    const user = userEvent.setup()
+
+    renderWithProviders(<GatewaySettingsPage />)
+    await user.click(await screen.findByRole('button', { name: 'Open settings' }))
+    const preview = await screen.findByTestId('gateway-customer-preview')
+    expect(preview).toHaveTextContent('WATA')
+    expect(preview).toHaveTextContent('RUB')
+
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(patchSpy).toHaveBeenCalled())
+    const body = patchSpy.mock.calls[0]![1] as Record<string, unknown>
+    expect(body).not.toHaveProperty('displayName')
+    expect(body).not.toHaveProperty('displayIconSvg')
+  })
+
+  it('goes back to the provider\'s icon, and says so with a null', async () => {
+    mockGatewayList([
+      createGateway({
+        type: 'WATA',
+        isConfigured: true,
+        settings: { apiKey: 'k', publicKey: 'p' },
+        displayName: 'Card or SBP',
+        displayIconSvg: ICON,
+      }),
+    ])
+    const patchSpy = vi.spyOn(api, 'patch').mockResolvedValue({ data: {} })
+    grantEdit()
+    const user = userEvent.setup()
+
+    renderWithProviders(<GatewaySettingsPage />)
+    expect(await screen.findByText('customers see: «Card or SBP»')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Open settings' }))
+    await user.click(await screen.findByRole('button', { name: "Back to the provider's icon" }))
+    expect(screen.queryByTestId('gateway-custom-icon')).toBeNull()
+
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(patchSpy).toHaveBeenCalled())
+    expect(patchSpy.mock.calls[0]![1]).toMatchObject({ displayName: 'Card or SBP', displayIconSvg: null })
+  })
+
+  it('refuses a file that is not an SVG before it is saved', async () => {
+    mockGatewayList([createGateway({ type: 'WATA', isConfigured: true, settings: { apiKey: 'k', publicKey: 'p' } })])
+    const errorToast = vi.spyOn(toast, 'error').mockReturnValue('toast-1')
+    grantEdit()
+    const user = userEvent.setup()
+
+    renderWithProviders(<GatewaySettingsPage />)
+    await user.click(await screen.findByRole('button', { name: 'Open settings' }))
+    await user.upload(
+      await screen.findByTestId('gateway-icon-file'),
+      new File(['<html><body/></html>'], 'page.svg', { type: 'image/svg+xml' }),
+    )
+
+    await waitFor(() =>
+      expect(errorToast).toHaveBeenCalledWith('This is not an SVG: the file must start with <svg> and end with </svg>.'),
+    )
+    expect(screen.queryByTestId('gateway-custom-icon')).toBeNull()
+  })
+
+  it('words the panel\'s refusal of an unsafe icon instead of leaking its code', async () => {
+    mockGatewayList([createGateway({ type: 'WATA', isConfigured: true, settings: { apiKey: 'k', publicKey: 'p' } })])
+    vi.spyOn(api, 'patch').mockRejectedValue({
+      response: { data: { code: 'PAYMENT_GATEWAY_ICON_UNSAFE', message: 'PAYMENT_GATEWAY_ICON_UNSAFE' } },
+    })
+    const errorToast = vi.spyOn(toast, 'error').mockReturnValue('toast-1')
+    grantEdit()
+    const user = userEvent.setup()
+
+    renderWithProviders(<GatewaySettingsPage />)
+    await user.click(await screen.findByRole('button', { name: 'Open settings' }))
+    await user.upload(screen.getByTestId('gateway-icon-file'), new File([ICON], 'card.svg', { type: 'image/svg+xml' }))
+    await waitFor(() => expect(screen.getByTestId('gateway-custom-icon')).toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() =>
+      expect(errorToast).toHaveBeenCalledWith(
+        'The SVG has a script, an event handler or a link to another site — such a file is not shown to customers. Save the icon again as a plain SVG.',
+      ),
+    )
+  })
+})
+
 describe('GatewaySettingsPage AuraPay automatic charging', () => {
   beforeAll(async () => {
     await loadFeatureBundle('payments')
@@ -1459,6 +1594,9 @@ interface GatewayFixture {
   configuredSecretKeys: readonly string[]
   webhookUrl: string
   updatedAt: string
+  displayName?: string | null
+  displayDescription?: string | null
+  displayIconSvg?: string | null
 }
 
 function createGateway(overrides: Partial<GatewayFixture> = {}): GatewayFixture {

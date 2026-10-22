@@ -2455,6 +2455,16 @@ model PaymentGateway {
   currency   Currency           @map("currency")
   isActive   Boolean            @default(false) @map("is_active")
   settings   Json               @default("{}") @map("settings")
+  /// What the cabinet's payment step calls this gateway instead of the
+  /// provider's name («Карта или СБП»). NULL — the provider's name. See
+  /// `gateway-presentation.util.ts`.
+  displayName        String?    @map("display_name")
+  /// The line under the name in the cabinet's payment step, instead of the
+  /// currency code. NULL — the currency code.
+  displayDescription String?    @map("display_description")
+  /// The operator's SVG in place of the provider's logo in the cabinet, checked
+  /// on save and shown only as an image. NULL — the provider's logo.
+  displayIconSvg     String?    @map("display_icon_svg")
   createdAt  DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt  DateTime           @updatedAt @map("updated_at") @db.Timestamptz(3)
 

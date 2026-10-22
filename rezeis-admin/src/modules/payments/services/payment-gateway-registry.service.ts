@@ -9,6 +9,11 @@ import { MovePaymentGatewayDto, PaymentGatewayMoveDirection } from '../dto/move-
 import { UpdatePaymentGatewayDto } from '../dto/update-payment-gateway.dto';
 import { AdminPaymentGatewayInterface } from '../interfaces/admin-payment-gateway.interface';
 import {
+  normalizeGatewayDisplayDescription,
+  normalizeGatewayDisplayName,
+  normalizeGatewayIconSvg,
+} from '../utils/gateway-presentation.util';
+import {
   GATEWAY_SUPPORTED_CURRENCIES,
   isCurrencySupportedByGateway,
 } from '../utils/gateway-supported-currencies.util';
@@ -301,6 +306,17 @@ export class PaymentGatewayRegistryService {
     if (input.input.orderIndex !== undefined) {
       updateData.orderIndex = input.input.orderIndex;
     }
+    // What the customer sees. Each is its own: a PATCH that does not name one
+    // leaves it as stored, and the toggle and the arrows send none of them.
+    if (input.input.displayName !== undefined) {
+      updateData.displayName = normalizeGatewayDisplayName(input.input.displayName);
+    }
+    if (input.input.displayDescription !== undefined) {
+      updateData.displayDescription = normalizeGatewayDisplayDescription(input.input.displayDescription);
+    }
+    if (input.input.displayIconSvg !== undefined) {
+      updateData.displayIconSvg = normalizeGatewayIconSvg(input.input.displayIconSvg);
+    }
     if (input.normalizedSettings !== undefined) {
       // Encryption is the LAST thing that happens to the settings object. Doing
       // it here rather than earlier means validation, mask resolution and the
@@ -356,6 +372,9 @@ export class PaymentGatewayRegistryService {
       orderIndex: gateway.orderIndex,
       currency: gateway.currency,
       isActive: gateway.isActive,
+      displayName: gateway.displayName,
+      displayDescription: gateway.displayDescription,
+      displayIconSvg: gateway.displayIconSvg,
       settings: revealSecrets ? plainSettings : masked.settings,
       secretsVisible: revealSecrets,
       // Always the real list, even when secrets are revealed: it names the

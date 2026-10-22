@@ -166,6 +166,11 @@ export class InternalPaymentsController {
             type: gateway.type,
             currency: gateway.currency,
             orderIndex: gateway.orderIndex,
+            // What the customer is shown instead of the provider's own, only
+            // where the operator set it.
+            ...(gateway.displayName ? { displayName: gateway.displayName } : {}),
+            ...(gateway.displayDescription ? { displayDescription: gateway.displayDescription } : {}),
+            ...(gateway.displayIconSvg ? { displayIconSvg: gateway.displayIconSvg } : {}),
           };
           // Antilopay approves automatic charging per method: the list names them
           // and the boolean stays false (see `autopayMethods`).

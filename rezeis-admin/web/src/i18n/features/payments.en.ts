@@ -71,6 +71,39 @@ export const en = {
      * the key is there; leave the field alone and it stays; type a new value to
      * replace it; clear the field to remove it.
      */
+    /**
+     * «How customers see this gateway» in the gateway settings: the operator's
+     * name, a line under it and an SVG icon in the customer's cabinet
+     * (operators, 22.10.2026).
+     */
+    presentation: {
+      title: 'How customers see this gateway',
+      description:
+        "The name, caption and icon of this payment option in the customer's cabinet — when buying, renewing, changing plan and buying add-ons. Leave a field empty to show the provider's own.",
+      preview: 'How it looks in the cabinet',
+      name: 'Name for customers',
+      namePlaceholder: 'For example: Card or SBP',
+      nameHint: "Empty — the provider's name. {{used}} of {{max}} characters.",
+      line: 'Caption under the name',
+      linePlaceholder: 'For example: Any Russian card or an SBP QR code',
+      lineHint: 'Empty — «{{currency}}». Up to 3 lines, {{used}} of {{max}} characters.',
+      icon: 'Icon',
+      iconUpload: 'Upload SVG',
+      iconReplace: 'Replace SVG',
+      iconRemove: "Back to the provider's icon",
+      iconHint:
+        'An SVG file up to 32 KB, ideally square. No scripts and no links to other sites — the panel refuses such a file.',
+      iconReadFailed: 'Could not read the file.',
+      rowName: 'customers see: «{{name}}»',
+      refusals: {
+        nameInvalid: 'Name for customers: one line of up to 40 characters, no invisible characters.',
+        descriptionInvalid: 'Caption under the name: up to 3 lines and 160 characters, no invisible characters.',
+        iconInvalid: 'This is not an SVG: the file must start with <svg> and end with </svg>.',
+        iconTooLarge: 'The SVG is over 32 KB. Compress it, for example in SVGOMG, and upload it again.',
+        iconUnsafe:
+          'The SVG has a script, an event handler or a link to another site — such a file is not shown to customers. Save the icon again as a plain SVG.',
+      },
+    },
     secretsHidden: {
       title: 'Credentials are hidden',
       description:

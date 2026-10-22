@@ -422,6 +422,9 @@ function createService(
         isActive: args.data.isActive ?? true,
         orderIndex: args.data.orderIndex ?? 0,
         settings: (args.data.settings as Record<string, unknown>) ?? {},
+        displayName: null,
+        displayDescription: null,
+        displayIconSvg: null,
         updatedAt: new Date('2026-04-19T12:00:00.000Z'),
       };
       gateways.push(created);
@@ -449,6 +452,11 @@ function createService(
       }
       if (args.data.settings !== undefined) {
         gateway.settings = args.data.settings as Record<string, unknown>;
+      }
+      for (const key of ['displayName', 'displayDescription', 'displayIconSvg'] as const) {
+        if (args.data[key] !== undefined) {
+          gateway[key] = args.data[key] as string | null;
+        }
       }
       gateway.updatedAt = new Date('2026-04-19T12:00:00.000Z');
       return gateway;
@@ -480,6 +488,8 @@ function createGateway(input: {
   readonly isActive: boolean;
   readonly orderIndex: number;
   readonly settings?: Record<string, unknown>;
+  readonly displayName?: string | null;
+  readonly displayIconSvg?: string | null;
 }): GatewayRecord {
   return {
     id: input.id,
@@ -488,6 +498,9 @@ function createGateway(input: {
     isActive: input.isActive,
     orderIndex: input.orderIndex,
     settings: input.settings ?? {},
+    displayName: input.displayName ?? null,
+    displayDescription: null,
+    displayIconSvg: input.displayIconSvg ?? null,
     updatedAt: new Date('2026-04-19T12:00:00.000Z'),
   };
 }
@@ -508,8 +521,85 @@ interface GatewayRecord {
   currency: Currency;
   isActive: boolean;
   settings: Record<string, unknown>;
+  displayName: string | null;
+  displayDescription: string | null;
+  displayIconSvg: string | null;
   updatedAt: Date;
 }
+
+describe('PaymentGatewayRegistryService — how the customer sees a gateway', () => {
+  const ICON = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M0 0h24v24H0z"/></svg>';
+
+  it('stores the name, the line under it and the icon, and shows them back', async () => {
+    const { service, rows } = createService([
+      createGateway({ id: 'gateway-1', type: PaymentGatewayType.WATA, currency: Currency.RUB, isActive: true, orderIndex: 1 }),
+    ]);
+
+    const updated = await service.updateGateway('gateway-1', {
+      displayName: '  Карта   или СБП ',
+      displayDescription: 'Любая карта РФ\n\nили QR-код СБП',
+      displayIconSvg: ICON,
+    });
+
+    assert.equal(updated.displayName, 'Карта или СБП');
+    assert.equal(updated.displayDescription, 'Любая карта РФ\nили QR-код СБП');
+    assert.equal(updated.displayIconSvg, ICON);
+    assert.equal(rows[0]!.displayName, 'Карта или СБП');
+  });
+
+  it('leaves them alone on a PATCH that does not name them, like the order arrows', async () => {
+    const { service } = createService([
+      createGateway({
+        id: 'gateway-1',
+        type: PaymentGatewayType.WATA,
+        currency: Currency.RUB,
+        isActive: false,
+        orderIndex: 1,
+        displayName: 'Карта или СБП',
+        displayIconSvg: ICON,
+      }),
+    ]);
+
+    const updated = await service.updateGateway('gateway-1', { orderIndex: 2 });
+
+    assert.equal(updated.displayName, 'Карта или СБП');
+    assert.equal(updated.displayIconSvg, ICON);
+  });
+
+  it('goes back to the provider\'s own on null or an empty value', async () => {
+    const { service } = createService([
+      createGateway({
+        id: 'gateway-1',
+        type: PaymentGatewayType.WATA,
+        currency: Currency.RUB,
+        isActive: false,
+        orderIndex: 1,
+        displayName: 'Карта или СБП',
+        displayIconSvg: ICON,
+      }),
+    ]);
+
+    const updated = await service.updateGateway('gateway-1', { displayName: '   ', displayIconSvg: null });
+
+    assert.equal(updated.displayName, null);
+    assert.equal(updated.displayIconSvg, null);
+  });
+
+  it('refuses an icon with a script, and writes nothing of that PATCH', async () => {
+    const { service, rows } = createService([
+      createGateway({ id: 'gateway-1', type: PaymentGatewayType.WATA, currency: Currency.RUB, isActive: false, orderIndex: 1 }),
+    ]);
+
+    await assert.rejects(
+      service.updateGateway('gateway-1', {
+        displayName: 'Карта или СБП',
+        displayIconSvg: '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>',
+      }),
+      (error: unknown) => (error as { response?: { code?: string } }).response?.code === 'PAYMENT_GATEWAY_ICON_UNSAFE',
+    );
+    assert.equal(rows[0]!.displayName, null);
+  });
+});
 
 describe('PaymentGatewayRegistryService secret handling', () => {
   it('encrypts secret settings at rest while leaving configuration readable', async () => {

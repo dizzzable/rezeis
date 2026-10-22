@@ -7,6 +7,15 @@ export interface AdminPaymentGatewayInterface {
   readonly currency: Currency;
   readonly isActive: boolean;
   /**
+   * How the cabinet's payment step shows this gateway to the customer, `null`
+   * where the operator set nothing: the name (else the provider's), the line
+   * under it (else the currency code) and the SVG icon (else the provider's
+   * logo). See `gateway-presentation.util.ts`. Not secret, and never masked.
+   */
+  readonly displayName: string | null;
+  readonly displayDescription: string | null;
+  readonly displayIconSvg: string | null;
+  /**
    * Gateway settings, decrypted. Secret-bearing values (see
    * `GATEWAY_SECRET_SETTING_KEYS`) are returned in the clear only when the
    * caller holds `payment_gateways:view_secrets`; otherwise each is replaced by
