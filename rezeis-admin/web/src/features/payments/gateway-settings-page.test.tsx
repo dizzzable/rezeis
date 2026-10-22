@@ -585,6 +585,28 @@ describe('GatewaySettingsPage — how customers see a gateway', () => {
     expect(patchSpy.mock.calls[0]![1]).toMatchObject({ displayName: 'Card or SBP', displayIconSvg: null })
   })
 
+  it('previews an editor file without a namespace as the customer will get it, not as an empty box', async () => {
+    mockGatewayList([createGateway({ type: 'WATA', isConfigured: true, settings: { apiKey: 'k', publicKey: 'p' } })])
+    const patchSpy = vi.spyOn(api, 'patch').mockResolvedValue({ data: {} })
+    grantEdit()
+    const user = userEvent.setup()
+    const bare = '<svg width="24px" height="24"><path d="M0 0h24v24H0z"/></svg>'
+    const asShown = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24px" height="24"><path d="M0 0h24v24H0z"/></svg>'
+
+    renderWithProviders(<GatewaySettingsPage />)
+    await user.click(await screen.findByRole('button', { name: 'Open settings' }))
+    await user.upload(await screen.findByTestId('gateway-icon-file'), new File([bare], 'bare.svg', { type: 'image/svg+xml' }))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('gateway-custom-icon').getAttribute('src')).toBe(
+        `data:image/svg+xml;charset=utf-8,${encodeURIComponent(asShown)}`,
+      ),
+    )
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(patchSpy).toHaveBeenCalled())
+    expect(patchSpy.mock.calls[0]![1]).toMatchObject({ displayIconSvg: asShown })
+  })
+
   it('refuses a file that is not an SVG before it is saved', async () => {
     mockGatewayList([createGateway({ type: 'WATA', isConfigured: true, settings: { apiKey: 'k', publicKey: 'p' } })])
     const errorToast = vi.spyOn(toast, 'error').mockReturnValue('toast-1')

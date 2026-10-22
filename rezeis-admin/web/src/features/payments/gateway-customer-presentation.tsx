@@ -89,6 +89,40 @@ function codePoints(value: string): number {
   return [...value].length
 }
 
+/** A plain number of user units, as `width` and `height` are written by every editor. */
+function userUnits(value: string | undefined): number | null {
+  if (value === undefined) return null
+  const match = /^\s*(\d+(?:\.\d+)?)\s*(?:px)?\s*$/i.exec(value)
+  if (match === null) return null
+  const units = Number(match[1])
+  return units > 0 ? units : null
+}
+
+/**
+ * The root `<svg>` as the server leaves it on save (`normalizeGatewayIconSvg`):
+ * the SVG namespace added where it is missing — without it a browser draws no
+ * image at all — and a `viewBox` from plain `width` and `height` where there is
+ * none, so the icon scales instead of being cut. Done to the uploaded file
+ * before it is previewed, so the preview is the icon the customer will get,
+ * not an empty box until the first save.
+ */
+export function withImageRootAttributes(svg: string): string {
+  const root = /<svg\b[^>]*>/.exec(svg)
+  if (root === null) return svg
+  const tag = root[0]
+  const attribute = (name: string): string | undefined =>
+    new RegExp(`\\s${name}\\s*=\\s*(["'])([\\s\\S]*?)\\1`, 'i').exec(tag)?.[2]
+  const additions: string[] = []
+  if (attribute('xmlns') === undefined) additions.push('xmlns="http://www.w3.org/2000/svg"')
+  if (attribute('viewBox') === undefined) {
+    const width = userUnits(attribute('width'))
+    const height = userUnits(attribute('height'))
+    if (width !== null && height !== null) additions.push(`viewBox="0 0 ${width} ${height}"`)
+  }
+  if (additions.length === 0) return svg
+  return `${svg.slice(0, root.index)}<svg ${additions.join(' ')}${tag.slice('<svg'.length)}${svg.slice(root.index + tag.length)}`
+}
+
 export function GatewayCustomerPresentation({
   providerName,
   currency,
@@ -128,7 +162,7 @@ export function GatewayCustomerPresentation({
       toast.error(t('paymentGateways.presentation.refusals.iconInvalid'))
       return
     }
-    onChange({ ...values, iconSvg: text.trim() })
+    onChange({ ...values, iconSvg: withImageRootAttributes(text.trim()) })
   }
 
   const shownName = values.name.trim() === '' ? providerName : values.name.trim()
