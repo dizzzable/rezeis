@@ -20,9 +20,18 @@ export interface ContestPrize {
   readonly manualInstructions: string | null
 }
 
+/** Who may enter — the broadcast filter's shape. */
 export interface ContestAudienceFilter {
   readonly subscription?: string[]
   readonly planIds?: string[]
+  readonly platforms?: string[]
+  readonly contact?: string[]
+  readonly inactiveDays?: number
+}
+
+export interface ContestChannel {
+  readonly chatId: string
+  readonly joinUrl: string
 }
 
 export interface Contest {
@@ -36,10 +45,25 @@ export interface Contest {
   readonly maxEntries: number | null
   readonly drawnAt: string | null
   readonly drawnEntries: number | null
+  readonly drawnTickets: number | null
   readonly order: number
   readonly createdAt: string
   readonly entries: number
   readonly winners: number
+  readonly announce: boolean
+  readonly announcedAt: string | null
+  readonly resultsNotifiedAt: string | null
+  readonly ticketsPerPurchase: number
+  readonly ticketsPerReferral: number
+  readonly maxTicketsPerUser: number | null
+  readonly channel: ContestChannel | null
+  /** SHA-256 of the draw's seed, from publish on. */
+  readonly drawSeedHash: string | null
+  /** The seed itself — only once drawn. */
+  readonly drawSeed: string | null
+  /** Why the last draw attempt failed, while it keeps failing. */
+  readonly drawError: string | null
+  readonly drawErrorAt: string | null
   readonly prizes: readonly ContestPrize[]
   /** Why it cannot be published as it stands. Empty means it can. */
   readonly problems: readonly string[]
@@ -52,7 +76,27 @@ export interface ContestPayload {
   readonly endAt: string
   readonly audienceFilter?: ContestAudienceFilter | null
   readonly maxEntries?: number | null
+  readonly announce?: boolean
+  readonly ticketsPerPurchase?: number
+  readonly ticketsPerReferral?: number
+  readonly maxTicketsPerUser?: number | null
+  readonly channelLink?: string | null
+  readonly channelId?: string | null
   readonly prizes: readonly Omit<ContestPrize, 'id'>[]
+}
+
+export interface ContestEntrant {
+  readonly userId: string
+  readonly name: string | null
+  readonly username: string | null
+  readonly telegramId: string | null
+  readonly enteredAt: string
+  readonly tickets: number
+}
+
+export interface ContestEntrantsPage {
+  readonly total: number
+  readonly rows: readonly ContestEntrant[]
 }
 
 export interface ContestWinner {
@@ -79,7 +123,7 @@ export interface ContestWinner {
 }
 
 export type DrawResult =
-  | { readonly drawn: true; readonly winners: number; readonly entrants: number }
+  | { readonly drawn: true; readonly winners: number; readonly entrants: number; readonly tickets?: number }
   | { readonly drawn: false; readonly reason: 'NOT_ACTIVE' | 'NOT_OVER' | 'ALREADY_DRAWN' }
 
 export const listContests = () =>
@@ -107,6 +151,11 @@ export const listContestWinners = (contestId: string) =>
   api
     .get(`/admin/contests/${encodeURIComponent(contestId)}/winners`)
     .then((r) => expectArray<ContestWinner>(r.data))
+
+export const listContestEntrants = (contestId: string, page: { readonly take: number; readonly skip: number }) =>
+  api
+    .get<ContestEntrantsPage>(`/admin/contests/${encodeURIComponent(contestId)}/entrants`, { params: page })
+    .then((r) => ({ total: Number(r.data?.total ?? 0), rows: Array.isArray(r.data?.rows) ? r.data.rows : [] }))
 
 export const listPendingContestWinners = () =>
   api.get('/admin/contests/winners/pending').then((r) => expectArray<ContestWinner>(r.data))

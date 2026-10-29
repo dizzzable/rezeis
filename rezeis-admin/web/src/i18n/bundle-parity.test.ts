@@ -51,6 +51,8 @@ import { en as brandingEn } from './features/branding.en'
 import { ru as brandingRu } from './features/branding.ru'
 import { en as broadcastEn } from './features/broadcast.en'
 import { ru as broadcastRu } from './features/broadcast.ru'
+import { en as contestsEn } from './features/contests.en'
+import { ru as contestsRu } from './features/contests.ru'
 import { en as dashboardEn } from './features/dashboard.en'
 import { ru as dashboardRu } from './features/dashboard.ru'
 import { en as importsEn } from './features/imports.en'
@@ -112,6 +114,7 @@ const PAIRS = [
   { name: 'features/botMap.{en,ru}.ts', en: botMapEn as unknown, ru: botMapRu as unknown },
   { name: 'features/branding.{en,ru}.ts', en: brandingEn as unknown, ru: brandingRu as unknown },
   { name: 'features/broadcast.{en,ru}.ts', en: broadcastEn as unknown, ru: broadcastRu as unknown },
+  { name: 'features/contests.{en,ru}.ts', en: contestsEn as unknown, ru: contestsRu as unknown },
   { name: 'features/dashboard.{en,ru}.ts', en: dashboardEn as unknown, ru: dashboardRu as unknown },
   { name: 'features/imports.{en,ru}.ts', en: importsEn as unknown, ru: importsRu as unknown },
   { name: 'features/legalDocuments.{en,ru}.ts', en: legalDocumentsEn as unknown, ru: legalDocumentsRu as unknown },

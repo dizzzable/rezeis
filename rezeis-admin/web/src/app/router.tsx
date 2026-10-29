@@ -111,7 +111,9 @@ const ReferralSettingsPage = lazy(() => import('@/features/settings/referral-set
 const PointsSettingsPage = lazy(() => import('@/features/settings/points-settings-page'));
 const QuestsPage = lazy(() => import('@/features/quests/quests-page'));
 const WheelConfigPage = lazy(() => import('@/features/wheel/wheel-config-page'));
-const ContestsPage = lazy(() => import('@/features/wheel/contests-page'));
+const ContestsPage = lazy(
+  withFeatureBundle('contests', () => import('@/features/wheel/contests-page')),
+);
 const WheelPrizesPage = lazy(() => import('@/features/wheel/wheel-prizes-page'));
 const WheelKeysPage = lazy(() => import('@/features/wheel/wheel-keys-page'));
 const PartnerSettingsPage = lazy(() => import('@/features/settings/partner-settings-page'));

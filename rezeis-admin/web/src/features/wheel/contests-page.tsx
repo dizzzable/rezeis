@@ -1,9 +1,9 @@
 import { useCallback, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Link } from 'react-router'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { AlertTriangle, Check, Dices, Pencil, Plus, Trash2, X } from 'lucide-react'
+import { AlertTriangle, Check, Dices, Megaphone, Pencil, Plus, Ticket, Trash2, Users, X } from 'lucide-react'
 
 import { getErrorMessage } from '@/lib/http-errors'
 import {
@@ -19,6 +19,7 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
+import { Checkbox } from '@/components/ui/checkbox'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -26,6 +27,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Textarea } from '@/components/ui/textarea'
+import { usePlans } from '@/features/plans/plans-api'
 
 import {
   cancelContest,
@@ -33,12 +35,14 @@ import {
   deleteContest,
   drawContest,
   issueContestPrize,
+  listContestEntrants,
   listContestWinners,
   listContests,
   publishContest,
   refuseContestPrize,
   updateContest,
   type Contest,
+  type ContestAudienceFilter,
   type ContestPayload,
   type ContestPrize,
   type ContestWinner,
@@ -47,7 +51,7 @@ import { listKeyPools } from './wheel-keys-api'
 import { sectorTitle, type WheelSectorKind } from './wheel-config-api'
 import { PromoPrizeFields } from './promo-prize-fields'
 import { emptyPromoDraft, promoDraftOf, promoPayload, type PromoDraft } from './promo-prize'
-import { activeLocale } from '@/lib/utils'
+import { activeLocale, cn } from '@/lib/utils'
 
 /** Prize kinds a contest may hand out — everything on the wheel but a loss. */
 const PRIZE_KINDS: readonly WheelSectorKind[] = [
@@ -70,9 +74,18 @@ const NEEDS_AMOUNT: ReadonlySet<WheelSectorKind> = new Set<WheelSectorKind>([
   'PROMOCODE',
 ])
 
+/** The broadcast filter's buckets — the same shape the server reads. */
+const SUB_BUCKETS = ['ACTIVE', 'EXPIRED', 'TRIAL', 'LIMITED', 'NONE'] as const
+const PLATFORM_OPTS = ['telegram', 'miniapp', 'web'] as const
+const CONTACT_OPTS = ['hasTelegram', 'hasEmail', 'hasWebPush'] as const
+
+/** Entrants loaded per page of the participants list. */
+const ENTRANTS_PAGE = 50
+
 interface PrizeDraft {
   kind: WheelSectorKind
   titleRu: string
+  titleEn: string
   amount: string
   keyPoolId: string
   manualInstructions: string
@@ -84,9 +97,21 @@ interface Draft {
   titleRu: string
   titleEn: string
   descriptionRu: string
+  descriptionEn: string
   startAt: string
   endAt: string
   maxEntries: string
+  announce: boolean
+  subscription: string[]
+  planIds: string[]
+  platforms: string[]
+  contact: string[]
+  inactiveDays: string
+  channelLink: string
+  channelId: string
+  ticketsPerPurchase: string
+  ticketsPerReferral: string
+  maxTicketsPerUser: string
   prizes: PrizeDraft[]
 }
 
@@ -94,6 +119,7 @@ function emptyPrize(): PrizeDraft {
   return {
     kind: 'POINTS',
     titleRu: '',
+    titleEn: '',
     amount: '100',
     keyPoolId: '',
     manualInstructions: '',
@@ -115,24 +141,54 @@ function emptyDraft(): Draft {
     titleRu: '',
     titleEn: '',
     descriptionRu: '',
+    descriptionEn: '',
     startAt: toLocalInput(start.toISOString()),
     endAt: toLocalInput(end.toISOString()),
     maxEntries: '',
+    // A new contest nobody hears about is the complaint this page answers.
+    announce: true,
+    subscription: [],
+    planIds: [],
+    platforms: [],
+    contact: [],
+    inactiveDays: '',
+    channelLink: '',
+    channelId: '',
+    ticketsPerPurchase: '0',
+    ticketsPerReferral: '0',
+    maxTicketsPerUser: '',
     prizes: [emptyPrize()],
   }
 }
 
 function toDraft(contest: Contest): Draft {
+  const filter = contest.audienceFilter ?? {}
+  const chatId = contest.channel?.chatId ?? ''
   return {
     titleRu: contest.title?.ru ?? '',
     titleEn: contest.title?.en ?? '',
     descriptionRu: contest.description?.ru ?? '',
+    descriptionEn: contest.description?.en ?? '',
     startAt: toLocalInput(contest.startAt),
     endAt: toLocalInput(contest.endAt),
     maxEntries: contest.maxEntries === null ? '' : String(contest.maxEntries),
+    announce: contest.announce,
+    subscription: [...(filter.subscription ?? [])],
+    planIds: [...(filter.planIds ?? [])],
+    platforms: [...(filter.platforms ?? [])],
+    contact: [...(filter.contact ?? [])],
+    inactiveDays: filter.inactiveDays === undefined ? '' : String(filter.inactiveDays),
+    channelLink: contest.channel?.joinUrl ?? '',
+    // A public channel is checked by its @username, which the link already
+    // carries; only a numeric id is something the operator typed.
+    channelId: chatId.startsWith('-100') ? chatId : '',
+    ticketsPerPurchase: String(contest.ticketsPerPurchase ?? 0),
+    ticketsPerReferral: String(contest.ticketsPerReferral ?? 0),
+    maxTicketsPerUser: contest.maxTicketsPerUser == null ? '' : String(contest.maxTicketsPerUser),
     prizes: contest.prizes.map((prize) => ({
       kind: prize.kind,
       titleRu: prize.title?.ru ?? '',
+      titleEn: prize.title?.en ?? '',
       amount: String(prize.amount),
       keyPoolId: prize.keyPoolId ?? '',
       manualInstructions: prize.manualInstructions ?? '',
@@ -146,19 +202,50 @@ function isValidLocalDate(value: string): boolean {
   return value.trim() !== '' && !Number.isNaN(new Date(value).getTime())
 }
 
+/** A whole number from a field, or `fallback` for an empty or unreadable one. */
+function readCount(value: string, fallback: number | null): number | null {
+  if (value.trim() === '') return fallback
+  const parsed = Math.trunc(Number(value))
+  return Number.isFinite(parsed) ? parsed : fallback
+}
+
+function toAudience(draft: Draft): ContestAudienceFilter | null {
+  const inactiveDays = readCount(draft.inactiveDays, null)
+  const filter: ContestAudienceFilter = {
+    ...(draft.subscription.length > 0 ? { subscription: draft.subscription } : {}),
+    ...(draft.planIds.length > 0 ? { planIds: draft.planIds } : {}),
+    ...(draft.platforms.length > 0 ? { platforms: draft.platforms } : {}),
+    ...(draft.contact.length > 0 ? { contact: draft.contact } : {}),
+    ...(inactiveDays !== null && inactiveDays > 0 ? { inactiveDays } : {}),
+  }
+  return Object.keys(filter).length === 0 ? null : filter
+}
+
+/** The English field when it was filled, the Russian one when it was not. */
+function bilingual(ru: string, en: string): { ru: string; en: string } {
+  return { ru: ru.trim(), en: en.trim() || ru.trim() }
+}
+
 function toPayload(draft: Draft): ContestPayload {
-  const maxEntries = draft.maxEntries.trim() === '' ? null : Math.trunc(Number(draft.maxEntries))
+  const maxTickets = readCount(draft.maxTicketsPerUser, null)
   return {
-    title: { ru: draft.titleRu.trim(), en: draft.titleEn.trim() || draft.titleRu.trim() },
-    description: { ru: draft.descriptionRu.trim(), en: draft.descriptionRu.trim() },
+    title: bilingual(draft.titleRu, draft.titleEn),
+    description: bilingual(draft.descriptionRu, draft.descriptionEn),
     startAt: new Date(draft.startAt).toISOString(),
     endAt: new Date(draft.endAt).toISOString(),
-    maxEntries: Number.isFinite(maxEntries) ? maxEntries : null,
+    audienceFilter: toAudience(draft),
+    maxEntries: readCount(draft.maxEntries, null),
+    announce: draft.announce,
+    ticketsPerPurchase: Math.max(0, readCount(draft.ticketsPerPurchase, 0) ?? 0),
+    ticketsPerReferral: Math.max(0, readCount(draft.ticketsPerReferral, 0) ?? 0),
+    maxTicketsPerUser: maxTickets !== null && maxTickets >= 1 ? maxTickets : null,
+    channelLink: draft.channelLink.trim() === '' ? null : draft.channelLink.trim(),
+    channelId: draft.channelId.trim() === '' ? null : draft.channelId.trim(),
     // Places follow the list order: the first row is first prize.
     prizes: draft.prizes.map<Omit<ContestPrize, 'id'>>((prize, index) => ({
       place: index + 1,
       kind: prize.kind,
-      title: { ru: prize.titleRu.trim(), en: prize.titleRu.trim() },
+      title: bilingual(prize.titleRu, prize.titleEn),
       amount: NEEDS_AMOUNT.has(prize.kind) ? Math.trunc(Number(prize.amount)) || 0 : 0,
       ...promoPayload(prize.kind, prize.promo),
       keyPoolId: prize.kind === 'KEY' && prize.keyPoolId !== '' ? prize.keyPoolId : null,
@@ -170,20 +257,28 @@ function toPayload(draft: Draft): ContestPayload {
   }
 }
 
+function toggleIn(list: readonly string[], value: string): string[] {
+  return list.includes(value) ? list.filter((item) => item !== value) : [...list, value]
+}
+
 /**
  * Contests: an event with a draw at the end.
  *
  * The page is built around the status a contest is in, because that is what
  * decides which buttons make sense. A draft can be edited and published; a
- * live one can be cancelled, and drawn once its end has passed; a drawn one
- * shows its winners, with the prizes a human hands over settled right here.
+ * live one can have its wording fixed and its end moved later, can be
+ * cancelled, and drawn once its end has passed; a drawn one shows its
+ * winners, with the prizes a human hands over settled right here. Every
+ * contest past the draft shows who entered.
  */
 export default function ContestsPage() {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const [editing, setEditing] = useState<{ id: string | null; draft: Draft } | null>(null)
   const [removing, setRemoving] = useState<Contest | null>(null)
+  const [cancelling, setCancelling] = useState<Contest | null>(null)
   const [winnersOf, setWinnersOf] = useState<Contest | null>(null)
+  const [entrantsOf, setEntrantsOf] = useState<Contest | null>(null)
 
   // Refetched on a timer so "over, waiting for the draw" appears without a
   // reload; `dataUpdatedAt` is then the clock the rows are judged against,
@@ -238,9 +333,13 @@ export default function ContestsPage() {
     mutationFn: cancelContest,
     onSuccess: () => {
       refresh()
+      setCancelling(null)
       toast.success(t('contestsPage.toast.cancelled'))
     },
-    onError: fail,
+    onError: (error: unknown) => {
+      fail(error)
+      setCancelling(null)
+    },
   })
   const draw = useMutation({
     mutationFn: drawContest,
@@ -252,10 +351,16 @@ export default function ContestsPage() {
         toast.error(t(`contestsPage.drawRefused.${result.reason}`))
       }
     },
-    onError: fail,
+    onError: (error: unknown) => {
+      // The reason is now on the row as well; refetch so it shows.
+      refresh()
+      fail(error)
+    },
   })
 
   const items = contests.data ?? []
+  const editingStatus =
+    editing === null || editing.id === null ? 'DRAFT' : (items.find((c) => c.id === editing.id)?.status ?? 'DRAFT')
 
   return (
     <div className="space-y-6">
@@ -305,6 +410,7 @@ export default function ContestsPage() {
                         <div className="text-xs text-muted-foreground">
                           {t('contestsPage.prizesCount', { count: contest.prizes.length })}
                         </div>
+                        <ContestBadges contest={contest} />
                         {contest.status === 'DRAFT' && contest.problems.length > 0 ? (
                           <ul className="mt-1 space-y-0.5 text-xs text-destructive">
                             {contest.problems.map((problem) => (
@@ -314,6 +420,15 @@ export default function ContestsPage() {
                               </li>
                             ))}
                           </ul>
+                        ) : null}
+                        {contest.status === 'ACTIVE' && contest.drawError ? (
+                          <div className="mt-1 text-xs text-destructive" data-testid="contest-draw-error">
+                            <div className="flex gap-1">
+                              <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+                              {t('contestsPage.row.drawError', { error: contest.drawError })}
+                            </div>
+                            <div className="text-muted-foreground">{t('contestsPage.row.drawErrorHint')}</div>
+                          </div>
                         ) : null}
                       </TableCell>
                       <TableCell className="align-top text-xs text-muted-foreground">
@@ -334,6 +449,7 @@ export default function ContestsPage() {
                             {t('contestsPage.awaitingDraw')}
                           </div>
                         ) : null}
+                        <NoticeState contest={contest} />
                       </TableCell>
                       <TableCell className="align-top">
                         <div className="flex flex-wrap justify-end gap-1">
@@ -380,7 +496,7 @@ export default function ContestsPage() {
                               >
                                 <Pencil className="h-4 w-4" />
                               </Button>
-                              <Button variant="outline" size="sm" disabled={cancel.isPending} onClick={() => cancel.mutate(contest.id)}>
+                              <Button variant="outline" size="sm" disabled={cancel.isPending} onClick={() => setCancelling(contest)}>
                                 {t('contestsPage.actions.cancel')}
                               </Button>
                             </>
@@ -388,6 +504,12 @@ export default function ContestsPage() {
                           {contest.status === 'DRAWN' ? (
                             <Button variant="outline" size="sm" onClick={() => setWinnersOf(contest)}>
                               {t('contestsPage.actions.winners', { count: contest.winners })}
+                            </Button>
+                          ) : null}
+                          {contest.status !== 'DRAFT' ? (
+                            <Button variant="outline" size="sm" className="gap-1" onClick={() => setEntrantsOf(contest)}>
+                              <Users className="h-4 w-4" />
+                              {t('contestsPage.actionsExtra.entrants')}
                             </Button>
                           ) : null}
                         </div>
@@ -411,10 +533,7 @@ export default function ContestsPage() {
           {editing !== null ? (
             <ContestForm
               draft={editing.draft}
-              locked={
-                editing.id !== null &&
-                (items.find((c) => c.id === editing.id)?.status ?? 'DRAFT') !== 'DRAFT'
-              }
+              locked={editingStatus !== 'DRAFT'}
               pools={(pools.data ?? []).map((pool) => ({ id: pool.id, name: pool.name, available: pool.available }))}
               onChange={(draft) => setEditing({ id: editing.id, draft })}
             />
@@ -462,7 +581,113 @@ export default function ContestsPage() {
         </AlertDialogContent>
       </AlertDialog>
 
+      {/* Cancelling a live contest throws away everybody's entry; one stray click used to do it. */}
+      <AlertDialog open={cancelling !== null} onOpenChange={(open) => (open ? undefined : setCancelling(null))}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t('contestsPage.cancelDialog.title')}</AlertDialogTitle>
+            <AlertDialogDescription>{t('contestsPage.cancelDialog.description')}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t('common.cancel')}</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              disabled={cancel.isPending}
+              onClick={() => {
+                if (cancelling !== null) cancel.mutate(cancelling.id)
+              }}
+            >
+              {t('contestsPage.cancelDialog.confirm')}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       <WinnersDialog contest={winnersOf} onClose={() => setWinnersOf(null)} />
+      <EntrantsDialog contest={entrantsOf} onClose={() => setEntrantsOf(null)} />
+    </div>
+  )
+}
+
+/** What a contest asks of people beyond the button: a channel, tickets. */
+function ContestBadges({ contest }: { readonly contest: Contest }) {
+  const { t } = useTranslation()
+  const tickets = contest.ticketsPerPurchase > 0 || contest.ticketsPerReferral > 0
+  if (contest.channel === null && !tickets) return null
+  return (
+    <div className="mt-1 flex flex-wrap gap-1">
+      {contest.channel !== null ? (
+        <Badge variant="outline" className="text-[10px]">
+          {t('contestsPage.row.channel')}
+        </Badge>
+      ) : null}
+      {tickets ? (
+        <Badge variant="outline" className="gap-1 text-[10px]">
+          <Ticket className="h-3 w-3" />
+          {t('contestsPage.row.tickets')}
+        </Badge>
+      ) : null}
+    </div>
+  )
+}
+
+/** Whether the announcement and the results have gone out yet. */
+function NoticeState({ contest }: { readonly contest: Contest }) {
+  const { t } = useTranslation()
+  const lines: string[] = []
+  if (contest.announce && contest.status === 'ACTIVE') {
+    lines.push(contest.announcedAt === null ? t('contestsPage.row.announceSending') : t('contestsPage.row.announceSent'))
+  }
+  if (contest.status === 'DRAWN') {
+    lines.push(contest.resultsNotifiedAt === null ? t('contestsPage.row.resultsSending') : t('contestsPage.row.resultsSent'))
+  }
+  if (lines.length === 0) return null
+  return (
+    <div className="mt-1 space-y-0.5 text-xs text-muted-foreground">
+      {lines.map((line) => (
+        <div key={line} className="flex items-center gap-1">
+          <Megaphone className="h-3 w-3 shrink-0" />
+          {line}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+/** A row of toggle chips for one multi-select audience category. */
+function ChipGroup({
+  label,
+  options,
+  selected,
+  onToggle,
+}: {
+  readonly label: string
+  readonly options: ReadonlyArray<{ value: string; label: string }>
+  readonly selected: readonly string[]
+  readonly onToggle: (value: string) => void
+}) {
+  return (
+    <div className="space-y-1.5">
+      <p className="text-xs font-medium text-muted-foreground">{label}</p>
+      <div className="flex flex-wrap gap-1.5">
+        {options.map((option) => {
+          const active = selected.includes(option.value)
+          return (
+            <button
+              key={option.value}
+              type="button"
+              aria-pressed={active}
+              onClick={() => onToggle(option.value)}
+              className={cn(
+                'rounded-full border px-3 py-1 text-xs transition-colors',
+                active ? 'border-primary bg-primary/15 text-primary' : 'border-border text-muted-foreground hover:bg-muted',
+              )}
+            >
+              {option.label}
+            </button>
+          )
+        })}
+      </div>
     </div>
   )
 }
@@ -474,12 +699,13 @@ function ContestForm({
   onChange,
 }: {
   readonly draft: Draft
-  /** Live: only the wording may change. */
+  /** Live: the wording may change, and the end may move later. */
   readonly locked: boolean
   readonly pools: ReadonlyArray<{ id: string; name: string; available: number }>
   readonly onChange: (draft: Draft) => void
 }) {
   const { t } = useTranslation()
+  const { data: plans = [] } = usePlans()
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) => onChange({ ...draft, [key]: value })
   const setPrize = (index: number, patch: Partial<PrizeDraft>) =>
     set(
@@ -499,13 +725,26 @@ function ContestForm({
           <Input id="contest-title-en" value={draft.titleEn} onChange={(e) => set('titleEn', e.target.value)} />
         </div>
       </div>
-      <div className="space-y-1.5">
-        <Label htmlFor="contest-description">{t('contestsPage.form.description')}</Label>
-        <Textarea id="contest-description" rows={3} value={draft.descriptionRu} onChange={(e) => set('descriptionRu', e.target.value)} />
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div className="space-y-1.5">
+          <Label htmlFor="contest-description">{t('contestsPage.form.descriptionRu')}</Label>
+          <Textarea id="contest-description" rows={4} value={draft.descriptionRu} onChange={(e) => set('descriptionRu', e.target.value)} />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="contest-description-en">{t('contestsPage.form.descriptionEn')}</Label>
+          <Textarea id="contest-description-en" rows={4} value={draft.descriptionEn} onChange={(e) => set('descriptionEn', e.target.value)} />
+        </div>
       </div>
+      <p className="-mt-2 text-xs text-muted-foreground">{t('contestsPage.form.descriptionHint')}</p>
 
       {locked ? (
-        <p className="text-xs text-muted-foreground">{t('contestsPage.form.locked')}</p>
+        <>
+          <p className="text-xs text-muted-foreground">{t('contestsPage.form.lockedLive')}</p>
+          <div className="space-y-1.5 sm:max-w-xs">
+            <Label htmlFor="contest-end">{t('contestsPage.form.endAtExtend')}</Label>
+            <Input id="contest-end" type="datetime-local" value={draft.endAt} onChange={(e) => set('endAt', e.target.value)} />
+          </div>
+        </>
       ) : (
         <>
           <div className="grid gap-3 sm:grid-cols-3">
@@ -526,6 +765,127 @@ function ContestForm({
                 value={draft.maxEntries}
                 onChange={(e) => set('maxEntries', e.target.value)}
               />
+            </div>
+          </div>
+
+          <fieldset className="space-y-3 rounded-lg border p-3">
+            <legend className="px-1 text-sm font-medium">{t('contestsPage.form.audience')}</legend>
+            <p className="text-xs text-muted-foreground">{t('contestsPage.form.audienceHint')}</p>
+            <ChipGroup
+              label={t('contestsPage.form.subscription')}
+              options={SUB_BUCKETS.map((value) => ({ value, label: t(`contestsPage.form.sub.${value}`) }))}
+              selected={draft.subscription}
+              onToggle={(value) => set('subscription', toggleIn(draft.subscription, value))}
+            />
+            {plans.length > 0 ? (
+              <ChipGroup
+                label={t('contestsPage.form.plan')}
+                options={plans.map((plan) => ({ value: plan.id, label: plan.name }))}
+                selected={draft.planIds}
+                onToggle={(value) => set('planIds', toggleIn(draft.planIds, value))}
+              />
+            ) : (
+              <p className="text-xs text-muted-foreground">{t('contestsPage.form.planEmpty')}</p>
+            )}
+            <ChipGroup
+              label={t('contestsPage.form.platform')}
+              options={PLATFORM_OPTS.map((value) => ({ value, label: t(`contestsPage.form.platforms.${value}`) }))}
+              selected={draft.platforms}
+              onToggle={(value) => set('platforms', toggleIn(draft.platforms, value))}
+            />
+            <ChipGroup
+              label={t('contestsPage.form.contact')}
+              options={CONTACT_OPTS.map((value) => ({ value, label: t(`contestsPage.form.contacts.${value}`) }))}
+              selected={draft.contact}
+              onToggle={(value) => set('contact', toggleIn(draft.contact, value))}
+            />
+            <div className="space-y-1.5">
+              <Label htmlFor="contest-inactive-days" className="text-xs font-medium text-muted-foreground">
+                {t('contestsPage.form.inactiveDays')}
+              </Label>
+              <Input
+                id="contest-inactive-days"
+                inputMode="numeric"
+                className="max-w-[160px]"
+                placeholder={t('contestsPage.form.inactiveDaysPlaceholder')}
+                value={draft.inactiveDays}
+                onChange={(e) => set('inactiveDays', e.target.value)}
+              />
+            </div>
+          </fieldset>
+
+          <fieldset className="space-y-3 rounded-lg border p-3">
+            <legend className="px-1 text-sm font-medium">{t('contestsPage.form.channel')}</legend>
+            <p className="text-xs text-muted-foreground">{t('contestsPage.form.channelHint')}</p>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <Label htmlFor="contest-channel-link">{t('contestsPage.form.channelLink')}</Label>
+                <Input
+                  id="contest-channel-link"
+                  placeholder={t('contestsPage.form.channelLinkPlaceholder')}
+                  value={draft.channelLink}
+                  onChange={(e) => set('channelLink', e.target.value)}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="contest-channel-id">{t('contestsPage.form.channelId')}</Label>
+                <Input
+                  id="contest-channel-id"
+                  placeholder={t('contestsPage.form.channelIdPlaceholder')}
+                  value={draft.channelId}
+                  onChange={(e) => set('channelId', e.target.value)}
+                />
+              </div>
+            </div>
+          </fieldset>
+
+          <fieldset className="space-y-3 rounded-lg border p-3">
+            <legend className="px-1 text-sm font-medium">{t('contestsPage.form.tickets')}</legend>
+            <p className="text-xs text-muted-foreground">{t('contestsPage.form.ticketsHint')}</p>
+            <div className="grid gap-3 sm:grid-cols-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="contest-tickets-purchase">{t('contestsPage.form.ticketsPerPurchase')}</Label>
+                <Input
+                  id="contest-tickets-purchase"
+                  inputMode="numeric"
+                  value={draft.ticketsPerPurchase}
+                  onChange={(e) => set('ticketsPerPurchase', e.target.value)}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="contest-tickets-referral">{t('contestsPage.form.ticketsPerReferral')}</Label>
+                <Input
+                  id="contest-tickets-referral"
+                  inputMode="numeric"
+                  value={draft.ticketsPerReferral}
+                  onChange={(e) => set('ticketsPerReferral', e.target.value)}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="contest-tickets-max">{t('contestsPage.form.maxTicketsPerUser')}</Label>
+                <Input
+                  id="contest-tickets-max"
+                  inputMode="numeric"
+                  placeholder={t('contestsPage.form.maxTicketsPlaceholder')}
+                  value={draft.maxTicketsPerUser}
+                  onChange={(e) => set('maxTicketsPerUser', e.target.value)}
+                />
+              </div>
+            </div>
+          </fieldset>
+
+          <div className="flex items-start gap-2 rounded-lg border p-3">
+            <Checkbox
+              id="contest-announce"
+              checked={draft.announce}
+              onCheckedChange={(checked) => set('announce', checked === true)}
+              className="mt-0.5"
+            />
+            <div className="space-y-0.5">
+              <Label htmlFor="contest-announce" className="text-sm">
+                {t('contestsPage.form.announce')}
+              </Label>
+              <p className="text-xs text-muted-foreground">{t('contestsPage.form.announceHint')}</p>
             </div>
           </div>
 
@@ -559,7 +919,7 @@ function ContestForm({
                     <X className="h-4 w-4" />
                   </Button>
                 </div>
-                <div className="grid gap-2 sm:grid-cols-3">
+                <div className="grid gap-2 sm:grid-cols-2">
                   <Select value={prize.kind} onValueChange={(value) => setPrize(index, { kind: value as WheelSectorKind })}>
                     <SelectTrigger>
                       <SelectValue />
@@ -572,11 +932,6 @@ function ContestForm({
                       ))}
                     </SelectContent>
                   </Select>
-                  <Input
-                    placeholder={t('contestsPage.form.prizeTitle')}
-                    value={prize.titleRu}
-                    onChange={(e) => setPrize(index, { titleRu: e.target.value })}
-                  />
                   {NEEDS_AMOUNT.has(prize.kind) ? (
                     <Input
                       inputMode="numeric"
@@ -585,6 +940,17 @@ function ContestForm({
                       onChange={(e) => setPrize(index, { amount: e.target.value })}
                     />
                   ) : null}
+                  <Input
+                    placeholder={t('contestsPage.form.prizeTitle')}
+                    value={prize.titleRu}
+                    onChange={(e) => setPrize(index, { titleRu: e.target.value })}
+                  />
+                  <Input
+                    placeholder={t('contestsPage.form.prizeTitleEn')}
+                    aria-label={t('contestsPage.form.prizeTitleEn')}
+                    value={prize.titleEn}
+                    onChange={(e) => setPrize(index, { titleEn: e.target.value })}
+                  />
                 </div>
                 {prize.kind === 'KEY' ? (
                   <Select value={prize.keyPoolId} onValueChange={(value) => setPrize(index, { keyPoolId: value })}>
@@ -620,6 +986,85 @@ function ContestForm({
         </>
       )}
     </div>
+  )
+}
+
+/** Who entered, newest first, with their tickets. */
+function EntrantsDialog({ contest, onClose }: { readonly contest: Contest | null; readonly onClose: () => void }) {
+  const { t } = useTranslation()
+  const entrants = useInfiniteQuery({
+    queryKey: ['admin', 'contests', contest?.id, 'entrants'],
+    queryFn: ({ pageParam }) => listContestEntrants(contest?.id as string, { take: ENTRANTS_PAGE, skip: pageParam }),
+    initialPageParam: 0,
+    getNextPageParam: (last, pages) => {
+      const loaded = pages.reduce((sum, page) => sum + page.rows.length, 0)
+      return loaded < last.total && last.rows.length > 0 ? loaded : undefined
+    },
+    enabled: contest !== null,
+  })
+  const rows = (entrants.data?.pages ?? []).flatMap((page) => page.rows)
+  const total = entrants.data?.pages[0]?.total ?? contest?.entries ?? 0
+  const live = contest !== null && contest.status !== 'DRAWN'
+  const hasTickets = contest !== null && (contest.ticketsPerPurchase > 0 || contest.ticketsPerReferral > 0)
+
+  return (
+    <Dialog open={contest !== null} onOpenChange={(open) => (open ? undefined : onClose())}>
+      <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>
+            {contest ? sectorTitle(contest, t('contestsPage.unnamed')) : ''} —{' '}
+            {t('contestsPage.entrants.title', { count: total })}
+          </DialogTitle>
+        </DialogHeader>
+        {hasTickets && live ? (
+          <p className="text-xs text-muted-foreground">{t('contestsPage.entrants.liveHint')}</p>
+        ) : null}
+        {entrants.isLoading ? (
+          <Skeleton className="h-24 w-full" />
+        ) : rows.length === 0 ? (
+          <p className="py-6 text-center text-sm text-muted-foreground">{t('contestsPage.entrants.empty')}</p>
+        ) : (
+          <ul className="divide-y rounded-lg border" data-testid="contest-entrants">
+            {rows.map((row) => {
+              const label = row.name || (row.username ? `@${row.username}` : t('contestsPage.entrants.noName'))
+              return (
+                <li key={row.userId} className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 text-sm">
+                  <div className="min-w-0">
+                    {row.telegramId ? (
+                      <Link className="font-medium underline-offset-2 hover:underline" to={`/users/${row.telegramId}`}>
+                        {label}
+                      </Link>
+                    ) : (
+                      <span className="font-medium">{label}</span>
+                    )}
+                    <div className="text-xs text-muted-foreground">
+                      {new Date(row.enteredAt).toLocaleString(activeLocale())}
+                    </div>
+                  </div>
+                  {hasTickets ? (
+                    <Badge variant="secondary" className="gap-1 tabular-nums">
+                      <Ticket className="h-3 w-3" />
+                      {t('contestsPage.entrants.tickets', { count: row.tickets })}
+                    </Badge>
+                  ) : null}
+                </li>
+              )
+            })}
+          </ul>
+        )}
+        {entrants.hasNextPage ? (
+          <Button
+            variant="outline"
+            size="sm"
+            className="self-start"
+            disabled={entrants.isFetchingNextPage}
+            onClick={() => void entrants.fetchNextPage()}
+          >
+            {t('contestsPage.entrants.more')}
+          </Button>
+        ) : null}
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -666,6 +1111,22 @@ function WinnersDialog({ contest, onClose }: { readonly contest: Contest | null;
             {t('contestsPage.winners.title', { entrants: contest?.drawnEntries ?? 0 })}
           </DialogTitle>
         </DialogHeader>
+        {contest !== null && (contest.drawnTickets !== null || contest.drawSeed !== null) ? (
+          <div className="space-y-1 rounded-lg bg-muted p-3 text-xs text-muted-foreground">
+            {contest.drawnTickets !== null && contest.drawnTickets !== contest.drawnEntries ? (
+              <div>{t('contestsPage.draw.tickets', { count: contest.drawnTickets })}</div>
+            ) : null}
+            {contest.drawSeed !== null ? (
+              <>
+                <div className="font-medium text-foreground">{t('contestsPage.draw.seed')}</div>
+                <code className="block break-all" data-testid="contest-draw-seed">
+                  {contest.drawSeed}
+                </code>
+                <div>{t('contestsPage.draw.seedHint')}</div>
+              </>
+            ) : null}
+          </div>
+        ) : null}
         {winners.isLoading ? (
           <Skeleton className="h-24 w-full" />
         ) : (winners.data?.length ?? 0) === 0 ? (

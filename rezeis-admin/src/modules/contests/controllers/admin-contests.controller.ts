@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   ConflictException,
   Controller,
@@ -9,6 +10,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   Req,
   UseGuards,
 } from '@nestjs/common';
@@ -23,9 +25,17 @@ import { AdminJwtAuthGuard } from '../../auth/guards/admin-jwt-auth.guard';
 import { CurrentAdminInterface } from '../../auth/interfaces/current-admin.interface';
 import { extractRequestMetadata } from '../../auth/utils/request-metadata.util';
 import { RequirePermission } from '../../rbac/decorators/require-permission.decorator';
+import { resolveQuestChannelConfig } from '../../quests/utils/quest-channel-config.util';
 import { RbacGuard } from '../../rbac/guards/rbac.guard';
-import { ContestDto, RefuseContestWinnerDto, SettleContestWinnerDto } from '../dto/contest.dto';
-import { ContestService, type ContestInput, type ContestSummary, type DrawResult } from '../services/contest.service';
+import { ContestDto, ListContestEntrantsDto, RefuseContestWinnerDto, SettleContestWinnerDto } from '../dto/contest.dto';
+import {
+  ContestService,
+  type ContestChannel,
+  type ContestEntrantRow,
+  type ContestInput,
+  type ContestSummary,
+  type DrawResult,
+} from '../services/contest.service';
 import { ContestWinnerService, type ContestWinnerRow } from '../services/contest-winner.service';
 
 /**
@@ -64,6 +74,15 @@ export class AdminContestsController {
   @ApiOperation({ summary: 'Один конкурс' })
   public get(@Param('contestId') contestId: string): Promise<ContestSummary> {
     return this.contests.get(contestId);
+  }
+
+  @Get(':contestId/entrants')
+  @ApiOperation({ summary: 'Участники конкурса с билетами, новые первыми' })
+  public entrants(
+    @Param('contestId') contestId: string,
+    @Query() query: ListContestEntrantsDto,
+  ): Promise<{ readonly total: number; readonly rows: readonly ContestEntrantRow[] }> {
+    return this.contests.listEntrants(contestId, { take: query.take ?? 50, skip: query.skip ?? 0 });
   }
 
   @Get(':contestId/winners')
@@ -149,7 +168,11 @@ export class AdminContestsController {
     @CurrentAdmin() currentAdmin: CurrentAdminInterface,
     @Req() req: Request,
   ): Promise<DrawResult> {
-    const result = await this.contests.draw({ contestId });
+    const result = await this.contests.draw({ contestId }).catch(async (error: unknown) => {
+      // The same record the sweep leaves, so the list says why.
+      await this.contests.recordDrawFailure(contestId, error).catch(() => false);
+      throw error;
+    });
     if (result.drawn) {
       await this.audit(req, currentAdmin, 'contests.drawn', { contestId, winners: result.winners });
       // The conversations for prizes a human hands over open here as well as
@@ -225,6 +248,11 @@ function toInput(dto: ContestDto): ContestInput {
         ? null
         : (dto.audienceFilter as unknown as Prisma.InputJsonValue),
     maxEntries: dto.maxEntries ?? null,
+    announce: dto.announce ?? false,
+    ticketsPerPurchase: dto.ticketsPerPurchase ?? 0,
+    ticketsPerReferral: dto.ticketsPerReferral ?? 0,
+    maxTicketsPerUser: dto.maxTicketsPerUser ?? null,
+    channel: readChannel(dto),
     prizes: dto.prizes.map((prize) => ({
       place: prize.place,
       kind: prize.kind,
@@ -238,4 +266,23 @@ function toInput(dto: ContestDto): ContestInput {
       manualInstructions: prize.manualInstructions ?? null,
     })),
   };
+}
+
+/**
+ * The channel entering needs, from what the operator typed: a t.me link —
+ * public, or an invitation — and, for a private channel, its numeric id,
+ * because an invitation link cannot be asked about. The same rule, and the
+ * same parser, as the «подпишись на канал» quest. Both empty is no channel.
+ */
+function readChannel(dto: ContestDto): ContestChannel | null {
+  const link = dto.channelLink?.trim() ?? '';
+  const id = dto.channelId?.trim() ?? '';
+  if (link === '' && id === '') return null;
+  const resolved = resolveQuestChannelConfig({ channelLink: link, channelId: id });
+  if (resolved === null) {
+    throw new BadRequestException(
+      'Канал: укажите ссылку https://t.me/… — для закрытого канала ещё и его ID (-100…), иначе подписку не проверить',
+    );
+  }
+  return resolved;
 }

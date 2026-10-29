@@ -2,18 +2,25 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 
 import { shouldRunSchedules } from '../../../common/runtime/process-role.util';
+import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
 import { ContestService } from './contest.service';
+import { ContestNoticeService } from './contest-notice.service';
 import { ContestWinnerService } from './contest-winner.service';
 
 /**
- * Runs the draw for every contest that has ended, and opens a conversation
- * for every contest prize a human has to hand over.
+ * Runs the draw for every contest that has ended, opens a conversation for
+ * every contest prize a human has to hand over, and tells people — that a
+ * contest has opened, and how they did.
  *
  * Every minute, because "the draw is at the end" is a promise people set an
  * alarm for. The draw itself is one transaction stamped on ACTIVE, so a sweep
  * that overlaps the operator pressing the button — or another sweep — cannot
  * hand out a second set of prizes; the loser is told ALREADY_DRAWN and moves
  * on.
+ *
+ * A draw that fails rolls back whole and is tried again next minute. Its
+ * reason goes on the contest, where the panel shows it, and the operator gets
+ * one event when it first fails — not one a minute.
  */
 @Injectable()
 export class ContestReconcilerService {
@@ -22,6 +29,8 @@ export class ContestReconcilerService {
   public constructor(
     private readonly contests: ContestService,
     private readonly winners: ContestWinnerService,
+    private readonly notices: ContestNoticeService,
+    private readonly events: SystemEventsService,
   ) {}
 
   @Cron(CronExpression.EVERY_MINUTE, { name: 'contest-draws' })
@@ -35,9 +44,21 @@ export class ContestReconcilerService {
             this.logger.log(`Contest ${contestId} drawn by the sweep: ${result.winners} of ${result.entrants}`);
           }
         } catch (error: unknown) {
-          this.logger.warn(
-            `Contest ${contestId} draw failed: ${error instanceof Error ? error.message : String(error)}`,
-          );
+          const message = error instanceof Error ? error.message : String(error);
+          this.logger.warn(`Contest ${contestId} draw failed: ${message}`);
+          const news = await this.contests.recordDrawFailure(contestId, error).catch(() => false);
+          if (news) {
+            this.events.warn(EVENT_TYPES.SYSTEM_ERROR, 'SYSTEM', `Розыгрыш конкурса не прошёл: ${message}`, {
+              contestId,
+              why:
+                'Победители не выбраны и призы не выданы: розыгрыш откатывается целиком и повторяется ' +
+                'каждую минуту, а участники ждут итогов.',
+              nextSteps:
+                'Откройте «Конкурсы»: причина написана у этого конкурса. Чаще всего это приз, который нельзя ' +
+                'выдать, — например, удалён тариф промокода. Исправить конкурс после публикации нельзя; если ' +
+                'причина не уходит сама, отмените его и создайте заново.',
+            });
+          }
         }
       }
       const opened = await this.winners.openMissingTickets();
@@ -46,6 +67,17 @@ export class ContestReconcilerService {
       }
     } catch (error: unknown) {
       this.logger.warn(`Contest reconcile failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    // Apart from the draws: a failure telling people must not hold up a draw,
+    // and the other way round.
+    try {
+      const sent = await this.notices.sendDue();
+      if (sent.announced + sent.results > 0) {
+        this.logger.log(`Contest notices: ${sent.announced} announcement(s), ${sent.results} result(s)`);
+      }
+    } catch (error: unknown) {
+      this.logger.warn(`Contest notices failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 }

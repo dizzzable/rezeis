@@ -1656,6 +1656,7 @@ model User {
   wheelSpins              WheelSpin[]              @relation("UserWheelSpins")
   wheelKeys               WheelKey[]               @relation("UserWheelKeys")
   contestEntries          ContestEntry[]           @relation("UserContestEntries")
+  contestNotices          ContestNotice[]          @relation("UserContestNotices")
   contestWins             ContestWinner[]          @relation("UserContestWins")
   referralRewards         ReferralReward[]         @relation("ReferralRewardUser")
   partnerTransactions     PartnerTransaction[]     @relation("PartnerTransactionReferral")
@@ -5406,14 +5407,45 @@ model Contest {
   /// How many had entered when the draw ran - the denominator every winner's
   /// odds were, kept because the entries can be pruned later.
   drawnEntries   Int?          @map("drawn_entries")
+  /// How many tickets were in the draw, against `drawnEntries` people.
+  drawnTickets   Int?          @map("drawn_tickets")
   order          Int           @default(0) @map("order")
   createdBy      String?       @map("created_by")
   createdAt      DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
   updatedAt      DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
 
+  /// Tell the audience the contest has opened. `announcedAt` says everybody
+  /// has been told.
+  announce          Boolean   @default(false) @map("announce")
+  announcedAt       DateTime? @map("announced_at") @db.Timestamptz(3)
+  /// Every entrant has heard how they did.
+  resultsNotifiedAt DateTime? @map("results_notified_at") @db.Timestamptz(3)
+
+  /// Extra chances, counted at the draw from what happened inside the window:
+  /// a paid purchase, and a friend who paid. 0 / 0 / NULL is "one person, one
+  /// chance". The ceiling includes the ticket for entering.
+  ticketsPerPurchase Int  @default(0) @map("tickets_per_purchase")
+  ticketsPerReferral Int  @default(0) @map("tickets_per_referral")
+  maxTicketsPerUser  Int? @map("max_tickets_per_user")
+
+  /// Entering needs a subscription to this channel. Checked by the cabinet,
+  /// which holds the bot token, at the moment of entering.
+  channelChatId  String? @map("channel_chat_id")
+  channelJoinUrl String? @map("channel_join_url")
+
+  /// The draw's source of chance, made at publish. The hash is public while
+  /// the contest runs, the seed once it is drawn. NULL on contests published
+  /// before 29.10.2026: they draw from their id, as they always did.
+  drawSeed     String?   @map("draw_seed")
+  drawSeedHash String?   @map("draw_seed_hash")
+  /// Why the last draw attempt failed. Cleared by the draw that succeeds.
+  drawError    String?   @map("draw_error")
+  drawErrorAt  DateTime? @map("draw_error_at") @db.Timestamptz(3)
+
   prizes  ContestPrize[]  @relation("ContestPrizes")
   entries ContestEntry[]  @relation("ContestEntries")
   winners ContestWinner[] @relation("ContestWinners")
+  notices ContestNotice[] @relation("ContestNotices")
 
   @@index([status, endAt])
   @@index([status, order])
@@ -5454,6 +5486,8 @@ model ContestEntry {
   contestId String   @map("contest_id")
   userId    String   @map("user_id")
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  /// This person's tickets as the draw counted them. NULL until the draw.
+  tickets   Int?     @map("tickets")
 
   contest Contest @relation("ContestEntries", fields: [contestId], references: [id], onDelete: Cascade)
   user    User    @relation("UserContestEntries", fields: [userId], references: [id], onDelete: Cascade)
@@ -5461,6 +5495,30 @@ model ContestEntry {
   @@unique([contestId, userId])
   @@index([userId])
   @@map("contest_entries")
+}
+
+enum ContestNoticeKind {
+  /// "A contest has opened" — sent to the audience.
+  ANNOUNCED
+  /// "Here is how you did" — sent to every entrant after the draw.
+  RESULT
+}
+
+/// One message to one person about one contest. The unique index is what
+/// keeps a retried sweep from sending it twice.
+model ContestNotice {
+  id        String            @id @default(cuid()) @map("id")
+  contestId String            @map("contest_id")
+  userId    String            @map("user_id")
+  kind      ContestNoticeKind @map("kind")
+  createdAt DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  contest Contest @relation("ContestNotices", fields: [contestId], references: [id], onDelete: Cascade)
+  user    User    @relation("UserContestNotices", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([contestId, kind, userId])
+  @@index([userId])
+  @@map("contest_notices")
 }
 
 /// Who won which place, and what became of the prize.

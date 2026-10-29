@@ -61,6 +61,12 @@ const POINTS_BUTTONS: ReadonlyArray<DefaultNotificationTemplateButton> = [
   { labelRu: '🏠 Главное меню', labelEn: '🏠 Main menu', kind: 'callback', target: 'menu:main' },
 ];
 
+/** Contest rows open «События», where the contest, the result and the prize are. */
+const CONTEST_BUTTONS: ReadonlyArray<DefaultNotificationTemplateButton> = [
+  { labelRu: '🎉 Открыть конкурсы', labelEn: '🎉 Open contests', kind: 'webApp', target: '/events' },
+  { labelRu: '🏠 Главное меню', labelEn: '🏠 Main menu', kind: 'callback', target: 'menu:main' },
+];
+
 /** Partner-program rows deep-link to the partner cabinet. */
 const PARTNER_BUTTONS: ReadonlyArray<DefaultNotificationTemplateButton> = [
   { labelRu: '🤝 Партнёрский кабинет', labelEn: '🤝 Partner dashboard', kind: 'webApp', target: '/partner' },
@@ -279,6 +285,49 @@ const POINTS_TEMPLATES: ReadonlyArray<DefaultNotificationTemplate> = [
     body: 'За покупку начислено <b>{{points}}</b> баллов. Ваш баланс: <b>{{balance}}</b>.',
     bodyEn: 'Your purchase earned <b>{{points}}</b> points. Your balance: <b>{{balance}}</b>.',
     buttons: POINTS_BUTTONS,
+  },
+];
+
+/**
+ * Contests (the owner, 29.10.2026): an announcement to everybody who may enter
+ * when the operator ticks «Сообщить о конкурсе», and the result to every
+ * entrant after the draw. Sent by `ContestNoticeService`. `{{contest}}` and
+ * `{{prize}}` are the operator's own titles in the reader's language, and
+ * `{{contestEndsDateTime}}` the end in the panel's time zone — derived at
+ * render time (`buildContestFacts`), like the subscription's dates.
+ */
+const CONTEST_TEMPLATES: ReadonlyArray<DefaultNotificationTemplate> = [
+  {
+    type: 'contest_started',
+    title: '🎉 Новый конкурс',
+    titleEn: '🎉 A new contest',
+    body: '{{name}}, начался конкурс <b>«{{contest}}»</b>. Участвуйте до {{contestEndsDateTime}} — призы и условия в разделе «События».',
+    bodyEn: '{{name}}, the contest <b>“{{contest}}”</b> has started. Enter by {{contestEndsDateTime}} — prizes and rules are under “Events”.',
+    buttons: CONTEST_BUTTONS,
+  },
+  {
+    type: 'contest_won',
+    title: '🏆 Вы выиграли!',
+    titleEn: '🏆 You won!',
+    body: 'Конкурс <b>«{{contest}}»</b> разыгран: ваше <b>{{place}} место</b>, приз — {{prize}}. Он уже начислен, подробности — в разделе «События».',
+    bodyEn: 'The contest <b>“{{contest}}”</b> has been drawn: you took <b>place {{place}}</b>, prize — {{prize}}. It has been credited; details are under “Events”.',
+    buttons: CONTEST_BUTTONS,
+  },
+  {
+    type: 'contest_won_manual',
+    title: '🏆 Вы выиграли!',
+    titleEn: '🏆 You won!',
+    body: 'Конкурс <b>«{{contest}}»</b> разыгран: ваше <b>{{place}} место</b>, приз — {{prize}}. Оператор напишет вам в поддержку, чтобы вручить его.',
+    bodyEn: 'The contest <b>“{{contest}}”</b> has been drawn: you took <b>place {{place}}</b>, prize — {{prize}}. An operator will message you in support to hand it over.',
+    buttons: CONTEST_BUTTONS,
+  },
+  {
+    type: 'contest_lost',
+    title: '🎲 Итоги конкурса',
+    titleEn: '🎲 Contest results',
+    body: 'Конкурс <b>«{{contest}}»</b> разыгран. В этот раз не повезло — спасибо, что участвовали! Победители — в разделе «События».',
+    bodyEn: 'The contest <b>“{{contest}}”</b> has been drawn. No luck this time — thank you for taking part! The winners are under “Events”.',
+    buttons: CONTEST_BUTTONS,
   },
 ];
 
@@ -889,6 +938,7 @@ export const DEFAULT_NOTIFICATION_TEMPLATES: ReadonlyArray<DefaultNotificationTe
   ...AUTOPAY_FIRST_CHARGE_FAILED_TEMPLATES,
   ...REFERRAL_TEMPLATES,
   ...POINTS_TEMPLATES,
+  ...CONTEST_TEMPLATES,
   ...PARTNER_TEMPLATES,
   ...ADVERTISING_TEMPLATES,
   ...SYSTEM_TEMPLATES,

@@ -120,6 +120,9 @@ is_auto_recoverable_migration() {
     20261022120000_payment_gateway_presentation)
       return 0
       ;;
+    20261029120000_contest_finish)
+      return 0
+      ;;
     *)
       return 1
       ;;

@@ -1295,7 +1295,7 @@ export const en = {
       noLimit: 'no ceiling',
       locked: 'The contest is running: people entered on these terms, so only the title and description may change.',
       prizes: 'Prizes',
-      prizesHint: 'The first row is first prize. The draw is uniform: one entry per person, places handed out in draw order.',
+      prizesHint: 'The first row is first prize. One entry and one place per person, places handed out in draw order. Without extra chances every entrant has the same chance.',
       addPrize: 'Add a place',
       removePrize: 'Remove the place',
       place: 'Place {{place}}',

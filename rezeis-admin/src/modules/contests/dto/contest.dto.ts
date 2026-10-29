@@ -4,6 +4,7 @@ import { Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   IsArray,
+  IsBoolean,
   IsDate,
   IsEnum,
   IsInt,
@@ -21,6 +22,12 @@ import { MAX_SECTOR_AMOUNT } from '../../wheel-config/dto/wheel-sector.dto';
 
 /** Enough places for a real giveaway; more than this is a lottery, not a contest. */
 export const MAX_PRIZES = 50;
+
+/** Extra tickets one purchase or one friend can bring. */
+export const MAX_TICKETS_PER_ACTION = 100;
+
+/** The highest ceiling an operator may set on one person's tickets. */
+export const MAX_TICKETS_PER_USER = 10_000;
 
 /**
  * A contest description has room for the rules; a title does not.
@@ -134,12 +141,70 @@ export class ContestDto {
   @Min(1)
   public maxEntries?: number | null;
 
+  @ApiPropertyOptional({ description: 'Сообщить о конкурсе тем, кто может участвовать, когда он начнётся.' })
+  @IsOptional()
+  @IsBoolean()
+  public announce?: boolean;
+
+  @ApiPropertyOptional({ minimum: 0, maximum: MAX_TICKETS_PER_ACTION, description: 'Доп. билетов за каждую оплату в период конкурса. 0 — выключено.' })
+  @IsOptional()
+  @Type((): NumberConstructor => Number)
+  @IsInt()
+  @Min(0)
+  @Max(MAX_TICKETS_PER_ACTION)
+  public ticketsPerPurchase?: number;
+
+  @ApiPropertyOptional({ minimum: 0, maximum: MAX_TICKETS_PER_ACTION, description: 'Доп. билетов за каждого приглашённого, оплатившего в период конкурса. 0 — выключено.' })
+  @IsOptional()
+  @Type((): NumberConstructor => Number)
+  @IsInt()
+  @Min(0)
+  @Max(MAX_TICKETS_PER_ACTION)
+  public ticketsPerReferral?: number;
+
+  @ApiPropertyOptional({ nullable: true, minimum: 1, maximum: MAX_TICKETS_PER_USER, description: 'Потолок билетов на человека, включая билет за участие. Пусто — без потолка.' })
+  @IsOptional()
+  @Type((): NumberConstructor => Number)
+  @IsInt()
+  @Min(1)
+  @Max(MAX_TICKETS_PER_USER)
+  public maxTicketsPerUser?: number | null;
+
+  @ApiPropertyOptional({ nullable: true, maxLength: 200, description: 'Канал, подписка на который нужна для участия: https://t.me/… (публичный или приглашение).' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  public channelLink?: string | null;
+
+  @ApiPropertyOptional({ nullable: true, maxLength: 40, description: 'ID канала (-100…). Обязателен для закрытого канала: по ссылке-приглашению подписку не проверить.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  public channelId?: string | null;
+
   @ApiProperty({ type: [ContestPrizeDto], description: 'Призы по местам: место 1 — первый приз.' })
   @IsArray()
   @ArrayMaxSize(MAX_PRIZES)
   @ValidateNested({ each: true })
   @Type((): typeof ContestPrizeDto => ContestPrizeDto)
   public prizes!: ContestPrizeDto[];
+}
+
+export class ListContestEntrantsDto {
+  @ApiPropertyOptional({ minimum: 1, maximum: 200, default: 50 })
+  @IsOptional()
+  @Type((): NumberConstructor => Number)
+  @IsInt()
+  @Min(1)
+  @Max(200)
+  public take?: number;
+
+  @ApiPropertyOptional({ minimum: 0, default: 0 })
+  @IsOptional()
+  @Type((): NumberConstructor => Number)
+  @IsInt()
+  @Min(0)
+  public skip?: number;
 }
 
 export class SettleContestWinnerDto {

@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { drawWinners, seededRandom } from '../src/modules/contests/contest-draw.util';
+import {
+  drawWeightedWinners,
+  drawWinners,
+  hashDrawSeed,
+  newDrawSeed,
+  seededRandom,
+} from '../src/modules/contests/contest-draw.util';
 
 /** A random source that hands back exactly the rolls it was given. */
 function rolls(...values: readonly number[]): () => number {
@@ -117,5 +123,87 @@ describe('the source of chance behind a draw', () => {
       const value = next();
       assert.ok(value >= 0 && value < 1, `out of range: ${value}`);
     }
+  });
+});
+
+describe('the draw with tickets', () => {
+  it('is roll for roll the old draw when everybody holds one ticket', () => {
+    // Contests published before tickets existed must draw exactly as before.
+    const random = seededRandom('contest-1');
+    const again = seededRandom('contest-1');
+    const people = ['e', 'b', 'd', 'a', 'c'];
+
+    assert.deepEqual(
+      drawWeightedWinners({ entrants: people.map((id) => ({ id, tickets: 1 })), count: 3, random }),
+      drawWinners({ entrants: people, count: 3, random: again }),
+    );
+  });
+
+  it('lands a roll inside the holder of the tickets it falls on', () => {
+    // a holds 4 of 5 tickets: rolls below 0.8 are a's, the rest b's.
+    const entrants = [
+      { id: 'a', tickets: 4 },
+      { id: 'b', tickets: 1 },
+    ];
+    assert.deepEqual(drawWeightedWinners({ entrants, count: 1, random: rolls(0.79) }), ['a']);
+    assert.deepEqual(drawWeightedWinners({ entrants, count: 1, random: rolls(0.8) }), ['b']);
+  });
+
+  it('takes a person out once drawn: more tickets, never a second place', () => {
+    const winners = drawWeightedWinners({
+      entrants: [
+        { id: 'whale', tickets: 1000 },
+        { id: 'minnow', tickets: 1 },
+      ],
+      count: 2,
+      // Sorted by id, the minnow's one ticket comes first: 0.5 of 1001 lands
+      // in the whale's, and the second roll has only the minnow left.
+      random: rolls(0.5, 0.5),
+    });
+
+    assert.deepEqual(winners, ['whale', 'minnow']);
+  });
+
+  it('favours the holder of more tickets in proportion, over many draws', () => {
+    let wins = 0;
+    const draws = 4000;
+    for (let index = 0; index < draws; index += 1) {
+      const [first] = drawWeightedWinners({
+        entrants: [
+          { id: 'three', tickets: 3 },
+          { id: 'one', tickets: 1 },
+        ],
+        count: 1,
+        random: seededRandom(`seed-${index}`),
+      });
+      if (first === 'three') wins += 1;
+    }
+    // Expected 75 %; four thousand draws put three standard deviations near 2 %.
+    assert.ok(Math.abs(wins / draws - 0.75) < 0.03, `three tickets won ${wins} of ${draws}`);
+  });
+
+  it('treats a nonsense ticket count as the one ticket for entering', () => {
+    const winners = drawWeightedWinners({
+      entrants: [
+        { id: 'a', tickets: 0 },
+        { id: 'b', tickets: Number.NaN },
+      ],
+      count: 2,
+      random: rolls(0.6, 0),
+    });
+    assert.deepEqual(winners, ['b', 'a']);
+  });
+});
+
+describe('the draw key', () => {
+  it('is a fresh 64-character hex seed whose hash is SHA-256', () => {
+    const seed = newDrawSeed();
+    assert.match(seed, /^[0-9a-f]{64}$/);
+    assert.notEqual(seed, newDrawSeed(), 'two publications, two seeds');
+    assert.equal(
+      hashDrawSeed('abc'),
+      'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
+      'the published SHA-256 test vector, so anybody can check it with any tool',
+    );
   });
 });

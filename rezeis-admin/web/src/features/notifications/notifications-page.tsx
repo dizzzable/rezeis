@@ -128,6 +128,13 @@ const USER_NOTIFICATION_KEYS = [
   'referral_reward',
   'referral_qualified',
   'points_cashback_credited',
+  // Contests (29.10.2026): the announcement when one opens, then each
+  // result for every entrant — a prize credited, a prize an operator hands over, or
+  // not this time. Sent by `ContestNoticeService`.
+  'contest_started',
+  'contest_won',
+  'contest_won_manual',
+  'contest_lost',
   'partner_referral_registered',
   'partner_earning',
   'partner_withdrawal_request_created',

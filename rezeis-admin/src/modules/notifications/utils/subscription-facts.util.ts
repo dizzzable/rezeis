@@ -294,6 +294,54 @@ const ZONE_PHRASE_RU: Readonly<Record<string, string>> = {
  * The zone a reset time is read in: «по Москве» / "Moscow Time"; «по UTC» /
  * "UTC"; otherwise its offset at that instant, «(UTC+5)».
  */
+/** What a contest notice is given by its sender (`ContestNoticeService`). */
+export interface ContestFactsInput {
+  /** The contest's title as stored: `{ ru, en }`. */
+  readonly title: unknown;
+  /** The prize's title as stored: `{ ru, en }`. Absent on all but a winner's notice. */
+  readonly prize: unknown;
+  /** When entries close, ISO. Absent on all but the announcement. */
+  readonly endsAt: unknown;
+  /** IANA zone the operator configured. Falls back to UTC. */
+  readonly timezone?: string | null;
+}
+
+/**
+ * A contest notice's words, in the reader's language: `{{contest}}` and
+ * `{{prize}}` are the operator's own titles — the English one for an English
+ * reader when there is one, else the Russian — and `{{contestEndsDate}}`,
+ * `{{contestEndsTime}}`, `{{contestEndsDateTime}}` when entries close, the
+ * last with its zone named, «5 ноября в 20:00 по Москве», as a reset time is.
+ * A payload that is not a contest's gives nothing.
+ */
+export function buildContestFacts(input: ContestFactsInput, locale: NotificationLocaleTag): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (input.title !== undefined) {
+    out['contest'] = pickTitle(input.title, locale) ?? (locale === 'en' ? 'Contest' : 'Конкурс');
+  }
+  const prize = pickTitle(input.prize, locale);
+  if (prize !== null) out['prize'] = prize;
+  const when = parseInstant(typeof input.endsAt === 'string' ? input.endsAt : null);
+  if (when !== null) {
+    const zone = normaliseZone(input.timezone);
+    out['contestEndsDate'] = formatDate(when, locale, zone);
+    out['contestEndsTime'] = formatTime(when, zone);
+    out['contestEndsDateTime'] =
+      `${out['contestEndsDate']} ${WORDS[locale].at} ${out['contestEndsTime']} ${zonePhrase(zone, when, locale)}`;
+  }
+  return out;
+}
+
+function pickTitle(value: unknown, locale: NotificationLocaleTag): string | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const read = (key: string): string | null => {
+    const text = record[key];
+    return typeof text === 'string' && text.trim() !== '' ? text.trim() : null;
+  };
+  return locale === 'en' ? (read('en') ?? read('ru')) : (read('ru') ?? read('en'));
+}
+
 function zonePhrase(zone: string, at: Date, locale: NotificationLocaleTag): string {
   const offset = zoneOffset(zone, at);
   if (offset === 'UTC') return locale === 'ru' ? 'по UTC' : 'UTC';

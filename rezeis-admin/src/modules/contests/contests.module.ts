@@ -1,12 +1,15 @@
 import { Module } from '@nestjs/common';
 
 import { AuthModule } from '../auth/auth.module';
+import { NotificationsModule } from '../notifications/notifications.module';
+import { ProfileSyncModule } from '../profile-sync/profile-sync.module';
 import { SupportTicketsModule } from '../support-tickets/support-tickets.module';
 import { WheelModule } from '../wheel/wheel.module';
 import { AdminContestsController } from './controllers/admin-contests.controller';
 import { InternalContestsController } from './controllers/internal-contests.controller';
 import { ContestReconcilerService } from './services/contest-reconciler.service';
 import { ContestService } from './services/contest.service';
+import { ContestNoticeService } from './services/contest-notice.service';
 import { ContestWinnerService } from './services/contest-winner.service';
 
 /**
@@ -19,9 +22,9 @@ import { ContestWinnerService } from './services/contest-winner.service';
  * lives here.
  */
 @Module({
-  imports: [AuthModule, WheelModule, SupportTicketsModule],
+  imports: [AuthModule, NotificationsModule, ProfileSyncModule, WheelModule, SupportTicketsModule],
   controllers: [AdminContestsController, InternalContestsController],
-  providers: [ContestService, ContestWinnerService, ContestReconcilerService],
+  providers: [ContestService, ContestWinnerService, ContestNoticeService, ContestReconcilerService],
   exports: [ContestService, ContestWinnerService],
 })
 export class ContestsModule {}

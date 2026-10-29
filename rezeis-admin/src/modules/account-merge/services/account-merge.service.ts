@@ -753,6 +753,18 @@ export class AccountMergeService {
     await tx.contestWinner.deleteMany({ where: { userId: sourceId, contestId: { in: wonByTarget } } });
     await tx.contestWinner.updateMany({ where: { userId: sourceId }, data: { userId: targetId } });
 
+    // A notice row says this person has been told about a contest. They move
+    // with the person, or a sweep still running would tell them a second time
+    // under the account they kept; where both were told, the survivor's stands.
+    const toldTarget = await tx.contestNotice.findMany({
+      where: { userId: targetId },
+      select: { contestId: true, kind: true },
+    });
+    for (const told of toldTarget) {
+      await tx.contestNotice.deleteMany({ where: { userId: sourceId, contestId: told.contestId, kind: told.kind } });
+    }
+    await tx.contestNotice.updateMany({ where: { userId: sourceId }, data: { userId: targetId } });
+
     const targetDevices = await tx.deviceObservation.findMany({
       where: { userId: targetId },
       select: { kind: true, value: true },

@@ -37,7 +37,7 @@ import {
   type NotificationLocale,
 } from '../utils/notification-template-locale.util';
 import { readPlatformBranding } from '../../settings/utils/platform-branding.util';
-import { buildAddOnFacts, buildSubscriptionFacts } from '../utils/subscription-facts.util';
+import { buildAddOnFacts, buildContestFacts, buildSubscriptionFacts } from '../utils/subscription-facts.util';
 import { EmailDeliveryService } from '../../email/services/email-delivery.service';
 import { isRetryableRelayOutcome } from '../../backup/backup-delivery-retry.util';
 import type { NotifyDeliveryResult } from './bot-notifier.client';
@@ -1965,6 +1965,17 @@ export class UserNotificationsService {
           total: payloadRecord['addonTotal'],
           endsAt: payloadRecord['addonEndsAt'],
           resetAt: payloadRecord['addonResetAt'],
+          timezone: branding.timezone,
+        },
+        locale === 'en' ? 'en' : 'ru',
+      ),
+      // A contest notice's titles and end, in the reader's language
+      // (`ContestNoticeService`); nothing for any other payload.
+      ...buildContestFacts(
+        {
+          title: payloadRecord['contestTitle'],
+          prize: payloadRecord['contestPrize'],
+          endsAt: payloadRecord['contestEndsAt'],
           timezone: branding.timezone,
         },
         locale === 'en' ? 'en' : 'ru',
