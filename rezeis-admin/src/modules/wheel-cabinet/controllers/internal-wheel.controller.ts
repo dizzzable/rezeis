@@ -5,6 +5,7 @@ import {
   Get,
   HttpCode,
   HttpStatus,
+  Logger,
   NotFoundException,
   Param,
   Post,
@@ -16,6 +17,7 @@ import { SkipThrottle } from '@nestjs/throttler';
 import { WheelSpinStatus } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { InternalAdminAuthGuard } from '../../auth/guards/internal-admin-auth.guard';
 import { buildUserReferenceWhere } from '../../internal-user/utils/user-reference.util';
 import { WheelSpinService, type SpinResult } from '../../wheel/services/wheel-spin.service';
@@ -63,11 +65,14 @@ interface CabinetSpinResponse {
 // `src/modules/user-hints/controllers/internal-user-hints.controller.ts`.
 @SkipThrottle()
 export class InternalWheelController {
+  private readonly logger = new Logger(InternalWheelController.name);
+
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly cabinet: WheelCabinetService,
     private readonly wheelSpin: WheelSpinService,
     private readonly manualPrizes: WheelManualPrizeService,
+    private readonly profileSyncQueue: ProfileSyncQueueService,
   ) {}
 
   @Get(':userRef')
@@ -105,6 +110,20 @@ export class InternalWheelController {
     });
 
     if (!result.spun) return { spun: false, reason: result.reason };
+
+    // A won «+дни» or «+трафик» is in the panel already; Remnawave hears of it
+    // only from this. Without it the winner was cut off on the old date.
+    if (result.syncSubscriptionId !== null) {
+      await this.profileSyncQueue
+        .enqueueSubscriptionSync(result.syncSubscriptionId, { source: 'WHEEL_PRIZE', spinId: result.spinId })
+        .catch((err: unknown) => {
+          this.logger.error(
+            `Wheel spin ${result.spinId} changed subscription ${result.syncSubscriptionId}, but its sync could not be queued: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        });
+    }
 
     // The operator hears about a jackpot in this second rather than at the
     // next sweep. The sweep stays as the backstop: if this fails, or the

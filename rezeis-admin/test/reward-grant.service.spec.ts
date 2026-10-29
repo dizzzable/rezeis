@@ -252,7 +252,8 @@ describe('RewardGrantService — traffic', () => {
     assert.equal(state.writes.some((entry) => entry.op === 'subscription.update'), false);
   });
 
-  it('earns nothing when there is no subscription to top up', async () => {
+  it('mints a traffic code when there is no subscription to top up, so the gigabytes are not lost', async () => {
+    // They used to vanish here while the cabinet told the winner «+10 ГБ».
     const state = world();
 
     const applied = await service.apply(makeTx(state), {
@@ -261,7 +262,15 @@ describe('RewardGrantService — traffic', () => {
       origin: ORIGIN,
     });
 
-    assert.deepEqual(applied, { kind: 'TRAFFIC', trafficGb: 10, syncSubscriptionId: null });
+    assert.equal(applied.trafficGb, 10);
+    assert.equal(applied.syncSubscriptionId, null);
+    assert.match(applied.promoCode ?? '', /^QUEST-[A-Z2-9]{8}$/);
+    const minted = state.writes.find((entry) => entry.op === 'promocode.create')!.args as {
+      data: Record<string, unknown>;
+    };
+    assert.equal(minted.data['rewardType'], 'TRAFFIC');
+    assert.equal(minted.data['reward'], 10);
+    assert.equal(minted.data['maxActivations'], 1, 'personal and single-use');
   });
 });
 

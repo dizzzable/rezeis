@@ -44,7 +44,16 @@ export interface SpinRecord {
 }
 
 export type SpinResult =
-  | ({ readonly spun: true } & SpinRecord)
+  | ({
+      readonly spun: true;
+      /**
+       * The subscription a won «+дни» or «+трафик» changed, for the CALLER to
+       * push to Remnawave once this has committed — this module is a leaf and
+       * does not reach the sync queue. `null` when nothing panel-visible moved,
+       * and on a replay, whose original request already pushed it.
+       */
+      readonly syncSubscriptionId: string | null;
+    } & SpinRecord)
   | { readonly spun: false; readonly reason: SpinRefusal };
 
 /** Thrown to roll the transaction back with a reason the caller can report. */
@@ -168,7 +177,7 @@ export class WheelSpinService {
     if (!settings.enabled) return { spun: false, reason: 'WHEEL_DISABLED' };
 
     const alreadyServed = await this.readSpin(input.userId, input.idempotencyKey);
-    if (alreadyServed !== null) return { spun: true, ...alreadyServed };
+    if (alreadyServed !== null) return { spun: true, ...alreadyServed, syncSubscriptionId: null };
 
     let spun: { readonly record: SpinRecord; readonly post: PostCommit } | null = null;
     try {
@@ -203,7 +212,7 @@ export class WheelSpinService {
       // so the answer is its answer, and this request rolled back and cost
       // nothing.
       const served = await this.readSpin(input.userId, input.idempotencyKey);
-      if (served !== null) return { spun: true, ...served };
+      if (served !== null) return { spun: true, ...served, syncSubscriptionId: null };
       // The handle was spent and there is no spin to show for it. Unreachable
       // by construction, and not something to paper over with a refusal that
       // would read to the person as "you have no spins".
@@ -213,7 +222,7 @@ export class WheelSpinService {
     }
 
     await this.afterCommit(spun.post);
-    return { spun: true, ...spun.record };
+    return { spun: true, ...spun.record, syncSubscriptionId: spun.post.syncSubscriptionId };
   }
 
   private async spinInTransaction(
@@ -516,6 +525,8 @@ export class WheelSpinService {
       this.logger.log(`Wheel spin ${post.manualSpinId} needs an operator to settle it by hand`);
     }
     if (post.syncSubscriptionId !== null) {
+      // Pushed to Remnawave by the caller, which can reach the sync queue —
+      // `syncSubscriptionId` on the result.
       this.logger.debug(`Wheel prize changed subscription ${post.syncSubscriptionId}`);
     }
   }

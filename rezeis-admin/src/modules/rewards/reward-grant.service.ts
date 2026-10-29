@@ -136,7 +136,24 @@ export class RewardGrantService {
   ): Promise<RewardApplication> {
     const subId = await resolveActiveSubscriptionId(tx, input.userId);
     if (subId === null) {
-      return { kind: 'TRAFFIC', trafficGb: input.grant.amount, syncSubscriptionId: null };
+      // Nothing to top up — and the gigabytes used to vanish here while the
+      // cabinet told the winner «+10 ГБ». The same answer as days without a
+      // subscription: a code they can spend once they have one.
+      return {
+        kind: 'TRAFFIC',
+        trafficGb: input.grant.amount,
+        promoCode: await this.mintPromocode(
+          tx,
+          input.userId,
+          {
+            ...input.grant,
+            planId: null,
+            promo: { rewardType: PromocodeRewardType.TRAFFIC, allowedPlanIds: [], lifetimeDays: null },
+          },
+          input.origin,
+        ),
+        syncSubscriptionId: null,
+      };
     }
     // The row lock is what lets the increment below be written as an absolute
     // value. It has to be absolute: `planSnapshot` is JSON and cannot be

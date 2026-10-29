@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 
 import { AuthModule } from '../auth/auth.module';
 import { PointsModule } from '../points/points.module';
+import { ProfileSyncModule } from '../profile-sync/profile-sync.module';
 import { WheelModule } from '../wheel/wheel.module';
 import { WheelPrizesModule } from '../wheel-prizes/wheel-prizes.module';
 import { InternalWheelController } from './controllers/internal-wheel.controller';
@@ -17,7 +18,7 @@ import { WheelCabinetService } from './services/wheel-cabinet.service';
  * spin stay free of the support stack.
  */
 @Module({
-  imports: [AuthModule, PointsModule, WheelModule, WheelPrizesModule],
+  imports: [AuthModule, PointsModule, ProfileSyncModule, WheelModule, WheelPrizesModule],
   controllers: [InternalWheelController],
   providers: [WheelCabinetService],
   exports: [WheelCabinetService],

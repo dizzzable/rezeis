@@ -128,6 +128,39 @@ export class ProfileSyncQueueService {
     return queued;
   }
 
+  /**
+   * Push one subscription's panel state to Remnawave, after a change the
+   * caller has already committed: a PENDING row first, so a queue that is
+   * down loses nothing — the five-minute sweep picks the row up — then the
+   * job itself.
+   *
+   * For a reward that moved the expiry or the traffic limit. `RewardGrant`
+   * hands the id back instead of enqueueing because a job enqueued inside the
+   * transaction announces a change a rollback then undoes; every caller has
+   * to do this part, and the wheel and the contests did not, so a won «+7
+   * дней» stayed in the panel while Remnawave cut the person off on the old
+   * date.
+   */
+  public async enqueueSubscriptionSync(
+    subscriptionId: string,
+    payload: Prisma.InputJsonObject,
+  ): Promise<void> {
+    const subscription = await this.prismaService.subscription.findUnique({
+      where: { id: subscriptionId },
+      select: { remnawaveId: true },
+    });
+    const job = await this.prismaService.profileSyncJob.create({
+      data: {
+        subscriptionId,
+        action: subscription?.remnawaveId == null ? SyncAction.CREATE : SyncAction.UPDATE,
+        status: SyncJobStatus.PENDING,
+        payload,
+      },
+      select: { id: true },
+    });
+    await this.enqueue(job.id);
+  }
+
   public async enqueue(syncJobId: string, force = false): Promise<void> {
     const jobId = `sync_${syncJobId}`;
     if (force) {
