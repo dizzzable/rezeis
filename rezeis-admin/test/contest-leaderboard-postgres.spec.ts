@@ -447,7 +447,8 @@ run('leaderboards on PostgreSQL', () => {
       select: { content: true },
     });
     assert.equal(thread.length, 1, 'the refusal and its reason, not «оператор свяжется, чтобы вручить приз» before it');
-    assert.match(thread[0]?.content ?? '', /отказать[\s\S]*Накрутка рефералов/);
+    // In the winner's language — English by default, as `User.language` is.
+    assert.match(thread[0]?.content ?? '', /(отказать|declined)[\s\S]*Накрутка рефералов/);
   });
 
   it('starts the same contest again for a month, once', async () => {
