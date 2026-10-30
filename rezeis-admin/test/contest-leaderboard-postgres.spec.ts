@@ -8,16 +8,19 @@ import {
   ContestPrizeDelivery,
   ContestStatus,
   Currency,
+  DeviceSignalKind,
   PaymentGatewayType,
   PointsLedgerSource,
   PurchaseType,
   SubscriptionStatus,
   TransactionStatus,
+  UserReviewFlagKind,
   WheelSectorKind,
   WheelSpinStatus,
 } from '@prisma/client';
 
 import { PrismaService } from '../src/common/prisma/prisma.service';
+import type { SystemEventsService } from '../src/common/services/system-events.service';
 import { InternalContestsController } from '../src/modules/contests/controllers/internal-contests.controller';
 import { ContestService, type ContestInput, type ContestPrizeInput } from '../src/modules/contests/services/contest.service';
 import { ContestNoticeService } from '../src/modules/contests/services/contest-notice.service';
@@ -81,6 +84,14 @@ const userNotifications = {
 
 const supportNotifications = { notifyAdminReply: async () => undefined } as unknown as SupportNotificationsService;
 
+/** Every operator card the contests raised. */
+const raised: Array<{ type: string; metadata: Record<string, unknown> }> = [];
+const events = {
+  info: (type: string, _category: string, _message: string, metadata: Record<string, unknown> = {}) => {
+    raised.push({ type, metadata });
+  },
+} as unknown as SystemEventsService;
+
 /** Roubles are the base; a currency without a rate is left out, as with the real one. */
 const fx = {
   getBaseCurrency: () => 'RUB',
@@ -126,6 +137,7 @@ function input(overrides: Partial<ContestInput> = {}): ContestInput {
     audienceFilter: null,
     maxEntries: null,
     announce: false,
+    remind: false,
     ticketsPerPurchase: 0,
     ticketsPerReferral: 0,
     maxTicketsPerUser: null,
@@ -195,7 +207,7 @@ run('leaderboards on PostgreSQL', () => {
     await prisma.$connect();
     const payout = new PrizePayoutService(new SpinWalletService(), new RewardGrantService(new PointsWalletService()));
     const standings = new ContestStandingsService(prisma, fx);
-    contests = new ContestService(prisma, payout, syncQueue, standings);
+    contests = new ContestService(prisma, payout, syncQueue, standings, events);
     winners = new ContestWinnerService(
       prisma,
       new SupportTicketsService(prisma),
@@ -241,7 +253,7 @@ run('leaderboards on PostgreSQL', () => {
 
     const result = await contests.draw({ contestId });
 
-    assert.deepEqual(result, { drawn: true, winners: 3, entrants: 4, tickets: null, repeatedBy: null });
+    assert.deepEqual(result, { drawn: true, winners: 3, entrants: 4, tickets: null, repeatedBy: null, pending: 0 });
     const board = await prisma.contestEntry.findMany({
       where: { contestId },
       orderBy: { rank: 'asc' },
@@ -566,6 +578,106 @@ run('leaderboards on PostgreSQL', () => {
 
     const entered = await contests.enter({ contestId, userId: me });
     assert.deepEqual(entered, { entered: false, reason: 'AUTOMATIC' });
+  });
+
+  it('tells the operators once that prizes wait for them, and stays quiet when nothing does', async () => {
+    const held = await january({ prizeDelivery: ContestPrizeDelivery.REVIEW, prizes: [pointsPrize(1, 100), pointsPrize(2, 50)] });
+    for (const friends of [2, 1]) {
+      const id = await createUser(`held-${friends}`);
+      for (let i = 0; i < friends; i += 1) await friendWhoPaid(id, inJanuary(3 + i));
+    }
+    raised.length = 0;
+
+    const result = await contests.draw({ contestId: held });
+    await contests.draw({ contestId: held });
+
+    assert.equal(result.drawn && result.pending, 2);
+    assert.deepEqual(
+      raised.filter((event) => event.metadata['contestId'] === held).map((event) => [event.type, event.metadata['pending']]),
+      [['contest.prizes_pending', 2]],
+    );
+
+    const paid = await january();
+    await friendWhoPaid(await createUser('paid-at-once'), inJanuary(3));
+    raised.length = 0;
+    await contests.draw({ contestId: paid });
+    assert.equal(raised.length, 0, 'a prize paid at once leaves the operators nothing to do');
+  });
+
+  it('shows the hints a check needs: friends who share the winner’s device or address, flags', async () => {
+    const contestId = await january({ prizeDelivery: ContestPrizeDelivery.REVIEW });
+    const winner = await createUser('suspect');
+    const friends: string[] = [];
+    for (let i = 0; i < 3; i += 1) {
+      const friend = await createUser(`twin-${i}`);
+      friends.push(friend);
+      await prisma.referral.create({ data: { referrerId: winner, referredId: friend, level: 1, qualifiedAt: inJanuary(4 + i) } });
+    }
+    const device = `${prefix}-device`;
+    for (const id of [winner, friends[0] as string, friends[1] as string]) {
+      await prisma.deviceObservation.create({ data: { userId: id, kind: DeviceSignalKind.INSTALL_ID, value: device } });
+    }
+    for (const id of [winner, friends[2] as string]) {
+      await prisma.userIpObservation.create({ data: { userId: id, address: '203.0.113.77' } });
+    }
+    await prisma.userReviewFlag.create({ data: { userId: winner, kind: UserReviewFlagKind.DEVICE_MATCH, fingerprint: `${prefix}-flag` } });
+    await prisma.user.update({ where: { id: friends[2] as string }, data: { isBlocked: true } });
+
+    await contests.draw({ contestId });
+    const [row] = await winners.listForContest(contestId);
+
+    assert.deepEqual(row?.signals?.friends, { counted: 3, sharedDevice: 2, sharedIp: 1, blocked: 1 });
+    assert.equal(row?.signals?.reviewFlags, 1);
+    assert.equal(row?.signals?.accountAgeDays, 0);
+  });
+
+  it('reminds a leaderboard’s prize holders and those right behind, a day before the end, once', async () => {
+    const contestId = await january({ remind: true, leaderboardSize: 3, prizes: [pointsPrize(1, 100)] });
+    const people: string[] = [];
+    for (let i = 0; i < 6; i += 1) {
+      const id = await createUser(`r${i}`);
+      people.push(id);
+      for (let f = 0; f < 6 - i; f += 1) await friendWhoPaid(id, inJanuary(2 + f));
+    }
+    const dayBefore = new Date(monthEnd().getTime() - 12 * HOUR);
+    sent.length = 0;
+
+    await notices.sendDue(dayBefore);
+    await notices.sendDue(dayBefore);
+
+    const mine = sent.filter((entry) => entry.payload['contestId'] === contestId);
+    assert.deepEqual(
+      mine.map((entry) => [people.indexOf(entry.userId), entry.type, entry.payload['place'], entry.payload['contestGap'] ?? null]),
+      [
+        [0, 'contest_reminder_holding', 1, null],
+        // To take first place from six, a score has to beat it: seven.
+        [1, 'contest_reminder_chasing', 2, '2'],
+        [2, 'contest_reminder_chasing', 3, '3'],
+        [3, 'contest_reminder_chasing', 4, '4'],
+      ],
+      'the prize place and three behind it; nobody further down; nobody twice',
+    );
+    const row = await prisma.contest.findUniqueOrThrow({ where: { id: contestId }, select: { remindedAt: true } });
+    assert.notEqual(row.remindedAt, null);
+  });
+
+  it('reminds the audience of a draw who has not entered, and not the entrants', async () => {
+    const contestId = await january({ kind: ContestKind.DRAW, metric: null, remind: true });
+    const entrant = await createUser('in-already');
+    const outsider = await createUser('not-yet');
+    await prisma.contestEntry.create({ data: { contestId, userId: entrant } });
+    const dayBefore = new Date(monthEnd().getTime() - 12 * HOUR);
+    sent.length = 0;
+
+    for (let round = 0; round < 200; round += 1) {
+      const row = await prisma.contest.findUniqueOrThrow({ where: { id: contestId }, select: { remindedAt: true } });
+      if (row.remindedAt !== null) break;
+      await notices.sendDue(dayBefore);
+    }
+
+    const mine = sent.filter((entry) => entry.payload['contestId'] === contestId);
+    assert.ok(mine.some((entry) => entry.userId === outsider && entry.type === 'contest_reminder'));
+    assert.equal(mine.some((entry) => entry.userId === entrant), false);
   });
 
   it('tells the board its places, and the winner theirs — not everybody further down', async () => {

@@ -1,9 +1,24 @@
 import { useCallback, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Link } from 'react-router'
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { AlertTriangle, Check, Dices, Megaphone, Pencil, Plus, Repeat, Ticket, Trash2, Trophy, Users, X } from 'lucide-react'
+import {
+  AlertTriangle,
+  Check,
+  Copy,
+  Dices,
+  Megaphone,
+  Pencil,
+  Plus,
+  Repeat,
+  ShieldAlert,
+  Ticket,
+  Trash2,
+  Trophy,
+  Users,
+  X,
+} from 'lucide-react'
 
 import { getErrorMessage } from '@/lib/http-errors'
 import {
@@ -31,6 +46,7 @@ import { usePlans } from '@/features/plans/plans-api'
 
 import {
   cancelContest,
+  countContestAudience,
   createContest,
   deleteContest,
   drawContest,
@@ -133,6 +149,8 @@ interface Draft {
   endAt: string
   maxEntries: string
   announce: boolean
+  /** One reminder a day before the end. */
+  remind: boolean
   subscription: string[]
   planIds: string[]
   platforms: string[]
@@ -186,6 +204,7 @@ function emptyDraft(): Draft {
     maxEntries: '',
     // A new contest nobody hears about is the complaint this page answers.
     announce: true,
+    remind: true,
     subscription: [],
     planIds: [],
     platforms: [],
@@ -256,6 +275,7 @@ function toDraft(contest: Contest): Draft {
     endAt: toLocalInput(contest.endAt),
     maxEntries: contest.maxEntries === null ? '' : String(contest.maxEntries),
     announce: contest.announce,
+    remind: contest.remind ?? false,
     subscription: [...(filter.subscription ?? [])],
     planIds: [...(filter.planIds ?? [])],
     platforms: [...(filter.platforms ?? [])],
@@ -339,6 +359,7 @@ function toPayload(draft: Draft): ContestPayload {
     audienceFilter: toAudience(draft),
     maxEntries: readCount(draft.maxEntries, null),
     announce: draft.announce,
+    remind: draft.remind,
     ticketsPerPurchase: Math.max(0, readCount(draft.ticketsPerPurchase, 0) ?? 0),
     ticketsPerReferral: Math.max(0, readCount(draft.ticketsPerReferral, 0) ?? 0),
     maxTicketsPerUser: maxTickets !== null && maxTickets >= 1 ? maxTickets : null,
@@ -365,6 +386,20 @@ function toPayload(draft: Draft): ContestPayload {
           ? prize.manualInstructions.trim()
           : null,
     })),
+  }
+}
+
+/**
+ * A new draft with this contest's terms and prizes, starting now and as long
+ * as the original — what «Копировать» opens. Nothing is saved until «Сохранить».
+ */
+function copyDraft(contest: Contest, now: number): Draft {
+  const draft = toDraft(contest)
+  const length = Math.max(60 * 60 * 1000, new Date(contest.endAt).getTime() - new Date(contest.startAt).getTime())
+  return {
+    ...draft,
+    startAt: toLocalInput(new Date(now).toISOString()),
+    endAt: toLocalInput(new Date(now + length).toISOString()),
   }
 }
 
@@ -645,6 +680,15 @@ export default function ContestsPage() {
                               {t('contestsPage.actions.winners', { count: contest.winners })}
                             </Button>
                           ) : null}
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            aria-label={t('contestsPage.actionsExtra.copy')}
+                            title={t('contestsPage.actionsExtra.copy')}
+                            onClick={() => setEditing({ id: null, draft: copyDraft(contest, contests.dataUpdatedAt) })}
+                          >
+                            <Copy className="h-4 w-4" />
+                          </Button>
                           {contest.status !== 'DRAFT' && contest.kind === 'LEADERBOARD' ? (
                             <Button variant="outline" size="sm" className="gap-1" onClick={() => setStandingsOf(contest)}>
                               <Trophy className="h-4 w-4" />
@@ -806,6 +850,7 @@ function NoticeState({ contest }: { readonly contest: Contest }) {
   if (contest.announce && contest.status === 'ACTIVE') {
     lines.push(contest.announcedAt === null ? t('contestsPage.row.announceSending') : t('contestsPage.row.announceSent'))
   }
+  if (contest.remindedAt) lines.push(t('contestsPage.row.remindSent'))
   if (contest.status === 'DRAWN') {
     lines.push(contest.resultsNotifiedAt === null ? t('contestsPage.row.resultsSending') : t('contestsPage.row.resultsSent'))
   }
@@ -856,6 +901,76 @@ function ChipGroup({
           )
         })}
       </div>
+    </div>
+  )
+}
+
+/** How many people the filter takes in right now — before anybody presses «Опубликовать». */
+function AudienceEstimate({ filter }: { readonly filter: ContestAudienceFilter | null }) {
+  const { t } = useTranslation()
+  const count = useQuery({
+    queryKey: ['admin', 'contests', 'audience', JSON.stringify(filter)],
+    queryFn: () => countContestAudience(filter),
+    placeholderData: keepPreviousData,
+    staleTime: 30_000,
+  })
+  return (
+    <p className="text-xs font-medium" data-testid="contest-audience-count">
+      {count.data === undefined
+        ? t('contestsPage.form.audienceCounting')
+        : t('contestsPage.form.audienceCount', { value: count.data.toLocaleString(activeLocale()) })}
+    </p>
+  )
+}
+
+/** «Напомнить за сутки до конца» — on a draft, and on a live contest too. */
+function RemindToggle({ checked, onChange }: { readonly checked: boolean; readonly onChange: (value: boolean) => void }) {
+  const { t } = useTranslation()
+  return (
+    <div className="flex items-start gap-2 rounded-lg border p-3">
+      <Checkbox
+        id="contest-remind"
+        checked={checked}
+        onCheckedChange={(value) => onChange(value === true)}
+        className="mt-0.5"
+      />
+      <div className="space-y-0.5">
+        <Label htmlFor="contest-remind" className="text-sm">
+          {t('contestsPage.form.remind')}
+        </Label>
+        <p className="text-xs text-muted-foreground">{t('contestsPage.form.remindHint')}</p>
+      </div>
+    </div>
+  )
+}
+
+/** What an operator checking a prize should look at; amber where it is worth a second look. */
+function WinnerSignalsLine({ signals }: { readonly signals: NonNullable<ContestWinner['signals']> }) {
+  const { t } = useTranslation()
+  const friends = signals.friends
+  const parts: Array<{ text: string; alarm: boolean }> = [
+    { text: t('contestsPage.signals.age', { value: signals.accountAgeDays }), alarm: false },
+  ]
+  if (signals.reviewFlags > 0) parts.push({ text: t('contestsPage.signals.flags', { value: signals.reviewFlags }), alarm: true })
+  if (friends !== null) {
+    parts.push({ text: t('contestsPage.signals.friends', { value: friends.counted }), alarm: false })
+    if (friends.sharedDevice > 0) {
+      parts.push({ text: t('contestsPage.signals.sharedDevice', { value: friends.sharedDevice }), alarm: true })
+    }
+    if (friends.sharedIp > 0) parts.push({ text: t('contestsPage.signals.sharedIp', { value: friends.sharedIp }), alarm: true })
+    if (friends.blocked > 0) parts.push({ text: t('contestsPage.signals.blocked', { value: friends.blocked }), alarm: true })
+  }
+  const alarm = parts.some((part) => part.alarm)
+  return (
+    <div
+      className={cn('flex flex-wrap items-center gap-x-2 text-xs', alarm ? 'text-amber-600 dark:text-amber-400' : 'text-muted-foreground')}
+      data-testid="contest-winner-signals"
+      title={t('contestsPage.signals.hint')}
+    >
+      {alarm ? <ShieldAlert className="h-3.5 w-3.5 shrink-0" /> : null}
+      {parts.map((part) => (
+        <span key={part.text}>{part.text}</span>
+      ))}
     </div>
   )
 }
@@ -971,6 +1086,7 @@ function ContestForm({
             <Input id="contest-end" type="datetime-local" value={draft.endAt} onChange={(e) => set('endAt', e.target.value)} />
           </div>
           <RepeatToggle checked={draft.repeatMonthly} onChange={(value) => set('repeatMonthly', value)} />
+          <RemindToggle checked={draft.remind} onChange={(value) => set('remind', value)} />
         </>
       ) : (
         <>
@@ -1101,6 +1217,7 @@ function ContestForm({
                 onChange={(e) => set('inactiveDays', e.target.value)}
               />
             </div>
+            <AudienceEstimate filter={toAudience(draft)} />
           </fieldset>
 
           {ranked ? null : (
@@ -1201,6 +1318,7 @@ function ContestForm({
               <p className="text-xs text-muted-foreground">{t('contestsPage.form.announceHint')}</p>
             </div>
           </div>
+          <RemindToggle checked={draft.remind} onChange={(value) => set('remind', value)} />
 
           <div className="space-y-2">
             <div className="flex items-center justify-between">
@@ -1599,6 +1717,7 @@ function WinnersDialog({ contest, onClose }: { readonly contest: Contest | null;
                   {winner.heldForReview && winner.status === 'PENDING' ? (
                     <div className="text-xs text-amber-600 dark:text-amber-400">{t('contestsPage.winnersExtra.held')}</div>
                   ) : null}
+                  {winner.signals ? <WinnerSignalsLine signals={winner.signals} /> : null}
                 </div>
                 <div className="flex gap-1">
                   {winner.status === 'PENDING' ? (

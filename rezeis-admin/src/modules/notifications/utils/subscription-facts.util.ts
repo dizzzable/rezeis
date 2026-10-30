@@ -311,6 +311,8 @@ export interface ContestFactsInput {
   readonly score?: unknown;
   readonly total?: unknown;
   readonly currency?: unknown;
+  /** How much more takes a prize place, in the metric's unit, as a string. */
+  readonly gap?: unknown;
 }
 
 /**
@@ -320,7 +322,8 @@ export interface ContestFactsInput {
  * `{{contestEndsTime}}`, `{{contestEndsDateTime}}` when entries close, the
  * last with its zone named, «5 ноября в 20:00 по Москве», as a reset time is.
  * A leaderboard's adds `{{contestMetric}}` («потраченному трафику»),
- * `{{contestScore}}` («12,4 ГБ») and `{{contestTotal}}`, how many were ranked.
+ * `{{contestScore}}` («12,4 ГБ»), `{{contestTotal}}`, how many were ranked, and
+ * `{{contestGap}}`, how much more takes a prize place.
  * A payload that is not a contest's gives nothing.
  */
 export function buildContestFacts(input: ContestFactsInput, locale: NotificationLocaleTag): Record<string, string> {
@@ -342,6 +345,8 @@ export function buildContestFacts(input: ContestFactsInput, locale: Notification
   if (metric !== null) out['contestMetric'] = metric;
   const score = formatContestScore(input.metric, input.score, locale, input.currency);
   if (score !== null) out['contestScore'] = score;
+  const gap = formatContestScore(input.metric, input.gap, locale, input.currency);
+  if (gap !== null) out['contestGap'] = gap;
   if (typeof input.total === 'number' && Number.isInteger(input.total) && input.total > 0) {
     out['contestTotal'] = input.total.toLocaleString(locale === 'en' ? 'en-GB' : 'ru-RU');
   }

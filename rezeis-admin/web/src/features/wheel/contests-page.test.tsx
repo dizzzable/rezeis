@@ -80,6 +80,13 @@ function contest(overrides: Partial<Contest>): Contest {
   }
 }
 
+/** The form counts its audience over `post` as well; this finds the save among those calls. */
+function created(post: { readonly mock: { readonly calls: readonly unknown[][] } }): Record<string, unknown> {
+  const call = post.mock.calls.find((args) => args[0] === '/admin/contests')
+  expect(call, 'the contest was saved').toBeDefined()
+  return (call as [string, Record<string, unknown>])[1]
+}
+
 function serve(contests: Contest[]): void {
   vi.spyOn(api, 'get').mockImplementation(async (url: string) => {
     if (url === '/admin/contests') return { data: contests }
@@ -136,9 +143,8 @@ describe('ContestsPage', () => {
     await user.type(within(dialog).getByLabelText('Prize title (EN)'), '100 points')
     await user.click(within(dialog).getByRole('button', { name: 'Save' }))
 
-    await waitFor(() => expect(post).toHaveBeenCalled())
-    const [url, payload] = post.mock.calls[0] as [string, Record<string, unknown>]
-    expect(url).toBe('/admin/contests')
+    await waitFor(() => expect(post).toHaveBeenCalledWith('/admin/contests', expect.anything()))
+    const payload = created(post)
     expect(payload).toMatchObject({
       title: { ru: 'Осенний', en: 'Осенний' },
       description: { ru: '', en: 'Rules in English' },
@@ -149,6 +155,7 @@ describe('ContestsPage', () => {
       ticketsPerReferral: 0,
       maxTicketsPerUser: null,
       announce: true,
+      remind: true,
     })
     expect((payload.prizes as Array<{ title: unknown }>)[0]?.title).toEqual({ ru: '', en: '100 points' })
   })
@@ -168,8 +175,8 @@ describe('ContestsPage', () => {
     await user.type(within(dialog).getByLabelText('Minimum for a prize place, GB'), '5')
     await user.click(within(dialog).getByRole('button', { name: 'Save' }))
 
-    await waitFor(() => expect(post).toHaveBeenCalled())
-    const [, payload] = post.mock.calls[0] as [string, Record<string, unknown>]
+    await waitFor(() => expect(post).toHaveBeenCalledWith('/admin/contests', expect.anything()))
+    const payload = created(post)
     expect(payload).toMatchObject({
       title: { ru: 'Who uses the most traffic' },
       kind: 'LEADERBOARD',
@@ -214,6 +221,97 @@ describe('ContestsPage', () => {
 
     expect(await screen.findByTestId('contest-pending-prizes')).toHaveTextContent('Waiting to be handed over: 2')
     expect(screen.getByText('Prizes after a check')).toBeInTheDocument()
+  })
+
+  it('says how many people the audience takes in, and asks again when it changes', async () => {
+    serve([])
+    const post = vi.spyOn(api, 'post').mockImplementation(async (url: string, body?: unknown) => {
+      if (url !== '/admin/contests/audience/count') return { data: contest({ status: 'DRAFT' }) }
+      const filter = (body as { audienceFilter: { subscription?: string[] } | null }).audienceFilter
+      return { data: { count: filter?.subscription?.includes('ACTIVE') ? 1234 : 50000 } }
+    })
+    const user = userEvent.setup()
+    renderWithProviders(<ContestsPage />)
+
+    await user.click(await screen.findByRole('button', { name: 'New contest' }))
+    const dialog = await screen.findByRole('dialog')
+    await waitFor(() => expect(within(dialog).getByTestId('contest-audience-count')).toHaveTextContent('50,000'))
+    await user.click(within(dialog).getByRole('button', { name: 'Active' }))
+    await waitFor(() => expect(within(dialog).getByTestId('contest-audience-count')).toHaveTextContent('1,234'))
+    expect(post).toHaveBeenCalledWith('/admin/contests/audience/count', { audienceFilter: { subscription: ['ACTIVE'] } })
+  })
+
+  it('copies a contest into a new draft that starts now and runs as long', async () => {
+    serve([
+      contest({
+        status: 'DRAWN',
+        startAt: new Date(Date.now() - 10 * 24 * HOUR).toISOString(),
+        endAt: new Date(Date.now() - 3 * 24 * HOUR).toISOString(),
+        ticketsPerPurchase: 3,
+        remind: true,
+      }),
+    ])
+    const post = vi.spyOn(api, 'post').mockResolvedValue({ data: contest({ status: 'DRAFT' }) })
+    const user = userEvent.setup()
+    renderWithProviders(<ContestsPage />)
+
+    await user.click(await screen.findByRole('button', { name: 'Copy' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByText('New contest')).toBeInTheDocument()
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(post).toHaveBeenCalledWith('/admin/contests', expect.anything()))
+    const payload = created(post)
+    expect(payload).toMatchObject({ title: { ru: 'Осенний розыгрыш', en: 'Autumn draw' }, ticketsPerPurchase: 3, remind: true })
+    const days = (new Date(payload.endAt as string).getTime() - new Date(payload.startAt as string).getTime()) / (24 * HOUR)
+    expect(days).toBeCloseTo(7, 1)
+    expect(new Date(payload.startAt as string).getTime()).toBeGreaterThan(Date.now() - 5 * 60 * 1000)
+  })
+
+  it('shows what is worth a second look before a prize is handed over', async () => {
+    serve([contest({ status: 'DRAWN', winners: 1, pendingPrizes: 1, prizeDelivery: 'REVIEW' })])
+    vi.spyOn(api, 'get').mockImplementation(async (url: string) => {
+      if (url === '/admin/contests') {
+        return { data: [contest({ status: 'DRAWN', winners: 1, pendingPrizes: 1, prizeDelivery: 'REVIEW' })] }
+      }
+      if (url.endsWith('/winners')) {
+        return {
+          data: [
+            {
+              id: 'w1',
+              contestId: 'c1',
+              contestTitle: { ru: 'Топ' },
+              place: 1,
+              kind: 'POINTS',
+              prizeTitle: { ru: '100 баллов' },
+              status: 'PENDING',
+              createdAt: new Date().toISOString(),
+              settledAt: null,
+              settledBy: null,
+              settlementNote: null,
+              ticketId: null,
+              instructions: '',
+              heldForReview: true,
+              score: 12,
+              signals: { accountAgeDays: 3, reviewFlags: 0, friends: { counted: 12, sharedDevice: 9, sharedIp: 11, blocked: 0 } },
+              winner: { id: 'u1', name: 'Иван', username: null, telegramId: '111', email: null },
+            },
+          ],
+        }
+      }
+      return { data: [] }
+    })
+    const user = userEvent.setup()
+    renderWithProviders(<ContestsPage />)
+
+    await user.click(await screen.findByRole('button', { name: 'Winners (1)' }))
+    const signals = await screen.findByTestId('contest-winner-signals')
+    expect(signals).toHaveTextContent('account 3 d old')
+    expect(signals).toHaveTextContent('friends counted: 12')
+    expect(signals).toHaveTextContent('same device: 9')
+    expect(signals).toHaveTextContent('same IP: 11')
+    expect(signals).not.toHaveTextContent('blocked')
+    expect(screen.getByText('Waiting for a check: “Issue” credits the prize')).toBeInTheDocument()
   })
 
   it('lets a live contest have only its wording fixed and its end moved', async () => {

@@ -110,6 +110,7 @@ function input(overrides: Partial<ContestInput> = {}): ContestInput {
     audienceFilter: null,
     maxEntries: null,
     announce: false,
+    remind: false,
     ticketsPerPurchase: 0,
     ticketsPerReferral: 0,
     maxTicketsPerUser: null,
@@ -269,7 +270,7 @@ run('contests on PostgreSQL', () => {
     await enter(contestId, b);
 
     const first = await contests.draw({ contestId, random: () => 0 });
-    assert.deepEqual(first, { drawn: true, winners: 1, entrants: 2, tickets: 2, repeatedBy: null });
+    assert.deepEqual(first, { drawn: true, winners: 1, entrants: 2, tickets: 2, repeatedBy: null, pending: 0 });
 
     const contest = await contests.get(contestId);
     assert.equal(contest.status, ContestStatus.DRAWN);
@@ -311,7 +312,7 @@ run('contests on PostgreSQL', () => {
     for (const person of people) await enter(contestId, person);
 
     const result = await contests.draw({ contestId, random: () => 0.5 });
-    assert.deepEqual(result, { drawn: true, winners: 3, entrants: 4, tickets: 4, repeatedBy: null });
+    assert.deepEqual(result, { drawn: true, winners: 3, entrants: 4, tickets: 4, repeatedBy: null, pending: 0 });
 
     const rows = await winners.listForContest(contestId);
     assert.deepEqual(rows.map((r) => r.place), [1, 2, 3]);
@@ -327,7 +328,7 @@ run('contests on PostgreSQL', () => {
 
     const result = await contests.draw({ contestId, random: () => 0 });
 
-    assert.deepEqual(result, { drawn: true, winners: 1, entrants: 1, tickets: 1, repeatedBy: null });
+    assert.deepEqual(result, { drawn: true, winners: 1, entrants: 1, tickets: 1, repeatedBy: null, pending: 0 });
     assert.equal((await winners.listForContest(contestId))[0]?.place, 1, 'first prize, not third');
   });
 
@@ -441,7 +442,7 @@ run('contests on PostgreSQL', () => {
     // each, 0.7 of 2 would have been b's.
     const result = await contests.draw({ contestId, random: () => 0.7 });
 
-    assert.deepEqual(result, { drawn: true, winners: 1, entrants: 2, tickets: 5, repeatedBy: null });
+    assert.deepEqual(result, { drawn: true, winners: 1, entrants: 2, tickets: 5, repeatedBy: null, pending: 0 });
     assert.equal((await winners.listForContest(contestId))[0]?.winner.id, a);
     const entries = await prisma.contestEntry.findMany({ where: { contestId }, select: { userId: true, tickets: true } });
     assert.deepEqual(Object.fromEntries(entries.map((entry) => [entry.userId, entry.tickets])), { [a]: 4, [b]: 1 });

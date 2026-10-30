@@ -116,6 +116,11 @@ export const en = {
       prizesHintRanges:
         'The first prize goes to first place. To give one prize to several places, say how many places get it: “places 4–10 — 100 points each”.',
       leaderboardEntry: 'Everybody in the audience takes part: a leaderboard has no entries, channel or tickets.',
+      remind: 'Remind a day before the end',
+      remindHint:
+        'One message a day before the end. A draw — to those who may enter and have not yet. A leaderboard — to the prize holders (“keep it up”) and those just behind (“a prize needs 1 more friend”). A contest shorter than two days gets no reminder.',
+      audienceCount: 'Right now the conditions take in: {{value}}',
+      audienceCounting: 'Counting how many people this takes in…',
     },
     row: {
       drawError: 'The draw failed: {{error}}',
@@ -133,10 +138,12 @@ export const en = {
       },
       repeat: 'Monthly',
       pendingPrizes: 'Waiting to be handed over: {{count}}',
+      remindSent: 'Reminder sent',
       awaitingTraffic: 'Waiting for the last traffic reading from Remnawave',
       awaitingResults: 'Over — results are being counted',
     },
     actionsExtra: {
+      copy: 'Copy',
       entrants: 'Entrants',
       standings: 'Leaderboard',
       results: 'Results',
@@ -164,6 +171,15 @@ export const en = {
       points_many: '{{count}} points',
       points_other: '{{count}} points',
       gb: '{{value}} GB',
+    },
+    signals: {
+      age: 'account {{value}} d old',
+      flags: 'review flags: {{value}}',
+      friends: 'friends counted: {{value}}',
+      sharedDevice: 'same device: {{value}}',
+      sharedIp: 'same IP: {{value}}',
+      blocked: 'blocked: {{value}}',
+      hint: 'A hint, not a verdict: a family shares one IP, and similar devices belong to different people. What should worry you is many friends looking like this at once.',
     },
     winnersExtra: {
       held: 'Waiting for a check: “Issue” credits the prize',

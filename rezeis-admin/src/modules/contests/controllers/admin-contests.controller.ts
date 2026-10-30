@@ -27,7 +27,13 @@ import { extractRequestMetadata } from '../../auth/utils/request-metadata.util';
 import { RequirePermission } from '../../rbac/decorators/require-permission.decorator';
 import { resolveQuestChannelConfig } from '../../quests/utils/quest-channel-config.util';
 import { RbacGuard } from '../../rbac/guards/rbac.guard';
-import { ContestDto, ListContestEntrantsDto, RefuseContestWinnerDto, SettleContestWinnerDto } from '../dto/contest.dto';
+import {
+  ContestAudienceCountDto,
+  ContestDto,
+  ListContestEntrantsDto,
+  RefuseContestWinnerDto,
+  SettleContestWinnerDto,
+} from '../dto/contest.dto';
 import {
   ContestService,
   type ContestChannel,
@@ -99,6 +105,17 @@ export class AdminContestsController {
   @ApiOperation({ summary: 'Победители конкурса по местам' })
   public contestWinners(@Param('contestId') contestId: string): Promise<readonly ContestWinnerRow[]> {
     return this.winners.listForContest(contestId);
+  }
+
+  @Post('audience/count')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Сколько людей подходит под фильтр аудитории' })
+  public async audienceCount(@Body() dto: ContestAudienceCountDto): Promise<{ readonly count: number }> {
+    const filter =
+      dto.audienceFilter === undefined || dto.audienceFilter === null
+        ? null
+        : (dto.audienceFilter as unknown as Prisma.JsonValue);
+    return { count: await this.contests.countAudience(filter) };
   }
 
   @Post()
@@ -259,6 +276,7 @@ function toInput(dto: ContestDto): ContestInput {
         : (dto.audienceFilter as unknown as Prisma.InputJsonValue),
     maxEntries: dto.maxEntries ?? null,
     announce: dto.announce ?? false,
+    remind: dto.remind ?? false,
     ticketsPerPurchase: dto.ticketsPerPurchase ?? 0,
     ticketsPerReferral: dto.ticketsPerReferral ?? 0,
     maxTicketsPerUser: dto.maxTicketsPerUser ?? null,

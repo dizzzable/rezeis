@@ -141,6 +141,10 @@ const USER_NOTIFICATION_KEYS = [
   'contest_prize_issued',
   'contest_lost',
   'contest_rank',
+  // One reminder a day before the end, when the operator ticks it.
+  'contest_reminder',
+  'contest_reminder_holding',
+  'contest_reminder_chasing',
   'partner_referral_registered',
   'partner_earning',
   'partner_withdrawal_request_created',
@@ -248,6 +252,8 @@ const EVENT_TYPE_CATALOG: Readonly<Record<string, readonly string[]>> = {
     // operators hear about a thread it led. Also delivered to whoever ticked
     // support.ticket_created or support.ticket_user_reply.
     'support.ticket_handed_off',
+    // A contest ended with prizes an operator has to hand over or check.
+    'contest.prizes_pending',
   ],
   FRAUD: [
     'fraud.signal_opened', 'fraud.connections_dropped',

@@ -86,8 +86,10 @@ export class ContestReconcilerService {
     // and the other way round.
     try {
       const sent = await this.notices.sendDue();
-      if (sent.announced + sent.results > 0) {
-        this.logger.log(`Contest notices: ${sent.announced} announcement(s), ${sent.results} result(s)`);
+      if (sent.announced + sent.results + sent.reminded > 0) {
+        this.logger.log(
+          `Contest notices: ${sent.announced} announcement(s), ${sent.results} result(s), ${sent.reminded} reminder(s)`,
+        );
       }
     } catch (error: unknown) {
       this.logger.warn(`Contest notices failed: ${error instanceof Error ? error.message : String(error)}`);

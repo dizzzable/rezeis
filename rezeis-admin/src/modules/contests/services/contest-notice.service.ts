@@ -13,7 +13,7 @@ import {
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { buildAudienceWhere, normalizeAudienceFilter } from '../../broadcast/utils/broadcast-audience.util';
 import { UserNotificationsService } from '../../notifications/services/user-notifications.service';
-import { countPlaces } from './contest.service';
+import { countPlaces, readGapToPrize } from './contest.service';
 import { ContestStandingsService } from './contest-standings.service';
 
 /** Notice types, as the template catalogue and the panel's template page name them. */
@@ -25,7 +25,12 @@ export const CONTEST_NOTICE_TYPES = {
   wonReview: 'contest_won_review',
   lost: 'contest_lost',
   rank: 'contest_rank',
+  reminder: 'contest_reminder',
+  reminderHolding: 'contest_reminder_holding',
+  reminderChasing: 'contest_reminder_chasing',
 } as const;
+
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
  * People told per contest per sweep. A sweep runs every minute, so this is
@@ -46,6 +51,13 @@ const BATCH = 300;
  * A leaderboard has nobody who entered: its results go to the winners and to
  * everybody else on the public board — «ваше место X из Y» — and not to the
  * thousands further down, who never asked to be in a contest at all.
+ *
+ * One reminder a day before the end, when the operator ticks «Напомнить за
+ * сутки»: a draw reminds the audience that has not entered yet; a
+ * leaderboard reminds the people at the prize places and those right behind
+ * them — «вы на 12-м месте, до приза не хватает 1 друга» — and nobody else.
+ * A contest shorter than two days gets none: its reminder would land on the
+ * day it started.
  *
  * ── At most once ──────────────────────────────────────────────────────────
  *
@@ -69,9 +81,12 @@ export class ContestNoticeService {
     @Optional() private readonly standings?: ContestStandingsService,
   ) {}
 
-  public async sendDue(now = new Date()): Promise<{ readonly announced: number; readonly results: number }> {
+  public async sendDue(
+    now = new Date(),
+  ): Promise<{ readonly announced: number; readonly results: number; readonly reminded: number }> {
     let announced = 0;
     let results = 0;
+    let reminded = 0;
 
     const opening = await this.prismaService.contest.findMany({
       where: {
@@ -107,7 +122,111 @@ export class ContestNoticeService {
     for (const contest of drawn) {
       results += await this.tellResults(contest, now);
     }
-    return { announced, results };
+
+    const ending = await this.prismaService.contest.findMany({
+      where: {
+        status: ContestStatus.ACTIVE,
+        remind: true,
+        remindedAt: null,
+        endAt: { gt: now, lte: new Date(now.getTime() + DAY_MS) },
+        startAt: { lte: new Date(now.getTime() - DAY_MS) },
+      },
+      orderBy: { endAt: 'asc' },
+      take: 5,
+      select: {
+        id: true,
+        title: true,
+        startAt: true,
+        endAt: true,
+        audienceFilter: true,
+        kind: true,
+        metric: true,
+        minScore: true,
+        leaderboardSize: true,
+        prizes: { select: { place: true, placeTo: true } },
+      },
+    });
+    for (const contest of ending) {
+      reminded += await this.remind(contest, now);
+    }
+    return { announced, results, reminded };
+  }
+
+  /** One batch of «остались сутки». */
+  private async remind(
+    contest: {
+      readonly id: string;
+      readonly title: Prisma.JsonValue;
+      readonly startAt: Date;
+      readonly endAt: Date;
+      readonly audienceFilter: Prisma.JsonValue | null;
+      readonly kind: ContestKind;
+      readonly metric: ContestMetric | null;
+      readonly minScore: bigint | null;
+      readonly leaderboardSize: number;
+      readonly prizes: readonly { readonly place: number; readonly placeTo: number | null }[];
+    },
+    now: Date,
+  ): Promise<number> {
+    const common = { contestId: contest.id, contestTitle: contest.title, contestEndsAt: contest.endAt.toISOString() };
+
+    if (contest.kind !== ContestKind.LEADERBOARD) {
+      const filter = normalizeAudienceFilter(contest.audienceFilter);
+      const audience = filter === null ? {} : buildAudienceWhere(BroadcastAudience.ALL, filter);
+      const people = await this.prismaService.user.findMany({
+        where: {
+          AND: [
+            { isBlocked: false },
+            audience,
+            { contestEntries: { none: { contestId: contest.id } } },
+            { contestNotices: { none: { contestId: contest.id, kind: ContestNoticeKind.REMINDER } } },
+          ],
+        },
+        orderBy: { id: 'asc' },
+        take: BATCH,
+        select: { id: true },
+      });
+      const claimed = await this.claim(contest.id, ContestNoticeKind.REMINDER, people.map((person) => person.id));
+      for (const userId of claimed) await this.notify(userId, CONTEST_NOTICE_TYPES.reminder, common);
+      if (people.length < BATCH) await this.markReminded(contest.id, now);
+      return claimed.length;
+    }
+
+    // The board is a few hundred people at most here: the prize places and
+    // as many again behind them. One pass, then done.
+    if (this.standings === undefined) return 0;
+    const board = await this.standings.live({ ...contest }, now);
+    const places = countPlaces(contest.prizes);
+    const reach = Math.min(board.length, places + contest.leaderboardSize);
+    const candidates = board.slice(0, reach);
+    const claimed = new Set(
+      await this.claim(contest.id, ContestNoticeKind.REMINDER, candidates.map((row) => row.userId)),
+    );
+    const currency = this.standings.baseCurrency();
+    let sent = 0;
+    for (const [index, row] of candidates.entries()) {
+      if (!claimed.has(row.userId)) continue;
+      const gap = readGapToPrize(board, index, places, contest.minScore);
+      const holding = gap === 0;
+      await this.notify(row.userId, holding ? CONTEST_NOTICE_TYPES.reminderHolding : CONTEST_NOTICE_TYPES.reminderChasing, {
+        ...common,
+        place: index + 1,
+        contestScore: row.score.toString(),
+        contestMetric: contest.metric,
+        contestCurrency: currency,
+        ...(holding || gap === null ? {} : { contestGap: String(gap) }),
+      });
+      sent += 1;
+    }
+    await this.markReminded(contest.id, now);
+    return sent;
+  }
+
+  private async markReminded(contestId: string, now: Date): Promise<void> {
+    await this.prismaService.contest.updateMany({
+      where: { id: contestId, remindedAt: null },
+      data: { remindedAt: now },
+    });
   }
 
   /** One batch of «начался конкурс» to people who may enter and have not. */

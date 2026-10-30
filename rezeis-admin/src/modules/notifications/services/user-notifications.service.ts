@@ -1980,6 +1980,7 @@ export class UserNotificationsService {
           score: payloadRecord['contestScore'],
           total: payloadRecord['contestTotal'],
           currency: payloadRecord['contestCurrency'],
+          gap: payloadRecord['contestGap'],
           timezone: branding.timezone,
         },
         locale === 'en' ? 'en' : 'ru',

@@ -358,6 +358,13 @@ export const EVENT_TYPES = {
    * whoever ticked either support card (`DELIVERED_WITH`).
    */
   SUPPORT_TICKET_HANDED_OFF: 'support.ticket_handed_off',
+  /**
+   * A contest has ended with prizes nobody has handed over yet: held for the
+   * operator's check, through support, a manual prize, a key the pool ran out
+   * of. Once per contest, from the transaction that ended it — without it a
+   * prize held «после проверки» waits for somebody to happen to open the page.
+   */
+  CONTEST_PRIZES_PENDING: 'contest.prizes_pending',
 
   // Anti-fraud
   FRAUD_SIGNAL_OPENED: 'fraud.signal_opened',
@@ -3920,6 +3927,7 @@ export const EVENT_PRESENTATION: Record<string, EventPresentation> = {
   'support.ticket_created': { emoji: '🆘', title: 'Новое обращение в поддержку' },
   'support.ticket_user_reply': { emoji: '💬', title: 'Ответ пользователя в тикете' },
   'support.ticket_handed_off': { emoji: '🙋', title: 'ИИ передал обращение оператору' },
+  'contest.prizes_pending': { emoji: '🏆', title: 'Призы конкурса ждут выдачи' },
 
   // Anti-fraud
   'fraud.signal_opened': { emoji: '🚨', title: 'Антифрод: новый сигнал' },

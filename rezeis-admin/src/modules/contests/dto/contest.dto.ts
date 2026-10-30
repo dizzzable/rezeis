@@ -161,6 +161,11 @@ export class ContestDto {
   @IsBoolean()
   public announce?: boolean;
 
+  @ApiPropertyOptional({ description: 'Напомнить за сутки до конца: розыгрыш — тем, кто ещё не участвует; рейтинг — призёрам и тем, кто рядом.' })
+  @IsOptional()
+  @IsBoolean()
+  public remind?: boolean;
+
   @ApiPropertyOptional({ minimum: 0, maximum: MAX_TICKETS_PER_ACTION, description: 'Доп. билетов за каждую оплату в период конкурса. 0 — выключено.' })
   @IsOptional()
   @Type((): NumberConstructor => Number)
@@ -239,6 +244,14 @@ export class ContestDto {
   @ValidateNested({ each: true })
   @Type((): typeof ContestPrizeDto => ContestPrizeDto)
   public prizes!: ContestPrizeDto[];
+}
+
+export class ContestAudienceCountDto {
+  @ApiPropertyOptional({ nullable: true, description: 'Тот же фильтр, что у конкурса. Пусто — все, кроме заблокированных.' })
+  @IsOptional()
+  @ValidateNested()
+  @Type((): typeof QuestAudienceFilterDto => QuestAudienceFilterDto)
+  public audienceFilter?: QuestAudienceFilterDto | null;
 }
 
 export class ListContestEntrantsDto {

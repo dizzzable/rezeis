@@ -1,5 +1,12 @@
 import { Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
-import { ContestPrizeDelivery, PromocodeRewardType, Prisma, WheelSectorKind, WheelSpinStatus } from '@prisma/client';
+import {
+  ContestMetric,
+  ContestPrizeDelivery,
+  PromocodeRewardType,
+  Prisma,
+  WheelSectorKind,
+  WheelSpinStatus,
+} from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { UserNotificationsService } from '../../notifications/services/user-notifications.service';
@@ -39,6 +46,8 @@ export interface ContestWinnerRow {
   readonly heldForReview: boolean;
   /** The leaderboard score that won the place. `null` on a draw. */
   readonly score: number | null;
+  /** What an operator checking the prize should look at. Only on a contest's own list. */
+  readonly signals?: WinnerSignals;
   readonly winner: {
     readonly id: string;
     readonly name: string;
@@ -46,6 +55,29 @@ export interface ContestWinnerRow {
     readonly telegramId: string | null;
     readonly email: string | null;
   };
+}
+
+/**
+ * Hints for the check «после проверки» exists for — never a verdict. A
+ * household shares an address, a family a phone; what is worth a second look
+ * is many friends who all look like the winner.
+ */
+export interface WinnerSignals {
+  /** Days since the winner's account was made. */
+  readonly accountAgeDays: number;
+  /** Open «похож на заблокированного» flags on the winner. */
+  readonly reviewFlags: number;
+  /**
+   * On a contest that counts friends — a referral leaderboard, or tickets for
+   * friends: the friends who counted, and how many of them share a device or
+   * an address with the winner, or are blocked now.
+   */
+  readonly friends: {
+    readonly counted: number;
+    readonly sharedDevice: number;
+    readonly sharedIp: number;
+    readonly blocked: number;
+  } | null;
 }
 
 const WINNER_SELECT = {
@@ -105,13 +137,89 @@ export class ContestWinnerService {
     @Optional() private readonly userNotifications?: UserNotificationsService,
   ) {}
 
-  public async listForContest(contestId: string): Promise<readonly ContestWinnerRow[]> {
+  public async listForContest(contestId: string, now = new Date()): Promise<readonly ContestWinnerRow[]> {
     const rows = await this.prismaService.contestWinner.findMany({
       where: { contestId },
       orderBy: { place: 'asc' },
       select: WINNER_SELECT,
     });
-    return rows.map((row) => toRow(row));
+    const signals = await this.readSignals(contestId, rows.map((row) => row.user.id), now);
+    return rows.map((row) => ({ ...toRow(row), signals: signals.get(row.user.id) }));
+  }
+
+  /** The hints for every winner of one contest, in a handful of queries rather than a few per winner. */
+  private async readSignals(
+    contestId: string,
+    winnerIds: readonly string[],
+    now: Date,
+  ): Promise<ReadonlyMap<string, WinnerSignals>> {
+    const out = new Map<string, WinnerSignals>();
+    if (winnerIds.length === 0) return out;
+    const contest = await this.prismaService.contest.findUnique({
+      where: { id: contestId },
+      select: { startAt: true, endAt: true, metric: true, ticketsPerReferral: true },
+    });
+    if (contest === null) return out;
+
+    const [people, flags] = await Promise.all([
+      this.prismaService.user.findMany({ where: { id: { in: [...winnerIds] } }, select: { id: true, createdAt: true } }),
+      this.prismaService.userReviewFlag.groupBy({
+        by: ['userId'],
+        where: { userId: { in: [...winnerIds] }, clearedAt: null },
+        _count: { _all: true },
+      }),
+    ]);
+    const flagsOf = new Map(flags.map((row) => [row.userId, row._count._all]));
+
+    const countsFriends = contest.metric === ContestMetric.REFERRALS_PAID || contest.ticketsPerReferral > 0;
+    const friendsOf = new Map<string, string[]>();
+    const devices = new Map<string, Set<string>>();
+    const addresses = new Map<string, Set<string>>();
+    const blocked = new Set<string>();
+    if (countsFriends) {
+      const referrals = await this.prismaService.referral.findMany({
+        where: { referrerId: { in: [...winnerIds] }, level: 1, qualifiedAt: { gte: contest.startAt, lte: contest.endAt } },
+        select: { referrerId: true, referredId: true },
+      });
+      for (const row of referrals) friendsOf.set(row.referrerId, [...(friendsOf.get(row.referrerId) ?? []), row.referredId]);
+      const everybody = [...new Set([...winnerIds, ...referrals.map((row) => row.referredId)])];
+      const [deviceRows, addressRows, blockedRows] = await Promise.all([
+        this.prismaService.deviceObservation.findMany({
+          where: { userId: { in: everybody } },
+          select: { userId: true, kind: true, value: true },
+        }),
+        this.prismaService.userIpObservation.findMany({
+          where: { userId: { in: everybody } },
+          select: { userId: true, address: true },
+        }),
+        this.prismaService.user.findMany({
+          where: { id: { in: referrals.map((row) => row.referredId) }, isBlocked: true },
+          select: { id: true },
+        }),
+      ]);
+      for (const row of deviceRows) collect(devices, row.userId, `${row.kind}:${row.value}`);
+      for (const row of addressRows) collect(addresses, row.userId, row.address);
+      for (const row of blockedRows) blocked.add(row.id);
+    }
+
+    for (const person of people) {
+      const friends = friendsOf.get(person.id) ?? [];
+      const mine = devices.get(person.id) ?? new Set<string>();
+      const myAddresses = addresses.get(person.id) ?? new Set<string>();
+      out.set(person.id, {
+        accountAgeDays: Math.max(0, Math.floor((now.getTime() - person.createdAt.getTime()) / 86_400_000)),
+        reviewFlags: flagsOf.get(person.id) ?? 0,
+        friends: countsFriends
+          ? {
+              counted: friends.length,
+              sharedDevice: friends.filter((id) => overlaps(devices.get(id), mine)).length,
+              sharedIp: friends.filter((id) => overlaps(addresses.get(id), myAddresses)).length,
+              blocked: friends.filter((id) => blocked.has(id)).length,
+            }
+          : null,
+      });
+    }
+    return out;
   }
 
   /** The queue: every contest prize still owed to somebody. */
@@ -432,6 +540,18 @@ export class ContestWinnerService {
 }
 
 class TicketRaceLost extends Error {}
+
+function collect(into: Map<string, Set<string>>, key: string, value: string): void {
+  const set = into.get(key) ?? new Set<string>();
+  set.add(value);
+  into.set(key, set);
+}
+
+function overlaps(a: ReadonlySet<string> | undefined, b: ReadonlySet<string>): boolean {
+  if (a === undefined || b.size === 0) return false;
+  for (const value of a) if (b.has(value)) return true;
+  return false;
+}
 
 function toRow(row: WinnerRow): ContestWinnerRow {
   const snapshot = readSnapshot(row.prizeSnapshot);

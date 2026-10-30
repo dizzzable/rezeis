@@ -12,6 +12,7 @@ import {
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { EVENT_TYPES, SystemEventsService } from '../../../common/services/system-events.service';
 import { buildAudienceWhere, normalizeAudienceFilter } from '../../broadcast/utils/broadcast-audience.util';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { readPlatformBranding } from '../../settings/utils/platform-branding.util';
@@ -62,6 +63,8 @@ const CONTEST_SELECT = {
   announce: true,
   announcedAt: true,
   resultsNotifiedAt: true,
+  remind: true,
+  remindedAt: true,
   ticketsPerPurchase: true,
   ticketsPerReferral: true,
   maxTicketsPerUser: true,
@@ -95,6 +98,7 @@ const TERMS_SELECT = {
   order: true,
   createdBy: true,
   announce: true,
+  remind: true,
   ticketsPerPurchase: true,
   ticketsPerReferral: true,
   maxTicketsPerUser: true,
@@ -153,6 +157,8 @@ export interface ContestInput extends ContestTicketRules {
   readonly audienceFilter: Prisma.InputJsonValue | null;
   readonly maxEntries: number | null;
   readonly announce: boolean;
+  /** One reminder a day before the end. */
+  readonly remind: boolean;
   readonly channel: ContestChannel | null;
   readonly prizes: readonly ContestPrizeInput[];
   readonly kind: ContestKind;
@@ -184,6 +190,8 @@ export interface ContestSummary extends ContestTicketRules {
   readonly announce: boolean;
   readonly announcedAt: string | null;
   readonly resultsNotifiedAt: string | null;
+  readonly remind: boolean;
+  readonly remindedAt: string | null;
   readonly channel: ContestChannel | null;
   /** SHA-256 of the draw's seed, from publish on. */
   readonly drawSeedHash: string | null;
@@ -221,6 +229,8 @@ export type DrawResult =
       readonly tickets: number | null;
       /** The contest that repeats this one, when it was made. */
       readonly repeatedBy: string | null;
+      /** Prizes left for an operator: held for a check, through support, manual, a key that ran out. */
+      readonly pending: number;
     }
   /**
    * Not ACTIVE, or not over yet, or already drawn by a concurrent sweep; or a
@@ -320,6 +330,8 @@ export class ContestService {
     @Optional() private readonly profileSyncQueue?: ProfileSyncQueueService,
     /** Ranks a leaderboard. `@Optional()` for the same specs; a leaderboard without it cannot end. */
     @Optional() private readonly standings?: ContestStandingsService,
+    /** Tells the operators about prizes left for them. */
+    @Optional() private readonly events?: SystemEventsService,
   ) {}
 
   public async list(): Promise<readonly ContestSummary[]> {
@@ -413,6 +425,7 @@ export class ContestService {
           title: input.title,
           description: input.description,
           repeatMonthly: input.repeatMonthly,
+          remind: input.remind,
           ...(endAt === null ? {} : { endAt }),
         },
       });
@@ -694,13 +707,16 @@ export class ContestService {
         }
 
         const repeatedBy = contest.repeatMonthly ? await repeatForAMonth(tx, input.contestId, contest, zone, now) : null;
+        const pending = await tx.contestWinner.count({
+          where: { contestId: input.contestId, status: WheelSpinStatus.PENDING },
+        });
 
         this.logger.log(
           `Contest ${input.contestId} finished: ${picked.length} winner(s) from ${entrants}` +
             (totalTickets === null ? ' ranked' : ` entrant(s), ${totalTickets} ticket(s)`) +
             (repeatedBy === null ? '' : `; repeats as ${repeatedBy}`),
         );
-        return { drawn: true, winners: picked.length, entrants, tickets: totalTickets, repeatedBy };
+        return { drawn: true, winners: picked.length, entrants, tickets: totalTickets, repeatedBy, pending };
       },
       // Up to a hundred places, each a create, a payout and an update, and a
       // leaderboard's thousands of rows besides — that does not fit Prisma's
@@ -710,7 +726,17 @@ export class ContestService {
     );
 
     // After the commit, never inside it: a sync job enqueued in a transaction
-    // announces a change a rollback then undoes.
+    // announces a change a rollback then undoes. The same for the operators'
+    // card: a draw that rolled back has nothing waiting for them.
+    if (result.drawn && result.pending > 0) {
+      this.events?.info(
+        EVENT_TYPES.CONTEST_PRIZES_PENDING,
+        'SUPPORT',
+        `Конкурс «${readRuTitle(terms.title)}» завершён: призов ждут выдачи — ${result.pending}. ` +
+          'Откройте «Конкурсы» → «Победители»: «Выдать» начисляет приз, «Отказать» — с причиной.',
+        { contestId: input.contestId, pending: result.pending, prizeDelivery: terms.prizeDelivery },
+      );
+    }
     for (const subscriptionId of new Set(synced)) {
       await this.profileSyncQueue
         ?.enqueueSubscriptionSync(subscriptionId, { source: 'CONTEST_PRIZE', contestId: input.contestId })
@@ -746,6 +772,17 @@ export class ContestService {
       data: { drawError: message, drawErrorAt: now },
     });
     return current.drawError !== message;
+  }
+
+  /**
+   * How many people an audience filter takes in, blocked accounts left out —
+   * the number the form shows beside the filter, so an operator sees that
+   * «Триал + Android + не заходил 30 дней» is twelve people before publishing.
+   */
+  public async countAudience(audienceFilter: Prisma.JsonValue | null): Promise<number> {
+    const filter = normalizeAudienceFilter(audienceFilter);
+    const where = filter === null ? {} : buildAudienceWhere(BroadcastAudience.ALL, filter);
+    return this.prismaService.user.count({ where: { AND: [{ isBlocked: false }, where] } });
   }
 
   /** Every ACTIVE contest whose end has passed. The sweep's list. */
@@ -1409,6 +1446,7 @@ async function repeatForAMonth(
       order: contest.order,
       createdBy: contest.createdBy,
       announce: contest.announce,
+      remind: contest.remind,
       ticketsPerPurchase: contest.ticketsPerPurchase,
       ticketsPerReferral: contest.ticketsPerReferral,
       maxTicketsPerUser: contest.maxTicketsPerUser,
@@ -1429,6 +1467,17 @@ async function repeatForAMonth(
     select: { id: true },
   });
   return created.id;
+}
+
+function readRuTitle(value: Prisma.JsonValue): string {
+  if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+    const record = value as Record<string, unknown>;
+    for (const key of ['ru', 'en']) {
+      const text = record[key];
+      if (typeof text === 'string' && text.trim() !== '') return text.trim();
+    }
+  }
+  return 'Конкурс';
 }
 
 /** A draw's source of chance, made when it goes live. A leaderboard has none. */
@@ -1453,6 +1502,7 @@ function termsData(input: ContestInput): Omit<Prisma.ContestCreateInput, 'prizes
     audienceFilter: input.audienceFilter ?? Prisma.JsonNull,
     maxEntries: ranked ? null : input.maxEntries,
     announce: input.announce,
+    remind: input.remind,
     ticketsPerPurchase: ranked ? 0 : input.ticketsPerPurchase,
     ticketsPerReferral: ranked ? 0 : input.ticketsPerReferral,
     maxTicketsPerUser: ranked ? null : input.maxTicketsPerUser,
@@ -1503,6 +1553,8 @@ function toSummary(row: ContestRow, currency: string, pendingPrizes: number): Co
     announce: row.announce,
     announcedAt: row.announcedAt?.toISOString() ?? null,
     resultsNotifiedAt: row.resultsNotifiedAt?.toISOString() ?? null,
+    remind: row.remind,
+    remindedAt: row.remindedAt?.toISOString() ?? null,
     ticketsPerPurchase: row.ticketsPerPurchase,
     ticketsPerReferral: row.ticketsPerReferral,
     maxTicketsPerUser: row.maxTicketsPerUser,

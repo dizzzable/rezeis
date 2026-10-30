@@ -64,6 +64,8 @@ export interface Contest {
   readonly announce: boolean
   readonly announcedAt: string | null
   readonly resultsNotifiedAt: string | null
+  readonly remind?: boolean
+  readonly remindedAt?: string | null
   readonly ticketsPerPurchase: number
   readonly ticketsPerReferral: number
   readonly maxTicketsPerUser: number | null
@@ -103,6 +105,7 @@ export interface ContestPayload {
   readonly audienceFilter?: ContestAudienceFilter | null
   readonly maxEntries?: number | null
   readonly announce?: boolean
+  readonly remind?: boolean
   readonly ticketsPerPurchase?: number
   readonly ticketsPerReferral?: number
   readonly maxTicketsPerUser?: number | null
@@ -164,6 +167,17 @@ export interface ContestWinner {
   readonly heldForReview?: boolean
   /** The leaderboard score that won the place. */
   readonly score?: number | null
+  /** Hints for the check, never a verdict. */
+  readonly signals?: {
+    readonly accountAgeDays: number
+    readonly reviewFlags: number
+    readonly friends: {
+      readonly counted: number
+      readonly sharedDevice: number
+      readonly sharedIp: number
+      readonly blocked: number
+    } | null
+  }
   readonly winner: {
     readonly id: string
     readonly name: string
@@ -218,6 +232,11 @@ export const listContestStandings = (contestId: string, page: { readonly take: n
   api
     .get<ContestStandingsPage>(`/admin/contests/${encodeURIComponent(contestId)}/standings`, { params: page })
     .then((r) => ({ total: Number(r.data?.total ?? 0), rows: Array.isArray(r.data?.rows) ? r.data.rows : [] }))
+
+export const countContestAudience = (audienceFilter: ContestAudienceFilter | null) =>
+  api
+    .post<{ count: number }>('/admin/contests/audience/count', { audienceFilter })
+    .then((r) => Number(r.data?.count ?? 0))
 
 export const listPendingContestWinners = () =>
   api.get('/admin/contests/winners/pending').then((r) => expectArray<ContestWinner>(r.data))

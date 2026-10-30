@@ -5421,6 +5421,9 @@ model Contest {
   announcedAt       DateTime? @map("announced_at") @db.Timestamptz(3)
   /// Every entrant has heard how they did.
   resultsNotifiedAt DateTime? @map("results_notified_at") @db.Timestamptz(3)
+  /// Remind people a day before the end; `remindedAt` says everybody has been.
+  remind            Boolean   @default(false) @map("remind")
+  remindedAt        DateTime? @map("reminded_at") @db.Timestamptz(3)
 
   /// Extra chances, counted at the draw from what happened inside the window:
   /// a paid purchase, and a friend who paid. 0 / 0 / NULL is "one person, one
@@ -5531,6 +5534,8 @@ enum ContestNoticeKind {
   ANNOUNCED
   /// "Here is how you did" — sent to every entrant after the draw.
   RESULT
+  /// "A day left" — the one reminder before the end.
+  REMINDER
 }
 
 enum ContestKind {

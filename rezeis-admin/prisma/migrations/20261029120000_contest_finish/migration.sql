@@ -5,6 +5,7 @@
 --                               flag is the operator's; the stamp says the
 --                               sweep has told everybody.
 --   results_notified_at         every entrant has heard how they did.
+--   remind, reminded_at         one reminder a day before the end.
 --   tickets_per_purchase,       extra chances for a paid purchase, and for a
 --   tickets_per_referral,       friend who paid, inside the contest window;
 --   max_tickets_per_user        a ceiling per person. 0 / 0 / NULL is the old
@@ -58,6 +59,8 @@ SET lock_timeout = '5s';
 ALTER TABLE "contests" ADD COLUMN IF NOT EXISTS "announce" BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE "contests" ADD COLUMN IF NOT EXISTS "announced_at" TIMESTAMPTZ(3);
 ALTER TABLE "contests" ADD COLUMN IF NOT EXISTS "results_notified_at" TIMESTAMPTZ(3);
+ALTER TABLE "contests" ADD COLUMN IF NOT EXISTS "remind" BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE "contests" ADD COLUMN IF NOT EXISTS "reminded_at" TIMESTAMPTZ(3);
 ALTER TABLE "contests" ADD COLUMN IF NOT EXISTS "tickets_per_purchase" INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE "contests" ADD COLUMN IF NOT EXISTS "tickets_per_referral" INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE "contests" ADD COLUMN IF NOT EXISTS "max_tickets_per_user" INTEGER;
@@ -79,7 +82,7 @@ UPDATE "contests"
 DO $do$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'ContestNoticeKind') THEN
-    CREATE TYPE "ContestNoticeKind" AS ENUM ('ANNOUNCED', 'RESULT');
+    CREATE TYPE "ContestNoticeKind" AS ENUM ('ANNOUNCED', 'RESULT', 'REMINDER');
   END IF;
 END
 $do$;
