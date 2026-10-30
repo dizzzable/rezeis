@@ -39,6 +39,7 @@ import { UploadAttachmentDto } from '../dto/attachment.dto';
 import { CreateDocumentRequestDto } from '../dto/document-request.dto';
 import { SupportAiDispatchService } from '../services/support-ai-dispatch.service';
 import { SupportAttachmentService } from '../services/support-attachment.service';
+import { SupportClientCardService } from '../services/support-client-card.service';
 import { SupportNotificationsService } from '../services/support-notifications.service';
 import { BlockedIdentityService } from '../../blocked-identities/services/blocked-identity.service';
 import { SupportTicketsService } from '../services/support-tickets.service';
@@ -78,6 +79,9 @@ export class AdminSupportTicketsController {
      */
     @Optional()
     private readonly supportAi?: SupportAiDispatchService,
+    /** The client card beside a ticket. `@Optional()` for the same reason. */
+    @Optional()
+    private readonly clientCards?: SupportClientCardService,
   ) {}
 
   @Get()
@@ -206,6 +210,34 @@ export class AdminSupportTicketsController {
     }
     const ticket = await this.supportTicketsService.getById(ticketId);
     return serializeTicket(ticket);
+  }
+
+  /**
+   * The person behind the ticket, read now — the panel's rows and the live
+   * Remnawave profile beside each recent subscription, with the warnings
+   * they add up to. The same card the AI assistant reads before every reply.
+   *
+   * `null` for a guest thread (nobody to read) and for a panel built without
+   * the service. Under the ticket's own gate, archive included: it shows no
+   * more than the ticket's header already does, only fresher.
+   */
+  @Get(':ticketId/client-card')
+  @RequirePermission('support_tickets', 'view')
+  @ApiOperation({ summary: 'The ticket author\'s subscriptions, payments and live VPN profile, read now' })
+  public async getClientCard(
+    @Param('ticketId') ticketId: string,
+    @CurrentAdmin() admin: CurrentAdminInterface,
+  ): Promise<unknown> {
+    if (await this.supportTicketsService.isArchived(ticketId)) {
+      await this.assertArchivePermission(admin);
+    }
+    const ticket = await this.prismaService.supportTicket.findUnique({
+      where: { id: ticketId },
+      select: { userId: true },
+    });
+    if (ticket === null) throw new NotFoundException('Ticket not found');
+    if (ticket.userId === null || this.clientCards === undefined) return { card: null };
+    return { card: await this.clientCards.read(ticket.userId) };
   }
 
   @Post(':ticketId/reply')

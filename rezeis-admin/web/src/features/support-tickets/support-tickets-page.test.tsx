@@ -320,3 +320,136 @@ describe('the AI assistant on a ticket (panel 0.9.7.76)', () => {
     expect(screen.getByRole('button', { name: 'Give back to the AI' })).toBeInTheDocument()
   })
 })
+
+/**
+ * The client card beside a ticket (30.10.2026). The owner's ticket: the header
+ * said «Ни разу не подключался» and showed no subscription — panel columns
+ * only — while the client wrote «Сейчас работает»; the hand-over strip still
+ * read like an open fault six minutes after it was not one.
+ */
+describe('what the operator knows about the client (30.10.2026)', () => {
+  const NOW = Date.now()
+  const at = (minutesAgo: number) => new Date(NOW - minutesAgo * 60_000).toISOString()
+
+  function mockTicketWithCard(card: unknown, messages?: unknown[]) {
+    vi.restoreAllMocks()
+    usePermissionStore.setState({
+      loaded: true,
+      role: null,
+      granted: new Set(['support_tickets:view', 'support_tickets:edit']),
+    })
+    const detail = {
+      id: 'ticket-card',
+      userTelegramId: null,
+      subject: 'VPN не работает',
+      status: 'open',
+      channel: 'cabinet',
+      createdAt: at(10),
+      updatedAt: at(4),
+      user: { id: 'u-1', login: 'Zuli', name: null, username: null, telegramId: null, hasEverConnected: false, subscription: null },
+      ai: { active: false, handedOffAt: at(9), handoffReason: 'Клиент оплатил продление, а VPN не работает' },
+      messages: messages ?? [
+        { id: 'm-1', authorType: 'user', authorId: 'u-1', content: 'Я оплатила продление', createdAt: at(10) },
+        { id: 'm-2', authorType: 'admin', authorId: null, content: 'Передаю специалисту', createdAt: at(9), metadata: { ai: true } },
+        { id: 'm-3', authorType: 'user', authorId: 'u-1', content: 'Когда', createdAt: at(8) },
+        { id: 'm-4', authorType: 'user', authorId: 'u-1', content: 'Сейчас работает', createdAt: at(4) },
+      ],
+      docRequests: [],
+    }
+    vi.spyOn(api, 'get').mockImplementation(async (path: string) => {
+      if (path === '/admin/support-tickets') return { data: { items: [{ ...detail, messages: [] }], total: 1 } }
+      if (path === '/admin/support-tickets/ticket-card') return { data: detail }
+      if (path === '/admin/support-tickets/ticket-card/client-card') return { data: { card } }
+      return { data: {} }
+    })
+  }
+
+  const liveCard = {
+    asOf: at(0),
+    zone: 'Europe/Moscow',
+    account: { createdAt: at(100_000), isBlocked: false, surface: null, os: null, lastSeenAt: null, firstTrafficAt: at(3) },
+    subscriptions: [
+      {
+        id: 's-1',
+        plan: 'Стандарт',
+        status: 'ACTIVE',
+        isTrial: false,
+        startedAt: at(100),
+        expiresAt: new Date(NOW + 30 * 86_400_000).toISOString(),
+        trafficLimitGb: 100,
+        deviceLimit: 3,
+        read: 'live',
+        remnawave: { status: 'ACTIVE', expiresAt: null, usedBytes: 2 * 1024 ** 3, onlineAt: at(2), firstConnectedAt: at(3), devices: 1 },
+        sync: null,
+      },
+    ],
+    payments: [
+      {
+        number: '4821',
+        createdAt: at(12),
+        status: 'COMPLETED',
+        purchaseType: 'RENEW',
+        amount: '299',
+        currency: 'RUB',
+        gateway: 'Карта или СБП',
+        plan: 'Стандарт',
+        appliedAt: null,
+      },
+    ],
+    alerts: [{ kind: 'paid_not_applied', payment: '4821', paidAt: at(12) }],
+  }
+
+  it('shows the live card, its fault first, and drops the stale «never connected» badge', async () => {
+    mockTicketWithCard(liveCard)
+    const user = userEvent.setup()
+    renderWithProviders(<SupportTicketsPage />)
+    await user.click(await screen.findByRole('button', { name: /VPN не работает/ }))
+
+    const panel = await screen.findByTestId('ticket-client-card')
+    expect(panel).toHaveTextContent('Client now')
+    expect(panel).toHaveTextContent(/Стандарт · Subscription active, until/)
+    expect(screen.getByTestId('ticket-client-alerts')).toHaveTextContent(/Payment #4821 was paid .* but never applied to the subscription/)
+    // Unfolded by itself because of the fault: the live line and the payment.
+    expect(panel).toHaveTextContent(/Remnawave: ACTIVE · traffic 2\.0 of 100 GB · 1 of 3 devices · online 2 minutes ago/)
+    expect(panel).toHaveTextContent(/Renewal «Стандарт» · 299 RUB · Карта или СБП · paid, NOT applied · №4821/)
+    expect(screen.queryByText('Never connected')).not.toBeInTheDocument()
+  })
+
+  it('stays folded to one line when nothing is wrong', async () => {
+    mockTicketWithCard({ ...liveCard, alerts: [], payments: [] })
+    const user = userEvent.setup()
+    renderWithProviders(<SupportTicketsPage />)
+    await user.click(await screen.findByRole('button', { name: /VPN не работает/ }))
+
+    const panel = await screen.findByTestId('ticket-client-card')
+    expect(panel).toHaveTextContent(/Стандарт · Subscription active/)
+    expect(panel).not.toHaveTextContent(/online 2 minutes ago/)
+    await user.click(screen.getByRole('button', { name: 'Details' }))
+    expect(panel).toHaveTextContent(/online 2 minutes ago/)
+  })
+
+  it('says the client wrote after the hand-over, so the reason may be out of date', async () => {
+    mockTicketWithCard(null)
+    const user = userEvent.setup()
+    renderWithProviders(<SupportTicketsPage />)
+    await user.click(await screen.findByRole('button', { name: /VPN не работает/ }))
+
+    expect(await screen.findByTestId('ticket-ai-since')).toHaveTextContent(
+      /Since the hand-over the client wrote 2 more messages \(last .*\) — the reason may be out of date\./,
+    )
+    expect(screen.queryByTestId('ticket-client-card')).not.toBeInTheDocument()
+  })
+
+  it('says nothing of the kind when the client has not written since', async () => {
+    mockTicketWithCard(null, [
+      { id: 'm-1', authorType: 'user', authorId: 'u-1', content: 'Я оплатила продление', createdAt: at(10) },
+      { id: 'm-2', authorType: 'admin', authorId: null, content: 'Передаю специалисту', createdAt: at(9), metadata: { ai: true } },
+    ])
+    const user = userEvent.setup()
+    renderWithProviders(<SupportTicketsPage />)
+    await user.click(await screen.findByRole('button', { name: /VPN не работает/ }))
+
+    await screen.findByTestId('ticket-ai-strip')
+    expect(screen.queryByTestId('ticket-ai-since')).not.toBeInTheDocument()
+  })
+})

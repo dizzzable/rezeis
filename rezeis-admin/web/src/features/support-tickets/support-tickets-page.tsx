@@ -23,6 +23,7 @@ import {
 import { toast } from 'sonner';
 import { api } from '@/lib/api';
 import { UserPickerDialog } from './user-picker-dialog';
+import { ClientCardPanel } from './client-card-panel';
 import { formatBytes, formatDateTime } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -685,6 +686,15 @@ function TicketDetail({
   const viewer = useMediaViewer(viewable);
   const contact = ticket.guest?.email ?? ticket.guest?.displayName ?? null;
   const isClosed = ticket.status === 'closed';
+  // What the client wrote after the assistant handed the thread over. The
+  // reason above is the assistant's summary AT that moment; on the owner's
+  // ticket the client wrote «Сейчас работает» six minutes later, and the strip
+  // still read like an open fault.
+  const handedOffAt = ticket.ai?.handedOffAt ? Date.parse(ticket.ai.handedOffAt) : null;
+  const writtenSinceHandoff =
+    handedOffAt === null
+      ? []
+      : ticket.messages.filter((message) => message.authorType === 'user' && Date.parse(message.createdAt) > handedOffAt);
 
   return (
     <Card className="h-full flex flex-col">
@@ -791,27 +801,12 @@ function TicketDetail({
                     {t('supportTicketsPage.detail.ctx.blocked')}
                   </Badge>
                 )}
-                <Badge
-                  variant="outline"
-                  className={cn(
-                    'text-[10px]',
-                    ticket.user.hasEverConnected === false && 'border-amber-500/50 text-amber-600',
-                  )}
-                >
-                  {ticket.user.hasEverConnected === false
-                    ? t('supportTicketsPage.detail.ctx.neverConnected')
-                    : t('supportTicketsPage.detail.ctx.hasConnected')}
-                </Badge>
-                {ticket.user.subscription && (
-                  <Badge variant="outline" className="text-[10px]">
-                    {t(
-                      `supportTicketsPage.detail.ctx.sub.${ticket.user.subscription.status}`,
-                      ticket.user.subscription.status,
-                    )}
-                    {ticket.user.subscription.isTrial &&
-                      ` · ${t('supportTicketsPage.detail.ctx.trial')}`}
-                  </Badge>
-                )}
+                {/* «Подключался» and the subscription live in «Клиент сейчас»
+                    below, read from Remnawave as well as the panel: the two
+                    badges that stood here read panel columns only, and on the
+                    owner's ticket (30.10.2026) said «Ни разу не подключался»
+                    and nothing about a subscription while the client wrote
+                    «Сейчас работает». */}
                 {ticket.user.surface && (
                   <Badge variant="outline" className="text-[10px]">
                     {t(`supportTicketsPage.detail.ctx.surface.${ticket.user.surface}`, ticket.user.surface)}
@@ -857,6 +852,8 @@ function TicketDetail({
         </div>
       </CardHeader>
 
+      {!guest && ticket.user && <ClientCardPanel ticketId={ticket.id} />}
+
       {/* The AI assistant on this thread — only when it is, or was, involved.
           Taking the thread needs no button press: a reply does it. The button
           is for taking it without writing, or giving it back. */}
@@ -880,6 +877,14 @@ function TicketDetail({
                 : t('supportTicketsPage.detail.ai.handedOffNoReason', {
                     when: formatDateTime(ticket.ai.handedOffAt ?? ticket.updatedAt),
                   })}
+            {!ticket.ai.active && writtenSinceHandoff.length > 0 && (
+              <span className="mt-0.5 block font-medium" data-testid="ticket-ai-since">
+                {t('supportTicketsPage.detail.ai.since', {
+                  count: writtenSinceHandoff.length,
+                  time: formatDateTime(writtenSinceHandoff[writtenSinceHandoff.length - 1]!.createdAt),
+                })}
+              </span>
+            )}
           </span>
           {canSwitchAi && !isClosed && !guest && (
             <Button

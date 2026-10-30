@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { SupportTicketStatus } from '@prisma/client';
 import OpenAI from 'openai';
 import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions';
@@ -11,6 +11,8 @@ import { AiInstructionService } from '../ai-config/services/ai-instruction.servi
 import { FaqService } from '../faq/services/faq.service';
 import { PlanCatalogService } from '../plans/services/plan-catalog.service';
 import { SupportAiDispatchService } from '../support-tickets/services/support-ai-dispatch.service';
+import { SupportClientCardService } from '../support-tickets/services/support-client-card.service';
+import { describeClientCardForModel } from '../support-tickets/support-client-card';
 import { SupportNotificationsService } from '../support-tickets/services/support-notifications.service';
 import { SupportTicketsService } from '../support-tickets/services/support-tickets.service';
 import {
@@ -98,6 +100,14 @@ export class SupportAiResponderService {
     private readonly tickets: SupportTicketsService,
     private readonly notifications: SupportNotificationsService,
     private readonly dispatch: SupportAiDispatchService,
+    /**
+     * The client's account, read before every reply (30.10.2026: the
+     * assistant answered «only a specialist can check a payment» because it
+     * was told nothing about the client). Last and `@Optional()` so the
+     * specs' positional construction keeps working; absent, the prompt says
+     * the data is unavailable rather than nothing.
+     */
+    @Optional() private readonly clientCards?: SupportClientCardService,
   ) {}
 
   /** Answer the client's message of one job. */
@@ -133,9 +143,25 @@ export class SupportAiResponderService {
       this.logger.warn(`AI instructions unreadable, answering without them: ${describe(err)}`);
       return [];
     });
+    // Read now, for this reply: a card from the client's first message would
+    // tell the model «not paid» three messages after the payment went through.
+    const card =
+      ticket.user === null || this.clientCards === undefined
+        ? null
+        : await this.clientCards.read(ticket.user.id).catch((err: unknown) => {
+            this.logger.warn(`Client card unreadable for ticket ${ticket.id}, answering without it: ${describe(err)}`);
+            return null;
+          });
     const model = settings.model.trim().length > 0 ? settings.model.trim() : DEFAULT_MODEL;
     const messages: ChatCompletionMessageParam[] = [
-      { role: 'system', content: buildSupportAiSystemPrompt({ persona: settings.systemPrompt, knowledge }) },
+      {
+        role: 'system',
+        content: buildSupportAiSystemPrompt({
+          persona: settings.systemPrompt,
+          knowledge,
+          client: card === null ? null : describeClientCardForModel(card),
+        }),
+      },
       ...buildSupportAiConversation(ticket.subject, ticket.messages),
     ];
     const result = await this.runModel(this.createClient(settings), model, messages);

@@ -35,6 +35,8 @@ function build(opts: {
   readonly enabled?: boolean;
   /** Runs while the model "thinks" — an operator answering, the client writing. */
   readonly duringModel?: (state: { aiActive: boolean; messages: Message[] }) => void;
+  /** The client card service; absent — the assistant is built without one. */
+  readonly clientCards?: { read(userId: string): Promise<unknown> };
 } = {}) {
   const state = {
     aiActive: opts.aiActive ?? true,
@@ -147,6 +149,7 @@ function build(opts: {
     tickets as never,
     { notifyAdminReply: async (input: { ticketId: string }) => void notified.push(input.ticketId) } as never,
     dispatch as never,
+    opts.clientCards as never,
   );
   return { service, state, written, notified, handOffs, reopened, modelCalls };
 }
@@ -259,5 +262,56 @@ describe('the assistant hands the thread over', () => {
     assert.deepEqual(handOffs, ['ai_error']);
     assert.equal(written.length, 1);
     assert.deepEqual(reopened, [1]);
+  });
+});
+
+/**
+ * The client's account, read before EVERY reply (30.10.2026). The ticket the
+ * owner showed: «я оплатила продление» answered with «only a specialist can
+ * check» — the assistant had been told nothing about the client.
+ */
+describe('the assistant knows whom it answers', () => {
+  const card = (expiresAt: string) => ({
+    asOf: '2026-10-30T10:00:00.000Z',
+    zone: 'Europe/Moscow',
+    account: { createdAt: '2026-09-01T10:00:00.000Z', isBlocked: false, surface: null, os: null, lastSeenAt: null, firstTrafficAt: null },
+    subscriptions: [
+      {
+        id: 's-1', plan: 'Стандарт', status: 'ACTIVE', isTrial: false, startedAt: null, expiresAt,
+        trafficLimitGb: null, deviceLimit: 3, read: 'skipped', remnawave: null, sync: null,
+      },
+    ],
+    payments: [],
+    alerts: [],
+  });
+
+  it('reads the card for this reply and puts it in front of the model', async () => {
+    const reads: string[] = [];
+    const { service, modelCalls } = build({
+      clientCards: {
+        read: async (userId) => {
+          reads.push(userId);
+          return card('2026-11-30T10:00:00.000Z');
+        },
+      },
+    });
+    assert.equal(await service.answer({ ticketId: 't-1', messageId: 'm-1' }), 'answered');
+    assert.deepEqual(reads, ['u-1'], 'the ticket author, read once for this reply');
+    const system = String((modelCalls[0] as { messages: Array<{ content: unknown }> }).messages[0]?.content);
+    assert.match(system, /--- ДАННЫЕ КЛИЕНТА/);
+    assert.match(system, /«Стандарт» — активна, до 30\.11\.2026, 13:00/);
+  });
+
+  it('still answers when the card cannot be read — and says the data is missing', async () => {
+    const { service, modelCalls } = build({
+      clientCards: {
+        read: async () => {
+          throw new Error('db down');
+        },
+      },
+    });
+    assert.equal(await service.answer({ ticketId: 't-1', messageId: 'm-1' }), 'answered');
+    const system = String((modelCalls[0] as { messages: Array<{ content: unknown }> }).messages[0]?.content);
+    assert.match(system, /ДАННЫЕ КЛИЕНТА: недоступны/);
   });
 });

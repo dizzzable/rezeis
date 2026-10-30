@@ -13,7 +13,9 @@ import { InternalGuestSupportController } from './controllers/internal-guest-sup
 import { InternalUserSupportController } from './controllers/internal-user-support.controller';
 import { SupportAiDispatchService } from './services/support-ai-dispatch.service';
 import { SupportNotificationsService } from './services/support-notifications.service';
+import { RemnawaveModule } from '../remnawave/remnawave.module';
 import { SupportAttachmentService } from './services/support-attachment.service';
+import { SupportClientCardService } from './services/support-client-card.service';
 import { GuestGateService } from './services/guest-gate.service';
 import { SupportGuestService } from './services/support-guest.service';
 import { SupportTicketsService } from './services/support-tickets.service';
@@ -37,6 +39,10 @@ import { SUPPORT_AI_QUEUE } from './support-ai.constants';
     NotificationsModule,
     SettingsModule,
     ReiwaPublicLinksModule,
+    // The client card reads each recent subscription's profile live.
+    // Remnawave's own imports are config, HTTP and notifications: no edge
+    // back here.
+    RemnawaveModule,
     BullModule.registerQueue({ name: SUPPORT_AI_QUEUE }),
   ],
   controllers: [
@@ -51,12 +57,21 @@ import { SUPPORT_AI_QUEUE } from './support-ai.constants';
     SupportAttachmentService,
     GuestGateService,
     SupportAiDispatchService,
+    SupportClientCardService,
   ],
   // `SupportNotificationsService` is exported so a module that posts an
   // operator message of its own — the wheel settling a manual prize — can
   // announce it the same way a reply from the inbox is announced, rather
   // than growing a second, quieter delivery path. `SupportAiDispatchService`
-  // for the assistant's worker, which hands threads over through it.
-  exports: [SupportTicketsService, SupportGuestService, SupportNotificationsService, SupportAiDispatchService],
+  // for the assistant's worker, which hands threads over through it, and
+  // `SupportClientCardService` for the same worker: the client card it reads
+  // before every reply is the one the ticket page shows.
+  exports: [
+    SupportTicketsService,
+    SupportGuestService,
+    SupportNotificationsService,
+    SupportAiDispatchService,
+    SupportClientCardService,
+  ],
 })
 export class SupportTicketsModule {}
