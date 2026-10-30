@@ -188,7 +188,7 @@ export const en = {
     cancelDialog: {
       title: 'Cancel the contest?',
       description:
-        'There will be no draw, nobody gets a prize, and it cannot be undone. The entries stay on record. Entrants are not messaged — the cabinet marks the contest “Cancelled”.',
+        'There will be no draw, nobody gets a prize, and it cannot be undone. The entries stay on record. Entrants are not messaged — a cabinet of 0.9.7.61 or newer shows it to them for 30 days, marked as cancelled by the organiser.',
       confirm: 'Cancel the contest',
     },
     entrants: {

@@ -211,7 +211,11 @@ export class SupportClientCardService {
           sub.status === 'ACTIVE' ||
           sub.status === 'LIMITED' ||
           (sub.expiresAt !== null && now.getTime() - sub.expiresAt.getTime() <= LIVE_READ_ENDED_WITHIN_MS);
-        if (this.remnawave === undefined || !recent || budget <= 0) return { read: 'skipped' as const, profile: null, devices: null };
+        if (!recent) return { read: 'skipped' as const, profile: null, devices: null };
+        if (this.remnawave === undefined) return { read: 'unavailable' as const, profile: null, devices: null };
+        // Not «давно закончилась»: a fourth running subscription is as current
+        // as the first, the card just does not spend a fourth read on it.
+        if (budget <= 0) return { read: 'not_read' as const, profile: null, devices: null };
         budget -= 1;
         return this.readOne(identity);
       }),

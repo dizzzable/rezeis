@@ -87,4 +87,12 @@ describe('who is alerted', () => {
     assert.equal(route?.title, 'Поддержка: нужен оператор');
     assert.equal(route?.url(event('support.ticket_handed_off', { ticketId: 't-1' })), '/support-tickets?ticket=t-1');
   });
+
+  it('the support category, opening «Конкурсы», for prizes a contest left waiting', () => {
+    const waiting = event('contest.prizes_pending', { contestId: 'c-1', pending: 2 });
+    const route = resolveNotificationRoute(waiting);
+    assert.equal(route?.category, 'support');
+    assert.equal(route?.title, 'Конкурс: призы ждут выдачи');
+    assert.equal(route?.url(waiting), '/contests');
+  });
 });

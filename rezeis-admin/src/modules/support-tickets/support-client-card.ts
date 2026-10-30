@@ -33,8 +33,10 @@ export type RemnawaveRead =
   | 'unavailable'
   /** The subscription has no Remnawave profile linked. */
   | 'unlinked'
-  /** Not read: an old subscription, or past the reads one card may make. */
-  | 'skipped';
+  /** Not read: a subscription that ended more than a week ago. */
+  | 'skipped'
+  /** Not read: the card's live reads went to newer subscriptions. */
+  | 'not_read';
 
 export interface ClientCardSubscription {
   readonly id: string;

@@ -31,7 +31,7 @@ interface ClientCardSubscription {
   expiresAt: string | null;
   trafficLimitGb: number | null;
   deviceLimit: number;
-  read: 'live' | 'missing' | 'unavailable' | 'unlinked' | 'skipped';
+  read: 'live' | 'missing' | 'unavailable' | 'unlinked' | 'skipped' | 'not_read';
   remnawave: {
     status: string | null;
     expiresAt: string | null;

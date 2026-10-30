@@ -98,6 +98,14 @@ const EVENT_ROUTES: Readonly<Record<string, CategoryRoute>> = {
     },
     title: 'Поддержка: нужен оператор',
   },
+  // A contest ended with prizes a person has to hand over or check. Asked for
+  // in the notification centre as well as in Telegram (the owner, 30.10.2026);
+  // under «Поддержка», the topic it is raised in.
+  [EVENT_TYPES.CONTEST_PRIZES_PENDING]: {
+    category: 'support',
+    url: () => '/contests',
+    title: 'Конкурс: призы ждут выдачи',
+  },
   [EVENT_TYPES.PAYMENT_FAILED]: {
     category: 'payment',
     url: () => '/payments',

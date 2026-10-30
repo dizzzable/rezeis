@@ -2901,7 +2901,7 @@ export const en = {
       system: 'System',
     },
     categoryHints: {
-      support: 'New ticket or user reply',
+      support: 'New ticket, user reply, hand-over from the AI, contest prizes waiting',
       payment: 'Failed payment',
       fraud: 'New anti-fraud signal',
       withdrawal: 'New withdrawal request',
@@ -4155,6 +4155,7 @@ export const en = {
           unavailable: 'Remnawave did not answer — shown from the panel',
           unlinked: 'No Remnawave profile yet',
           skipped: 'Remnawave not read: the subscription ended long ago',
+          not_read: 'Remnawave not read: live data covers three subscriptions only',
         },
         sync: {
           pending: 'Changes on their way to Remnawave since {{time}}',

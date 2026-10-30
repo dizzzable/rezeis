@@ -242,8 +242,13 @@ export class ContestWinnerService {
     return toRow(row);
   }
 
-  /** Open the conversation for one owed prize. Safe to call twice, or from two places at once. */
-  public async openTicket(winnerId: string): Promise<string | null> {
+  /**
+   * Open the conversation for one owed prize. Safe to call twice, or from two
+   * places at once. `greeting: false` opens it without «Оператор свяжется с
+   * вами, чтобы вручить приз» — for a held prize that is being refused, whose
+   * first words in the thread are the refusal and its reason.
+   */
+  public async openTicket(winnerId: string, options: { readonly greeting?: boolean } = {}): Promise<string | null> {
     const winner = await this.prismaService.contestWinner.findUnique({
       where: { id: winnerId },
       select: {
@@ -281,15 +286,17 @@ export class ContestWinnerService {
           data: { manualTicketId: ticket.id },
         });
         if (claimed.count !== 1) throw new TicketRaceLost();
-        await tx.supportTicketMessage.create({
-          data: {
-            ticketId: ticket.id,
-            authorType: 'SYSTEM',
-            authorId: null,
-            content: contestPrizeGreeting(contestTitle, prizeTitle, locale),
-            metadata: { type: 'contest_prize', winnerId: winner.id },
-          },
-        });
+        if (options.greeting !== false) {
+          await tx.supportTicketMessage.create({
+            data: {
+              ticketId: ticket.id,
+              authorType: 'SYSTEM',
+              authorId: null,
+              content: contestPrizeGreeting(contestTitle, prizeTitle, locale),
+              metadata: { type: 'contest_prize', winnerId: winner.id },
+            },
+          });
+        }
         return ticket.id;
       });
     } catch (error) {
@@ -504,7 +511,11 @@ export class ContestWinnerService {
 
     // BEFORE the status moves: the conversation opens only for what is still
     // owed, and settling is what stops it being owed.
-    const ticketId = winner.manualTicketId ?? (await this.openTicket(winner.id));
+    // A refusal opens it too — the cabinet says «подробности в переписке» —
+    // but without the greeting that promises the prize.
+    const ticketId =
+      winner.manualTicketId ??
+      (await this.openTicket(winner.id, { greeting: input.status !== WheelSpinStatus.REFUSED }));
 
     const written = await this.prismaService.contestWinner.updateMany({
       where: { id: winner.id, status: WheelSpinStatus.PENDING },

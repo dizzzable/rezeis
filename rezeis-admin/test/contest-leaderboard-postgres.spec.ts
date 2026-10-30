@@ -440,6 +440,14 @@ run('leaderboards on PostgreSQL', () => {
 
     assert.deepEqual(refused, { settled: true, status: WheelSpinStatus.REFUSED });
     assert.equal(await points(winner), 0);
+    const after = await prisma.contestWinner.findUniqueOrThrow({ where: { id: row.id }, select: { manualTicketId: true } });
+    const thread = await prisma.supportTicketMessage.findMany({
+      where: { ticketId: after.manualTicketId as string },
+      orderBy: { createdAt: 'asc' },
+      select: { content: true },
+    });
+    assert.equal(thread.length, 1, 'the refusal and its reason, not «оператор свяжется, чтобы вручить приз» before it');
+    assert.match(thread[0]?.content ?? '', /отказать[\s\S]*Накрутка рефералов/);
   });
 
   it('starts the same contest again for a month, once', async () => {
@@ -659,6 +667,22 @@ run('leaderboards on PostgreSQL', () => {
     );
     const row = await prisma.contest.findUniqueOrThrow({ where: { id: contestId }, select: { remindedAt: true } });
     assert.notEqual(row.remindedAt, null);
+  });
+
+  it('does not remind a contest shorter than two days: a day after its start is not a day before its end', async () => {
+    const startAt = monthStart();
+    const contestId = await january(
+      { kind: ContestKind.DRAW, metric: null, remind: true },
+      { startAt, endAt: new Date(startAt.getTime() + 36 * HOUR) },
+    );
+    await createUser('short-contest');
+    sent.length = 0;
+
+    await notices.sendDue(new Date(startAt.getTime() + 25 * HOUR));
+
+    assert.equal(sent.some((entry) => entry.payload['contestId'] === contestId), false);
+    const row = await prisma.contest.findUniqueOrThrow({ where: { id: contestId }, select: { remindedAt: true } });
+    assert.equal(row.remindedAt, null);
   });
 
   it('reminds the audience of a draw who has not entered, and not the entrants', async () => {

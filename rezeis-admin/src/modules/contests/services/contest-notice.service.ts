@@ -132,7 +132,7 @@ export class ContestNoticeService {
         startAt: { lte: new Date(now.getTime() - DAY_MS) },
       },
       orderBy: { endAt: 'asc' },
-      take: 5,
+      take: 20,
       select: {
         id: true,
         title: true,
@@ -147,6 +147,10 @@ export class ContestNoticeService {
       },
     });
     for (const contest of ending) {
+      // Shorter than two days: a day after its start is already less than a
+      // day before its end, and «остались сутки» would not be true. The query
+      // cannot compare its two columns, so the rule is kept here.
+      if (contest.endAt.getTime() - contest.startAt.getTime() < 2 * DAY_MS) continue;
       reminded += await this.remind(contest, now);
     }
     return { announced, results, reminded };

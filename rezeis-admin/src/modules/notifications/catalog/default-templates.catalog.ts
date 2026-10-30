@@ -61,7 +61,7 @@ const POINTS_BUTTONS: ReadonlyArray<DefaultNotificationTemplateButton> = [
   { labelRu: '🏠 Главное меню', labelEn: '🏠 Main menu', kind: 'callback', target: 'menu:main' },
 ];
 
-/** Contest rows open «События», where the contest, the result and the prize are. */
+/** Contest rows open «Конкурсы» (`/events`), where the contest, the result and the prize are. */
 const CONTEST_BUTTONS: ReadonlyArray<DefaultNotificationTemplateButton> = [
   { labelRu: '🎉 Открыть конкурсы', labelEn: '🎉 Open contests', kind: 'webApp', target: '/events' },
   { labelRu: '🏠 Главное меню', labelEn: '🏠 Main menu', kind: 'callback', target: 'menu:main' },
@@ -301,16 +301,16 @@ const CONTEST_TEMPLATES: ReadonlyArray<DefaultNotificationTemplate> = [
     type: 'contest_started',
     title: '🎉 Новый конкурс',
     titleEn: '🎉 A new contest',
-    body: '{{name}}, начался конкурс <b>«{{contest}}»</b>. Участвуйте до {{contestEndsDateTime}} — призы и условия в разделе «События».',
-    bodyEn: '{{name}}, the contest <b>“{{contest}}”</b> has started. Enter by {{contestEndsDateTime}} — prizes and rules are under “Events”.',
+    body: '{{name}}, начался конкурс <b>«{{contest}}»</b>. Участвуйте до {{contestEndsDateTime}} — призы и условия в разделе «Конкурсы».',
+    bodyEn: '{{name}}, the contest <b>“{{contest}}”</b> has started. Enter by {{contestEndsDateTime}} — prizes and rules are under “Contests”.',
     buttons: CONTEST_BUTTONS,
   },
   {
     type: 'contest_won',
     title: '🏆 Вы выиграли!',
     titleEn: '🏆 You won!',
-    body: 'Итоги конкурса <b>«{{contest}}»</b>: ваше <b>{{place}} место</b>, приз — {{prize}}. Он уже начислен, подробности — в разделе «События».',
-    bodyEn: 'Results of <b>“{{contest}}”</b>: you took <b>place {{place}}</b>, prize — {{prize}}. It has been credited; details are under “Events”.',
+    body: 'Итоги конкурса <b>«{{contest}}»</b>: ваше <b>{{place}} место</b>, приз — {{prize}}. Он уже начислен, подробности — в разделе «Конкурсы».',
+    bodyEn: 'Results of <b>“{{contest}}”</b>: you took <b>place {{place}}</b>, prize — {{prize}}. It has been credited; details are under “Contests”.',
     buttons: CONTEST_BUTTONS,
   },
   {
@@ -325,8 +325,8 @@ const CONTEST_TEMPLATES: ReadonlyArray<DefaultNotificationTemplate> = [
     type: 'contest_lost',
     title: '🎲 Итоги конкурса',
     titleEn: '🎲 Contest results',
-    body: 'Конкурс <b>«{{contest}}»</b> разыгран. В этот раз не повезло — спасибо, что участвовали! Победители — в разделе «События».',
-    bodyEn: 'The contest <b>“{{contest}}”</b> has been drawn. No luck this time — thank you for taking part! The winners are under “Events”.',
+    body: 'Конкурс <b>«{{contest}}»</b> разыгран. В этот раз не повезло — спасибо, что участвовали! Победители — в разделе «Конкурсы».',
+    bodyEn: 'The contest <b>“{{contest}}”</b> has been drawn. No luck this time — thank you for taking part! The winners are under “Contests”.',
     buttons: CONTEST_BUTTONS,
   },
   {
@@ -349,16 +349,16 @@ const CONTEST_TEMPLATES: ReadonlyArray<DefaultNotificationTemplate> = [
     type: 'contest_rank',
     title: '📊 Итоги конкурса',
     titleEn: '📊 Contest results',
-    body: 'Итоги конкурса <b>«{{contest}}»</b>: ваше <b>{{place}} место</b> из {{contestTotal}}, результат — {{contestScore}}. В этот раз без приза — спасибо, что участвовали! Победители — в разделе «События».',
-    bodyEn: 'Results of <b>“{{contest}}”</b>: you took <b>place {{place}}</b> of {{contestTotal}} with {{contestScore}}. No prize this time — thank you for taking part! The winners are under “Events”.',
+    body: 'Итоги конкурса <b>«{{contest}}»</b>: ваше <b>{{place}} место</b> из {{contestTotal}}, результат — {{contestScore}}. В этот раз без приза — спасибо, что участвовали! Победители — в разделе «Конкурсы».',
+    bodyEn: 'Results of <b>“{{contest}}”</b>: you took <b>place {{place}}</b> of {{contestTotal}} with {{contestScore}}. No prize this time — thank you for taking part! The winners are under “Contests”.',
     buttons: CONTEST_BUTTONS,
   },
   {
     type: 'contest_reminder',
     title: '⏳ Остались сутки',
     titleEn: '⏳ One day left',
-    body: '{{name}}, конкурс <b>«{{contest}}»</b> заканчивается {{contestEndsDateTime}}. Успейте поучаствовать — призы и условия в разделе «События».',
-    bodyEn: '{{name}}, the contest <b>“{{contest}}”</b> ends {{contestEndsDateTime}}. There is still time to enter — prizes and rules are under “Events”.',
+    body: '{{name}}, конкурс <b>«{{contest}}»</b> заканчивается {{contestEndsDateTime}}. Успейте поучаствовать — призы и условия в разделе «Конкурсы».',
+    bodyEn: '{{name}}, the contest <b>“{{contest}}”</b> ends {{contestEndsDateTime}}. There is still time to enter — prizes and rules are under “Contests”.',
     buttons: CONTEST_BUTTONS,
   },
   {
@@ -381,8 +381,8 @@ const CONTEST_TEMPLATES: ReadonlyArray<DefaultNotificationTemplate> = [
     type: 'contest_leaderboard_started',
     title: '🏁 Новый конкурс',
     titleEn: '🏁 A new contest',
-    body: '{{name}}, начался конкурс <b>«{{contest}}»</b>: места — по {{contestMetric}}. Заявка не нужна, считаются все. Итоги — {{contestEndsDateTime}}, призы и таблица — в разделе «События».',
-    bodyEn: '{{name}}, the contest <b>“{{contest}}”</b> has started: places go by {{contestMetric}}. No need to enter — everybody counts. Results on {{contestEndsDateTime}}; prizes and the leaderboard are under “Events”.',
+    body: '{{name}}, начался конкурс <b>«{{contest}}»</b>: места — по {{contestMetric}}. Заявка не нужна, считаются все. Итоги — {{contestEndsDateTime}}, призы и таблица — в разделе «Конкурсы».',
+    bodyEn: '{{name}}, the contest <b>“{{contest}}”</b> has started: places go by {{contestMetric}}. No need to enter — everybody counts. Results on {{contestEndsDateTime}}; prizes and the leaderboard are under “Contests”.',
     buttons: CONTEST_BUTTONS,
   },
 ];

@@ -327,7 +327,7 @@ describe('reading the card', () => {
     const { service, reads } = fakes({ subscriptions: 5 });
     const read = await service.read('u-1', NOW);
     assert.deepEqual(reads, ['100', '101', '102']);
-    assert.deepEqual(read?.subscriptions.map((s) => s.read), ['live', 'live', 'live', 'skipped', 'skipped']);
+    assert.deepEqual(read?.subscriptions.map((s) => s.read), ['live', 'live', 'live', 'not_read', 'not_read']);
   });
 
   it('shows the payment number the client sees, and the gateway by the name the client saw', async () => {
