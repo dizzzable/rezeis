@@ -46,7 +46,7 @@ const BATCH = 300;
  * when the operator ticks «Сообщить о конкурсе»; the result to every entrant
  * after the draw — the winner, and «не повезло» to the rest. Each through the
  * ordinary user notification, so it reaches the bot and the cabinet feed and
- * its words live in «Шаблоны уведомлений».
+ * its words live in «Уведомления» → «Шаблоны сообщений».
  *
  * A leaderboard has nobody who entered: its results go to the winners and to
  * everybody else on the public board — «ваше место X из Y» — and not to the

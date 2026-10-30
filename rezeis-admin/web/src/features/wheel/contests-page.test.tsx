@@ -311,7 +311,7 @@ describe('ContestsPage', () => {
     expect(signals).toHaveTextContent('same device: 9')
     expect(signals).toHaveTextContent('same IP: 11')
     expect(signals).not.toHaveTextContent('blocked')
-    expect(screen.getByText('Waiting for a check: “Issue” credits the prize')).toBeInTheDocument()
+    expect(screen.getByText('Waiting for a check: “Hand over” credits the prize')).toBeInTheDocument()
   })
 
   it('lets a live contest have only its wording fixed and its end moved', async () => {

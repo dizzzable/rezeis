@@ -733,7 +733,7 @@ export class ContestService {
         EVENT_TYPES.CONTEST_PRIZES_PENDING,
         'SUPPORT',
         `Конкурс «${readRuTitle(terms.title)}» завершён: призов ждут выдачи — ${result.pending}. ` +
-          'Откройте «Конкурсы» → «Победители»: «Выдать» начисляет приз, «Отказать» — с причиной.',
+          'Откройте «Конкурсы» → «Победители»: «Вручить» начисляет приз, «Отказать» — с причиной.',
         { contestId: input.contestId, pending: result.pending, prizeDelivery: terms.prizeDelivery },
       );
     }

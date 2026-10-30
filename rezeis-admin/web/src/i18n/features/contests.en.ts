@@ -54,7 +54,7 @@ export const en = {
       maxTicketsPlaceholder: 'no ceiling',
       announce: 'Announce the contest',
       announceHint:
-        'When the contest starts, the bot and the cabinet tell everybody who may enter — a few hundred messages a minute. The wording is in “Notification templates”, “A new contest”. Entrants always get their results.',
+        'When the contest starts, the bot and the cabinet tell everybody who may enter — a few hundred messages a minute. The wording is in “Notifications” → “Message templates”, the “A new contest” template. Entrants always get their results.',
       template: 'Template',
       templates: {
         draw: 'Draw',
@@ -105,8 +105,8 @@ export const en = {
       },
       deliveryHints: {
         AUTO: 'Points, days, traffic, promo codes and keys are credited when the results are in.',
-        REVIEW: 'Winners wait: in “Winners” the operator presses “Issue” — the prize is credited — or “Refuse” with a reason. The winner is told the prize comes after a check.',
-        SUPPORT: 'A support conversation opens for each winner at once. “Issue” credits the prize and posts in the conversation.',
+        REVIEW: 'Winners wait: in “Winners” the operator presses “Hand over” — the prize is credited — or “Refuse” with a reason. The winner is told the prize comes after a check.',
+        SUPPORT: 'A support conversation opens for each winner at once. “Hand over” credits the prize and posts in the conversation.',
       },
       deliveryManual: 'A “manual” prize (money, merch) always goes through support — so, for example, 1st place can be money and the rest automatic.',
       repeat: 'Repeat every month',
@@ -182,7 +182,7 @@ export const en = {
       hint: 'A hint, not a verdict: a family shares one IP, and similar devices belong to different people. What should worry you is many friends looking like this at once.',
     },
     winnersExtra: {
-      held: 'Waiting for a check: “Issue” credits the prize',
+      held: 'Waiting for a check: “Hand over” credits the prize',
       score: 'score: {{score}}',
     },
     cancelDialog: {
