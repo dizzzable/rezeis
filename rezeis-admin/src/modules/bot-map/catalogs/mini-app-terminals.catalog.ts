@@ -158,10 +158,10 @@ export const MINI_APP_TERMINALS: ReadonlyArray<MiniAppTerminal> = [
   },
   {
     route: '/events',
-    nameRu: 'События',
-    nameEn: 'Events',
-    descriptionRu: 'Что идёт сейчас: рулетка и конкурсы, свой итог розыгрыша.',
-    descriptionEn: "What is running now: the wheel and contests, the person's own draw result.",
+    nameRu: 'Конкурсы',
+    nameEn: 'Contests',
+    descriptionRu: 'Идущие розыгрыши и рейтинги, своё место и свой итог, победители прошедших.',
+    descriptionEn: "Running draws and leaderboards, the person's own place and result, past winners.",
   },
   {
     route: '/activity',

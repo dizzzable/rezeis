@@ -53,6 +53,8 @@ type Glyph = ComponentType<SVGProps<SVGSVGElement>>
 export const DASHBOARD_ICONS: ReadonlyArray<{ key: string; Icon: Glyph; accent: string }> = [
   { key: 'quests', Icon: Sparkles, accent: '#f59e0b' },
   { key: 'wheel', Icon: CircleDot, accent: '#a78bfa' },
+  // Its own icon since 30.10.2026: a different mechanic from the wheel.
+  { key: 'contests', Icon: Trophy, accent: '#f97316' },
   { key: 'bell', Icon: Bell, accent: '#60a5fa' },
   { key: 'buy', Icon: ShoppingCart, accent: '#22c55e' },
   { key: 'promo', Icon: TicketPercent, accent: '#fb7185' },

@@ -5621,7 +5621,8 @@ export const ru = {
         reducedMotionStop: 'Остановить',
         icons: {
           quests: 'Задания',
-          wheel: 'Колесо и конкурсы',
+          wheel: 'Колесо',
+          contests: 'Конкурсы',
           bell: 'Оповещения',
           buy: 'Купить',
           promo: 'Промокод',

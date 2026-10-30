@@ -303,7 +303,7 @@ export type IconKey = (typeof ICON_KEYS)[number];
  * `ICON_KEYS` above are the settings-menu rows, which are a list and take
  * colour only.
  */
-export const DASHBOARD_ICON_KEYS = ['quests', 'wheel', 'bell', 'buy', 'promo'] as const;
+export const DASHBOARD_ICON_KEYS = ['quests', 'wheel', 'contests', 'bell', 'buy', 'promo'] as const;
 export type DashboardIconKey = (typeof DASHBOARD_ICON_KEYS)[number];
 
 /**

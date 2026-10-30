@@ -98,7 +98,7 @@ import {
  * the two that live beside the card (`buy`, `promo`) — those are previewed in
  * the configurator section, not up here.
  */
-const HEADER_ICON_KEYS = ['quests', 'wheel', 'bell'] as const
+const HEADER_ICON_KEYS = ['quests', 'wheel', 'contests', 'bell'] as const
 
 interface BrandingPreviewProps {
   values: {
