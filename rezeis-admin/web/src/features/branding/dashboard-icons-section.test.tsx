@@ -167,7 +167,8 @@ describe('DashboardIconsSection', () => {
 
   it('names every dashboard icon the cabinet renders', () => {
     renderWithProviders(<Harness />)
-    for (const label of ['Quests', 'Wheel', 'Notifications', 'Buy', 'Promo code']) {
+    // The wheel's icon opens «События», the contests as well as the wheel.
+    for (const label of ['Quests', 'Wheel and contests', 'Notifications', 'Buy', 'Promo code']) {
       expect(screen.getByText(label)).toBeInTheDocument()
     }
   })

@@ -2535,6 +2535,10 @@ function resolveNotificationPushUrl(type: string, payload?: unknown): string {
   }
   const t = type.toLowerCase();
   if (t.includes('support')) return '/support';
+  // Every contest notice — the announcement, a result, a held prize, a
+  // reminder — is about «События», where the contest, the board and the
+  // prize are. It used to fall through to the dashboard.
+  if (t.startsWith('contest_')) return '/events';
   if (t.includes('expir') || t.includes('limited')) return '/renew';
   if (t.includes('points') || t.includes('cashback')) return '/referrals';
   if (t.includes('referral') || t.includes('partner')) return '/referrals';

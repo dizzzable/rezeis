@@ -5488,7 +5488,7 @@ export const en = {
         reducedMotionStop: 'Stop',
         icons: {
           quests: 'Quests',
-          wheel: 'Wheel',
+          wheel: 'Wheel and contests',
           bell: 'Notifications',
           buy: 'Buy',
           promo: 'Promo code',

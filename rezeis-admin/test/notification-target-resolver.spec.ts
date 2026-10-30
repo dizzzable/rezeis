@@ -50,6 +50,24 @@ describe('notification-target-resolver', () => {
       assert.equal(resolveNotificationCategory('addon_not_applied_other'), 'expires');
     });
 
+    it('routes every contest notice to «События»', () => {
+      for (const type of [
+        'contest_started',
+        'contest_leaderboard_started',
+        'contest_won',
+        'contest_won_manual',
+        'contest_won_review',
+        'contest_prize_issued',
+        'contest_lost',
+        'contest_rank',
+        'contest_reminder',
+        'contest_reminder_holding',
+        'contest_reminder_chasing',
+      ]) {
+        assert.equal(resolveTerminalRouteFor(type), '/events', type);
+      }
+    });
+
     it('falls back to /dashboard for unknown types', () => {
       assert.equal(resolveTerminalRouteFor('user_registered'), '/dashboard');
       assert.equal(resolveTerminalRouteFor('node_status'), '/dashboard');

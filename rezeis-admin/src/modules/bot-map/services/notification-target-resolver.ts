@@ -39,6 +39,8 @@ export function resolveTerminalRouteFor(type: string): MiniAppRoute {
   // An add-on's end, or its approach: the add-on page, where it is bought again.
   if (isAddOnNoticeType(t)) return '/addons';
   if (t.includes('support')) return '/support';
+  // Contest notices: «События». Kept in step with `resolveNotificationPushUrl`.
+  if (t.startsWith('contest_')) return '/events';
   if (t.includes('expir') || t.includes('limited')) return '/renew';
   if (t.includes('partner')) return '/partner';
   // Points before referrals: a points row belongs on the exchange, and
