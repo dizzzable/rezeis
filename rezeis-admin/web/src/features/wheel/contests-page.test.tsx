@@ -13,7 +13,9 @@ import ContestsPage from './contests-page'
  * «Конкурсы» after the 29.10.2026 work: the form sends who may enter, the
  * channel, the tickets and the announcement, and English copy of its own; a
  * live contest can only have its end moved; cancelling asks first; a failed
- * draw says why; the participants are listed with their tickets.
+ * draw says why; the participants are listed with their tickets. And after
+ * 30.10: a leaderboard from a template, prize ranges, the live board, and
+ * the prizes still waiting for the operator.
  */
 
 const HOUR = 60 * 60 * 1000
@@ -46,10 +48,22 @@ function contest(overrides: Partial<Contest>): Contest {
     drawSeed: null,
     drawError: null,
     drawErrorAt: null,
+    kind: 'DRAW',
+    metric: null,
+    minScore: null,
+    leaderboardSize: 10,
+    prizeDelivery: 'AUTO',
+    repeatMonthly: false,
+    repeatOfId: null,
+    trafficReadAt: null,
+    places: 1,
+    currency: 'RUB',
+    pendingPrizes: 0,
     prizes: [
       {
         id: 'p1',
         place: 1,
+        placeTo: null,
         kind: 'POINTS',
         title: { ru: '100 баллов', en: '100 points' },
         amount: 100,
@@ -69,6 +83,17 @@ function contest(overrides: Partial<Contest>): Contest {
 function serve(contests: Contest[]): void {
   vi.spyOn(api, 'get').mockImplementation(async (url: string) => {
     if (url === '/admin/contests') return { data: contests }
+    if (url.endsWith('/standings')) {
+      return {
+        data: {
+          total: 2,
+          rows: [
+            { rank: 1, userId: 'u1', name: 'Иван', username: null, telegramId: '111', score: 12 * 1024 ** 3 },
+            { rank: 2, userId: 'u2', name: null, username: 'neo', telegramId: null, score: 1024 ** 3 / 2 },
+          ],
+        },
+      }
+    }
     if (url.endsWith('/entrants')) {
       return {
         data: {
@@ -126,6 +151,69 @@ describe('ContestsPage', () => {
       announce: true,
     })
     expect((payload.prizes as Array<{ title: unknown }>)[0]?.title).toEqual({ ru: '', en: '100 points' })
+  })
+
+  it('starts a monthly traffic leaderboard from its template, with a range of places and a threshold in gigabytes', async () => {
+    serve([])
+    const post = vi.spyOn(api, 'post').mockResolvedValue({ data: contest({ status: 'DRAFT' }) })
+    const user = userEvent.setup()
+    renderWithProviders(<ContestsPage />)
+
+    await user.click(await screen.findByRole('button', { name: 'New contest' }))
+    const dialog = await screen.findByRole('dialog')
+    await user.click(within(dialog).getByRole('button', { name: 'Top traffic' }))
+    expect(within(dialog).getByTestId('contest-leaderboard-fields')).toBeInTheDocument()
+    expect(within(dialog).queryByLabelText('Channel link'), 'a leaderboard has no entries to gate').not.toBeInTheDocument()
+    expect(within(dialog).getByText('Places 4–10')).toBeInTheDocument()
+    await user.type(within(dialog).getByLabelText('Minimum for a prize place, GB'), '5')
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(post).toHaveBeenCalled())
+    const [, payload] = post.mock.calls[0] as [string, Record<string, unknown>]
+    expect(payload).toMatchObject({
+      title: { ru: 'Who uses the most traffic' },
+      kind: 'LEADERBOARD',
+      metric: 'TRAFFIC',
+      minScore: 5 * 1024 ** 3,
+      leaderboardSize: 10,
+      prizeDelivery: 'AUTO',
+      repeatMonthly: true,
+    })
+    expect(
+      (payload.prizes as Array<{ place: number; placeTo: number | null; amount: number }>).map((prize) => [
+        prize.place,
+        prize.placeTo,
+        prize.amount,
+      ]),
+    ).toEqual([
+      [1, null, 1000],
+      [2, null, 500],
+      [3, null, 300],
+      [4, 10, 100],
+    ])
+  })
+
+  it('shows a running leaderboard as it stands, the prize zone marked', async () => {
+    serve([contest({ kind: 'LEADERBOARD', metric: 'TRAFFIC', drawSeedHash: null, places: 1 })])
+    const user = userEvent.setup()
+    renderWithProviders(<ContestsPage />)
+
+    await user.click(await screen.findByRole('button', { name: 'Leaderboard' }))
+    const board = await screen.findByTestId('contest-standings')
+    expect(board).toHaveTextContent('#1')
+    expect(board).toHaveTextContent('Иван')
+    expect(board).toHaveTextContent('12 GB')
+    expect(board).toHaveTextContent('@neo')
+    expect(board).toHaveTextContent('0.5 GB')
+    expect(within(board).getAllByLabelText('Prize zone')).toHaveLength(1)
+  })
+
+  it('says how many prizes are still waiting to be handed over', async () => {
+    serve([contest({ status: 'DRAWN', winners: 3, pendingPrizes: 2, prizeDelivery: 'REVIEW' })])
+    renderWithProviders(<ContestsPage />)
+
+    expect(await screen.findByTestId('contest-pending-prizes')).toHaveTextContent('Waiting to be handed over: 2')
+    expect(screen.getByText('Prizes after a check')).toBeInTheDocument()
   })
 
   it('lets a live contest have only its wording fixed and its end moved', async () => {

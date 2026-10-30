@@ -1657,6 +1657,7 @@ model User {
   wheelKeys               WheelKey[]               @relation("UserWheelKeys")
   contestEntries          ContestEntry[]           @relation("UserContestEntries")
   contestNotices          ContestNotice[]          @relation("UserContestNotices")
+  contestTrafficCounters  ContestTrafficCounter[]  @relation("UserContestTrafficCounters")
   contestWins             ContestWinner[]          @relation("UserContestWins")
   referralRewards         ReferralReward[]         @relation("ReferralRewardUser")
   partnerTransactions     PartnerTransaction[]     @relation("PartnerTransactionReferral")
@@ -5442,10 +5443,32 @@ model Contest {
   drawError    String?   @map("draw_error")
   drawErrorAt  DateTime? @map("draw_error_at") @db.Timestamptz(3)
 
-  prizes  ContestPrize[]  @relation("ContestPrizes")
-  entries ContestEntry[]  @relation("ContestEntries")
-  winners ContestWinner[] @relation("ContestWinners")
-  notices ContestNotice[] @relation("ContestNotices")
+  /// A draw among those who entered, or places by a metric over the window.
+  kind            ContestKind          @default(DRAW) @map("kind")
+  /// What a leaderboard ranks by. NULL on a draw.
+  metric          ContestMetric?       @map("metric")
+  /// The least score that can win a place, in the metric's own unit: friends,
+  /// minor units of the base currency, bytes, points. NULL = anything above 0.
+  minScore        BigInt?              @map("min_score")
+  /// How many places the public leaderboard shows.
+  leaderboardSize Int                  @default(10) @map("leaderboard_size")
+  /// Paid at once, after an operator's check, or through a support thread.
+  prizeDelivery   ContestPrizeDelivery @default(AUTO) @map("prize_delivery")
+  /// When this one is over, the same contest starts again for a month.
+  repeatMonthly   Boolean              @default(false) @map("repeat_monthly")
+  /// The contest this one repeats. Unique: a contest has one successor.
+  repeatOfId      String?              @unique @map("repeat_of_id")
+  /// When traffic was last read from Remnawave for this contest.
+  trafficReadAt   DateTime?            @map("traffic_read_at") @db.Timestamptz(3)
+
+  repeatOf   Contest? @relation("ContestRepeats", fields: [repeatOfId], references: [id], onDelete: SetNull)
+  repeatedBy Contest? @relation("ContestRepeats")
+
+  prizes   ContestPrize[]          @relation("ContestPrizes")
+  entries  ContestEntry[]          @relation("ContestEntries")
+  winners  ContestWinner[]         @relation("ContestWinners")
+  notices  ContestNotice[]         @relation("ContestNotices")
+  counters ContestTrafficCounter[] @relation("ContestTrafficCounters")
 
   @@index([status, endAt])
   @@index([status, order])
@@ -5459,6 +5482,9 @@ model ContestPrize {
   contestId String          @map("contest_id")
   /// 1 is first prize. Unique per contest, so a draw hands each place out once.
   place     Int             @map("place")
+  /// The last place this prize covers — «4–10 место: по 100 баллов». NULL is
+  /// the one place.
+  placeTo   Int?            @map("place_to")
   kind      WheelSectorKind @map("kind")
   title     Json            @default("{}") @map("title")
   amount    Int             @default(0) @map("amount")
@@ -5488,6 +5514,9 @@ model ContestEntry {
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
   /// This person's tickets as the draw counted them. NULL until the draw.
   tickets   Int?     @map("tickets")
+  /// A leaderboard's result: the metric and the place, as the end counted them.
+  score     BigInt?  @map("score")
+  rank      Int?     @map("rank")
 
   contest Contest @relation("ContestEntries", fields: [contestId], references: [id], onDelete: Cascade)
   user    User    @relation("UserContestEntries", fields: [userId], references: [id], onDelete: Cascade)
@@ -5502,6 +5531,55 @@ enum ContestNoticeKind {
   ANNOUNCED
   /// "Here is how you did" — sent to every entrant after the draw.
   RESULT
+}
+
+enum ContestKind {
+  /// People enter; the draw picks the winners.
+  DRAW
+  /// Nobody enters: everybody in the audience is ranked by a metric.
+  LEADERBOARD
+}
+
+enum ContestMetric {
+  /// Direct referrals whose first payment fell inside the window.
+  REFERRALS_PAID
+  /// Completed payments inside the window, in the base currency.
+  PAYMENTS_SUM
+  /// Traffic used inside the window, from Remnawave's lifetime counter.
+  TRAFFIC
+  /// Points earned inside the window: cashback, referrals, quests, the wheel.
+  POINTS_EARNED
+}
+
+enum ContestPrizeDelivery {
+  /// Paid at the end, there and then.
+  AUTO
+  /// Held until an operator presses «Выдать».
+  REVIEW
+  /// Held, with a support thread opened for each winner.
+  SUPPORT
+}
+
+/// Traffic a leaderboard has seen one subscription use: Remnawave's lifetime
+/// counter when the contest first saw it, and when it last did. The score is
+/// the difference — the counter never resets, so a monthly reset in the
+/// middle of the contest does not hand anybody a fresh start.
+model ContestTrafficCounter {
+  id          String   @id @default(cuid()) @map("id")
+  contestId   String   @map("contest_id")
+  remnawaveId String   @map("remnawave_id")
+  userId      String   @map("user_id")
+  startBytes  BigInt   @map("start_bytes")
+  lastBytes   BigInt   @map("last_bytes")
+  /// When `lastBytes` last went up — the leaderboard's "reached it first".
+  updatedAt   DateTime @map("updated_at") @db.Timestamptz(3)
+
+  contest Contest @relation("ContestTrafficCounters", fields: [contestId], references: [id], onDelete: Cascade)
+  user    User    @relation("UserContestTrafficCounters", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([contestId, remnawaveId])
+  @@index([userId])
+  @@map("contest_traffic_counters")
 }
 
 /// One message to one person about one contest. The unique index is what
@@ -5537,6 +5615,11 @@ model ContestWinner {
   kind          WheelSectorKind @map("kind")
   status        WheelSpinStatus @map("status")
   outcome       Json?           @map("outcome")
+  /// The leaderboard score that won the place. NULL on a draw.
+  score         BigInt?         @map("score")
+  /// A prize the system can pay, waiting for an operator's «Выдать». Unlike a
+  /// manual prize, issuing it PAYS it.
+  heldForReview Boolean         @default(false) @map("held_for_review")
 
   settledAt      DateTime? @map("settled_at") @db.Timestamptz(3)
   settledBy      String?   @map("settled_by")

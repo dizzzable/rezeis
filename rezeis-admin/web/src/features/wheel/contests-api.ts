@@ -6,9 +6,20 @@ import type { LocalizedText, WheelSpinStatus } from './wheel-prizes-api'
 
 export type ContestStatus = 'DRAFT' | 'ACTIVE' | 'DRAWN' | 'CANCELLED'
 
+/** A draw among those who entered, or places by a metric over the window. */
+export type ContestKind = 'DRAW' | 'LEADERBOARD'
+
+/** What a leaderboard ranks by. */
+export type ContestMetric = 'REFERRALS_PAID' | 'PAYMENTS_SUM' | 'TRAFFIC' | 'POINTS_EARNED'
+
+/** Paid at once, after an operator's check, or through a support thread. */
+export type ContestPrizeDelivery = 'AUTO' | 'REVIEW' | 'SUPPORT'
+
 export interface ContestPrize {
   readonly id?: string
   readonly place: number
+  /** The last place a range covers — «4–10 место». `null` is the one place. */
+  readonly placeTo: number | null
   readonly kind: WheelSectorKind
   readonly title: LocalizedText
   readonly amount: number
@@ -64,6 +75,21 @@ export interface Contest {
   /** Why the last draw attempt failed, while it keeps failing. */
   readonly drawError: string | null
   readonly drawErrorAt: string | null
+  readonly kind: ContestKind
+  readonly metric: ContestMetric | null
+  /** In the metric's unit: friends, kopecks of the base currency, bytes, points. */
+  readonly minScore: number | null
+  readonly leaderboardSize: number
+  readonly prizeDelivery: ContestPrizeDelivery
+  readonly repeatMonthly: boolean
+  readonly repeatOfId: string | null
+  readonly trafficReadAt: string | null
+  /** How many places it hands out, ranges counted out. */
+  readonly places: number
+  /** The base currency a payments score is counted in, as minor units. */
+  readonly currency: string
+  /** Prizes won and not yet handed over. */
+  readonly pendingPrizes?: number
   readonly prizes: readonly ContestPrize[]
   /** Why it cannot be published as it stands. Empty means it can. */
   readonly problems: readonly string[]
@@ -82,7 +108,28 @@ export interface ContestPayload {
   readonly maxTicketsPerUser?: number | null
   readonly channelLink?: string | null
   readonly channelId?: string | null
+  readonly kind?: ContestKind
+  readonly metric?: ContestMetric | null
+  readonly minScore?: number | null
+  readonly leaderboardSize?: number
+  readonly prizeDelivery?: ContestPrizeDelivery
+  readonly repeatMonthly?: boolean
   readonly prizes: readonly Omit<ContestPrize, 'id'>[]
+}
+
+/** One place on a leaderboard. */
+export interface ContestStanding {
+  readonly rank: number
+  readonly userId: string
+  readonly name: string | null
+  readonly username: string | null
+  readonly telegramId: string | null
+  readonly score: number
+}
+
+export interface ContestStandingsPage {
+  readonly total: number
+  readonly rows: readonly ContestStanding[]
 }
 
 export interface ContestEntrant {
@@ -113,6 +160,10 @@ export interface ContestWinner {
   readonly settlementNote: string | null
   readonly ticketId: string | null
   readonly instructions: string
+  /** Held for the operator's check: «Выдать» pays it. */
+  readonly heldForReview?: boolean
+  /** The leaderboard score that won the place. */
+  readonly score?: number | null
   readonly winner: {
     readonly id: string
     readonly name: string
@@ -123,8 +174,14 @@ export interface ContestWinner {
 }
 
 export type DrawResult =
-  | { readonly drawn: true; readonly winners: number; readonly entrants: number; readonly tickets?: number }
-  | { readonly drawn: false; readonly reason: 'NOT_ACTIVE' | 'NOT_OVER' | 'ALREADY_DRAWN' }
+  | {
+      readonly drawn: true
+      readonly winners: number
+      readonly entrants: number
+      readonly tickets?: number | null
+      readonly repeatedBy?: string | null
+    }
+  | { readonly drawn: false; readonly reason: 'NOT_ACTIVE' | 'NOT_OVER' | 'ALREADY_DRAWN' | 'AWAITING_TRAFFIC' }
 
 export const listContests = () =>
   api.get('/admin/contests').then((r) => expectArray<Contest>(r.data))
@@ -155,6 +212,11 @@ export const listContestWinners = (contestId: string) =>
 export const listContestEntrants = (contestId: string, page: { readonly take: number; readonly skip: number }) =>
   api
     .get<ContestEntrantsPage>(`/admin/contests/${encodeURIComponent(contestId)}/entrants`, { params: page })
+    .then((r) => ({ total: Number(r.data?.total ?? 0), rows: Array.isArray(r.data?.rows) ? r.data.rows : [] }))
+
+export const listContestStandings = (contestId: string, page: { readonly take: number; readonly skip: number }) =>
+  api
+    .get<ContestStandingsPage>(`/admin/contests/${encodeURIComponent(contestId)}/standings`, { params: page })
     .then((r) => ({ total: Number(r.data?.total ?? 0), rows: Array.isArray(r.data?.rows) ? r.data.rows : [] }))
 
 export const listPendingContestWinners = () =>

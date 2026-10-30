@@ -12,7 +12,7 @@ import {
 } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { SkipThrottle } from '@nestjs/throttler';
-import { ContestStatus, Prisma, WheelSpinStatus } from '@prisma/client';
+import { ContestKind, ContestMetric, ContestStatus, Prisma, WheelSpinStatus } from '@prisma/client';
 import { IsBoolean, IsOptional, ValidateIf } from 'class-validator';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
@@ -36,10 +36,28 @@ interface CabinetContest {
   readonly entries: number;
   readonly prizes: ReadonlyArray<{
     readonly place: number;
+    /** The last place of a range — «4–10 место»; `null` for one place. */
+    readonly placeTo: number | null;
     readonly kind: string;
     readonly title: Prisma.JsonValue;
     readonly amount: number;
   }>;
+  readonly kind: ContestKind;
+  /**
+   * A leaderboard's board: the top with names masked, where this person
+   * stands, and how far they are from a prize. `null` on a draw.
+   */
+  readonly leaderboard: {
+    readonly metric: ContestMetric | null;
+    /** The base currency a payments score is in, as minor units. */
+    readonly currency: string;
+    /** The least score that wins a place, in the metric's unit. */
+    readonly minScore: number | null;
+    readonly top: ReadonlyArray<{ readonly rank: number; readonly name: string | null; readonly score: number; readonly me: boolean }>;
+    readonly total: number;
+    readonly mine: { readonly rank: number; readonly score: number } | null;
+    readonly toPrize: number | null;
+  } | null;
   readonly entered: boolean;
   /** Why the button is not there, when it is not. */
   readonly closed: EntryRefusal | null;
@@ -50,6 +68,10 @@ interface CabinetContest {
     readonly status: WheelSpinStatus;
     readonly prize: Record<string, unknown> | null;
     readonly ticketId: string | null;
+    /** Waiting for the operator's check before it is paid. */
+    readonly held: boolean;
+    /** The leaderboard score that won it. */
+    readonly score: number | null;
   } | null;
   /** The channel entering needs, so the screen can link to it. */
   readonly channel: { readonly joinUrl: string } | null;
@@ -73,6 +95,7 @@ interface CabinetContest {
     readonly place: number;
     readonly name: string | null;
     readonly prizeTitle: Prisma.JsonValue;
+    readonly score: number | null;
   }> | null;
   readonly drawnEntries: number | null;
   readonly drawnTickets: number | null;
@@ -103,6 +126,9 @@ class EnterContestDto {
  * went to real people. Only for a cabinet that asks (`?results=all`): an
  * older one draws every finished contest as "how you did", and would tell
  * somebody who never entered that they were unlucky.
+ *
+ * The same cabinet is the first to know a leaderboard. An older one is never
+ * shown one: it would offer «Участвовать» on a contest nobody enters.
  */
 @ApiTags('internal/user/contests')
 @UseGuards(InternalAdminAuthGuard)
@@ -139,9 +165,13 @@ export class InternalContestsController {
     // does not simply vanish from their screen.
     const rows = await this.prismaService.contest.findMany({
       where: {
+        ...(everybodysResults ? {} : { kind: ContestKind.DRAW }),
         OR: [
           { status: ContestStatus.ACTIVE },
-          { status: ContestStatus.DRAWN, entries: { some: { userId } } },
+          // A leaderboard "enters" everybody it ranks; only its winners keep
+          // it on their screen past the public month.
+          { status: ContestStatus.DRAWN, kind: ContestKind.DRAW, entries: { some: { userId } } },
+          { status: ContestStatus.DRAWN, winners: { some: { userId } } },
           ...(everybodysResults
             ? [
                 { status: ContestStatus.DRAWN, drawnAt: { gte: recent } },
@@ -169,7 +199,14 @@ export class InternalContestsController {
         drawSeedHash: true,
         drawnEntries: true,
         drawnTickets: true,
-        prizes: { orderBy: { place: 'asc' }, select: { place: true, kind: true, title: true, amount: true } },
+        kind: true,
+        metric: true,
+        minScore: true,
+        leaderboardSize: true,
+        prizes: {
+          orderBy: { place: 'asc' },
+          select: { place: true, placeTo: true, kind: true, title: true, amount: true },
+        },
         entries: { where: { userId }, select: { id: true, tickets: true } },
         _count: { select: { entries: true } },
       },
@@ -195,6 +232,8 @@ export class InternalContestsController {
           prizeSnapshot: true,
           outcome: true,
           manualTicketId: true,
+          heldForReview: true,
+          score: true,
           key: { select: { value: true } },
         },
       }),
@@ -206,25 +245,32 @@ export class InternalContestsController {
               contestId: true,
               place: true,
               prizeSnapshot: true,
+              score: true,
               user: { select: { name: true, username: true } },
             },
           })
         : Promise.resolve([]),
     ]);
     const myWins = new Map(mine.map((win) => [win.contestId, win]));
-    const winnersOf = new Map<string, Array<{ place: number; name: string | null; prizeTitle: Prisma.JsonValue }>>();
+    const winnersOf = new Map<
+      string,
+      Array<{ place: number; name: string | null; prizeTitle: Prisma.JsonValue; score: number | null }>
+    >();
     for (const win of allWinners) {
       const list = winnersOf.get(win.contestId) ?? [];
       list.push({
         place: win.place,
         name: maskPublicName(win.user.name, win.user.username),
         prizeTitle: (readObject(win.prizeSnapshot)['title'] ?? {}) as Prisma.JsonValue,
+        score: win.score === null ? null : Number(win.score),
       });
       winnersOf.set(win.contestId, list);
     }
 
     const views: CabinetContest[] = [];
     for (const row of rows) {
+      const ranked = row.kind === ContestKind.LEADERBOARD;
+      const board = ranked ? await this.contests.leaderboardFor({ ...row, id: row.id }, userId, now) : null;
       const win = myWins.get(row.id) ?? null;
       const entry = row.entries[0] ?? null;
       const hasTickets = row.ticketsPerPurchase > 0 || row.ticketsPerReferral > 0;
@@ -242,8 +288,26 @@ export class InternalContestsController {
         status: row.status,
         startAt: row.startAt.toISOString(),
         endAt: row.endAt.toISOString(),
-        entries: row._count.entries,
+        entries: board === null ? row._count.entries : board.total,
         prizes: row.prizes,
+        kind: row.kind,
+        leaderboard:
+          board === null
+            ? null
+            : {
+                metric: row.metric,
+                currency: board.currency,
+                minScore: row.minScore === null ? null : Number(row.minScore),
+                top: board.top.map((place) => ({
+                  rank: place.rank,
+                  name: maskPublicName(place.name, place.username),
+                  score: place.score,
+                  me: place.userId === userId,
+                })),
+                total: board.total,
+                mine: board.mine,
+                toPrize: row.status === ContestStatus.ACTIVE ? board.toPrize : null,
+              },
         entered: entry !== null,
         closed:
           readClosedReason(row, now) ??
@@ -251,9 +315,11 @@ export class InternalContestsController {
             ? null
             : !eligible.has(row.id)
               ? 'NOT_ELIGIBLE'
-              : row.channelChatId !== null && person.telegramId === null
-                ? 'NEEDS_TELEGRAM'
-                : null),
+              : ranked
+                ? 'AUTOMATIC'
+                : row.channelChatId !== null && person.telegramId === null
+                  ? 'NEEDS_TELEGRAM'
+                  : null),
         myResult:
           win === null
             ? null
@@ -263,6 +329,8 @@ export class InternalContestsController {
                 status: win.status,
                 prize: buildPrize(win.outcome, win.key?.value ?? null),
                 ticketId: win.manualTicketId,
+                held: win.heldForReview,
+                score: win.score === null ? null : Number(win.score),
               },
         channel: row.channelJoinUrl === null ? null : { joinUrl: row.channelJoinUrl },
         tickets: hasTickets

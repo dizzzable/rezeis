@@ -1,6 +1,9 @@
 import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
 import {
   BroadcastAudience,
+  ContestKind,
+  ContestMetric,
+  ContestPrizeDelivery,
   ContestStatus,
   Prisma,
   TransactionStatus,
@@ -11,13 +14,26 @@ import {
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { buildAudienceWhere, normalizeAudienceFilter } from '../../broadcast/utils/broadcast-audience.util';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
+import { readPlatformBranding } from '../../settings/utils/platform-branding.util';
 import { PrizePayoutService } from '../../wheel/services/prize-payout.service';
 import { validateSector } from '../../wheel-config/wheel-sector-validation.util';
+import { addCalendarMonth, safeZone } from '../contest-calendar.util';
 import { drawWeightedWinners, hashDrawSeed, newDrawSeed, seededRandom } from '../contest-draw.util';
+import { ContestStandingsService, type Standing } from './contest-standings.service';
+
+/** The most places one contest hands out, ranges included. */
+export const MAX_PLACES = 100;
+
+/**
+ * How long after its end a traffic leaderboard waits for a reading from
+ * Remnawave before its failure to finish is the operator's business.
+ */
+const TRAFFIC_GRACE_MS = 60 * 60 * 1000;
 
 const PRIZE_SELECT = {
   id: true,
   place: true,
+  placeTo: true,
   kind: true,
   title: true,
   amount: true,
@@ -55,9 +71,47 @@ const CONTEST_SELECT = {
   drawSeedHash: true,
   drawError: true,
   drawErrorAt: true,
+  kind: true,
+  metric: true,
+  minScore: true,
+  leaderboardSize: true,
+  prizeDelivery: true,
+  repeatMonthly: true,
+  repeatOfId: true,
+  trafficReadAt: true,
   prizes: { orderBy: { place: 'asc' as const }, select: PRIZE_SELECT },
   _count: { select: { entries: true, winners: true } },
 } as const;
+
+/** Everything a contest is run by — what the draw reads, and what a monthly repeat copies. */
+const TERMS_SELECT = {
+  title: true,
+  description: true,
+  status: true,
+  startAt: true,
+  endAt: true,
+  audienceFilter: true,
+  maxEntries: true,
+  order: true,
+  createdBy: true,
+  announce: true,
+  ticketsPerPurchase: true,
+  ticketsPerReferral: true,
+  maxTicketsPerUser: true,
+  channelChatId: true,
+  channelJoinUrl: true,
+  drawSeed: true,
+  kind: true,
+  metric: true,
+  minScore: true,
+  leaderboardSize: true,
+  prizeDelivery: true,
+  repeatMonthly: true,
+  trafficReadAt: true,
+  prizes: { orderBy: { place: 'asc' as const }, select: PRIZE_SELECT },
+} as const;
+
+type ContestTerms = Prisma.ContestGetPayload<{ select: typeof TERMS_SELECT }>;
 
 type ContestRow = Prisma.ContestGetPayload<{ select: typeof CONTEST_SELECT }>;
 export type PrizeRow = Prisma.ContestPrizeGetPayload<{ select: typeof PRIZE_SELECT }>;
@@ -78,6 +132,8 @@ export interface ContestTicketRules {
 
 export interface ContestPrizeInput {
   readonly place: number;
+  /** The last place this prize covers; `null` is the one place. */
+  readonly placeTo: number | null;
   readonly kind: WheelSectorKind;
   readonly title: Prisma.InputJsonValue;
   readonly amount: number;
@@ -99,6 +155,14 @@ export interface ContestInput extends ContestTicketRules {
   readonly announce: boolean;
   readonly channel: ContestChannel | null;
   readonly prizes: readonly ContestPrizeInput[];
+  readonly kind: ContestKind;
+  /** What a leaderboard ranks by; ignored on a draw. */
+  readonly metric: ContestMetric | null;
+  /** The least score that wins a place, in the metric's unit. `null` = above nothing. */
+  readonly minScore: number | null;
+  readonly leaderboardSize: number;
+  readonly prizeDelivery: ContestPrizeDelivery;
+  readonly repeatMonthly: boolean;
 }
 
 export interface ContestSummary extends ContestTicketRules {
@@ -128,15 +192,41 @@ export interface ContestSummary extends ContestTicketRules {
   /** Why the last draw attempt failed, while it keeps failing. */
   readonly drawError: string | null;
   readonly drawErrorAt: string | null;
+  readonly kind: ContestKind;
+  readonly metric: ContestMetric | null;
+  readonly minScore: number | null;
+  readonly leaderboardSize: number;
+  readonly prizeDelivery: ContestPrizeDelivery;
+  readonly repeatMonthly: boolean;
+  /** The contest this one repeats, if it is a monthly repeat. */
+  readonly repeatOfId: string | null;
+  readonly trafficReadAt: string | null;
+  /** How many places it hands out, ranges counted out. */
+  readonly places: number;
+  /** The base currency a payments leaderboard counts in, as minor units. */
+  readonly currency: string;
+  /** Prizes won and not yet handed over: held for a check, manual, or a key that ran out. */
+  readonly pendingPrizes: number;
   readonly prizes: readonly PrizeRow[];
   /** Why it cannot be published as it stands. Empty means it can. */
   readonly problems: readonly string[];
 }
 
 export type DrawResult =
-  | { readonly drawn: true; readonly winners: number; readonly entrants: number; readonly tickets: number }
-  /** Not ACTIVE, or not over yet, or already drawn by a concurrent sweep. */
-  | { readonly drawn: false; readonly reason: 'NOT_ACTIVE' | 'NOT_OVER' | 'ALREADY_DRAWN' };
+  | {
+      readonly drawn: true;
+      readonly winners: number;
+      readonly entrants: number;
+      /** Tickets in a draw; `null` on a leaderboard. */
+      readonly tickets: number | null;
+      /** The contest that repeats this one, when it was made. */
+      readonly repeatedBy: string | null;
+    }
+  /**
+   * Not ACTIVE, or not over yet, or already drawn by a concurrent sweep; or a
+   * traffic leaderboard still waiting for its reading after the end.
+   */
+  | { readonly drawn: false; readonly reason: 'NOT_ACTIVE' | 'NOT_OVER' | 'ALREADY_DRAWN' | 'AWAITING_TRAFFIC' };
 
 /** One entrant as the operator sees them. */
 export interface ContestEntrantRow {
@@ -147,6 +237,38 @@ export interface ContestEntrantRow {
   readonly enteredAt: string;
   /** As the draw counted them, or — before the draw — as it would now. */
   readonly tickets: number;
+}
+
+/** One place on a leaderboard as the operator sees it. */
+export interface ContestStandingRow {
+  readonly rank: number;
+  readonly userId: string;
+  readonly name: string | null;
+  readonly username: string | null;
+  readonly telegramId: string | null;
+  /** In the metric's unit: friends, minor units of the base currency, bytes, points. */
+  readonly score: number;
+}
+
+/** A leaderboard as one person sees it: the top, and where they stand. */
+export interface LeaderboardView {
+  readonly top: readonly {
+    readonly rank: number;
+    readonly userId: string;
+    readonly name: string | null;
+    readonly username: string | null;
+    readonly score: number;
+  }[];
+  /** How many are ranked. */
+  readonly total: number;
+  readonly mine: { readonly rank: number; readonly score: number } | null;
+  /**
+   * How much more this person needs to take the last prize place — `0` when
+   * they hold one, `null` when there is nobody to ask about.
+   */
+  readonly toPrize: number | null;
+  /** The base currency a payments leaderboard is counted in. */
+  readonly currency: string;
 }
 
 /**
@@ -196,6 +318,8 @@ export class ContestService {
      * `@Optional()` and last for the specs that build this positionally.
      */
     @Optional() private readonly profileSyncQueue?: ProfileSyncQueueService,
+    /** Ranks a leaderboard. `@Optional()` for the same specs; a leaderboard without it cannot end. */
+    @Optional() private readonly standings?: ContestStandingsService,
   ) {}
 
   public async list(): Promise<readonly ContestSummary[]> {
@@ -203,7 +327,9 @@ export class ContestService {
       orderBy: [{ status: 'asc' }, { endAt: 'desc' }],
       select: CONTEST_SELECT,
     });
-    return rows.map((row) => toSummary(row));
+    const currency = this.baseCurrency();
+    const pending = await this.pendingPrizes(rows.map((row) => row.id));
+    return rows.map((row) => toSummary(row, currency, pending.get(row.id) ?? 0));
   }
 
   public async get(contestId: string): Promise<ContestSummary> {
@@ -212,7 +338,23 @@ export class ContestService {
       select: CONTEST_SELECT,
     });
     if (row === null) throw new NotFoundException('Contest not found');
-    return toSummary(row);
+    const pending = await this.pendingPrizes([row.id]);
+    return toSummary(row, this.baseCurrency(), pending.get(row.id) ?? 0);
+  }
+
+  /** How many prizes each contest still owes — what the operator has to go and press «Выдать» on. */
+  private async pendingPrizes(contestIds: readonly string[]): Promise<ReadonlyMap<string, number>> {
+    if (contestIds.length === 0) return new Map();
+    const rows = await this.prismaService.contestWinner.groupBy({
+      by: ['contestId'],
+      where: { contestId: { in: [...contestIds] }, status: WheelSpinStatus.PENDING },
+      _count: { _all: true },
+    });
+    return new Map(rows.map((row) => [row.contestId, row._count._all]));
+  }
+
+  private baseCurrency(): string {
+    return this.standings?.baseCurrency() ?? 'RUB';
   }
 
   public async create(input: ContestInput, createdBy: string): Promise<ContestSummary> {
@@ -236,7 +378,8 @@ export class ContestService {
    * and the description may — a typo is not a term — and the end may move
    * LATER (the owner, 29.10.2026): more time takes nothing from anybody who
    * entered, while an earlier end would close the door on people who were
-   * told they had until then.
+   * told they had until then. «Повторять каждый месяц» may be switched either
+   * way: it decides what happens after this contest, not what it is.
    */
   public async update(contestId: string, input: ContestInput, now = new Date()): Promise<ContestSummary> {
     const current = await this.prismaService.contest.findUnique({
@@ -266,7 +409,12 @@ export class ContestService {
       // this write must not have its end moved under it.
       const changed = await this.prismaService.contest.updateMany({
         where: { id: contestId, status: ContestStatus.ACTIVE },
-        data: { title: input.title, description: input.description, ...(endAt === null ? {} : { endAt }) },
+        data: {
+          title: input.title,
+          description: input.description,
+          repeatMonthly: input.repeatMonthly,
+          ...(endAt === null ? {} : { endAt }),
+        },
       });
       if (changed.count !== 1) throw new ConflictException('Конкурс уже разыгран — его нельзя изменить');
       return this.get(contestId);
@@ -293,7 +441,8 @@ export class ContestService {
    *
    * The draw's seed is made here, not at creation: until now a draft can be
    * edited at will, and from now on nobody — the operator included — may see
-   * the seed until the draw has used it. Only its hash goes out.
+   * the seed until the draw has used it. Only its hash goes out. A
+   * leaderboard has no chance in it, and gets no seed.
    */
   public async publish(contestId: string, now = new Date()): Promise<ContestSummary> {
     const summary = await this.get(contestId);
@@ -306,10 +455,9 @@ export class ContestService {
     }
     if (problems.length > 0) throw new BadRequestException(problems.join('; '));
 
-    const seed = newDrawSeed();
     const changed = await this.prismaService.contest.updateMany({
       where: { id: contestId, status: ContestStatus.DRAFT },
-      data: { status: ContestStatus.ACTIVE, drawSeed: seed, drawSeedHash: hashDrawSeed(seed) },
+      data: { status: ContestStatus.ACTIVE, ...seedData(summary.kind) },
     });
     if (changed.count !== 1) throw new ConflictException('Опубликовать можно только черновик');
     return this.get(contestId);
@@ -360,9 +508,12 @@ export class ContestService {
         audienceFilter: true,
         maxEntries: true,
         channelChatId: true,
+        kind: true,
       },
     });
     if (contest === null) throw new NotFoundException('Contest not found');
+    // Nobody enters a leaderboard: everybody in the audience is on it.
+    if (contest.kind === ContestKind.LEADERBOARD) return { entered: false, reason: 'AUTOMATIC' };
 
     // Somebody already in is answered as in, whatever has changed since —
     // the second tap on the button, a channel left after entering, a full
@@ -416,10 +567,16 @@ export class ContestService {
   }
 
   /**
-   * Run the draw for a contest that is over.
+   * Finish a contest that is over: draw it, or rank it.
    *
    * `random` is injectable for the same reason the wheel's is: a draw whose
    * source of chance is baked in cannot be tested for the thing that matters.
+   *
+   * A leaderboard is ranked BEFORE the transaction — a read over payments,
+   * referrals, the points ledger or the traffic counters, and for payments a
+   * currency conversion that may have to ask for a rate. Nothing it reads can
+   * change any more: the window has closed. The transaction then does what a
+   * draw's does, on the same conditional stamp.
    */
   public async draw(input: {
     readonly contestId: string;
@@ -429,43 +586,91 @@ export class ContestService {
     const now = input.now ?? new Date();
     const synced: string[] = [];
 
+    const terms = await this.prismaService.contest.findUnique({
+      where: { id: input.contestId },
+      select: TERMS_SELECT,
+    });
+    if (terms === null) throw new NotFoundException('Contest not found');
+    if (terms.status === ContestStatus.DRAWN) return { drawn: false, reason: 'ALREADY_DRAWN' };
+    if (terms.status !== ContestStatus.ACTIVE) return { drawn: false, reason: 'NOT_ACTIVE' };
+    if (terms.endAt.getTime() > now.getTime()) return { drawn: false, reason: 'NOT_OVER' };
+
+    let ranked: readonly Standing[] | null = null;
+    if (terms.kind === ContestKind.LEADERBOARD) {
+      if (terms.metric === ContestMetric.TRAFFIC && !(terms.trafficReadAt !== null && terms.trafficReadAt >= terms.endAt)) {
+        // The last reading has to come after the end, or the last hours of
+        // use are not on the board. It is taken every minute while this one
+        // waits; past the grace, the wait is the operator's to know about.
+        if (now.getTime() - terms.endAt.getTime() < TRAFFIC_GRACE_MS) return { drawn: false, reason: 'AWAITING_TRAFFIC' };
+        throw new Error('Remnawave не отдаёт трафик: без замера после окончания итоги рейтинга не подвести');
+      }
+      if (this.standings === undefined) throw new Error('Leaderboard standings are not wired');
+      ranked = await this.standings.rank({ id: input.contestId, ...terms }, now);
+    }
+    const zone = terms.repeatMonthly ? await this.readZone() : 'UTC';
+
     const result = await this.prismaService.$transaction(
       async (tx): Promise<DrawResult> => {
         const contest = await tx.contest.findUnique({
           where: { id: input.contestId },
-          select: {
-            status: true,
-            startAt: true,
-            endAt: true,
-            drawSeed: true,
-            ticketsPerPurchase: true,
-            ticketsPerReferral: true,
-            maxTicketsPerUser: true,
-            prizes: { orderBy: { place: 'asc' }, select: PRIZE_SELECT },
-          },
+          select: TERMS_SELECT,
         });
         if (contest === null) throw new NotFoundException('Contest not found');
         if (contest.status === ContestStatus.DRAWN) return { drawn: false, reason: 'ALREADY_DRAWN' };
         if (contest.status !== ContestStatus.ACTIVE) return { drawn: false, reason: 'NOT_ACTIVE' };
         if (contest.endAt.getTime() > now.getTime()) return { drawn: false, reason: 'NOT_OVER' };
 
-        const entries = await tx.contestEntry.findMany({
-          where: { contestId: input.contestId },
-          select: { userId: true },
-        });
-        const entrants = entries.map((entry) => entry.userId);
-        const tickets = await countTickets(tx, contest, entrants);
-        const totalTickets = entrants.reduce((sum, userId) => sum + (tickets.get(userId) ?? 1), 0);
+        const places = expandPlaces(contest.prizes);
+        let picked: { readonly userId: string; readonly score: bigint | null }[];
+        let entrants: number;
+        let totalTickets: number | null = null;
+        let drawnTickets: { readonly userIds: readonly string[]; readonly tickets: ReadonlyMap<string, number> } | null = null;
+
+        if (ranked !== null) {
+          // The places go down the board to those at or above the threshold
+          // — a prefix of it, the board being sorted by score.
+          const qualified = ranked.filter((row) => contest.minScore === null || row.score >= contest.minScore);
+          picked = qualified.slice(0, places.length).map((row) => ({ userId: row.userId, score: row.score }));
+          entrants = ranked.length;
+        } else {
+          const entries = await tx.contestEntry.findMany({
+            where: { contestId: input.contestId },
+            select: { userId: true },
+          });
+          const userIds = entries.map((entry) => entry.userId);
+          const tickets = await countTickets(tx, contest, userIds);
+          totalTickets = userIds.reduce((sum, userId) => sum + (tickets.get(userId) ?? 1), 0);
+          entrants = userIds.length;
+          drawnTickets = { userIds, tickets };
+
+          // Seeded, never `Math.random`.
+          //
+          // A draw that throws part way through rolls back to ACTIVE and the
+          // sweep tries again a minute later. With a fresh source of chance
+          // each time, every retry would pick a DIFFERENT field of winners — a
+          // contest whose second prize cannot be paid would quietly re-roll
+          // until it found a set that could be, which is not a draw, it is a
+          // search. Seeded, the retry reproduces the same winners and either
+          // pays them or keeps failing visibly. The seed is made at publish and
+          // shown once the draw has run; a contest published before seeds
+          // existed draws from its id, as it always did.
+          const random = input.random ?? seededRandom(contest.drawSeed ?? input.contestId);
+          picked = drawWeightedWinners({
+            entrants: userIds.map((userId) => ({ id: userId, tickets: tickets.get(userId) ?? 1 })),
+            count: places.length,
+            random,
+          }).map((userId) => ({ userId, score: null }));
+        }
 
         // The stamp goes before any payout and is conditional on ACTIVE, so
-        // two sweeps racing for the same contest cannot both draw it. The
+        // two sweeps racing for the same contest cannot both finish it. The
         // loser's transaction has nothing left to do.
         const stamped = await tx.contest.updateMany({
           where: { id: input.contestId, status: ContestStatus.ACTIVE },
           data: {
             status: ContestStatus.DRAWN,
             drawnAt: now,
-            drawnEntries: entrants.length,
+            drawnEntries: entrants,
             drawnTickets: totalTickets,
             drawError: null,
             drawErrorAt: null,
@@ -473,40 +678,34 @@ export class ContestService {
         });
         if (stamped.count !== 1) return { drawn: false, reason: 'ALREADY_DRAWN' };
 
-        await recordTickets(tx, input.contestId, entrants, tickets);
+        if (ranked !== null) await recordStandings(tx, input.contestId, ranked);
+        if (drawnTickets !== null) await recordTickets(tx, input.contestId, drawnTickets.userIds, drawnTickets.tickets);
 
-        // Seeded, never `Math.random`.
-        //
-        // A draw that throws part way through rolls back to ACTIVE and the
-        // sweep tries again a minute later. With a fresh source of chance
-        // each time, every retry would pick a DIFFERENT field of winners — a
-        // contest whose second prize cannot be paid would quietly re-roll
-        // until it found a set that could be, which is not a draw, it is a
-        // search. Seeded, the retry reproduces the same winners and either
-        // pays them or keeps failing visibly. The seed is made at publish and
-        // shown once the draw has run; a contest published before seeds
-        // existed draws from its id, as it always did.
-        const random = input.random ?? seededRandom(contest.drawSeed ?? input.contestId);
-        const winners = drawWeightedWinners({
-          entrants: entrants.map((userId) => ({ id: userId, tickets: tickets.get(userId) ?? 1 })),
-          count: contest.prizes.length,
-          random,
-        });
-        for (const [index, userId] of winners.entries()) {
-          const prize = contest.prizes[index] as PrizeRow;
-          const syncSubscriptionId = await this.award(tx, { contestId: input.contestId, userId, prize });
+        for (const [index, winner] of picked.entries()) {
+          const syncSubscriptionId = await this.award(tx, {
+            contestId: input.contestId,
+            userId: winner.userId,
+            prize: places[index] as PrizeRow,
+            place: index + 1,
+            score: winner.score,
+            delivery: contest.prizeDelivery,
+          });
           if (syncSubscriptionId !== null) synced.push(syncSubscriptionId);
         }
 
+        const repeatedBy = contest.repeatMonthly ? await repeatForAMonth(tx, input.contestId, contest, zone, now) : null;
+
         this.logger.log(
-          `Contest ${input.contestId} drawn: ${winners.length} winner(s) from ${entrants.length} entrant(s), ${totalTickets} ticket(s)`,
+          `Contest ${input.contestId} finished: ${picked.length} winner(s) from ${entrants}` +
+            (totalTickets === null ? ' ranked' : ` entrant(s), ${totalTickets} ticket(s)`) +
+            (repeatedBy === null ? '' : `; repeats as ${repeatedBy}`),
         );
-        return { drawn: true, winners: winners.length, entrants: entrants.length, tickets: totalTickets };
+        return { drawn: true, winners: picked.length, entrants, tickets: totalTickets, repeatedBy };
       },
-      // Up to fifty prizes, each a create, a payout and an update — a
-      // giveaway that size does not fit Prisma's five-second default, and
-      // running out of time rolls the whole draw back onto a sweep that will
-      // simply run out of time again.
+      // Up to a hundred places, each a create, a payout and an update, and a
+      // leaderboard's thousands of rows besides — that does not fit Prisma's
+      // five-second default, and running out of time rolls the whole thing
+      // back onto a sweep that will simply run out of time again.
       { maxWait: 15_000, timeout: 120_000 },
     );
 
@@ -615,14 +814,196 @@ export class ContestService {
   }
 
   /**
-   * Pays one place and returns the subscription it changed, for the caller to
-   * push to Remnawave after the commit.
+   * A leaderboard's places for the operator, best first: live while it runs,
+   * as the end counted them once it has.
+   */
+  public async listStandings(
+    contestId: string,
+    page: { readonly take: number; readonly skip: number },
+    now = new Date(),
+  ): Promise<{ readonly total: number; readonly rows: readonly ContestStandingRow[] }> {
+    const contest = await this.prismaService.contest.findUnique({
+      where: { id: contestId },
+      select: { id: true, status: true, kind: true, metric: true, startAt: true, endAt: true, audienceFilter: true },
+    });
+    if (contest === null) throw new NotFoundException('Contest not found');
+    if (contest.kind !== ContestKind.LEADERBOARD) return { total: 0, rows: [] };
+
+    if (contest.status === ContestStatus.DRAWN) {
+      const where = { contestId, rank: { not: null } };
+      const [total, entries] = await Promise.all([
+        this.prismaService.contestEntry.count({ where }),
+        this.prismaService.contestEntry.findMany({
+          where,
+          orderBy: { rank: 'asc' },
+          take: page.take,
+          skip: page.skip,
+          select: {
+            userId: true,
+            rank: true,
+            score: true,
+            user: { select: { name: true, username: true, telegramId: true } },
+          },
+        }),
+      ]);
+      return {
+        total,
+        rows: entries.map((entry) => ({
+          rank: entry.rank ?? 0,
+          userId: entry.userId,
+          name: entry.user.name,
+          username: entry.user.username,
+          telegramId: entry.user.telegramId === null ? null : entry.user.telegramId.toString(),
+          score: Number(entry.score ?? 0n),
+        })),
+      };
+    }
+
+    const standings = await this.liveStandings(contest, now);
+    const slice = standings.slice(page.skip, page.skip + page.take);
+    const people = await this.people(slice.map((row) => row.userId));
+    return {
+      total: standings.length,
+      rows: slice.map((row, index) => {
+        const person = people.get(row.userId);
+        return {
+          rank: page.skip + index + 1,
+          userId: row.userId,
+          name: person?.name ?? null,
+          username: person?.username ?? null,
+          telegramId: person?.telegramId ?? null,
+          score: Number(row.score),
+        };
+      }),
+    };
+  }
+
+  /**
+   * A leaderboard as one person sees it: the top `leaderboardSize`, their own
+   * place and score, and how far they are from the last prize place. Names
+   * come unmasked; masking is the caller's, who knows who is looking.
+   */
+  public async leaderboardFor(
+    contest: {
+      readonly id: string;
+      readonly status: ContestStatus;
+      readonly kind: ContestKind;
+      readonly metric: ContestMetric | null;
+      readonly startAt: Date;
+      readonly endAt: Date;
+      readonly audienceFilter: Prisma.JsonValue | null;
+      readonly leaderboardSize: number;
+      readonly minScore: bigint | null;
+      readonly prizes: readonly Pick<PrizeRow, 'place' | 'placeTo'>[];
+    },
+    userId: string | null,
+    now = new Date(),
+  ): Promise<LeaderboardView> {
+    const currency = this.baseCurrency();
+    if (contest.status === ContestStatus.DRAWN) {
+      // The end wrote the board down: read the top and this one row, not the
+      // thousands in between.
+      const [entries, mineRow, total] = await Promise.all([
+        this.prismaService.contestEntry.findMany({
+          where: { contestId: contest.id, rank: { not: null, lte: contest.leaderboardSize } },
+          orderBy: { rank: 'asc' },
+          select: { userId: true, score: true, rank: true, user: { select: { name: true, username: true } } },
+        }),
+        userId === null
+          ? Promise.resolve(null)
+          : this.prismaService.contestEntry.findUnique({
+              where: { contestId_userId: { contestId: contest.id, userId } },
+              select: { rank: true, score: true },
+            }),
+        this.prismaService.contestEntry.count({ where: { contestId: contest.id, rank: { not: null } } }),
+      ]);
+      return {
+        top: entries.map((entry) => ({
+          rank: entry.rank ?? 0,
+          userId: entry.userId,
+          name: entry.user.name,
+          username: entry.user.username,
+          score: Number(entry.score ?? 0n),
+        })),
+        total,
+        mine: mineRow?.rank == null ? null : { rank: mineRow.rank, score: Number(mineRow.score ?? 0n) },
+        toPrize: null,
+        currency,
+      };
+    }
+
+    const board = await this.liveStandings(contest, now);
+    const top = board.slice(0, contest.leaderboardSize);
+    const people = await this.people(top.map((row) => row.userId));
+    const index = userId === null ? -1 : board.findIndex((row) => row.userId === userId);
+    const mine = index < 0 ? null : { rank: index + 1, score: Number((board[index] as Standing).score) };
+    return {
+      top: top.map((row, position) => ({
+        rank: position + 1,
+        userId: row.userId,
+        name: people.get(row.userId)?.name ?? null,
+        username: people.get(row.userId)?.username ?? null,
+        score: Number(row.score),
+      })),
+      total: board.length,
+      mine,
+      toPrize: userId === null ? null : readGapToPrize(board, index, countPlaces(contest.prizes), contest.minScore),
+      currency,
+    };
+  }
+
+  private async liveStandings(contest: Parameters<ContestStandingsService['live']>[0], now: Date): Promise<readonly Standing[]> {
+    if (this.standings === undefined) return [];
+    return this.standings.live(contest, now);
+  }
+
+  private async people(
+    userIds: readonly string[],
+  ): Promise<Map<string, { readonly name: string | null; readonly username: string | null; readonly telegramId: string | null }>> {
+    if (userIds.length === 0) return new Map();
+    const rows = await this.prismaService.user.findMany({
+      where: { id: { in: [...userIds] } },
+      select: { id: true, name: true, username: true, telegramId: true },
+    });
+    return new Map(
+      rows.map((row) => [
+        row.id,
+        { name: row.name, username: row.username, telegramId: row.telegramId === null ? null : row.telegramId.toString() },
+      ]),
+    );
+  }
+
+  /** The project's clock, for the dates a monthly repeat lands on. */
+  private async readZone(): Promise<string> {
+    const settings = await this.prismaService.settings
+      .findUnique({ where: { id: 1 }, select: { platformPolicy: true } })
+      .catch(() => null);
+    return safeZone(readPlatformBranding(settings?.platformPolicy ?? null).timezone);
+  }
+
+  /**
+   * Pays one place — or holds it for an operator — and returns the
+   * subscription it changed, for the caller to push to Remnawave after the
+   * commit.
+   *
+   * Held (the contest's «Выдача призов» is REVIEW or SUPPORT): the winner row
+   * is written PENDING and `heldForReview`, and nothing is paid until the
+   * operator's «Выдать». A MANUAL prize is never «held»: a human hands it over
+   * whatever the setting, through the support thread, as before.
    */
   private async award(
     tx: Prisma.TransactionClient,
-    input: { readonly contestId: string; readonly userId: string; readonly prize: PrizeRow },
+    input: {
+      readonly contestId: string;
+      readonly userId: string;
+      readonly prize: PrizeRow;
+      readonly place: number;
+      readonly score: bigint | null;
+      readonly delivery: ContestPrizeDelivery;
+    },
   ): Promise<string | null> {
     const { prize } = input;
+    const held = input.delivery !== ContestPrizeDelivery.AUTO && prize.kind !== WheelSectorKind.MANUAL;
     // The winner row is written first so the payout has an id to hang the
     // journal rows and a claimed key on. Its status is corrected right after,
     // in the same transaction.
@@ -631,19 +1012,30 @@ export class ContestService {
         contestId: input.contestId,
         userId: input.userId,
         prizeId: prize.id,
-        place: prize.place,
+        place: input.place,
+        score: input.score,
+        heldForReview: held,
+        // The whole prize, not just its face: a held prize is paid from this
+        // later, and the place it was won at is the one that counts.
         prizeSnapshot: {
           id: prize.id,
-          place: prize.place,
+          place: input.place,
           kind: prize.kind,
           title: (prize.title ?? {}) as Prisma.InputJsonValue,
           amount: prize.amount,
+          promoRewardType: prize.promoRewardType,
+          promoPlanId: prize.promoPlanId,
+          promoPlanIds: [...prize.promoPlanIds],
+          promoLifetime: prize.promoLifetime,
+          keyPoolId: prize.keyPoolId,
+          manualInstructions: prize.manualInstructions,
         },
         kind: prize.kind,
         status: WheelSpinStatus.PENDING,
       },
       select: { id: true },
     });
+    if (held) return null;
 
     const paid = await this.payout.payOut(tx, {
       userId: input.userId,
@@ -651,7 +1043,7 @@ export class ContestService {
       origin: {
         source: 'CONTEST',
         referenceKey: `contest:${winner.id}`,
-        details: { contestId: input.contestId, winnerId: winner.id, place: prize.place },
+        details: { contestId: input.contestId, winnerId: winner.id, place: input.place },
       },
     });
 
@@ -732,7 +1124,9 @@ export type EntryRefusal =
   /** The contest needs a channel subscription and Telegram says there is none. */
   | 'CHANNEL_REQUIRED'
   /** The contest needs a channel subscription and the account has no Telegram to check. */
-  | 'NEEDS_TELEGRAM';
+  | 'NEEDS_TELEGRAM'
+  /** A leaderboard: there is nothing to enter, everybody in the audience counts. */
+  | 'AUTOMATIC';
 
 export function readClosedReason(
   contest: { readonly status: ContestStatus; readonly startAt: Date; readonly endAt: Date },
@@ -838,14 +1232,19 @@ async function recordTickets(
 /**
  * What would stop this contest being published: the same per-prize checks
  * the wheel applies to a sector, plus the things a contest has that a sector
- * does not — a window, a first place, and a channel that has both halves.
+ * does not — a window, places from the first with no gap and no overlap, a
+ * channel that has both halves, and for a leaderboard something to rank by.
  */
 export function readContestProblems(input: {
   readonly startAt: Date;
   readonly endAt: Date;
   readonly channelChatId?: string | null;
   readonly channelJoinUrl?: string | null;
-  readonly prizes: readonly Pick<PrizeRow, 'place' | 'kind' | 'amount' | 'keyPoolId' | 'promoRewardType' | 'promoPlanId' | 'promoLifetime' | 'manualInstructions'>[];
+  readonly kind?: ContestKind;
+  readonly metric?: ContestMetric | null;
+  readonly prizes: readonly (Pick<PrizeRow, 'place' | 'kind' | 'amount' | 'keyPoolId' | 'promoRewardType' | 'promoPlanId' | 'promoLifetime' | 'manualInstructions'> & {
+    readonly placeTo?: number | null;
+  })[];
 }): readonly string[] {
   const problems: string[] = [];
   if (input.prizes.length === 0) problems.push('Нужен хотя бы один приз');
@@ -853,10 +1252,25 @@ export function readContestProblems(input: {
   if ((input.channelChatId ?? null) === null !== ((input.channelJoinUrl ?? null) === null)) {
     problems.push('Канал: нужны и ссылка, и то, по чему его проверять');
   }
+  if (input.kind === ContestKind.LEADERBOARD && (input.metric ?? null) === null) {
+    problems.push('Рейтинг: выберите, по чему считать места');
+  }
 
-  const places = input.prizes.map((prize) => prize.place).sort((a, b) => a - b);
-  if (places.some((place, index) => place !== index + 1)) {
+  // Each prize covers [place, placeTo]; together they must cover 1…N once.
+  let next = 1;
+  let gapless = true;
+  for (const prize of [...input.prizes].sort((a, b) => a.place - b.place)) {
+    const last = prize.placeTo ?? prize.place;
+    if (prize.place !== next || last < prize.place) {
+      gapless = false;
+      break;
+    }
+    next = last + 1;
+  }
+  if (!gapless) {
     problems.push('Места должны идти подряд, начиная с первого');
+  } else if (next - 1 > MAX_PLACES) {
+    problems.push(`Призовых мест больше ${MAX_PLACES}`);
   }
 
   for (const prize of input.prizes) {
@@ -890,32 +1304,173 @@ function assertPrizesValid(prizes: readonly ContestPrizeInput[]): void {
     if (!Number.isInteger(prize.place) || prize.place < 1) {
       throw new BadRequestException('Место приза — целое число от единицы');
     }
+    if (prize.placeTo !== null && (!Number.isInteger(prize.placeTo) || prize.placeTo < prize.place)) {
+      throw new BadRequestException(`Место ${prize.place}: «до места» не может быть меньше «с места»`);
+    }
     if (seen.has(prize.place)) throw new BadRequestException(`Место ${prize.place} указано дважды`);
     seen.add(prize.place);
   }
 }
 
-/** The terms a draft carries, as columns. */
+/** The prize for each place, first place first: a range is counted out place by place. */
+export function expandPlaces<T extends Pick<PrizeRow, 'place' | 'placeTo'>>(prizes: readonly T[]): T[] {
+  const places: T[] = [];
+  for (const prize of [...prizes].sort((a, b) => a.place - b.place)) {
+    for (let place = prize.place; place <= (prize.placeTo ?? prize.place); place += 1) places.push(prize);
+  }
+  return places;
+}
+
+export function countPlaces(prizes: readonly Pick<PrizeRow, 'place' | 'placeTo'>[]): number {
+  return prizes.reduce((sum, prize) => sum + Math.max(0, (prize.placeTo ?? prize.place) - prize.place + 1), 0);
+}
+
+/**
+ * How much more score takes the last prize place: 0 for somebody holding one,
+ * `null` when no place is on offer.
+ *
+ * To take a place from the person holding it, a score has to BEAT theirs — a
+ * tie goes to whoever got there first, and that is never the one catching up.
+ * With fewer people on the board than places, the threshold is all it takes.
+ */
+export function readGapToPrize(
+  board: readonly { readonly score: bigint }[],
+  index: number,
+  places: number,
+  minScore: bigint | null,
+): number | null {
+  if (places <= 0) return null;
+  const threshold = minScore !== null && minScore > 0n ? minScore : 1n;
+  const own = index >= 0 ? (board[index] as { score: bigint }).score : 0n;
+  if (index >= 0 && index < places && own >= threshold) return 0;
+  let lastHeld: bigint | null = null;
+  let held = 0;
+  for (const [position, row] of board.entries()) {
+    if (position === index) continue;
+    if (row.score < threshold) break;
+    held += 1;
+    if (held === places) {
+      lastHeld = row.score;
+      break;
+    }
+  }
+  const needed = lastHeld === null ? threshold : lastHeld + 1n > threshold ? lastHeld + 1n : threshold;
+  const gap = needed - own;
+  return Number(gap > 0n ? gap : 0n);
+}
+
+/** A leaderboard's final board, one entry per person ranked, in chunks. */
+async function recordStandings(
+  tx: Prisma.TransactionClient,
+  contestId: string,
+  ranked: readonly Standing[],
+): Promise<void> {
+  for (let start = 0; start < ranked.length; start += 5_000) {
+    await tx.contestEntry.createMany({
+      data: ranked.slice(start, start + 5_000).map((row, offset) => ({
+        contestId,
+        userId: row.userId,
+        score: row.score,
+        rank: start + offset + 1,
+      })),
+      skipDuplicates: true,
+    });
+  }
+}
+
+/**
+ * The next month of a monthly contest: the same terms and prizes, from this
+ * one's end to the same moment a calendar month later on the project's clock.
+ * A contest finished so late that a whole month has passed starts from the
+ * last boundary that has, not in the past.
+ */
+async function repeatForAMonth(
+  tx: Prisma.TransactionClient,
+  contestId: string,
+  contest: ContestTerms,
+  zone: string,
+  now: Date,
+): Promise<string> {
+  let startAt = contest.endAt;
+  let endAt = addCalendarMonth(startAt, zone);
+  while (endAt.getTime() <= now.getTime()) {
+    startAt = endAt;
+    endAt = addCalendarMonth(endAt, zone);
+  }
+  const created = await tx.contest.create({
+    data: {
+      title: contest.title as Prisma.InputJsonValue,
+      description: contest.description as Prisma.InputJsonValue,
+      status: ContestStatus.ACTIVE,
+      startAt,
+      endAt,
+      audienceFilter: contest.audienceFilter === null ? Prisma.JsonNull : (contest.audienceFilter as Prisma.InputJsonValue),
+      maxEntries: contest.maxEntries,
+      order: contest.order,
+      createdBy: contest.createdBy,
+      announce: contest.announce,
+      ticketsPerPurchase: contest.ticketsPerPurchase,
+      ticketsPerReferral: contest.ticketsPerReferral,
+      maxTicketsPerUser: contest.maxTicketsPerUser,
+      channelChatId: contest.channelChatId,
+      channelJoinUrl: contest.channelJoinUrl,
+      kind: contest.kind,
+      metric: contest.metric,
+      minScore: contest.minScore,
+      leaderboardSize: contest.leaderboardSize,
+      prizeDelivery: contest.prizeDelivery,
+      repeatMonthly: true,
+      repeatOf: { connect: { id: contestId } },
+      ...seedData(contest.kind),
+      prizes: {
+        create: contest.prizes.map((prize) => toPrizeData({ ...prize, title: prize.title as Prisma.InputJsonValue })),
+      },
+    },
+    select: { id: true },
+  });
+  return created.id;
+}
+
+/** A draw's source of chance, made when it goes live. A leaderboard has none. */
+function seedData(kind: ContestKind): { drawSeed?: string; drawSeedHash?: string } {
+  if (kind !== ContestKind.DRAW) return {};
+  const seed = newDrawSeed();
+  return { drawSeed: seed, drawSeedHash: hashDrawSeed(seed) };
+}
+
+/**
+ * The terms a draft carries, as columns. A leaderboard has nobody entering,
+ * so what governs entering — a ceiling, tickets, a channel — is cleared on
+ * it rather than kept as a setting that does nothing.
+ */
 function termsData(input: ContestInput): Omit<Prisma.ContestCreateInput, 'prizes' | 'createdBy'> {
+  const ranked = input.kind === ContestKind.LEADERBOARD;
   return {
     title: input.title,
     description: input.description,
     startAt: input.startAt,
     endAt: input.endAt,
     audienceFilter: input.audienceFilter ?? Prisma.JsonNull,
-    maxEntries: input.maxEntries,
+    maxEntries: ranked ? null : input.maxEntries,
     announce: input.announce,
-    ticketsPerPurchase: input.ticketsPerPurchase,
-    ticketsPerReferral: input.ticketsPerReferral,
-    maxTicketsPerUser: input.maxTicketsPerUser,
-    channelChatId: input.channel?.chatId ?? null,
-    channelJoinUrl: input.channel?.joinUrl ?? null,
+    ticketsPerPurchase: ranked ? 0 : input.ticketsPerPurchase,
+    ticketsPerReferral: ranked ? 0 : input.ticketsPerReferral,
+    maxTicketsPerUser: ranked ? null : input.maxTicketsPerUser,
+    channelChatId: ranked ? null : (input.channel?.chatId ?? null),
+    channelJoinUrl: ranked ? null : (input.channel?.joinUrl ?? null),
+    kind: input.kind,
+    metric: ranked ? input.metric : null,
+    minScore: ranked && input.minScore !== null && input.minScore > 0 ? BigInt(input.minScore) : null,
+    leaderboardSize: input.leaderboardSize,
+    prizeDelivery: input.prizeDelivery,
+    repeatMonthly: input.repeatMonthly,
   };
 }
 
 function toPrizeData(prize: ContestPrizeInput): Prisma.ContestPrizeCreateWithoutContestInput {
   return {
     place: prize.place,
+    placeTo: prize.placeTo !== null && prize.placeTo > prize.place ? prize.placeTo : null,
     kind: prize.kind,
     title: prize.title,
     amount: prize.amount,
@@ -928,7 +1483,7 @@ function toPrizeData(prize: ContestPrizeInput): Prisma.ContestPrizeCreateWithout
   };
 }
 
-function toSummary(row: ContestRow): ContestSummary {
+function toSummary(row: ContestRow, currency: string, pendingPrizes: number): ContestSummary {
   return {
     id: row.id,
     title: row.title,
@@ -959,12 +1514,25 @@ function toSummary(row: ContestRow): ContestSummary {
     drawSeed: row.status === ContestStatus.DRAWN ? row.drawSeed : null,
     drawError: row.drawError,
     drawErrorAt: row.drawErrorAt?.toISOString() ?? null,
+    kind: row.kind,
+    metric: row.metric,
+    minScore: row.minScore === null ? null : Number(row.minScore),
+    leaderboardSize: row.leaderboardSize,
+    prizeDelivery: row.prizeDelivery,
+    repeatMonthly: row.repeatMonthly,
+    repeatOfId: row.repeatOfId,
+    trafficReadAt: row.trafficReadAt?.toISOString() ?? null,
+    places: countPlaces(row.prizes),
+    currency,
+    pendingPrizes,
     prizes: row.prizes,
     problems: readContestProblems({
       startAt: row.startAt,
       endAt: row.endAt,
       channelChatId: row.channelChatId,
       channelJoinUrl: row.channelJoinUrl,
+      kind: row.kind,
+      metric: row.metric,
       prizes: row.prizes,
     }),
   };

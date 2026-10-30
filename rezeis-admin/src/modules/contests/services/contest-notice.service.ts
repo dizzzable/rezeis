@@ -1,7 +1,10 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import {
   BroadcastAudience,
+  ContestKind,
+  ContestMetric,
   ContestNoticeKind,
+  ContestPrizeDelivery,
   ContestStatus,
   Prisma,
   WheelSpinStatus,
@@ -10,13 +13,18 @@ import {
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { buildAudienceWhere, normalizeAudienceFilter } from '../../broadcast/utils/broadcast-audience.util';
 import { UserNotificationsService } from '../../notifications/services/user-notifications.service';
+import { countPlaces } from './contest.service';
+import { ContestStandingsService } from './contest-standings.service';
 
 /** Notice types, as the template catalogue and the panel's template page name them. */
 export const CONTEST_NOTICE_TYPES = {
   started: 'contest_started',
+  leaderboardStarted: 'contest_leaderboard_started',
   won: 'contest_won',
   wonManual: 'contest_won_manual',
+  wonReview: 'contest_won_review',
   lost: 'contest_lost',
+  rank: 'contest_rank',
 } as const;
 
 /**
@@ -34,6 +42,10 @@ const BATCH = 300;
  * after the draw — the winner, and «не повезло» to the rest. Each through the
  * ordinary user notification, so it reaches the bot and the cabinet feed and
  * its words live in «Шаблоны уведомлений».
+ *
+ * A leaderboard has nobody who entered: its results go to the winners and to
+ * everybody else on the public board — «ваше место X из Y» — and not to the
+ * thousands further down, who never asked to be in a contest at all.
  *
  * ── At most once ──────────────────────────────────────────────────────────
  *
@@ -53,6 +65,8 @@ export class ContestNoticeService {
   public constructor(
     private readonly prismaService: PrismaService,
     private readonly userNotifications: UserNotificationsService,
+    /** The base currency a payments score is told in. `@Optional()` for the specs. */
+    @Optional() private readonly standings?: ContestStandingsService,
   ) {}
 
   public async sendDue(now = new Date()): Promise<{ readonly announced: number; readonly results: number }> {
@@ -69,7 +83,7 @@ export class ContestNoticeService {
       },
       orderBy: { startAt: 'asc' },
       take: 5,
-      select: { id: true, title: true, endAt: true, audienceFilter: true },
+      select: { id: true, title: true, endAt: true, audienceFilter: true, kind: true, metric: true },
     });
     for (const contest of opening) {
       announced += await this.announce(contest, now);
@@ -79,7 +93,16 @@ export class ContestNoticeService {
       where: { status: ContestStatus.DRAWN, resultsNotifiedAt: null },
       orderBy: { drawnAt: 'asc' },
       take: 5,
-      select: { id: true, title: true },
+      select: {
+        id: true,
+        title: true,
+        kind: true,
+        metric: true,
+        leaderboardSize: true,
+        prizeDelivery: true,
+        drawnEntries: true,
+        prizes: { select: { place: true, placeTo: true } },
+      },
     });
     for (const contest of drawn) {
       results += await this.tellResults(contest, now);
@@ -94,9 +117,12 @@ export class ContestNoticeService {
       readonly title: Prisma.JsonValue;
       readonly endAt: Date;
       readonly audienceFilter: Prisma.JsonValue | null;
+      readonly kind: ContestKind;
+      readonly metric: ContestMetric | null;
     },
     now: Date,
   ): Promise<number> {
+    const ranked = contest.kind === ContestKind.LEADERBOARD;
     const filter = normalizeAudienceFilter(contest.audienceFilter);
     const audience = filter === null ? {} : buildAudienceWhere(BroadcastAudience.ALL, filter);
     const people = await this.prismaService.user.findMany({
@@ -115,10 +141,11 @@ export class ContestNoticeService {
 
     const claimed = await this.claim(contest.id, ContestNoticeKind.ANNOUNCED, people.map((person) => person.id));
     for (const userId of claimed) {
-      await this.notify(userId, CONTEST_NOTICE_TYPES.started, {
+      await this.notify(userId, ranked ? CONTEST_NOTICE_TYPES.leaderboardStarted : CONTEST_NOTICE_TYPES.started, {
         contestId: contest.id,
         contestTitle: contest.title,
         contestEndsAt: contest.endAt.toISOString(),
+        ...(ranked ? { contestMetric: contest.metric } : {}),
       });
     }
     if (people.length < BATCH) {
@@ -130,40 +157,73 @@ export class ContestNoticeService {
     return claimed.length;
   }
 
-  /** One batch of results to entrants not yet told. */
+  /** One batch of results to entrants — or, on a leaderboard, the board — not yet told. */
   private async tellResults(
-    contest: { readonly id: string; readonly title: Prisma.JsonValue },
+    contest: {
+      readonly id: string;
+      readonly title: Prisma.JsonValue;
+      readonly kind: ContestKind;
+      readonly metric: ContestMetric | null;
+      readonly leaderboardSize: number;
+      readonly prizeDelivery: ContestPrizeDelivery;
+      readonly drawnEntries: number | null;
+      readonly prizes: readonly { readonly place: number; readonly placeTo: number | null }[];
+    },
     now: Date,
   ): Promise<number> {
+    const ranked = contest.kind === ContestKind.LEADERBOARD;
+    // Every prize place is inside this, and so is the whole public board.
+    const told = Math.max(contest.leaderboardSize, countPlaces(contest.prizes));
     const entries = await this.prismaService.contestEntry.findMany({
       where: {
         contestId: contest.id,
+        ...(ranked ? { rank: { lte: told } } : {}),
         user: { contestNotices: { none: { contestId: contest.id, kind: ContestNoticeKind.RESULT } } },
       },
       orderBy: { id: 'asc' },
       take: BATCH,
-      select: { userId: true },
+      select: { userId: true, rank: true, score: true },
     });
     const userIds = entries.map((entry) => entry.userId);
+    const entryOf = new Map(entries.map((entry) => [entry.userId, entry]));
     const wins = await this.prismaService.contestWinner.findMany({
       where: { contestId: contest.id, userId: { in: userIds } },
-      select: { userId: true, place: true, status: true, prizeSnapshot: true },
+      select: { userId: true, place: true, status: true, heldForReview: true, prizeSnapshot: true },
     });
     const winOf = new Map(wins.map((win) => [win.userId, win]));
+    const currency = this.standings?.baseCurrency() ?? 'RUB';
 
     const claimed = await this.claim(contest.id, ContestNoticeKind.RESULT, userIds);
     for (const userId of claimed) {
       const win = winOf.get(userId);
       if (win === undefined) {
+        const entry = entryOf.get(userId);
+        if (ranked && entry?.rank != null) {
+          await this.notify(userId, CONTEST_NOTICE_TYPES.rank, {
+            contestId: contest.id,
+            contestTitle: contest.title,
+            place: entry.rank,
+            contestTotal: contest.drawnEntries ?? entry.rank,
+            contestScore: (entry.score ?? 0n).toString(),
+            contestMetric: contest.metric,
+            contestCurrency: currency,
+          });
+          continue;
+        }
         await this.notify(userId, CONTEST_NOTICE_TYPES.lost, { contestId: contest.id, contestTitle: contest.title });
         continue;
       }
-      // Owed and not yet handed over — a manual prize, or a key the pool ran
-      // out of: the person is told an operator will be in touch, not that the
-      // prize is already theirs.
+      // Held for the operator's check: the person is told it is coming, not
+      // that it is theirs already. Owed and handed over by a human — a manual
+      // prize, a prize «через поддержку», a key the pool ran out of: an
+      // operator will be in touch.
       await this.notify(
         userId,
-        win.status === WheelSpinStatus.PENDING ? CONTEST_NOTICE_TYPES.wonManual : CONTEST_NOTICE_TYPES.won,
+        win.heldForReview && contest.prizeDelivery === ContestPrizeDelivery.REVIEW
+          ? CONTEST_NOTICE_TYPES.wonReview
+          : win.status === WheelSpinStatus.PENDING
+            ? CONTEST_NOTICE_TYPES.wonManual
+            : CONTEST_NOTICE_TYPES.won,
         {
           contestId: contest.id,
           contestTitle: contest.title,

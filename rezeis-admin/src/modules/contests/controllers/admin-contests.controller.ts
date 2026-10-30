@@ -15,7 +15,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
-import { Prisma } from '@prisma/client';
+import { ContestKind, ContestPrizeDelivery, Prisma } from '@prisma/client';
 import { Request } from 'express';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
@@ -33,6 +33,7 @@ import {
   type ContestChannel,
   type ContestEntrantRow,
   type ContestInput,
+  type ContestStandingRow,
   type ContestSummary,
   type DrawResult,
 } from '../services/contest.service';
@@ -83,6 +84,15 @@ export class AdminContestsController {
     @Query() query: ListContestEntrantsDto,
   ): Promise<{ readonly total: number; readonly rows: readonly ContestEntrantRow[] }> {
     return this.contests.listEntrants(contestId, { take: query.take ?? 50, skip: query.skip ?? 0 });
+  }
+
+  @Get(':contestId/standings')
+  @ApiOperation({ summary: 'Места рейтинга: живые, пока идёт, и итоговые после конца' })
+  public standings(
+    @Param('contestId') contestId: string,
+    @Query() query: ListContestEntrantsDto,
+  ): Promise<{ readonly total: number; readonly rows: readonly ContestStandingRow[] }> {
+    return this.contests.listStandings(contestId, { take: query.take ?? 50, skip: query.skip ?? 0 });
   }
 
   @Get(':contestId/winners')
@@ -253,8 +263,15 @@ function toInput(dto: ContestDto): ContestInput {
     ticketsPerReferral: dto.ticketsPerReferral ?? 0,
     maxTicketsPerUser: dto.maxTicketsPerUser ?? null,
     channel: readChannel(dto),
+    kind: dto.kind ?? ContestKind.DRAW,
+    metric: dto.metric ?? null,
+    minScore: dto.minScore ?? null,
+    leaderboardSize: dto.leaderboardSize ?? 10,
+    prizeDelivery: dto.prizeDelivery ?? ContestPrizeDelivery.AUTO,
+    repeatMonthly: dto.repeatMonthly ?? false,
     prizes: dto.prizes.map((prize) => ({
       place: prize.place,
+      placeTo: prize.placeTo ?? null,
       kind: prize.kind,
       title: prize.title as Prisma.InputJsonValue,
       amount: prize.amount,

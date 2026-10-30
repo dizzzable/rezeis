@@ -2,7 +2,8 @@
  * «Конкурсы» feature bundle (RU), lazy-loaded via withFeatureBundle('contests').
  *
  * What the page learned on 29.10.2026 — audience, channel, tickets, the
- * announcement, the participants, a draw that failed. Deep-merged into
+ * announcement, the participants, a draw that failed — and on 30.10 the
+ * leaderboards, prize delivery and monthly repeats. Deep-merged into
  * `contestsPage` from the core dictionary, whose older keys stay where the
  * quick search reads them.
  */
@@ -59,6 +60,67 @@ export const ru = {
       announce: 'Сообщить о конкурсе',
       announceHint:
         'Когда конкурс начнётся, бот и кабинет сообщат о нём всем, кто может участвовать, — несколько сотен сообщений в минуту. Текст — в «Шаблонах уведомлений», «Новый конкурс». Итоги участникам приходят всегда.',
+      template: 'Шаблон',
+      templates: {
+        draw: 'Розыгрыш',
+        referrals: 'Топ приглашений',
+        payments: 'Топ оплат',
+        traffic: 'Топ трафика',
+        points: 'Топ баллов',
+      },
+      templateTitles: {
+        referrals: 'Кто пригласит больше друзей',
+        payments: 'Топ покупателей месяца',
+        traffic: 'Кто потратит больше трафика',
+        points: 'Кто заработает больше баллов',
+      },
+      kind: 'Вид конкурса',
+      kinds: {
+        DRAW: 'Розыгрыш — участвуют по кнопке, победителей выбирает жребий',
+        LEADERBOARD: 'Рейтинг — места по показателю, участвуют все автоматически',
+      },
+      metric: 'По чему считать места',
+      metrics: {
+        REFERRALS_PAID: 'Приглашённые друзья, которые оплатили',
+        PAYMENTS_SUM: 'Сумма оплат',
+        TRAFFIC: 'Потраченный трафик',
+        POINTS_EARNED: 'Заработанные баллы',
+      },
+      metricHints: {
+        REFERRALS_PAID: 'Друг считается, когда его первая оплата пришлась на период конкурса. Регистрация без оплаты не считается.',
+        PAYMENTS_SUM: 'Оплаты за период в базовой валюте. Возвраты и оплаты партнёрским балансом не считаются.',
+        TRAFFIC: 'Счётчик Remnawave читается раз в час и ещё раз после конца. Ежемесячный сброс трафика на результат не влияет.',
+        POINTS_EARNED: 'Кэшбэк, рефералы, задания и колесо. Списания за возвраты вычитаются; призы конкурсов и ручные начисления не считаются.',
+      },
+      minScore: 'Минимум для призового места',
+      minScoreUnits: {
+        REFERRALS_PAID: 'друзей',
+        PAYMENTS_SUM: '₽',
+        TRAFFIC: 'ГБ',
+        POINTS_EARNED: 'баллов',
+      },
+      minScorePlaceholder: 'без минимума',
+      leaderboardSize: 'Мест в таблице',
+      leaderboardSizeHint: 'Сколько первых мест видят все в кабинете. Каждый видит и своё место.',
+      delivery: 'Выдача призов',
+      deliveries: {
+        AUTO: 'Сразу автоматически',
+        REVIEW: 'После проверки оператором',
+        SUPPORT: 'Через поддержку',
+      },
+      deliveryHints: {
+        AUTO: 'Баллы, дни, трафик, промокоды и ключи начисляются в момент итогов.',
+        REVIEW: 'Победители ждут: в «Победителях» оператор нажимает «Выдать» — приз начисляется — или «Отказать» с причиной. Победителю приходит «приз после проверки».',
+        SUPPORT: 'Каждому победителю сразу открывается обращение в поддержку. «Выдать» начисляет приз и пишет в обращение.',
+      },
+      deliveryManual: 'Приз «вручную» (деньги, мерч) всегда идёт через поддержку — так можно сделать, например, 1-е место деньгами, а остальные автоматически.',
+      repeat: 'Повторять каждый месяц',
+      repeatHint: 'Когда конкурс закончится, такой же начнётся сразу — до того же числа и часа следующего месяца, с теми же условиями и призами. Выключить можно и у идущего.',
+      placesCount: 'Мест с этим призом',
+      placeRange: 'Места {{from}}–{{to}}',
+      prizesHintRanges:
+        'Первый приз — первому месту. Чтобы дать один приз нескольким местам, укажите, сколько мест его получают: «4–10 место — по 100 баллов».',
+      leaderboardEntry: 'Участвуют все, кто подходит под аудиторию: заявки, канала и билетов у рейтинга нет.',
     },
     row: {
       drawError: 'Розыгрыш не прошёл: {{error}}',
@@ -69,9 +131,48 @@ export const ru = {
       announceSent: 'Анонс отправлен',
       resultsSending: 'Итоги рассылаются',
       resultsSent: 'Итоги разосланы',
+      leaderboard: 'Рейтинг: {{metric}}',
+      delivery: {
+        REVIEW: 'Призы после проверки',
+        SUPPORT: 'Призы через поддержку',
+      },
+      repeat: 'Каждый месяц',
+      pendingPrizes: 'Ждут выдачи: {{count}}',
+      awaitingTraffic: 'Ждёт последнего замера трафика из Remnawave',
+      awaitingResults: 'Окончен — подводятся итоги',
     },
     actionsExtra: {
       entrants: 'Участники',
+      standings: 'Рейтинг',
+      results: 'Итоги',
+    },
+    drawRefused: {
+      AWAITING_TRAFFIC: 'Ждём замера трафика после окончания — итоги подведутся сами в течение минуты-двух.',
+    },
+    toastExtra: {
+      finished: 'Итоги подведены: победителей — {{winners}}, в рейтинге — {{entrants}}',
+      repeated: 'Следующий месяц уже идёт',
+    },
+    standings: {
+      title: 'Рейтинг: {{count}}',
+      empty: 'Пока ни у кого нет результата.',
+      liveHint: 'Пока идёт — обновляется раз в минуту; трафик — раз в час. Окончательно — при подведении итогов.',
+      prizeLine: 'Призовая зона',
+    },
+    units: {
+      friends_one: '{{count}} друг',
+      friends_few: '{{count}} друга',
+      friends_many: '{{count}} друзей',
+      friends_other: '{{count}} друга',
+      points_one: '{{count}} балл',
+      points_few: '{{count}} балла',
+      points_many: '{{count}} баллов',
+      points_other: '{{count}} балла',
+      gb: '{{value}} ГБ',
+    },
+    winnersExtra: {
+      held: 'Ждёт проверки: «Выдать» начислит приз',
+      score: 'результат: {{score}}',
     },
     cancelDialog: {
       title: 'Отменить конкурс?',

@@ -1,3 +1,5 @@
+import { contestMetricPhrase, formatContestScore } from './contest-score.util';
+
 /**
  * The subscription facts a notification template can print.
  *
@@ -304,6 +306,11 @@ export interface ContestFactsInput {
   readonly endsAt: unknown;
   /** IANA zone the operator configured. Falls back to UTC. */
   readonly timezone?: string | null;
+  /** A leaderboard's metric, its score for this reader as a string, how many were ranked, and the base currency. */
+  readonly metric?: unknown;
+  readonly score?: unknown;
+  readonly total?: unknown;
+  readonly currency?: unknown;
 }
 
 /**
@@ -312,6 +319,8 @@ export interface ContestFactsInput {
  * reader when there is one, else the Russian — and `{{contestEndsDate}}`,
  * `{{contestEndsTime}}`, `{{contestEndsDateTime}}` when entries close, the
  * last with its zone named, «5 ноября в 20:00 по Москве», as a reset time is.
+ * A leaderboard's adds `{{contestMetric}}` («потраченному трафику»),
+ * `{{contestScore}}` («12,4 ГБ») and `{{contestTotal}}`, how many were ranked.
  * A payload that is not a contest's gives nothing.
  */
 export function buildContestFacts(input: ContestFactsInput, locale: NotificationLocaleTag): Record<string, string> {
@@ -328,6 +337,13 @@ export function buildContestFacts(input: ContestFactsInput, locale: Notification
     out['contestEndsTime'] = formatTime(when, zone);
     out['contestEndsDateTime'] =
       `${out['contestEndsDate']} ${WORDS[locale].at} ${out['contestEndsTime']} ${zonePhrase(zone, when, locale)}`;
+  }
+  const metric = contestMetricPhrase(input.metric, locale);
+  if (metric !== null) out['contestMetric'] = metric;
+  const score = formatContestScore(input.metric, input.score, locale, input.currency);
+  if (score !== null) out['contestScore'] = score;
+  if (typeof input.total === 'number' && Number.isInteger(input.total) && input.total > 0) {
+    out['contestTotal'] = input.total.toLocaleString(locale === 'en' ? 'en-GB' : 'ru-RU');
   }
   return out;
 }

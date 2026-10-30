@@ -56,4 +56,30 @@ describe('contest finish migration', () => {
     assert.match(statements, /"tickets_per_purchase" INTEGER NOT NULL DEFAULT 0/);
     assert.match(statements, /"tickets_per_referral" INTEGER NOT NULL DEFAULT 0/);
   });
+
+  it('leaves every existing contest a draw that pays at once and does not repeat', () => {
+    assert.match(statements, /"kind" "ContestKind" NOT NULL DEFAULT 'DRAW'/);
+    assert.match(statements, /"prize_delivery" "ContestPrizeDelivery" NOT NULL DEFAULT 'AUTO'/);
+    assert.match(statements, /"repeat_monthly" BOOLEAN NOT NULL DEFAULT false/);
+    assert.match(statements, /"held_for_review" BOOLEAN NOT NULL DEFAULT false/);
+  });
+
+  it('creates the leaderboard types, the counter table and its keys only once', () => {
+    for (const type of ['ContestKind', 'ContestMetric', 'ContestPrizeDelivery']) {
+      assert.match(statements, new RegExp(`IF NOT EXISTS \\(SELECT 1 FROM pg_type WHERE typname = '${type}'\\)`));
+    }
+    assert.match(statements, /CREATE TABLE IF NOT EXISTS "contest_traffic_counters"/);
+    assert.match(
+      statements,
+      /CREATE UNIQUE INDEX IF NOT EXISTS "contest_traffic_counters_contest_id_remnawave_id_key"\s+ON "contest_traffic_counters" \("contest_id", "remnawave_id"\)/,
+    );
+    assert.match(statements, /CREATE UNIQUE INDEX IF NOT EXISTS "contests_repeat_of_id_key" ON "contests" \("repeat_of_id"\)/);
+    for (const key of [
+      'contests_repeat_of_id_fkey',
+      'contest_traffic_counters_contest_id_fkey',
+      'contest_traffic_counters_user_id_fkey',
+    ]) {
+      assert.match(statements, new RegExp(`conname = '${key}'`));
+    }
+  });
 });

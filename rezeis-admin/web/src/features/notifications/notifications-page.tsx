@@ -130,11 +130,17 @@ const USER_NOTIFICATION_KEYS = [
   'points_cashback_credited',
   // Contests (29.10.2026): the announcement when one opens, then each
   // result for every entrant — a prize credited, a prize an operator hands over, or
-  // not this time. Sent by `ContestNoticeService`.
+  // not this time. Sent by `ContestNoticeService`. Leaderboards (30.10.2026)
+  // add their own announcement, a place without a prize, a prize waiting for an
+  // operator check, and the word when that check pays it.
   'contest_started',
+  'contest_leaderboard_started',
   'contest_won',
   'contest_won_manual',
+  'contest_won_review',
+  'contest_prize_issued',
   'contest_lost',
+  'contest_rank',
   'partner_referral_registered',
   'partner_earning',
   'partner_withdrawal_request_created',

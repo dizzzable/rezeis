@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { PromocodeRewardType, WheelSectorKind } from '@prisma/client';
+import { ContestKind, ContestMetric, ContestPrizeDelivery, PromocodeRewardType, WheelSectorKind } from '@prisma/client';
 import { Type } from 'class-transformer';
 import {
   ArrayMaxSize,
@@ -19,9 +19,16 @@ import {
 
 import { LocalizedTextDto, QuestAudienceFilterDto } from '../../quests/dto/quest-payload.dto';
 import { MAX_SECTOR_AMOUNT } from '../../wheel-config/dto/wheel-sector.dto';
+import { MAX_PLACES } from '../services/contest.service';
 
-/** Enough places for a real giveaway; more than this is a lottery, not a contest. */
+/** Enough prizes for a real giveaway; more than this is a lottery, not a contest. A range is one prize. */
 export const MAX_PRIZES = 50;
+
+/** The largest public leaderboard. */
+export const MAX_LEADERBOARD_SIZE = 100;
+
+/** A threshold beyond any real score — a petabyte, ten trillion roubles in kopecks. */
+export const MAX_MIN_SCORE = 1_000_000_000_000_000;
 
 /** Extra tickets one purchase or one friend can bring. */
 export const MAX_TICKETS_PER_ACTION = 100;
@@ -50,11 +57,19 @@ export class LocalizedLongTextDto {
 }
 
 export class ContestPrizeDto {
-  @ApiProperty({ minimum: 1, maximum: MAX_PRIZES })
+  @ApiProperty({ minimum: 1, maximum: MAX_PLACES })
   @IsInt()
   @Min(1)
-  @Max(MAX_PRIZES)
+  @Max(MAX_PLACES)
   public place!: number;
+
+  @ApiPropertyOptional({ nullable: true, minimum: 1, maximum: MAX_PLACES, description: 'Последнее место, которое получает этот приз: «4–10 место». Пусто — одно место.' })
+  @IsOptional()
+  @Type((): NumberConstructor => Number)
+  @IsInt()
+  @Min(1)
+  @Max(MAX_PLACES)
+  public placeTo?: number | null;
 
   @ApiProperty({ enum: WheelSectorKind })
   @IsEnum(WheelSectorKind)
@@ -181,6 +196,42 @@ export class ContestDto {
   @IsString()
   @MaxLength(40)
   public channelId?: string | null;
+
+  @ApiPropertyOptional({ enum: ContestKind, default: ContestKind.DRAW, description: 'Розыгрыш среди участников или рейтинг по показателю.' })
+  @IsOptional()
+  @IsEnum(ContestKind)
+  public kind?: ContestKind;
+
+  @ApiPropertyOptional({ enum: ContestMetric, nullable: true, description: 'По чему считать места рейтинга.' })
+  @IsOptional()
+  @IsEnum(ContestMetric)
+  public metric?: ContestMetric | null;
+
+  @ApiPropertyOptional({ nullable: true, minimum: 0, maximum: MAX_MIN_SCORE, description: 'Наименьший результат, с которым дают место: друзья, копейки базовой валюты, байты, баллы.' })
+  @IsOptional()
+  @Type((): NumberConstructor => Number)
+  @IsInt()
+  @Min(0)
+  @Max(MAX_MIN_SCORE)
+  public minScore?: number | null;
+
+  @ApiPropertyOptional({ minimum: 3, maximum: MAX_LEADERBOARD_SIZE, default: 10, description: 'Сколько мест показывать в таблице рейтинга.' })
+  @IsOptional()
+  @Type((): NumberConstructor => Number)
+  @IsInt()
+  @Min(3)
+  @Max(MAX_LEADERBOARD_SIZE)
+  public leaderboardSize?: number;
+
+  @ApiPropertyOptional({ enum: ContestPrizeDelivery, default: ContestPrizeDelivery.AUTO, description: 'Сразу, после проверки оператором или через поддержку.' })
+  @IsOptional()
+  @IsEnum(ContestPrizeDelivery)
+  public prizeDelivery?: ContestPrizeDelivery;
+
+  @ApiPropertyOptional({ description: 'Когда закончится — начать такой же на следующий месяц.' })
+  @IsOptional()
+  @IsBoolean()
+  public repeatMonthly?: boolean;
 
   @ApiProperty({ type: [ContestPrizeDto], description: 'Призы по местам: место 1 — первый приз.' })
   @IsArray()

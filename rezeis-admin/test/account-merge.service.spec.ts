@@ -214,6 +214,14 @@ function createMergeMock(fx: MergeFixtures): { prisma: PrismaService; calls: Cal
       deleteMany: async (a: Record<string, unknown>) => { rec('contestWinner', 'deleteMany', a); return { count: 0 }; },
       updateMany: async (a: Record<string, unknown>) => { rec('contestWinner', 'updateMany', a); return { count: 0 }; },
     },
+    contestNotice: {
+      findMany: async () => [],
+      deleteMany: async (a: Record<string, unknown>) => { rec('contestNotice', 'deleteMany', a); return { count: 0 }; },
+      updateMany: async (a: Record<string, unknown>) => { rec('contestNotice', 'updateMany', a); return { count: 0 }; },
+    },
+    contestTrafficCounter: {
+      updateMany: async (a: Record<string, unknown>) => { rec('contestTrafficCounter', 'updateMany', a); return { count: 0 }; },
+    },
     deviceObservation: {
       findMany: async () => [],
       deleteMany: async (a: Record<string, unknown>) => { rec('deviceObservation', 'deleteMany', a); return { count: 0 }; },

@@ -25,6 +25,26 @@
 --   contest_notices             one row per person per notice, so a retried
 --                               sweep never sends the same message twice.
 --
+-- And a second kind of contest, the leaderboard (owner, 29–30.10.2026):
+--
+--   kind, metric                a draw among entrants, or places by a metric
+--                               over the window — friends who paid, payments,
+--                               traffic, points earned.
+--   min_score                   the least score that wins a place.
+--   leaderboard_size            how many places the public board shows.
+--   prize_delivery              paid at once, after an operator's check, or
+--                               through a support thread — for both kinds.
+--   repeat_monthly,             when it ends, the same contest starts again
+--   repeat_of_id                for a month; the link is unique, so a contest
+--                               has one successor however often it is drawn.
+--   traffic_read_at             when traffic was last read from Remnawave.
+--   contest_prizes.place_to     one prize for a range of places.
+--   contest_entries.score/rank  a leaderboard's result per person.
+--   contest_winners.score,      the winning score; a prize the system can pay
+--   held_for_review             but an operator has to release.
+--   contest_traffic_counters    Remnawave's lifetime counter per subscription,
+--                               when the contest first and last saw it.
+--
 -- Contests drawn before this file already had their results: they are marked
 -- as told, or the first sweep would message every past entrant.
 --
@@ -89,6 +109,77 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'contest_notices_user_id_fkey') THEN
     ALTER TABLE "contest_notices"
       ADD CONSTRAINT "contest_notices_user_id_fkey"
+      FOREIGN KEY ("user_id") REFERENCES "users"("id")
+      ON DELETE CASCADE ON UPDATE CASCADE;
+  END IF;
+END
+$do$;
+
+DO $do$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'ContestKind') THEN
+    CREATE TYPE "ContestKind" AS ENUM ('DRAW', 'LEADERBOARD');
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'ContestMetric') THEN
+    CREATE TYPE "ContestMetric" AS ENUM ('REFERRALS_PAID', 'PAYMENTS_SUM', 'TRAFFIC', 'POINTS_EARNED');
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'ContestPrizeDelivery') THEN
+    CREATE TYPE "ContestPrizeDelivery" AS ENUM ('AUTO', 'REVIEW', 'SUPPORT');
+  END IF;
+END
+$do$;
+
+ALTER TABLE "contests" ADD COLUMN IF NOT EXISTS "kind" "ContestKind" NOT NULL DEFAULT 'DRAW';
+ALTER TABLE "contests" ADD COLUMN IF NOT EXISTS "metric" "ContestMetric";
+ALTER TABLE "contests" ADD COLUMN IF NOT EXISTS "min_score" BIGINT;
+ALTER TABLE "contests" ADD COLUMN IF NOT EXISTS "leaderboard_size" INTEGER NOT NULL DEFAULT 10;
+ALTER TABLE "contests" ADD COLUMN IF NOT EXISTS "prize_delivery" "ContestPrizeDelivery" NOT NULL DEFAULT 'AUTO';
+ALTER TABLE "contests" ADD COLUMN IF NOT EXISTS "repeat_monthly" BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE "contests" ADD COLUMN IF NOT EXISTS "repeat_of_id" TEXT;
+ALTER TABLE "contests" ADD COLUMN IF NOT EXISTS "traffic_read_at" TIMESTAMPTZ(3);
+
+ALTER TABLE "contest_prizes" ADD COLUMN IF NOT EXISTS "place_to" INTEGER;
+ALTER TABLE "contest_entries" ADD COLUMN IF NOT EXISTS "score" BIGINT;
+ALTER TABLE "contest_entries" ADD COLUMN IF NOT EXISTS "rank" INTEGER;
+ALTER TABLE "contest_winners" ADD COLUMN IF NOT EXISTS "score" BIGINT;
+ALTER TABLE "contest_winners" ADD COLUMN IF NOT EXISTS "held_for_review" BOOLEAN NOT NULL DEFAULT false;
+
+-- Every value is NULL until a repeat is made, so the index builds on nothing.
+CREATE UNIQUE INDEX IF NOT EXISTS "contests_repeat_of_id_key" ON "contests" ("repeat_of_id");
+
+CREATE TABLE IF NOT EXISTS "contest_traffic_counters" (
+  "id"           TEXT NOT NULL,
+  "contest_id"   TEXT NOT NULL,
+  "remnawave_id" TEXT NOT NULL,
+  "user_id"      TEXT NOT NULL,
+  "start_bytes"  BIGINT NOT NULL,
+  "last_bytes"   BIGINT NOT NULL,
+  "updated_at"   TIMESTAMPTZ(3) NOT NULL,
+  CONSTRAINT "contest_traffic_counters_pkey" PRIMARY KEY ("id")
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS "contest_traffic_counters_contest_id_remnawave_id_key"
+  ON "contest_traffic_counters" ("contest_id", "remnawave_id");
+CREATE INDEX IF NOT EXISTS "contest_traffic_counters_user_id_idx"
+  ON "contest_traffic_counters" ("user_id");
+
+DO $do$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'contests_repeat_of_id_fkey') THEN
+    ALTER TABLE "contests"
+      ADD CONSTRAINT "contests_repeat_of_id_fkey"
+      FOREIGN KEY ("repeat_of_id") REFERENCES "contests"("id")
+      ON DELETE SET NULL ON UPDATE CASCADE;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'contest_traffic_counters_contest_id_fkey') THEN
+    ALTER TABLE "contest_traffic_counters"
+      ADD CONSTRAINT "contest_traffic_counters_contest_id_fkey"
+      FOREIGN KEY ("contest_id") REFERENCES "contests"("id")
+      ON DELETE CASCADE ON UPDATE CASCADE;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'contest_traffic_counters_user_id_fkey') THEN
+    ALTER TABLE "contest_traffic_counters"
+      ADD CONSTRAINT "contest_traffic_counters_user_id_fkey"
       FOREIGN KEY ("user_id") REFERENCES "users"("id")
       ON DELETE CASCADE ON UPDATE CASCADE;
   END IF;

@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { Link } from 'react-router'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { AlertTriangle, Check, Dices, Megaphone, Pencil, Plus, Ticket, Trash2, Users, X } from 'lucide-react'
+import { AlertTriangle, Check, Dices, Megaphone, Pencil, Plus, Repeat, Ticket, Trash2, Trophy, Users, X } from 'lucide-react'
 
 import { getErrorMessage } from '@/lib/http-errors'
 import {
@@ -36,6 +36,7 @@ import {
   drawContest,
   issueContestPrize,
   listContestEntrants,
+  listContestStandings,
   listContestWinners,
   listContests,
   publishContest,
@@ -43,8 +44,11 @@ import {
   updateContest,
   type Contest,
   type ContestAudienceFilter,
+  type ContestKind,
+  type ContestMetric,
   type ContestPayload,
   type ContestPrize,
+  type ContestPrizeDelivery,
   type ContestWinner,
 } from './contests-api'
 import { listKeyPools } from './wheel-keys-api'
@@ -82,6 +86,31 @@ const CONTACT_OPTS = ['hasTelegram', 'hasEmail', 'hasWebPush'] as const
 /** Entrants loaded per page of the participants list. */
 const ENTRANTS_PAGE = 50
 
+const METRICS: readonly ContestMetric[] = ['REFERRALS_PAID', 'PAYMENTS_SUM', 'TRAFFIC', 'POINTS_EARNED']
+const DELIVERIES: readonly ContestPrizeDelivery[] = ['AUTO', 'REVIEW', 'SUPPORT']
+const GB = 1024 ** 3
+
+/** What «Новый конкурс» can start from. */
+const TEMPLATES = ['draw', 'referrals', 'payments', 'traffic', 'points'] as const
+type TemplateKey = (typeof TEMPLATES)[number]
+const TEMPLATE_METRIC: Record<Exclude<TemplateKey, 'draw'>, ContestMetric> = {
+  referrals: 'REFERRALS_PAID',
+  payments: 'PAYMENTS_SUM',
+  traffic: 'TRAFFIC',
+  points: 'POINTS_EARNED',
+}
+
+/**
+ * The threshold as the operator types it — friends, roubles, gigabytes,
+ * points — and as the server stores it: friends, kopecks, bytes, points.
+ */
+const SCORE_SCALE: Record<ContestMetric, number> = {
+  REFERRALS_PAID: 1,
+  PAYMENTS_SUM: 100,
+  TRAFFIC: GB,
+  POINTS_EARNED: 1,
+}
+
 interface PrizeDraft {
   kind: WheelSectorKind
   titleRu: string
@@ -91,6 +120,8 @@ interface PrizeDraft {
   manualInstructions: string
   /** What a PROMOCODE prize's code actually does. */
   promo: PromoDraft
+  /** How many places in a row get this prize: «4–10 место» is 7. */
+  places: string
 }
 
 interface Draft {
@@ -112,6 +143,13 @@ interface Draft {
   ticketsPerPurchase: string
   ticketsPerReferral: string
   maxTicketsPerUser: string
+  kind: ContestKind
+  metric: ContestMetric
+  /** In the unit the operator types: friends, roubles, gigabytes, points. */
+  minScore: string
+  leaderboardSize: string
+  prizeDelivery: ContestPrizeDelivery
+  repeatMonthly: boolean
   prizes: PrizeDraft[]
 }
 
@@ -124,6 +162,7 @@ function emptyPrize(): PrizeDraft {
     keyPoolId: '',
     manualInstructions: '',
     promo: emptyPromoDraft(),
+    places: '1',
   }
 }
 
@@ -157,8 +196,52 @@ function emptyDraft(): Draft {
     ticketsPerPurchase: '0',
     ticketsPerReferral: '0',
     maxTicketsPerUser: '',
+    kind: 'DRAW',
+    metric: 'REFERRALS_PAID',
+    minScore: '',
+    leaderboardSize: '10',
+    prizeDelivery: 'AUTO',
+    repeatMonthly: false,
     prizes: [emptyPrize()],
   }
+}
+
+/**
+ * A new contest from a template: the kind, what it ranks by, and a set of
+ * places that fits — a month long and repeating for a leaderboard, the usual
+ * week for a draw. Everything stays editable; the template only fills in.
+ */
+function applyTemplate(draft: Draft, key: TemplateKey, title: string): Draft {
+  if (key === 'draw') {
+    return { ...draft, kind: 'DRAW', repeatMonthly: false, titleRu: draft.titleRu || title }
+  }
+  const start = new Date()
+  const end = new Date(start.getFullYear(), start.getMonth() + 1, 1, 0, 0)
+  const prize = (amount: string, places: string): PrizeDraft => ({ ...emptyPrize(), amount, places })
+  return {
+    ...draft,
+    kind: 'LEADERBOARD',
+    metric: TEMPLATE_METRIC[key],
+    titleRu: draft.titleRu || title,
+    startAt: toLocalInput(start.toISOString()),
+    endAt: toLocalInput(end.toISOString()),
+    leaderboardSize: '10',
+    repeatMonthly: true,
+    prizes: [prize('1000', '1'), prize('500', '1'), prize('300', '1'), prize('100', '7')],
+  }
+}
+
+/** A threshold from the server's unit into the one typed. */
+function scoreToInput(metric: ContestMetric | null, value: number | null): string {
+  if (value === null || metric === null) return ''
+  const shown = value / SCORE_SCALE[metric]
+  return String(Math.round(shown * 100) / 100)
+}
+
+function scoreFromInput(metric: ContestMetric, value: string): number | null {
+  const typed = Number(value.replace(',', '.'))
+  if (value.trim() === '' || !Number.isFinite(typed) || typed <= 0) return null
+  return Math.round(typed * SCORE_SCALE[metric])
 }
 
 function toDraft(contest: Contest): Draft {
@@ -185,7 +268,13 @@ function toDraft(contest: Contest): Draft {
     ticketsPerPurchase: String(contest.ticketsPerPurchase ?? 0),
     ticketsPerReferral: String(contest.ticketsPerReferral ?? 0),
     maxTicketsPerUser: contest.maxTicketsPerUser == null ? '' : String(contest.maxTicketsPerUser),
-    prizes: contest.prizes.map((prize) => ({
+    kind: contest.kind ?? 'DRAW',
+    metric: contest.metric ?? 'REFERRALS_PAID',
+    minScore: scoreToInput(contest.metric ?? null, contest.minScore ?? null),
+    leaderboardSize: String(contest.leaderboardSize ?? 10),
+    prizeDelivery: contest.prizeDelivery ?? 'AUTO',
+    repeatMonthly: contest.repeatMonthly ?? false,
+    prizes: [...contest.prizes].sort((a, b) => a.place - b.place).map((prize) => ({
       kind: prize.kind,
       titleRu: prize.title?.ru ?? '',
       titleEn: prize.title?.en ?? '',
@@ -193,8 +282,20 @@ function toDraft(contest: Contest): Draft {
       keyPoolId: prize.keyPoolId ?? '',
       manualInstructions: prize.manualInstructions ?? '',
       promo: promoDraftOf(prize),
+      places: String(Math.max(1, (prize.placeTo ?? prize.place) - prize.place + 1)),
     })),
   }
+}
+
+/** Each row's first and last place: the rows follow one another down the board. */
+function placeRanges(prizes: readonly PrizeDraft[]): Array<{ from: number; to: number }> {
+  let next = 1
+  return prizes.map((prize) => {
+    const count = Math.max(1, readCount(prize.places, 1) ?? 1)
+    const range = { from: next, to: next + count - 1 }
+    next += count
+    return range
+  })
 }
 
 /** `datetime-local` gives back '' when the field is cleared. */
@@ -228,6 +329,8 @@ function bilingual(ru: string, en: string): { ru: string; en: string } {
 
 function toPayload(draft: Draft): ContestPayload {
   const maxTickets = readCount(draft.maxTicketsPerUser, null)
+  const ranges = placeRanges(draft.prizes)
+  const ranked = draft.kind === 'LEADERBOARD'
   return {
     title: bilingual(draft.titleRu, draft.titleEn),
     description: bilingual(draft.descriptionRu, draft.descriptionEn),
@@ -241,9 +344,17 @@ function toPayload(draft: Draft): ContestPayload {
     maxTicketsPerUser: maxTickets !== null && maxTickets >= 1 ? maxTickets : null,
     channelLink: draft.channelLink.trim() === '' ? null : draft.channelLink.trim(),
     channelId: draft.channelId.trim() === '' ? null : draft.channelId.trim(),
-    // Places follow the list order: the first row is first prize.
+    kind: draft.kind,
+    metric: ranked ? draft.metric : null,
+    minScore: ranked ? scoreFromInput(draft.metric, draft.minScore) : null,
+    leaderboardSize: Math.min(100, Math.max(3, readCount(draft.leaderboardSize, 10) ?? 10)),
+    prizeDelivery: draft.prizeDelivery,
+    repeatMonthly: draft.repeatMonthly,
+    // Places follow the list order: the first row is first prize, and a row
+    // for several places takes them one after another.
     prizes: draft.prizes.map<Omit<ContestPrize, 'id'>>((prize, index) => ({
-      place: index + 1,
+      place: ranges[index]?.from ?? index + 1,
+      placeTo: (ranges[index]?.to ?? 0) > (ranges[index]?.from ?? 0) ? (ranges[index]?.to ?? null) : null,
       kind: prize.kind,
       title: bilingual(prize.titleRu, prize.titleEn),
       amount: NEEDS_AMOUNT.has(prize.kind) ? Math.trunc(Number(prize.amount)) || 0 : 0,
@@ -269,7 +380,8 @@ function toggleIn(list: readonly string[], value: string): string[] {
  * live one can have its wording fixed and its end moved later, can be
  * cancelled, and drawn once its end has passed; a drawn one shows its
  * winners, with the prizes a human hands over settled right here. Every
- * contest past the draft shows who entered.
+ * contest past the draft shows who entered — or, for a leaderboard, the
+ * board as it stands.
  */
 export default function ContestsPage() {
   const { t } = useTranslation()
@@ -279,6 +391,7 @@ export default function ContestsPage() {
   const [cancelling, setCancelling] = useState<Contest | null>(null)
   const [winnersOf, setWinnersOf] = useState<Contest | null>(null)
   const [entrantsOf, setEntrantsOf] = useState<Contest | null>(null)
+  const [standingsOf, setStandingsOf] = useState<Contest | null>(null)
 
   // Refetched on a timer so "over, waiting for the draw" appears without a
   // reload; `dataUpdatedAt` is then the clock the rows are judged against,
@@ -346,7 +459,12 @@ export default function ContestsPage() {
     onSuccess: (result) => {
       refresh()
       if (result.drawn) {
-        toast.success(t('contestsPage.toast.drawn', { winners: result.winners, entrants: result.entrants }))
+        toast.success(
+          result.tickets === null
+            ? t('contestsPage.toastExtra.finished', { winners: result.winners, entrants: result.entrants })
+            : t('contestsPage.toast.drawn', { winners: result.winners, entrants: result.entrants }),
+        )
+        if (result.repeatedBy) toast.success(t('contestsPage.toastExtra.repeated'))
       } else {
         toast.error(t(`contestsPage.drawRefused.${result.reason}`))
       }
@@ -408,7 +526,7 @@ export default function ContestsPage() {
                           {sectorTitle(contest, t('contestsPage.unnamed'))}
                         </div>
                         <div className="text-xs text-muted-foreground">
-                          {t('contestsPage.prizesCount', { count: contest.prizes.length })}
+                          {t('contestsPage.prizesCount', { count: contest.places ?? contest.prizes.length })}
                         </div>
                         <ContestBadges contest={contest} />
                         {contest.status === 'DRAFT' && contest.problems.length > 0 ? (
@@ -437,8 +555,14 @@ export default function ContestsPage() {
                         {new Date(contest.endAt).toLocaleString(activeLocale())}
                       </TableCell>
                       <TableCell className="align-top text-right tabular-nums">
-                        {contest.entries}
-                        {contest.maxEntries !== null ? ` / ${contest.maxEntries}` : ''}
+                        {contest.kind === 'LEADERBOARD' && contest.status !== 'DRAWN' ? (
+                          '—'
+                        ) : (
+                          <>
+                            {contest.entries}
+                            {contest.maxEntries !== null ? ` / ${contest.maxEntries}` : ''}
+                          </>
+                        )}
                       </TableCell>
                       <TableCell className="align-top">
                         <Badge variant={contest.status === 'ACTIVE' ? 'default' : 'secondary'}>
@@ -446,10 +570,21 @@ export default function ContestsPage() {
                         </Badge>
                         {contest.status === 'ACTIVE' && over ? (
                           <div className="mt-1 text-xs text-amber-600 dark:text-amber-400">
-                            {t('contestsPage.awaitingDraw')}
+                            {contest.kind !== 'LEADERBOARD'
+                              ? t('contestsPage.awaitingDraw')
+                              : contest.metric === 'TRAFFIC' &&
+                                  (contest.trafficReadAt === null ||
+                                    new Date(contest.trafficReadAt).getTime() < new Date(contest.endAt).getTime())
+                                ? t('contestsPage.row.awaitingTraffic')
+                                : t('contestsPage.row.awaitingResults')}
                           </div>
                         ) : null}
                         <NoticeState contest={contest} />
+                        {contest.status === 'DRAWN' && (contest.pendingPrizes ?? 0) > 0 ? (
+                          <div className="mt-1 text-xs text-amber-600 dark:text-amber-400" data-testid="contest-pending-prizes">
+                            {t('contestsPage.row.pendingPrizes', { count: contest.pendingPrizes })}
+                          </div>
+                        ) : null}
                       </TableCell>
                       <TableCell className="align-top">
                         <div className="flex flex-wrap justify-end gap-1">
@@ -502,11 +637,23 @@ export default function ContestsPage() {
                             </>
                           ) : null}
                           {contest.status === 'DRAWN' ? (
-                            <Button variant="outline" size="sm" onClick={() => setWinnersOf(contest)}>
+                            <Button
+                              variant={(contest.pendingPrizes ?? 0) > 0 ? 'default' : 'outline'}
+                              size="sm"
+                              onClick={() => setWinnersOf(contest)}
+                            >
                               {t('contestsPage.actions.winners', { count: contest.winners })}
                             </Button>
                           ) : null}
-                          {contest.status !== 'DRAFT' ? (
+                          {contest.status !== 'DRAFT' && contest.kind === 'LEADERBOARD' ? (
+                            <Button variant="outline" size="sm" className="gap-1" onClick={() => setStandingsOf(contest)}>
+                              <Trophy className="h-4 w-4" />
+                              {contest.status === 'DRAWN'
+                                ? t('contestsPage.actionsExtra.results')
+                                : t('contestsPage.actionsExtra.standings')}
+                            </Button>
+                          ) : null}
+                          {contest.status !== 'DRAFT' && contest.kind !== 'LEADERBOARD' ? (
                             <Button variant="outline" size="sm" className="gap-1" onClick={() => setEntrantsOf(contest)}>
                               <Users className="h-4 w-4" />
                               {t('contestsPage.actionsExtra.entrants')}
@@ -533,6 +680,7 @@ export default function ContestsPage() {
           {editing !== null ? (
             <ContestForm
               draft={editing.draft}
+              isNew={editing.id === null}
               locked={editingStatus !== 'DRAFT'}
               pools={(pools.data ?? []).map((pool) => ({ id: pool.id, name: pool.name, available: pool.available }))}
               onChange={(draft) => setEditing({ id: editing.id, draft })}
@@ -605,17 +753,37 @@ export default function ContestsPage() {
 
       <WinnersDialog contest={winnersOf} onClose={() => setWinnersOf(null)} />
       <EntrantsDialog contest={entrantsOf} onClose={() => setEntrantsOf(null)} />
+      <StandingsDialog contest={standingsOf} onClose={() => setStandingsOf(null)} />
     </div>
   )
 }
 
-/** What a contest asks of people beyond the button: a channel, tickets. */
+/** What a contest asks of people beyond the button, and how it ends: a channel, tickets, a leaderboard, held prizes, a repeat. */
 function ContestBadges({ contest }: { readonly contest: Contest }) {
   const { t } = useTranslation()
   const tickets = contest.ticketsPerPurchase > 0 || contest.ticketsPerReferral > 0
-  if (contest.channel === null && !tickets) return null
+  const ranked = contest.kind === 'LEADERBOARD'
+  const held = contest.prizeDelivery === 'REVIEW' || contest.prizeDelivery === 'SUPPORT'
+  if (contest.channel === null && !tickets && !ranked && !held && !contest.repeatMonthly) return null
   return (
     <div className="mt-1 flex flex-wrap gap-1">
+      {ranked && contest.metric ? (
+        <Badge variant="outline" className="gap-1 text-[10px]">
+          <Trophy className="h-3 w-3" />
+          {t('contestsPage.row.leaderboard', { metric: t(`contestsPage.form.metrics.${contest.metric}`) })}
+        </Badge>
+      ) : null}
+      {held ? (
+        <Badge variant="outline" className="text-[10px]">
+          {t(`contestsPage.row.delivery.${contest.prizeDelivery}`)}
+        </Badge>
+      ) : null}
+      {contest.repeatMonthly ? (
+        <Badge variant="outline" className="gap-1 text-[10px]">
+          <Repeat className="h-3 w-3" />
+          {t('contestsPage.row.repeat')}
+        </Badge>
+      ) : null}
       {contest.channel !== null ? (
         <Badge variant="outline" className="text-[10px]">
           {t('contestsPage.row.channel')}
@@ -692,13 +860,37 @@ function ChipGroup({
   )
 }
 
+/** «Повторять каждый месяц» — on a draft, and on a live contest too. */
+function RepeatToggle({ checked, onChange }: { readonly checked: boolean; readonly onChange: (value: boolean) => void }) {
+  const { t } = useTranslation()
+  return (
+    <div className="flex items-start gap-2 rounded-lg border p-3">
+      <Checkbox
+        id="contest-repeat"
+        checked={checked}
+        onCheckedChange={(value) => onChange(value === true)}
+        className="mt-0.5"
+      />
+      <div className="space-y-0.5">
+        <Label htmlFor="contest-repeat" className="text-sm">
+          {t('contestsPage.form.repeat')}
+        </Label>
+        <p className="text-xs text-muted-foreground">{t('contestsPage.form.repeatHint')}</p>
+      </div>
+    </div>
+  )
+}
+
 function ContestForm({
   draft,
+  isNew,
   locked,
   pools,
   onChange,
 }: {
   readonly draft: Draft
+  /** A contest not saved yet: offered the templates. */
+  readonly isNew: boolean
   /** Live: the wording may change, and the end may move later. */
   readonly locked: boolean
   readonly pools: ReadonlyArray<{ id: string; name: string; available: number }>
@@ -712,9 +904,43 @@ function ContestForm({
       'prizes',
       draft.prizes.map((prize, i) => (i === index ? { ...prize, ...patch } : prize)),
     )
+  const ranked = draft.kind === 'LEADERBOARD'
+  const ranges = placeRanges(draft.prizes)
 
   return (
     <div className="space-y-4">
+      {isNew ? (
+        <div className="space-y-1.5" data-testid="contest-templates">
+          <p className="text-xs font-medium text-muted-foreground">{t('contestsPage.form.template')}</p>
+          <div className="flex flex-wrap gap-1.5">
+            {TEMPLATES.map((key) => {
+              const active = key === 'draw' ? draft.kind === 'DRAW' : ranked && draft.metric === TEMPLATE_METRIC[key]
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  aria-pressed={active}
+                  onClick={() =>
+                    onChange(
+                      applyTemplate(
+                        draft,
+                        key,
+                        key === 'draw' ? '' : t(`contestsPage.form.templateTitles.${key}`),
+                      ),
+                    )
+                  }
+                  className={cn(
+                    'rounded-full border px-3 py-1 text-xs transition-colors',
+                    active ? 'border-primary bg-primary/15 text-primary' : 'border-border text-muted-foreground hover:bg-muted',
+                  )}
+                >
+                  {t(`contestsPage.form.templates.${key}`)}
+                </button>
+              )
+            })}
+          </div>
+        </div>
+      ) : null}
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="space-y-1.5">
           <Label htmlFor="contest-title-ru">{t('contestsPage.form.titleRu')}</Label>
@@ -744,10 +970,71 @@ function ContestForm({
             <Label htmlFor="contest-end">{t('contestsPage.form.endAtExtend')}</Label>
             <Input id="contest-end" type="datetime-local" value={draft.endAt} onChange={(e) => set('endAt', e.target.value)} />
           </div>
+          <RepeatToggle checked={draft.repeatMonthly} onChange={(value) => set('repeatMonthly', value)} />
         </>
       ) : (
         <>
-          <div className="grid gap-3 sm:grid-cols-3">
+          <div className="space-y-1.5">
+            <Label>{t('contestsPage.form.kind')}</Label>
+            <Select value={draft.kind} onValueChange={(value) => set('kind', value as ContestKind)}>
+              <SelectTrigger aria-label={t('contestsPage.form.kind')}>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {(['DRAW', 'LEADERBOARD'] as const).map((kind) => (
+                  <SelectItem key={kind} value={kind}>
+                    {t(`contestsPage.form.kinds.${kind}`)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          {ranked ? (
+            <fieldset className="space-y-3 rounded-lg border p-3" data-testid="contest-leaderboard-fields">
+              <legend className="px-1 text-sm font-medium">{t('contestsPage.form.metric')}</legend>
+              <Select value={draft.metric} onValueChange={(value) => set('metric', value as ContestMetric)}>
+                <SelectTrigger aria-label={t('contestsPage.form.metric')}>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {METRICS.map((metric) => (
+                    <SelectItem key={metric} value={metric}>
+                      {t(`contestsPage.form.metrics.${metric}`)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">{t(`contestsPage.form.metricHints.${draft.metric}`)}</p>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label htmlFor="contest-min-score">
+                    {t('contestsPage.form.minScore')}, {t(`contestsPage.form.minScoreUnits.${draft.metric}`)}
+                  </Label>
+                  <Input
+                    id="contest-min-score"
+                    inputMode="decimal"
+                    placeholder={t('contestsPage.form.minScorePlaceholder')}
+                    value={draft.minScore}
+                    onChange={(e) => set('minScore', e.target.value)}
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="contest-board-size">{t('contestsPage.form.leaderboardSize')}</Label>
+                  <Input
+                    id="contest-board-size"
+                    inputMode="numeric"
+                    value={draft.leaderboardSize}
+                    onChange={(e) => set('leaderboardSize', e.target.value)}
+                  />
+                </div>
+              </div>
+              <p className="text-xs text-muted-foreground">{t('contestsPage.form.leaderboardSizeHint')}</p>
+              <p className="text-xs text-muted-foreground">{t('contestsPage.form.leaderboardEntry')}</p>
+            </fieldset>
+          ) : null}
+
+          <div className={cn('grid gap-3', ranked ? 'sm:grid-cols-2' : 'sm:grid-cols-3')}>
             <div className="space-y-1.5">
               <Label htmlFor="contest-start">{t('contestsPage.form.startAt')}</Label>
               <Input id="contest-start" type="datetime-local" value={draft.startAt} onChange={(e) => set('startAt', e.target.value)} />
@@ -756,16 +1043,18 @@ function ContestForm({
               <Label htmlFor="contest-end">{t('contestsPage.form.endAt')}</Label>
               <Input id="contest-end" type="datetime-local" value={draft.endAt} onChange={(e) => set('endAt', e.target.value)} />
             </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="contest-max">{t('contestsPage.form.maxEntries')}</Label>
-              <Input
-                id="contest-max"
-                inputMode="numeric"
-                placeholder={t('contestsPage.form.noLimit')}
-                value={draft.maxEntries}
-                onChange={(e) => set('maxEntries', e.target.value)}
-              />
-            </div>
+            {ranked ? null : (
+              <div className="space-y-1.5">
+                <Label htmlFor="contest-max">{t('contestsPage.form.maxEntries')}</Label>
+                <Input
+                  id="contest-max"
+                  inputMode="numeric"
+                  placeholder={t('contestsPage.form.noLimit')}
+                  value={draft.maxEntries}
+                  onChange={(e) => set('maxEntries', e.target.value)}
+                />
+              </div>
+            )}
           </div>
 
           <fieldset className="space-y-3 rounded-lg border p-3">
@@ -814,6 +1103,8 @@ function ContestForm({
             </div>
           </fieldset>
 
+          {ranked ? null : (
+          <>
           <fieldset className="space-y-3 rounded-lg border p-3">
             <legend className="px-1 text-sm font-medium">{t('contestsPage.form.channel')}</legend>
             <p className="text-xs text-muted-foreground">{t('contestsPage.form.channelHint')}</p>
@@ -873,6 +1164,28 @@ function ContestForm({
               </div>
             </div>
           </fieldset>
+          </>
+          )}
+
+          <fieldset className="space-y-2 rounded-lg border p-3">
+            <legend className="px-1 text-sm font-medium">{t('contestsPage.form.delivery')}</legend>
+            <Select value={draft.prizeDelivery} onValueChange={(value) => set('prizeDelivery', value as ContestPrizeDelivery)}>
+              <SelectTrigger aria-label={t('contestsPage.form.delivery')}>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {DELIVERIES.map((delivery) => (
+                  <SelectItem key={delivery} value={delivery}>
+                    {t(`contestsPage.form.deliveries.${delivery}`)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">{t(`contestsPage.form.deliveryHints.${draft.prizeDelivery}`)}</p>
+            <p className="text-xs text-muted-foreground">{t('contestsPage.form.deliveryManual')}</p>
+          </fieldset>
+
+          <RepeatToggle checked={draft.repeatMonthly} onChange={(value) => set('repeatMonthly', value)} />
 
           <div className="flex items-start gap-2 rounded-lg border p-3">
             <Checkbox
@@ -903,11 +1216,27 @@ function ContestForm({
                 {t('contestsPage.form.addPrize')}
               </Button>
             </div>
-            <p className="text-xs text-muted-foreground">{t('contestsPage.form.prizesHint')}</p>
+            <p className="text-xs text-muted-foreground">{t('contestsPage.form.prizesHintRanges')}</p>
             {draft.prizes.map((prize, index) => (
               <div key={index} className="space-y-2 rounded-lg border p-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-medium">{t('contestsPage.form.place', { place: index + 1 })}</span>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-sm font-medium">
+                    {(ranges[index]?.to ?? 0) > (ranges[index]?.from ?? 0)
+                      ? t('contestsPage.form.placeRange', { from: ranges[index]?.from, to: ranges[index]?.to })
+                      : t('contestsPage.form.place', { place: ranges[index]?.from ?? index + 1 })}
+                  </span>
+                  <div className="ml-auto flex items-center gap-1.5">
+                    <Label htmlFor={`contest-prize-places-${index}`} className="text-xs text-muted-foreground">
+                      {t('contestsPage.form.placesCount')}
+                    </Label>
+                    <Input
+                      id={`contest-prize-places-${index}`}
+                      inputMode="numeric"
+                      className="h-8 w-16"
+                      value={prize.places}
+                      onChange={(e) => setPrize(index, { places: e.target.value })}
+                    />
+                  </div>
                   <Button
                     type="button"
                     variant="ghost"
@@ -986,6 +1315,119 @@ function ContestForm({
         </>
       )}
     </div>
+  )
+}
+
+/** A leaderboard score as a person says it: «3 друга», «1 250 ₽», «12,4 ГБ», «350 баллов». */
+function useScoreFormat(): (metric: ContestMetric | null, score: number, currency: string) => string {
+  const { t } = useTranslation()
+  return (metric, score, currency) => {
+    const locale = activeLocale()
+    switch (metric) {
+      case 'REFERRALS_PAID':
+        return t('contestsPage.units.friends', { count: score })
+      case 'POINTS_EARNED':
+        return t('contestsPage.units.points', { count: score })
+      case 'TRAFFIC': {
+        const gb = score / GB
+        return t('contestsPage.units.gb', { value: gb.toLocaleString(locale, { maximumFractionDigits: gb >= 100 ? 0 : 1 }) })
+      }
+      case 'PAYMENTS_SUM': {
+        const major = score / 100
+        try {
+          return new Intl.NumberFormat(locale, {
+            style: 'currency',
+            currency,
+            maximumFractionDigits: Number.isInteger(major) ? 0 : 2,
+          }).format(major)
+        } catch {
+          return `${major.toLocaleString(locale)} ${currency}`
+        }
+      }
+      default:
+        return String(score)
+    }
+  }
+}
+
+/** A leaderboard's places: live while it runs, as the end counted them after. */
+function StandingsDialog({ contest, onClose }: { readonly contest: Contest | null; readonly onClose: () => void }) {
+  const { t } = useTranslation()
+  const format = useScoreFormat()
+  const standings = useInfiniteQuery({
+    queryKey: ['admin', 'contests', contest?.id, 'standings'],
+    queryFn: ({ pageParam }) => listContestStandings(contest?.id as string, { take: ENTRANTS_PAGE, skip: pageParam }),
+    initialPageParam: 0,
+    getNextPageParam: (last, pages) => {
+      const loaded = pages.reduce((sum, page) => sum + page.rows.length, 0)
+      return loaded < last.total && last.rows.length > 0 ? loaded : undefined
+    },
+    enabled: contest !== null,
+  })
+  const rows = (standings.data?.pages ?? []).flatMap((page) => page.rows)
+  const total = standings.data?.pages[0]?.total ?? 0
+  const places = contest?.places ?? 0
+
+  return (
+    <Dialog open={contest !== null} onOpenChange={(open) => (open ? undefined : onClose())}>
+      <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>
+            {contest ? sectorTitle(contest, t('contestsPage.unnamed')) : ''} —{' '}
+            {t('contestsPage.standings.title', { count: total })}
+          </DialogTitle>
+        </DialogHeader>
+        {contest !== null && contest.status !== 'DRAWN' ? (
+          <p className="text-xs text-muted-foreground">{t('contestsPage.standings.liveHint')}</p>
+        ) : null}
+        {standings.isLoading ? (
+          <Skeleton className="h-24 w-full" />
+        ) : rows.length === 0 ? (
+          <p className="py-6 text-center text-sm text-muted-foreground">{t('contestsPage.standings.empty')}</p>
+        ) : (
+          <ul className="divide-y rounded-lg border" data-testid="contest-standings">
+            {rows.map((row) => {
+              const label = row.name || (row.username ? `@${row.username}` : t('contestsPage.entrants.noName'))
+              return (
+                <li
+                  key={row.userId}
+                  className={cn(
+                    'flex flex-wrap items-center justify-between gap-2 px-3 py-2 text-sm',
+                    row.rank <= places ? 'bg-primary/5' : '',
+                  )}
+                >
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="w-8 shrink-0 text-right font-mono text-xs text-muted-foreground">#{row.rank}</span>
+                    {row.telegramId ? (
+                      <Link className="font-medium underline-offset-2 hover:underline" to={`/users/${row.telegramId}`}>
+                        {label}
+                      </Link>
+                    ) : (
+                      <span className="font-medium">{label}</span>
+                    )}
+                    {row.rank <= places ? (
+                      <Trophy className="h-3.5 w-3.5 shrink-0 text-amber-500" aria-label={t('contestsPage.standings.prizeLine')} />
+                    ) : null}
+                  </div>
+                  <span className="tabular-nums">{format(contest?.metric ?? null, row.score, contest?.currency ?? 'RUB')}</span>
+                </li>
+              )
+            })}
+          </ul>
+        )}
+        {standings.hasNextPage ? (
+          <Button
+            variant="outline"
+            size="sm"
+            className="self-start"
+            disabled={standings.isFetchingNextPage}
+            onClick={() => void standings.fetchNextPage()}
+          >
+            {t('contestsPage.entrants.more')}
+          </Button>
+        ) : null}
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -1074,6 +1516,7 @@ function WinnersDialog({ contest, onClose }: { readonly contest: Contest | null;
   const queryClient = useQueryClient()
   const [settling, setSettling] = useState<{ winner: ContestWinner; action: 'issue' | 'refuse' } | null>(null)
   const [note, setNote] = useState('')
+  const format = useScoreFormat()
 
   const winners = useQuery({
     queryKey: ['admin', 'contests', contest?.id, 'winners'],
@@ -1149,7 +1592,13 @@ function WinnersDialog({ contest, onClose }: { readonly contest: Contest | null;
                       winner.winner.name || winner.winner.id
                     )}
                     {winner.instructions ? ` · ${winner.instructions}` : ''}
+                    {winner.score != null && contest !== null
+                      ? ` · ${t('contestsPage.winnersExtra.score', { score: format(contest.metric, winner.score, contest.currency) })}`
+                      : ''}
                   </div>
+                  {winner.heldForReview && winner.status === 'PENDING' ? (
+                    <div className="text-xs text-amber-600 dark:text-amber-400">{t('contestsPage.winnersExtra.held')}</div>
+                  ) : null}
                 </div>
                 <div className="flex gap-1">
                   {winner.status === 'PENDING' ? (

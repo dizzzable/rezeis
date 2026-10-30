@@ -294,6 +294,14 @@ function createMergeWorld() {
       deleteMany: async () => ({ count: 0 }),
       updateMany: noopUpdateMany('contestWinner'),
     },
+    contestNotice: {
+      findMany: async () => [],
+      deleteMany: async () => ({ count: 0 }),
+      updateMany: noopUpdateMany('contestNotice'),
+    },
+    contestTrafficCounter: {
+      updateMany: noopUpdateMany('contestTrafficCounter'),
+    },
     deviceObservation: {
       findMany: async () => [],
       deleteMany: async () => ({ count: 0 }),

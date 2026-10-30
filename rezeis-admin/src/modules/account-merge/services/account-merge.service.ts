@@ -765,6 +765,11 @@ export class AccountMergeService {
     }
     await tx.contestNotice.updateMany({ where: { userId: sourceId }, data: { userId: targetId } });
 
+    // A traffic leaderboard's counters belong to subscriptions, which move to
+    // the survivor too; the counter is unique per subscription, never per
+    // person, so moving it cannot collide.
+    await tx.contestTrafficCounter.updateMany({ where: { userId: sourceId }, data: { userId: targetId } });
+
     const targetDevices = await tx.deviceObservation.findMany({
       where: { userId: targetId },
       select: { kind: true, value: true },
