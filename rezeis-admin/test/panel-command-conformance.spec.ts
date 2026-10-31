@@ -484,6 +484,15 @@ describe('the queries production sends unvalidated are accepted by every era', (
 // ── The runtime boundary ────────────────────────────────────────────────────
 
 const PACKAGE_ROOT = join(__dirname, '..');
+/**
+ * The one zod the runtime may carry: the version `package.json` pins. Read, not
+ * written here, so a deliberate bump (4.5.4 → 4.6.7 for GHSA-mrhx-c7xc-m3w5)
+ * moves the guard with it — and a range instead of an exact pin («^4.6.7»)
+ * matches no installed version, so loosening the pin still fails.
+ */
+const PINNED_ZOD = (
+  JSON.parse(readFileSync(join(PACKAGE_ROOT, 'package.json'), 'utf8')) as { dependencies: Record<string, string> }
+).dependencies['zod'];
 
 function sourceFiles(directory: string): string[] {
   const files: string[] = [];
@@ -553,7 +562,7 @@ describe('no vendor contract reaches the runtime', () => {
     );
     assert.deepStrictEqual(
       runtimeZod.map(([path, entry]) => `${path}@${entry.version}`),
-      ['node_modules/zod@4.5.4'],
+      [`node_modules/zod@${PINNED_ZOD}`],
     );
   });
 
@@ -582,6 +591,6 @@ describe('no vendor contract reaches the runtime', () => {
     // Anchor: a real production tree was read, not an empty object.
     assert.ok(seen.size > 100, `npm ls reported only ${seen.size} packages`);
     assert.deepStrictEqual([...seen.keys()].filter((name) => name.startsWith('@remnawave/')), []);
-    assert.deepStrictEqual([...(seen.get('zod') ?? [])], ['4.5.4']);
+    assert.deepStrictEqual([...(seen.get('zod') ?? [])], [PINNED_ZOD]);
   });
 });

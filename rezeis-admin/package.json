@@ -67,7 +67,7 @@
     "fflate": "^0.8.3",
     "helmet": "8.1.0",
     "ioredis": "5.11.1",
-    "nodemailer": "^10.1.1",
+    "nodemailer": "^10.2.1",
     "openai": "^4.50.0",
     "passport": "0.7.0",
     "passport-jwt": "4.0.1",
@@ -80,7 +80,7 @@
     "tar-stream": "3.1.7",
     "web-push": "^3.6.7",
     "winston": "3.19.0",
-    "zod": "4.5.4"
+    "zod": "4.6.7"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
@@ -127,13 +127,13 @@
   },
   "overrides": {
     "brace-expansion": "^5.0.9",
-    "fast-uri": "^3.1.5",
+    "fast-uri": "^3.1.9",
     "find-my-way": "^9.9.0",
-    "multer": "^2.4.0",
+    "multer": "^2.5.0",
     "ws": "^8.21.3",
     "js-yaml": "^4.3.1",
     "form-data": "^4.0.6",
-    "body-parser": "^2.3.0",
+    "body-parser": "^2.4.0",
     "valibot": "^1.5.0",
     "deepmerge-ts": "^8.0.2",
     "mysql2": "^3.24.2",
