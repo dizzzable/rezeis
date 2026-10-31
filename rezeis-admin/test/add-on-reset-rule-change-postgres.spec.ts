@@ -238,6 +238,20 @@ function nextReset(strategy: ResetStrategy, timeZone?: string): Date {
   return nextRemnawaveReset({ strategy, anchorAt: null, timeZone }, new Date())!;
 }
 
+/**
+ * Where a «до сброса» add-on ends once its reset rule changed: the first reset
+ * under the new rule, but never later than the date it was sold with
+ * (`reset-epoch.util.ts`). Usually the new reset is the earlier one. Not in the
+ * last hours of a month: a MONTH sale in UTC ends at 00:20 UTC on the 1st, and
+ * the next Moscow DAY reset is 21:05 UTC — so from 21:05 UTC on the last day
+ * the promised date wins. Asserting the new reset alone failed every month-end
+ * evening (seen 31.10.2026 at 22:45 UTC).
+ */
+function endAfterRuleChange(firstReset: Date, soldUntil: Date): string {
+  const end = new Date(firstReset.getTime() + RESET_EXPIRY_MARGIN_MS);
+  return (end.getTime() < soldUntil.getTime() ? end : soldUntil).toISOString();
+}
+
 /** The edit's own transaction, as the Plans tab saves it: the row, then the subscribers' snapshots. */
 function commitStrategyEdit(planId: string, strategy: TrafficLimitStrategy) {
   return prisma.$transaction(async (tx) => {
@@ -579,7 +593,7 @@ run('a plan\'s reset rule changes mid-period (PostgreSQL)', () => {
       assert.match(moscowReset.toISOString(), /T21:05:00\.000Z$/);
       assert.equal(
         (await liveAddOn(owner.subscriptionId)).expiresAt?.toISOString(),
-        new Date(moscowReset.getTime() + RESET_EXPIRY_MARGIN_MS).toISOString(),
+        endAfterRuleChange(moscowReset, owner.soldUntil),
       );
     } finally {
       await prisma.settings.update({ where: { id: 1 }, data: { addOnSettings: {} } });
@@ -1196,7 +1210,7 @@ run('a plan\'s reset rule changes mid-period (PostgreSQL)', () => {
 
     const dayReset = nextReset('DAY', 'Europe/Moscow');
     const addOn = await liveAddOn(owner.subscriptionId);
-    assert.equal(addOn.expiresAt?.toISOString(), new Date(dayReset.getTime() + RESET_EXPIRY_MARGIN_MS).toISOString());
+    assert.equal(addOn.expiresAt?.toISOString(), endAfterRuleChange(dayReset, owner.soldUntil));
     const projection = await prisma.subscriptionEffectiveProjection.findUniqueOrThrow({
       where: { subscriptionId: owner.subscriptionId },
     });
