@@ -141,7 +141,13 @@ async function subscription(
       remnawavePanelId: panelId,
       createdAt: inDays(-10),
       startedAt: inDays(-10),
-      expiresAt: options.expiresAt === undefined ? inDays(20) : options.expiresAt,
+      // Past any MONTH reset (the 1st at 00:20, up to 31 days ahead): a «до
+      // сброса» add-on ends at the earlier of its reset and the subscription's
+      // end, and with 20 days here the subscription's end won from the 1st to
+      // about the 11th of every month — the quote then carried no reset margin
+      // and the capture tests failed (CI, 01.11.2026). The cases about an
+      // earlier end set one of their own (`endsSoon`, `shortened`).
+      expiresAt: options.expiresAt === undefined ? inDays(45) : options.expiresAt,
     },
     select: { id: true },
   });
