@@ -21,6 +21,7 @@ import { releasePaidTrialClaim } from '../../subscriptions/services/trial-claim-
 import { CHECKOUT_LIFETIME_MS } from '../constants/checkout-lifetime.constant';
 import { isProviderCreationClaim } from './payments-checkout.service';
 import { AntilopayStatusService } from './antilopay-status.service';
+import { PlategaStatusService } from './platega-status.service';
 import { importedPaymentSource, PaymentReconciliationService } from './payment-reconciliation.service';
 import { PaymentSubscriptionMutationService } from './payment-subscription-mutation.service';
 
@@ -76,6 +77,9 @@ export class PaymentPendingExpiryService {
      */
     @Optional()
     private readonly antilopayStatusService?: AntilopayStatusService,
+    /** Asks Platega the same, for its one-off payments. Optional for the same reason. */
+    @Optional()
+    private readonly plategaStatusService?: PlategaStatusService,
   ) {}
 
   /** A sweep is running: see {@link expireStalePending}. */
@@ -234,6 +238,11 @@ export class PaymentPendingExpiryService {
     // was lost. What it says decides; see `AntilopayStatusService`.
     if (tx.gatewayType === PaymentGatewayType.ANTILOPAY && this.antilopayStatusService !== undefined) {
       return this.antilopayStatusService.verdictBeforeExpiry(tx);
+    }
+    // Asked by Platega's own id; a sign-up, whose id is its subscription's, is
+    // left to our clock as before. See `PlategaStatusService`.
+    if (tx.gatewayType === PaymentGatewayType.PLATEGA && this.plategaStatusService !== undefined) {
+      return this.plategaStatusService.verdictBeforeExpiry(tx);
     }
     if (tx.gatewayType !== PaymentGatewayType.YOOKASSA || tx.gatewayId === null) {
       return 'local-ttl';
