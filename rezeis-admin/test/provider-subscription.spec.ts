@@ -252,6 +252,7 @@ describe('Platega subscription checkout', () => {
       payload: 'payment-1',
       return: 'https://reiwa.example/success',
       failedUrl: 'https://reiwa.example/fail',
+      metadata: { user_email: 'user-1@mail.ru', userId: 'user-1' },
     });
     assert.equal(created.gatewayId, 'sub-1');
     assert.equal(created.checkoutUrl, 'https://pay.platega.example/sub-1');

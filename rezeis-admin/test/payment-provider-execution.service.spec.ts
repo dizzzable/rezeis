@@ -489,6 +489,7 @@ describe('PaymentProviderExecutionService checkout execution', () => {
         payload: 'payment-1',
         return: 'https://reiwa.example/success',
         failedUrl: 'https://reiwa.example/fail',
+        metadata: { user_email: 'user-1@mail.ru', userId: 'user-1' },
       },
       options: {
         headers: { 'X-MerchantId': 'merchant-1', 'X-Secret': 'secret-1' },
@@ -1214,6 +1215,8 @@ describe('PaymentProviderExecutionService — Platega endpoint selection', () =>
     payload: 'payment-1',
     return: 'https://reiwa.example/success',
     failedUrl: 'https://reiwa.example/fail',
+    // Built with `new`, the service has no Prisma: only our id of the buyer.
+    metadata: { user_email: 'user-1@mail.ru', userId: 'user-1' },
   } as const;
 
   it('keeps a selected method on v1 with the request byte-for-byte unchanged', async () => {
@@ -1353,5 +1356,92 @@ describe('PaymentProviderExecutionService — Platega endpoint selection', () =>
         return true;
       },
     );
+  });
+});
+
+/**
+ * Platega's `metadata` is mandatory (its docs of 30.10 and 04.11.2026): who
+ * pays, read from the buyer's row by the payment's own `userId`.
+ */
+describe('PaymentProviderExecutionService — Platega buyer metadata', () => {
+  function serviceFor(user: Record<string, unknown> | null) {
+    const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const lookups: unknown[] = [];
+    const service = new PaymentProviderExecutionService(
+      {
+        post: (url: string, body: unknown) => {
+          calls.push({ url, body: body as Record<string, unknown> });
+          return of({ data: { transactionId: 'platega-1', redirect: 'https://checkout.example/platega', status: 'PENDING' } });
+        },
+      } as never,
+      { domain: 'https://user.example', botToken: 'bot-token-1' } as never,
+      new PaymentWebhookPayloadRedactionService(),
+      {
+        user: {
+          findUnique: async (args: unknown) => {
+            lookups.push(args);
+            return user;
+          },
+        },
+      } as never,
+    );
+    return { service, calls, lookups };
+  }
+
+  function checkout(service: PaymentProviderExecutionService, settings: Record<string, unknown> = {}) {
+    return service.createCheckout({
+      gateway: createGateway({
+        type: PaymentGatewayType.PLATEGA,
+        settings: { merchantId: 'merchant-1', secret: 'secret-1', ...settings },
+      }),
+      transaction: createTransaction({ gatewayType: PaymentGatewayType.PLATEGA }),
+      description: 'Platega checkout',
+      successUrl: 'https://reiwa.example/success',
+      failUrl: 'https://reiwa.example/fail',
+    });
+  }
+
+  it('names a buyer from the bot by their Telegram id, even when they gave an address', async () => {
+    const { service, calls, lookups } = serviceFor({
+      id: 'user-1',
+      telegramId: 5512345678n,
+      email: 'ivan.petrov@gmail.com',
+      webAccount: null,
+    });
+
+    await checkout(service);
+
+    assert.deepStrictEqual(calls[0]?.body['metadata'], { user_email: '5512345678@telegram.org', userId: 'user-1' });
+    assert.deepStrictEqual(lookups, [
+      {
+        where: { id: 'user-1' },
+        select: { id: true, telegramId: true, email: true, webAccount: { select: { email: true } } },
+      },
+    ]);
+  });
+
+  it('names a buyer without Telegram by their own address, then by the web account’s', async () => {
+    const own = serviceFor({ id: 'user-1', telegramId: null, email: ' ivan@mail.example ', webAccount: { email: 'web@mail.example' } });
+    const web = serviceFor({ id: 'user-1', telegramId: null, email: null, webAccount: { email: 'web@mail.example' } });
+
+    await checkout(own.service);
+    await checkout(web.service, { paymentMethod: 'PROVIDER_CHOICE' });
+
+    assert.deepStrictEqual(own.calls[0]?.body['metadata'], { user_email: 'ivan@mail.example', userId: 'user-1' });
+    assert.equal(web.calls[0]?.url, 'https://app.platega.io/v2/transaction/process');
+    assert.deepStrictEqual(web.calls[0]?.body['metadata'], { user_email: 'web@mail.example', userId: 'user-1' });
+  });
+
+  it('fails the checkout when the buyer cannot be read, rather than inventing another address', async () => {
+    const calls: unknown[] = [];
+    const service = new PaymentProviderExecutionService(
+      { post: (...args: unknown[]) => { calls.push(args); return of({ data: {} }); } } as never,
+      { domain: 'https://user.example', botToken: 'bot-token-1' } as never,
+      new PaymentWebhookPayloadRedactionService(),
+      { user: { findUnique: async () => { throw new Error('connection lost'); } } } as never,
+    );
+
+    await assert.rejects(checkout(service), (error: unknown) => error instanceof ServiceUnavailableException);
+    assert.equal(calls.length, 0);
   });
 });

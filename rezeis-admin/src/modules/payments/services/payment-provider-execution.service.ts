@@ -33,6 +33,7 @@ import {
 } from '../utils/antilopay-recurrent.util';
 import { isAutopayApproved } from '../utils/gateway-autopay.util';
 import { normalizePaymentProviderError, redactPaymentDiagnosticMessage } from '../utils/payment-provider-error.util';
+import { type PlategaBuyerMetadata, plategaBuyerMetadata } from '../utils/platega-buyer.util';
 import { AURAPAY_API, aurapayHeaders, aurapaySubscriptionRef } from '../utils/aurapay-subscription.util';
 import { aurapayIntervalFor, PLATEGA_INTERVAL_CODE } from '../utils/provider-subscription-period.util';
 import {
@@ -461,6 +462,7 @@ export class PaymentProviderExecutionService {
       if (!isAutopayApproved(PaymentGatewayType.PLATEGA, settings)) {
         throw autopayNotAvailable('NOT_APPROVED');
       }
+      const metadata = await this.plategaMetadata(input.transaction);
       // A subscription is its own method (SBP only, `paymentMethod: 6`) on the
       // v1 endpoint, whatever rail the operator chose for one-off payments. The
       // payer confirms it in the bank, and the first charge is taken then.
@@ -479,6 +481,7 @@ export class PaymentProviderExecutionService {
             payload: input.transaction.paymentId,
             return: successResultUrl,
             failedUrl: failResultUrl,
+            metadata,
           },
           { headers: { 'X-MerchantId': merchantId, 'X-Secret': secret } },
         ),
@@ -514,6 +517,7 @@ export class PaymentProviderExecutionService {
       payload: input.transaction.paymentId,
       return: successResultUrl,
       failedUrl: failResultUrl,
+      metadata: await this.plategaMetadata(input.transaction),
     };
     // Two endpoints, and the difference is the whole point of the setting:
     // `/transaction/process` REQUIRES `paymentMethod` and pins the rail;
@@ -568,6 +572,28 @@ export class PaymentProviderExecutionService {
         checkoutUrl,
       },
     };
+  }
+
+  /**
+   * Platega's mandatory `metadata`: who pays (`platega-buyer.util.ts`). Read
+   * from the buyer's row here, by the payment's own `userId`, because no caller
+   * of `createCheckout` holds the row (see `customerEmail`). A failed read
+   * fails the checkout rather than inventing another address for this buyer:
+   * one buyer must carry one address on every payment.
+   *
+   * Without Prisma — specs built with `new` — only our id is known.
+   */
+  private async plategaMetadata(transaction: Transaction): Promise<PlategaBuyerMetadata> {
+    const user = await this.prismaService?.user.findUnique({
+      where: { id: transaction.userId },
+      select: { id: true, telegramId: true, email: true, webAccount: { select: { email: true } } },
+    });
+    return plategaBuyerMetadata({
+      id: transaction.userId,
+      telegramId: user?.telegramId ?? null,
+      email: user?.email ?? null,
+      webAccountEmail: user?.webAccount?.email ?? null,
+    });
   }
 
   private async createHeleketCheckout(input: {
