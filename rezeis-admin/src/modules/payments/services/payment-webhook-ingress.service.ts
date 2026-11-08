@@ -672,6 +672,11 @@ export function extractPlategaSubscriptionDispute(
   if (typeof status !== 'string' || !isRefundProviderStatus(status)) {
     return null;
   }
+  // A refund Platega declined moved no money: not a dispute of anything.
+  const refundStatus = read('refundstatus');
+  if (typeof refundStatus === 'string' && refundStatus.trim().toLowerCase() === 'declined') {
+    return null;
+  }
   const id = read('id');
   return {
     providerPaymentId: typeof id === 'string' && id.trim().length > 0 ? id.trim() : null,

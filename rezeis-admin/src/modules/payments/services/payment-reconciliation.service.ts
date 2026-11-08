@@ -47,6 +47,8 @@ import {
   lockTransactionRefundLedger,
   readRefundLedger,
   readRefundedTotal,
+  REFUND_CANCEL_PURCHASE_PENDING_KEY,
+  REFUND_PURCHASE_CANCELED_AT_KEY,
   REFUND_REVERSAL_CLAIMED_AT_KEY,
 } from '../utils/payment-refund-ledger.util';
 import {
@@ -75,6 +77,7 @@ import { ProviderSubscriptionService, readProviderSubscriptionDispute } from './
 import { releasePaidTrialClaim } from '../../subscriptions/services/trial-claim-ledger.util';
 import { findDaysConvertedFromPayment } from '../../subscriptions/services/paid-remainder-conversion.util';
 import { type AddOnRefundOutcome, AddOnRefundService, readRefundedAddOnMarker } from './addon-refund.service';
+import { RefundedDaysWithdrawalService } from './refunded-days-withdrawal.service';
 @Injectable()
 export class PaymentReconciliationService implements OnModuleDestroy {
   private readonly logger = new Logger(PaymentReconciliationService.name);
@@ -113,6 +116,13 @@ export class PaymentReconciliationService implements OnModuleDestroy {
      */
     @Optional()
     private readonly addOnRefunds?: AddOnRefundService,
+    /**
+     * Takes a refunded renewal's days off its subscription
+     * (`RefundedDaysWithdrawalService`). Last and optional for the same reason;
+     * without it a renewal's refund goes to an operator, as it always did.
+     */
+    @Optional()
+    private readonly refundedDays?: RefundedDaysWithdrawalService,
   ) {}
 
   public async reconcileWebhookEvent(eventId: string): Promise<void> {
@@ -161,6 +171,14 @@ export class PaymentReconciliationService implements OnModuleDestroy {
       // МойНалог income, ad conversion) — otherwise the platform keeps paying
       // out on money it no longer has. Handled here explicitly because the
       // block below would otherwise early-return and silently swallow it.
+      //
+      // A refund the provider DECLINED moved no money: it is taken back off the
+      // ledger and the operator told, before anything reads it as a refund.
+      if (isDeclinedRefundNotice(event.gatewayType, event.rawPayload)) {
+        await this.handleRefundDeclined(transaction, event.rawPayload);
+        await this.paymentWebhookInboxService.markProcessed(event.id);
+        return;
+      }
       if (
         isRefundProviderStatus(event.eventStatus) &&
         transaction.status === TransactionStatus.COMPLETED &&
@@ -1018,6 +1036,25 @@ export class PaymentReconciliationService implements OnModuleDestroy {
           ...(autopayNote === null ? {} : autopayMetadata(autopay, autopayNote)),
         },
       );
+      // «Отменить покупку», ticked for this very refund while the provider had
+      // not confirmed it (`REFUND_CANCEL_PURCHASE_PENDING_KEY`): this notice is
+      // the confirmation, so the purchase is undone now, once.
+      const pendingCancel = asRecord(commit.gatewayData)?.[REFUND_CANCEL_PURCHASE_PENDING_KEY];
+      if (typeof pendingCancel === 'string' && (refundId === null || pendingCancel === refundId)) {
+        try {
+          await this.cancelPurchaseForPartialRefund(transaction);
+          await writeTransactionGatewayData(this.prismaService, transaction.id, {
+            merge: {},
+            remove: [REFUND_CANCEL_PURCHASE_PENDING_KEY],
+          });
+        } catch (error: unknown) {
+          this.logger.error(
+            `Cancelling the purchase of transaction ${transaction.id} on its confirmed refund failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+      }
       return;
     }
 
@@ -1417,22 +1454,31 @@ export class PaymentReconciliationService implements OnModuleDestroy {
       );
     }
 
+    // A partial refund that cancelled the purchase already undid it
+    // (`cancelPurchaseForPartialRefund`): the rest of the money coming back is
+    // only money, and taking the days off a second time would take days the
+    // payment never bought.
+    const canceledBefore = await this.purchaseCanceledBefore(transaction.id);
+
     // An add-on the payment bought ends at once (the owner's decision of
     // 24.09.2026, `AddOnRefundService`): an add-on purchase is undone by that
     // alone, and a renewal's add-on lines end with it too.
-    const addOn = await this.endRefundedAddOnBestEffort(transaction, providerStatus);
+    const addOn = canceledBefore === null ? await this.endRefundedAddOnBestEffort(transaction, providerStatus) : null;
     const addOnPurchase = readRefundedAddOnMarker(transaction.planSnapshot) !== null;
 
-    // Revoke the access this payment paid for. Only a NEW purchase can be
-    // reversed mechanically — the subscription exists *because* of this
-    // transaction, so expiring it restores the pre-payment state exactly.
-    // RENEW/UPGRADE mutate a subscription that predates the payment (added days,
-    // switched plan), and un-mixing that from later activity is guesswork, so
-    // those are surfaced for manual handling instead of being half-undone.
+    // Revoke the access this payment paid for. A NEW purchase's subscription
+    // exists *because* of this transaction, so expiring it restores the
+    // pre-payment state exactly. A RENEW — and a NEW purchase renewed since —
+    // gives back the days it bought (`RefundedDaysWithdrawalService`, the
+    // owner's «снять купленные дни» of 08.11.2026). An UPGRADE switched the
+    // plan too, and un-mixing that from later activity is guesswork, so it is
+    // surfaced for manual handling instead of being half-undone.
     const revocation =
-      addOn !== null && addOnPurchase
-        ? { revoked: false, needsManualReview: !addOn.ended, audit: addOn.audit }
-        : mergeAddOnRevocation(await this.revokeRefundedSubscriptionBestEffort(transaction), addOn);
+      canceledBefore !== null
+        ? canceledBefore
+        : addOn !== null && addOnPurchase
+          ? { revoked: false, needsManualReview: !addOn.ended, audit: addOn.audit }
+          : mergeAddOnRevocation(await this.revokeRefundedSubscriptionBestEffort(transaction), addOn);
 
     // Mark CANCELED + stamp the reversal so it is auditable and never repeats.
     //
@@ -1562,6 +1608,157 @@ export class PaymentReconciliationService implements OnModuleDestroy {
       await reduceAddOnDevices();
       return autopay;
     });
+  }
+
+  /**
+   * «Вернуть» with «Отменить покупку» for PART of the money — the owner's call
+   * per refund (08.11.2026): what the payment bought is undone as a full
+   * refund undoes it — its add-on ends, a NEW purchase's subscription expires,
+   * a renewal gives back its days — while the money side stays a partial
+   * refund's: commission, cashback and tax income are not reversed for money
+   * the shop kept, and the payment stays COMPLETED.
+   *
+   * Once per payment: claimed under the refund ledger's row lock
+   * (`REFUND_PURCHASE_CANCELED_AT_KEY`), and a payment already reversed in full
+   * has nothing left to cancel. A full refund of the rest later reverses the
+   * money and leaves the purchase as this left it (`purchaseCanceledBefore`).
+   * Never throws past the claim: the money is already on its way back.
+   */
+  public async cancelPurchaseForPartialRefund(
+    transaction: Transaction,
+  ): Promise<{ readonly canceled: boolean; readonly revoked: boolean; readonly needsManualReview: boolean }> {
+    const claimed = await this.prismaService.$transaction(async (tx) => {
+      const live = asRecord(await lockTransactionRefundLedger(tx, transaction.id)) ?? {};
+      if (typeof live['refundReversedAt'] === 'string' || typeof live[REFUND_PURCHASE_CANCELED_AT_KEY] === 'string') {
+        return false;
+      }
+      await writeTransactionGatewayData(tx, transaction.id, {
+        merge: { [REFUND_PURCHASE_CANCELED_AT_KEY]: new Date().toISOString() },
+      });
+      return true;
+    });
+    if (!claimed) return { canceled: false, revoked: false, needsManualReview: false };
+
+    const fresh = (await this.prismaService.transaction.findUnique({ where: { id: transaction.id } })) ?? transaction;
+    const addOn = await this.endRefundedAddOnBestEffort(fresh, null);
+    const revocation =
+      addOn !== null && readRefundedAddOnMarker(fresh.planSnapshot) !== null
+        ? { revoked: false, needsManualReview: !addOn.ended, audit: addOn.audit }
+        : mergeAddOnRevocation(await this.revokeRefundedSubscriptionBestEffort(fresh), addOn);
+    try {
+      await writeTransactionGatewayData(this.prismaService, transaction.id, {
+        merge: {
+          subscriptionRevoked: revocation.revoked,
+          ...revocation.audit,
+          ...(revocation.needsManualReview ? { refundNeedsManualReview: true } : {}),
+        },
+      });
+      if (addOn?.reduceDevicesOf != null && this.addOnRefunds !== undefined) {
+        await this.addOnRefunds.reduceDevices(addOn.reduceDevicesOf);
+      }
+    } catch (error: unknown) {
+      this.logger.error(
+        `Recording the cancelled purchase of transaction ${transaction.id} failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+    this.logger.warn(
+      `Purchase of transaction ${transaction.id} cancelled with a partial refund ` +
+        `(revoked=${revocation.revoked}, needsManualReview=${revocation.needsManualReview})`,
+    );
+    return { canceled: true, revoked: revocation.revoked, needsManualReview: revocation.needsManualReview };
+  }
+
+  /**
+   * Platega declined a refund the panel asked for (`isDeclinedRefundNotice`):
+   * no money moved. The refund comes off the ledger — it was counted when
+   * Platega took it into work (`PaymentRefundService`) — and the total becomes
+   * Platega's own `refundedAmount`, which its documentation names the figure to
+   * trust over any sum of ours. The operator is told; a purchase cancelled with
+   * the refund stays cancelled, and the card says so. Under the refund
+   * ledger's row lock, as every writer of it.
+   */
+  private async handleRefundDeclined(transaction: Transaction, rawPayload: Prisma.JsonValue): Promise<void> {
+    const payload = asRecord(rawPayload) ?? {};
+    const refundId = typeof payload['refundId'] === 'string' && payload['refundId'].length > 0 ? payload['refundId'] : null;
+    const reported = payload['refundedAmount'];
+    const refundAmount = payload['refundAmount'];
+    const commit = await this.prismaService.$transaction(async (tx) => {
+      const live = await lockTransactionRefundLedger(tx, transaction.id);
+      const ledger = readRefundLedger(live);
+      const kept = refundId === null ? ledger : ledger.filter((entry) => entry.refundId !== refundId);
+      const total =
+        typeof reported === 'number' && Number.isFinite(reported) && reported >= 0
+          ? reported
+          : kept.length !== ledger.length
+            ? kept.reduce((sum, entry) => sum + Number(entry.amount), 0)
+            : readRefundedTotal(live);
+      const held = asRecord(live) ?? {};
+      // A cancel waiting for this refund's confirmation will not get one.
+      const dropPendingCancel = refundId !== null && held[REFUND_CANCEL_PURCHASE_PENDING_KEY] === refundId;
+      await writeTransactionGatewayData(tx, transaction.id, {
+        merge: {
+          refunds: kept,
+          refundedAmountTotal: total.toFixed(2),
+          refundDeclinedAt: new Date().toISOString(),
+          ...(refundId === null ? {} : { refundDeclinedId: refundId }),
+        },
+        ...(dropPendingCancel ? { remove: [REFUND_CANCEL_PURCHASE_PENDING_KEY] } : {}),
+      });
+      return {
+        total,
+        purchaseCanceled: typeof held[REFUND_PURCHASE_CANCELED_AT_KEY] === 'string',
+        // The refunds counted before this decline had reached the whole sum, and
+        // the full reversal ran: the payment is CANCELED and its money side
+        // undone, which the decline does not bring back.
+        reversedInFull: typeof held['refundReversedAt'] === 'string',
+      };
+    });
+    this.logger.warn(
+      `Refund ${refundId ?? '(no id)'} of transaction ${transaction.id} declined by ${transaction.gatewayType}; ` +
+        `refunded total now ${commit.total.toFixed(2)}`,
+    );
+    this.systemEvents.warn(
+      EVENT_TYPES.PAYMENT_REFUND_DECLINED,
+      'PAYMENT',
+      `Провайдер отклонил возврат: ${transaction.purchaseType}`,
+      {
+        userId: transaction.userId,
+        paymentId: transaction.paymentId,
+        ...planNamesFromTransactionSnapshot(transaction.planSnapshot),
+        gatewayType: transaction.gatewayType,
+        amount: transaction.amount.toString(),
+        currency: transaction.currency,
+        refundId,
+        refundAmount: typeof refundAmount === 'number' ? String(refundAmount) : null,
+        refundedAmountTotal: commit.total.toFixed(2),
+        purchaseCanceled: commit.purchaseCanceled || commit.reversedInFull,
+        note: commit.reversedInFull
+          ? 'Деньги клиенту не вернулись, а панель уже провела платёж как возвращённый полностью и отменила покупку. Верните остаток в кабинете провайдера или восстановите покупку вручную.'
+          : commit.purchaseCanceled
+            ? 'Деньги клиенту не вернулись. Покупка уже отменена вместе с возвратом: восстановите её вручную или повторите возврат.'
+            : 'Деньги клиенту не вернулись. Повторите возврат.',
+      },
+    );
+  }
+
+  /**
+   * What a partial refund's cancel of the purchase did, when one did
+   * ({@link cancelPurchaseForPartialRefund}): the full reversal then keeps it
+   * as it stands. Null when the purchase was not cancelled before.
+   */
+  private async purchaseCanceledBefore(transactionId: string): Promise<{
+    revoked: boolean;
+    needsManualReview: boolean;
+    audit: Record<string, unknown>;
+  } | null> {
+    const live = await this.prismaService.transaction
+      .findUnique({ where: { id: transactionId }, select: { gatewayData: true } })
+      .catch(() => null);
+    const data = asRecord(live?.gatewayData);
+    if (typeof data?.[REFUND_PURCHASE_CANCELED_AT_KEY] !== 'string') return null;
+    return { revoked: data['subscriptionRevoked'] === true, needsManualReview: false, audit: {} };
   }
 
   /**
@@ -1994,6 +2191,11 @@ export class PaymentReconciliationService implements OnModuleDestroy {
         audit: { refundRevocationSkippedReason: 'CONVERSION_NOT_APPLIED' },
       };
     }
+    // A renewal's refund takes back the days it bought (the owner, 08.11.2026:
+    // «Снять купленные дни»); the days paid for before stay.
+    if (transaction.purchaseType === 'RENEW') {
+      return this.withdrawRefundedDays(transaction);
+    }
     if (transaction.purchaseType !== 'NEW' || transaction.subscriptionId === null) {
       return { revoked: false, needsManualReview: true, audit: {} };
     }
@@ -2016,15 +2218,13 @@ export class PaymentReconciliationService implements OnModuleDestroy {
         },
       });
       if (otherPaidCount > 0) {
+        // Expired, it would take the renewals paid since with it; so the first
+        // purchase's days are taken off as a renewal's are, and the rest stay.
         this.logger.warn(
           `Refunded transaction ${transaction.id} targets subscription ${transaction.subscriptionId} ` +
-            `with ${otherPaidCount} other completed payment(s) — leaving access intact for manual review`,
+            `with ${otherPaidCount} other completed payment(s) — taking off only the days it bought`,
         );
-        return {
-          revoked: false,
-          needsManualReview: true,
-          audit: { refundRevocationSkippedReason: 'SUBSCRIPTION_HAS_OTHER_PAYMENTS' },
-        };
+        return this.withdrawRefundedDays(transaction);
       }
 
       const subscription = await this.prismaService.subscription.findUnique({
@@ -2145,6 +2345,23 @@ export class PaymentReconciliationService implements OnModuleDestroy {
       }
     }
     return { revoked, needsManualReview: !revoked, audit };
+  }
+
+  /**
+   * The days a refunded payment bought, taken off its subscription
+   * ({@link RefundedDaysWithdrawalService}); an operator's, as before, when the
+   * service is not there. Never throws.
+   */
+  private async withdrawRefundedDays(transaction: Transaction): Promise<{
+    revoked: boolean;
+    needsManualReview: boolean;
+    audit: Record<string, unknown>;
+  }> {
+    if (this.refundedDays === undefined) {
+      return { revoked: false, needsManualReview: true, audit: { refundRevocationSkippedReason: 'DAYS_WITHDRAWAL_UNAVAILABLE' } };
+    }
+    const outcome = await this.refundedDays.withdraw(transaction);
+    return { revoked: outcome.withdrawn, needsManualReview: outcome.needsManualReview, audit: outcome.audit };
   }
 
   private async disablePermissionRevokedAutopayBestEffort(
@@ -2453,7 +2670,17 @@ function resolveRefundEvent(rawPayload: Prisma.JsonValue | undefined): {
   const payload = asRecord(rawPayload);
   if (payload === null) return unknownRefund;
   const refundObject = asRecord(payload['object']);
-  if (refundObject === null) return unknownRefund;
+  if (refundObject === null) {
+    // Platega puts the refund at the top of the callback: `refundId` and this
+    // operation's `refundAmount` (`PARTIALLY_REFUNDED`, and `CHARGEBACKED` when
+    // the panel's refund settles). A bank's chargeback carries neither.
+    const plategaRefundId = payload['refundId'];
+    const plategaAmount = payload['refundAmount'];
+    return {
+      amount: typeof plategaAmount === 'number' && Number.isFinite(plategaAmount) ? plategaAmount : null,
+      refundId: typeof plategaRefundId === 'string' && plategaRefundId.length > 0 ? plategaRefundId : null,
+    };
+  }
   const rawRefundId = refundObject['id'];
   const refundId =
     typeof rawRefundId === 'string' && rawRefundId.length > 0 ? rawRefundId : null;
@@ -2793,8 +3020,25 @@ export function isRefundProviderStatus(providerStatus: string | null): boolean {
     // reversal branch never ran: the subscription and any partner accruals
     // stayed granted on money that had been clawed back.
     normalized === 'CHARGEBACKED' ||
-    normalized === 'REVERSED'
+    normalized === 'REVERSED' ||
+    // Platega's callback for each part of a payment given back. Its amount and
+    // refund id ride at the top of the body (`resolveRefundEvent`), so the
+    // partial branch ledgers it once; a DECLINED one is not a refund at all
+    // and is turned away before this (`isDeclinedRefundNotice`).
+    normalized === 'PARTIALLY_REFUNDED'
   );
+}
+
+/**
+ * A provider's notice that a refund was DECLINED — Platega's
+ * `PARTIALLY_REFUNDED` with `refundStatus: Declined`: no money moved, and the
+ * refund the panel ledgered when Platega took it into work is undone
+ * (`handleRefundDeclined`).
+ */
+export function isDeclinedRefundNotice(gatewayType: PaymentGatewayType, rawPayload: unknown): boolean {
+  if (gatewayType !== PaymentGatewayType.PLATEGA) return false;
+  const status = asRecord(rawPayload)?.['refundStatus'];
+  return typeof status === 'string' && status.trim().toLowerCase() === 'declined';
 }
 
 /**

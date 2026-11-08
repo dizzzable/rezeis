@@ -4941,6 +4941,9 @@ function RefundPaymentAction({
   const canRefund = useHasPermission('payments', 'refund')
   const [open, setOpen] = useState(false)
   const [customAmount, setCustomAmount] = useState('')
+  // «Отменить покупку» beside a partial sum: the operator's call per refund
+  // (the owner, 08.11.2026). Ticked by default; a full refund always cancels.
+  const [cancelPurchase, setCancelPurchase] = useState(true)
 
   const eligibility = useQuery({
     queryKey: ['admin', 'payments', 'transactions', transactionId, 'refund-eligibility'],
@@ -4952,6 +4955,8 @@ function RefundPaymentAction({
         refundableAmount: string
         currency: string
         refundedAmount: string
+        partialSupported?: boolean
+        providerFee?: { amount: string; currency: string } | null
       }
     },
     enabled: canRefund && open,
@@ -4959,14 +4964,16 @@ function RefundPaymentAction({
   })
 
   const refundMutation = useMutation({
-    mutationFn: async (payload: { amount?: string }) =>
+    mutationFn: async (payload: { amount?: string; cancelPurchase?: boolean }) =>
       api.post(`/admin/payments/transactions/${transactionId}/refund`, payload),
-    onSuccess: () => {
+    onSuccess: (response) => {
       setOpen(false)
       setCustomAmount('')
+      setCancelPurchase(true)
       queryClient.invalidateQueries({ queryKey: ['admin', 'users'] })
       queryClient.invalidateQueries({ queryKey: ['admin', 'payments'] })
-      toast.success(t('userDetailPanel.refund.requested'))
+      const manual = (response?.data as { manualControlRequired?: boolean } | undefined)?.manualControlRequired === true
+      toast.success(t(manual ? 'userDetailPanel.refund.manualControl' : 'userDetailPanel.refund.requested'))
     },
     onError: (err) => toast.error(getErrorMessage(err, t('userDetailPanel.refund.failed'))),
   })
@@ -4980,6 +4987,12 @@ function RefundPaymentAction({
   // guessed amount is exactly how an unintended refund happens.
   const maxAmount = eligibility.data?.refundableAmount ?? null
   const blocked = blockedReason !== null || eligibility.isError || maxAmount === null
+  const partialSupported = eligibility.data?.partialSupported !== false
+  const providerFee = eligibility.data?.providerFee ?? null
+  // A sum typed below what is left is a partial refund; empty is the whole.
+  const typedAmount = customAmount.trim()
+  const isPartial =
+    partialSupported && typedAmount.length > 0 && maxAmount !== null && Number(typedAmount) < Number(maxAmount)
 
   return (
     <AlertDialog
@@ -4989,7 +5002,10 @@ function RefundPaymentAction({
         // Reset on every close: a leftover partial amount from a cancelled
         // attempt must not be submitted on the next open, where the labels
         // describe a full refund.
-        if (!next) setCustomAmount('')
+        if (!next) {
+          setCustomAmount('')
+          setCancelPurchase(true)
+        }
       }}
     >
       <AlertDialogTrigger asChild>
@@ -5027,10 +5043,33 @@ function RefundPaymentAction({
               id={`refund-amount-${transactionId}`}
               inputMode="decimal"
               placeholder={maxAmount ?? amount}
-              value={customAmount}
+              value={partialSupported ? customAmount : ''}
+              disabled={!partialSupported}
               onChange={(e) => setCustomAmount(e.target.value)}
             />
-            <p className="text-xs text-muted-foreground">{t('userDetailPanel.refund.partialHint')}</p>
+            <p className="text-xs text-muted-foreground">
+              {t(partialSupported ? 'userDetailPanel.refund.partialHint' : 'userDetailPanel.refund.partialUnsupported')}
+            </p>
+            {providerFee && (
+              <p className="text-xs text-muted-foreground" data-refund-provider-fee="">
+                {t('userDetailPanel.refund.providerFee', { amount: providerFee.amount, currency: providerFee.currency })}
+              </p>
+            )}
+            {isPartial ? (
+              <label className="flex items-start gap-2 text-sm" htmlFor={`refund-cancel-${transactionId}`}>
+                <Checkbox
+                  id={`refund-cancel-${transactionId}`}
+                  checked={cancelPurchase}
+                  onCheckedChange={(checked) => setCancelPurchase(checked === true)}
+                />
+                <span>
+                  {t('userDetailPanel.refund.cancelPurchaseLabel')}
+                  <span className="block text-xs text-muted-foreground">{t('userDetailPanel.refund.cancelPurchaseHint')}</span>
+                </span>
+              </label>
+            ) : (
+              <p className="text-xs text-muted-foreground">{t('userDetailPanel.refund.wholeCancelsPurchase')}</p>
+            )}
           </div>
         )}
 
@@ -5044,7 +5083,9 @@ function RefundPaymentAction({
               // error is shown in place instead of vanishing with the dialog.
               e.preventDefault()
               refundMutation.mutate(
-                customAmount.trim().length > 0 ? { amount: customAmount.trim() } : {},
+                partialSupported && typedAmount.length > 0
+                  ? { amount: typedAmount, ...(isPartial ? { cancelPurchase } : {}) }
+                  : {},
               )
             }}
           >

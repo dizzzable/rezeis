@@ -311,6 +311,8 @@ describe('PaymentRefundService.getEligibility', () => {
       refundableAmount: '1000.00',
       currency: 'RUB',
       refundedAmount: '0.00',
+      partialSupported: true,
+      providerFee: null,
     });
   });
 
@@ -443,6 +445,7 @@ describe('PaymentRefundService.refundTransaction', () => {
       amount: '1000.00',
       currency: 'RUB',
       providerStatus: 'succeeded',
+      purchaseCanceled: true,
     });
     assert.equal(state.posts.length, 1);
     assert.equal(state.posts[0].url, 'https://api.yookassa.ru/v3/refunds');
@@ -543,6 +546,7 @@ describe('PaymentRefundService.refundTransaction', () => {
         reason: null,
         // 250 of the captured 1000 — the row must not read as a full refund.
         partial: true,
+        cancelPurchase: false,
       },
       'audit metadata no longer describes the refund it recorded',
     );

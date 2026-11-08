@@ -1,4 +1,4 @@
-import { IsOptional, IsString, Matches, MaxLength } from 'class-validator';
+import { IsBoolean, IsOptional, IsString, Matches, MaxLength } from 'class-validator';
 
 /**
  * Operator-issued refund. Both fields optional: omitting `amount` refunds
@@ -22,4 +22,12 @@ export class RefundTransactionDto {
   @IsString()
   @MaxLength(250)
   public readonly reason?: string;
+
+  /**
+   * «Отменить покупку» beside a partial sum: what the payment bought is undone
+   * too. Ignored for the whole sum, which always undoes it.
+   */
+  @IsOptional()
+  @IsBoolean()
+  public readonly cancelPurchase?: boolean;
 }

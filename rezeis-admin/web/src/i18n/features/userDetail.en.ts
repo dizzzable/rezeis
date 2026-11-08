@@ -575,7 +575,13 @@ export const en = {
       checking: 'Checking whether a refund is possible…',
       checkFailed: 'Could not check whether a refund is possible',
       amountLabel: 'Refund amount ({{max}} {{currency}} available)',
-      partialHint: 'Leave empty to refund the full available amount. On a partial refund, partner payouts and tax income are not reversed automatically — a manual review is required.',
+      partialHint: 'Leave empty to refund the full available amount. On a partial refund, partner payouts, cashback and tax income are not reversed.',
+      wholeCancelsPurchase: 'A full refund cancels the purchase: a new subscription is switched off, a renewal loses the days it bought, an add-on ends.',
+      cancelPurchaseLabel: 'Cancel the purchase',
+      cancelPurchaseHint: 'A new subscription is switched off, a renewal loses the days it bought, an add-on ends. Unticked, the customer keeps everything they bought — for a compensation, say.',
+      partialUnsupported: 'The provider refunds this payment only in full.',
+      providerFee: 'Provider fee for the refund: {{amount}} {{currency}}',
+      manualControl: 'The provider is reviewing the refund by hand: the money goes back once it decides',
       confirm: 'Refund',
       submitting: 'Submitting…',
       requested: 'Refund submitted to the payment gateway',
@@ -583,11 +589,16 @@ export const en = {
       reasons: {
         default: 'This payment cannot be refunded',
         PAYMENT_REFUND_UNSUPPORTED_GATEWAY:
-          'The panel returns money by itself only through YooKassa. If you refunded this payment at the provider, close this window and press “Record refund” beside it.',
+          'The panel returns money by itself only through YooKassa and Platega. If you refunded this payment at the provider, close this window and press “Record refund” beside it.',
         PAYMENT_REFUND_NOT_COMPLETED: 'The payment is not completed — there is nothing to refund',
         PAYMENT_REFUND_NOT_FULFILLED: 'The payment has not been delivered to the customer yet',
         PAYMENT_REFUND_MISSING_PROVIDER_ID: 'The payment has no provider-side identifier',
         PAYMENT_REFUND_ALREADY_REFUNDED: 'The payment has already been fully refunded',
+        PAYMENT_REFUND_PROVIDER_UNAVAILABLE: 'The provider did not answer. Try again later.',
+        PAYMENT_REFUND_PROVIDER_BLOCKED: 'The provider does not allow refunding this payment.',
+        PAYMENT_REFUND_PROVIDER_INSUFFICIENT_FUNDS: 'Your balance at the provider does not cover the refund.',
+        PAYMENT_REFUND_SUBSCRIPTION_CHECKOUT:
+          'An autopay payment is not refunded with this button: refund it in the provider’s dashboard, then press “Record refund” beside it.',
       },
     },
     // «Отметить возврат» for a payment of a gateway the panel does not refund
@@ -595,13 +606,13 @@ export const en = {
     // Payments bundle): one dialog on two pages, and a test holds them equal.
     providerRefund: {
       title: 'Refund made at the provider',
-      hint: 'The panel returns money by itself only through YooKassa. If you refunded this payment in the {{gateway}} dashboard or another way, record it here: the panel undoes what this payment gave, as if the provider had reported the refund.',
+      hint: 'The panel returns money by itself only through YooKassa and Platega. If you refunded this payment in the {{gateway}} dashboard or another way, record it here: the panel undoes what this payment gave, as if the provider had reported the refund.',
       action: 'Record refund',
       confirmTitle: 'Record the refund?',
       confirmIntro:
         'First return {{amount}} to the customer at the provider ({{gateway}}). The panel sends the provider nothing: it only records that the money is back, and undoes what this payment gave:',
-      consequenceNew: 'the subscription this payment created is switched off, if nothing else paid for it;',
-      consequenceOther: 'the subscription does not change: adjust a renewal or a plan change by hand if needed; an add-on this payment bought ends at once;',
+      consequenceNew: 'the subscription this payment created is switched off; if it was renewed since, only this purchase’s days are taken off;',
+      consequenceOther: 'a renewed subscription loses the days this payment bought (with fewer days left, it ends now); adjust a plan change by hand if needed; an add-on this payment bought ends at once;',
       consequenceAutopay:
         'the customer’s autopay ends: at Platega, RollyPay, Antilopay and AuraPay for the subscription this payment paid for, through YooKassa on every saved payment method;',
       consequenceMoney:

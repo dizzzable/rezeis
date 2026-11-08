@@ -222,6 +222,9 @@ const EVENT_TYPE_CATALOG: Readonly<Record<string, readonly string[]>> = {
     // of ours: the autopay ended, the charge to find by hand. Also delivered to
     // whoever ticked payment.refunded or payment.refund_partial.
     'payment.chargeback_unmatched',
+    // A refund the provider declined: no money went back. Operator-only;
+    // also delivered to whoever ticked payment.refunded or payment.refund_partial.
+    'payment.refund_declined',
     'payment.method_saved', 'payment.method_unbound', 'payment.method_autopay_updated',
     // An operator ended a customer autopay from the user card, without a
     // refund. Operator-only; also delivered to whoever ticked

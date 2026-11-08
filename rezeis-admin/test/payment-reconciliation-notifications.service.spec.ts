@@ -576,10 +576,12 @@ describe('PaymentReconciliationService reconciliation side effects', () => {
     assert.equal(gatewayData.refundRevokedFromStatus, 'ACTIVE');
   });
 
-  it('does NOT revoke a subscription that later payments extended', async () => {
+  it('does NOT expire a subscription that later payments extended — only its own days go', async () => {
     // RENEW updates the same subscription row, and the original NEW transaction
     // keeps pointing at it. A chargeback months later must not burn access the
-    // customer has since paid to extend.
+    // customer has since paid to extend: since 08.11.2026 only the days this
+    // payment bought are taken off (`RefundedDaysWithdrawalService`), and a
+    // service built without that leaves it to an operator, as before.
     const state = createState({
       eventStatus: 'REFUNDED',
       initialTransactionStatus: TransactionStatus.COMPLETED,
@@ -596,7 +598,7 @@ describe('PaymentReconciliationService reconciliation side effects', () => {
     const gatewayData = reversalWrites(state)[0].data.gatewayData as Record<string, unknown>;
     assert.equal(gatewayData.subscriptionRevoked, false);
     assert.equal(gatewayData.refundNeedsManualReview, true);
-    assert.equal(gatewayData.refundRevocationSkippedReason, 'SUBSCRIPTION_HAS_OTHER_PAYMENTS');
+    assert.equal(gatewayData.refundRevocationSkippedReason, 'DAYS_WITHDRAWAL_UNAVAILABLE');
     // The money-side reversal still ran — only access was left alone.
     assert.deepStrictEqual(state.partnerReversalCalls, ['tx-1']);
   });
@@ -652,6 +654,61 @@ describe('PaymentReconciliationService reconciliation side effects', () => {
     // Status stays COMPLETED — the payment was not fully given back.
     assert.equal(state.transactionUpdateCalls[0].data.status, undefined);
     assert.deepStrictEqual(state.markProcessedCalls, ['event-1']);
+  });
+
+  it('carries out «Отменить покупку» kept for this refund once the provider confirms it', async () => {
+    // The operator ticked «Отменить покупку» while ЮKassa still held the
+    // refund as pending: its `refund.succeeded` is the confirmation.
+    const state = createState({
+      eventStatus: 'REFUNDED',
+      initialTransactionStatus: TransactionStatus.COMPLETED,
+      refreshedSubscriptionId: 'subscription-1',
+      refreshedFulfilledAt: new Date('2026-04-19T11:00:00.000Z'),
+      gatewayDataOverride: { refundCancelPurchasePending: 'refund-1' },
+      rawPayload: {
+        event: 'refund.succeeded',
+        object: { id: 'refund-1', status: 'succeeded', amount: { value: '1.00', currency: 'RUB' } },
+      },
+    });
+    const service = createService(state);
+    const canceled: string[] = [];
+    (service as unknown as { cancelPurchaseForPartialRefund: (tx: { id: string }) => Promise<unknown> }).cancelPurchaseForPartialRefund =
+      async (tx) => {
+        canceled.push(tx.id);
+        return { canceled: true, revoked: true, needsManualReview: false };
+      };
+
+    await service.reconcileWebhookEvent('event-1');
+
+    assert.deepStrictEqual(canceled, ['tx-1']);
+    assert.equal('refundCancelPurchasePending' in (state.gatewayDataOverride ?? {}), false);
+    assert.deepStrictEqual(state.partnerReversalCalls, []);
+  });
+
+  it('keeps a kept «Отменить покупку» for another refund’s confirmation', async () => {
+    const state = createState({
+      eventStatus: 'REFUNDED',
+      initialTransactionStatus: TransactionStatus.COMPLETED,
+      refreshedSubscriptionId: 'subscription-1',
+      refreshedFulfilledAt: new Date('2026-04-19T11:00:00.000Z'),
+      gatewayDataOverride: { refundCancelPurchasePending: 'refund-2' },
+      rawPayload: {
+        event: 'refund.succeeded',
+        object: { id: 'refund-1', status: 'succeeded', amount: { value: '1.00', currency: 'RUB' } },
+      },
+    });
+    const service = createService(state);
+    const canceled: string[] = [];
+    (service as unknown as { cancelPurchaseForPartialRefund: (tx: { id: string }) => Promise<unknown> }).cancelPurchaseForPartialRefund =
+      async (tx) => {
+        canceled.push(tx.id);
+        return { canceled: true, revoked: true, needsManualReview: false };
+      };
+
+    await service.reconcileWebhookEvent('event-1');
+
+    assert.deepStrictEqual(canceled, []);
+    assert.equal(state.gatewayDataOverride?.refundCancelPurchasePending, 'refund-2');
   });
 
   it('reverses in full once accumulated partial refunds reach the captured amount', async () => {

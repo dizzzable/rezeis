@@ -88,6 +88,23 @@ export async function lockTransactionRefundLedger(
 export const REFUND_REVERSAL_CLAIMED_AT_KEY = 'refundReversalClaimedAt';
 
 /**
+ * Stamped, under the same row lock, by the one run that undoes a purchase on a
+ * PARTIAL refund the operator chose to cancel it with
+ * (`PaymentReconciliationService.cancelPurchaseForPartialRefund`): a second
+ * click finds it and takes nothing off again, and a full refund of the rest
+ * reverses the money and leaves the purchase as that run left it.
+ */
+export const REFUND_PURCHASE_CANCELED_AT_KEY = 'refundPurchaseCanceledAt';
+
+/**
+ * The provider's id of a PARTIAL refund the operator asked to cancel the
+ * purchase with, while the provider has not confirmed it yet (ЮKassa's
+ * `pending`, Platega's own review): the confirmation carries the cancel out,
+ * and a decline drops it (`PaymentReconciliationService`).
+ */
+export const REFUND_CANCEL_PURCHASE_PENDING_KEY = 'refundCancelPurchasePending';
+
+/**
  * How long a reversal's claim turns every other run away. Far longer than a
  * reversal takes (its steps are database writes and one queue job) so a slow
  * one is never run twice; a claim older than this belongs to a run that died

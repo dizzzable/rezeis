@@ -281,6 +281,17 @@ export const EVENT_TYPES = {
    */
   PAYMENT_CHARGEBACK_UNMATCHED: 'payment.chargeback_unmatched',
   /**
+   * The provider declined a refund the panel had asked for: no money went
+   * back. Platega's `PARTIALLY_REFUNDED` callback with `refundStatus:
+   * Declined` (08.11.2026). The refund is taken off the ledger; what the
+   * payment bought, when the operator cancelled it with the refund, stays
+   * cancelled — the card says so. Operator-only (`OPERATOR_ONLY_EVENT_TYPES`),
+   * delivered to whoever ticked the refund cards (`DELIVERED_WITH`). Metadata:
+   * `{ userId, paymentId, gatewayType, amount, currency, refundId,
+   * refundAmount, refundedAmountTotal, purchaseCanceled, note }`.
+   */
+  PAYMENT_REFUND_DECLINED: 'payment.refund_declined',
+  /**
    * An operator ended a customer's autopay from the user's card, without a
    * refund: a Platega or RollyPay subscription cancelled at the provider, or
    * the ЮKassa autopay switched off on every saved method
@@ -578,6 +589,9 @@ export const OPERATOR_ONLY_EVENT_TYPES: ReadonlySet<string> = new Set<string>([
   // A chargeback the panel could not pin on one payment: the operator finds
   // the charge by hand, and no integration may read it as a refund of anything.
   EVENT_TYPES.PAYMENT_CHARGEBACK_UNMATCHED,
+  // A refund the provider declined: the operator decides what next, and no
+  // integration may read it as money moving either way.
+  EVENT_TYPES.PAYMENT_REFUND_DECLINED,
   // An operator's own action. A rule or letter bound to an autopay change
   // would tell the customer they turned it off.
   EVENT_TYPES.PAYMENT_AUTOPAY_STOPPED_BY_OPERATOR,
@@ -3867,6 +3881,7 @@ export const EVENT_PRESENTATION: Record<string, EventPresentation> = {
   'payment.withheld_refunded': { emoji: '↩️', title: 'Возврат неприменённого платежа' },
   // A dispute the panel could not pin on one charge: a task, with its note.
   'payment.chargeback_unmatched': { emoji: '⚠️', title: 'Оспорено списание по автоплатежу' },
+  'payment.refund_declined': { emoji: '⛔', title: 'Провайдер отклонил возврат' },
   'payment.expired': { emoji: '⌛', title: 'Счёт на оплату истёк' },
   'payment.webhook_received': { emoji: '📩', title: 'Вебхук платёжки' },
   'payment.fulfillment_recovered': { emoji: '🛟', title: 'Восстановлено исполнение платежа' },

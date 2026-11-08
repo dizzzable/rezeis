@@ -36,6 +36,7 @@ import { PaymentAutoRetryService } from './services/payment-auto-retry.service';
 import { AntilopayKeyCheckService } from './services/antilopay-key-check.service';
 import { AntilopayStatusService } from './services/antilopay-status.service';
 import { PlategaStatusService } from './services/platega-status.service';
+import { RefundedDaysWithdrawalService } from './services/refunded-days-withdrawal.service';
 import { PaymentPendingExpiryService } from './services/payment-pending-expiry.service';
 import { PaymentOpsAlertService } from './services/payment-ops-alert.service';
 import { PaymentProviderExecutionService } from './services/payment-provider-execution.service';
@@ -142,6 +143,7 @@ import { YookassaPaymentVerificationService } from './services/yookassa-payment-
     PaymentPendingExpiryService,
     AntilopayStatusService,
     PlategaStatusService,
+    RefundedDaysWithdrawalService,
     AntilopayKeyCheckService,
     AddOnFulfillmentRecoveryService,
     SavedPaymentMethodService,

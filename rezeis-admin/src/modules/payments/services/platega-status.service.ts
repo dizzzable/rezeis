@@ -36,8 +36,12 @@ const PLATEGA_API = 'https://app.platega.io';
  */
 export const PLATEGA_FIRST_CHECK_AFTER_MS = 3 * MINUTE_MS;
 
-/** How soon the same open payment is asked about again. */
-export const PLATEGA_RECHECK_EVERY_MS = 5 * MINUTE_MS;
+/**
+ * How old the last question about an open payment must be before it is asked
+ * again: under the five-minute tick, so a tick that starts a little early
+ * never skips the payment for a whole round.
+ */
+export const PLATEGA_RECHECK_EVERY_MS = 4 * MINUTE_MS;
 
 /**
  * Open payments older than the checkout's lifetime plus this are no longer
@@ -59,8 +63,8 @@ export const PLATEGA_GIVE_UP_AFTER_MS = CHECKOUT_LIFETIME_MS + 30 * MINUTE_MS;
  * brings this check.
  */
 export const PLATEGA_LAPSED_WINDOW_MS = 7 * DAY_MS;
-/** How soon a lapsed payment Platega still called open is asked about again. */
-const PLATEGA_LAPSED_RECHECK_EVERY_MS = 60 * MINUTE_MS;
+/** How old the last question about a lapsed payment must be: under the hourly tick, for the same reason. */
+const PLATEGA_LAPSED_RECHECK_EVERY_MS = 55 * MINUTE_MS;
 
 /** Rows read at a time, in all at most, and the questions one sweep asks at most. */
 const PAGE = 200;
@@ -299,11 +303,16 @@ export class PlategaStatusService {
   public async checkLapsedPayments(now: Date, options: { readonly throttleMs?: number } = {}): Promise<number> {
     const gateway = await this.readGateway();
     if (gateway === null) return 0;
-    const rows = await this.readRows({
-      status: TransactionStatus.CANCELED,
-      fulfilledAt: null,
-      createdAt: { gte: new Date(now.getTime() - PLATEGA_LAPSED_WINDOW_MS) },
-    });
+    // Newest first: past {@link MAX_READ} rows a busy shop's oldest abandoned
+    // checkouts wait, not the payment made a minute before the sweep.
+    const rows = await this.readRows(
+      {
+        status: TransactionStatus.CANCELED,
+        fulfilledAt: null,
+        createdAt: { gte: new Date(now.getTime() - PLATEGA_LAPSED_WINDOW_MS) },
+      },
+      'desc',
+    );
     const due = rows
       .filter(
         (row) =>
@@ -452,7 +461,10 @@ export class PlategaStatusService {
   }
 
   /** Platega payments matching `where` that carry Platega's id, a page at a time. */
-  private async readRows(where: Prisma.TransactionWhereInput): Promise<PlategaCheckedRow[]> {
+  private async readRows(
+    where: Prisma.TransactionWhereInput,
+    order: 'asc' | 'desc' = 'asc',
+  ): Promise<PlategaCheckedRow[]> {
     const rows: PlategaCheckedRow[] = [];
     let cursor: string | null = null;
     for (;;) {
@@ -461,10 +473,10 @@ export class PlategaStatusService {
           ...where,
           gatewayType: PaymentGatewayType.PLATEGA,
           gatewayId: { not: null },
-          ...(cursor === null ? {} : { id: { gt: cursor } }),
+          ...(cursor === null ? {} : { id: order === 'asc' ? { gt: cursor } : { lt: cursor } }),
         },
         select: { id: true, paymentId: true, createdAt: true, gatewayId: true, gatewayData: true, planSnapshot: true },
-        orderBy: { id: 'asc' },
+        orderBy: { id: order },
         take: PAGE,
       });
       rows.push(...page);

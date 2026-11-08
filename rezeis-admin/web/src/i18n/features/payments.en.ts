@@ -505,13 +505,13 @@ export const en = {
     // card's bundle): one dialog on two pages, and a test holds them equal.
     providerRefund: {
       title: 'Refund made at the provider',
-      hint: 'The panel returns money by itself only through YooKassa. If you refunded this payment in the {{gateway}} dashboard or another way, record it here: the panel undoes what this payment gave, as if the provider had reported the refund.',
+      hint: 'The panel returns money by itself only through YooKassa and Platega. If you refunded this payment in the {{gateway}} dashboard or another way, record it here: the panel undoes what this payment gave, as if the provider had reported the refund.',
       action: 'Record refund',
       confirmTitle: 'Record the refund?',
       confirmIntro:
         'First return {{amount}} to the customer at the provider ({{gateway}}). The panel sends the provider nothing: it only records that the money is back, and undoes what this payment gave:',
-      consequenceNew: 'the subscription this payment created is switched off, if nothing else paid for it;',
-      consequenceOther: 'the subscription does not change: adjust a renewal or a plan change by hand if needed; an add-on this payment bought ends at once;',
+      consequenceNew: 'the subscription this payment created is switched off; if it was renewed since, only this purchase’s days are taken off;',
+      consequenceOther: 'a renewed subscription loses the days this payment bought (with fewer days left, it ends now); adjust a plan change by hand if needed; an add-on this payment bought ends at once;',
       consequenceAutopay:
         'the customer’s autopay ends: at Platega, RollyPay, Antilopay and AuraPay for the subscription this payment paid for, through YooKassa on every saved payment method;',
       consequenceMoney:

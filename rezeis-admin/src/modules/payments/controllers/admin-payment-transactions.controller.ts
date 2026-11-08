@@ -74,6 +74,7 @@ export class AdminPaymentTransactionsController {
       transactionId,
       amount: input.amount ?? null,
       reason: input.reason ?? null,
+      cancelPurchase: input.cancelPurchase ?? null,
       currentAdmin,
       requestMetadata: extractRequestMetadata(request),
     });

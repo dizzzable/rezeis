@@ -350,6 +350,7 @@ describe('AdminPaymentTransactionsController', () => {
           transactionId: 'transaction-1',
           amount: '5.00',
           reason: 'duplicate charge',
+          cancelPurchase: null,
           currentAdmin: CURRENT_ADMIN,
           requestMetadata: EXPECTED_REQUEST_METADATA,
         },

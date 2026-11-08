@@ -363,6 +363,52 @@ export class SubscriptionTermService {
   }
 
   /**
+   * A REFUND THAT TAKES PAID DAYS BACK, before it moves `expiresAt` to
+   * `newEnd`: every queued SCHEDULED term that would start at or after the new
+   * end is a period the refund unsold, and is CANCELED here — from the tail
+   * back, the way a refunded renewal's term was appended last. Without it the
+   * alignment that follows refuses to shorten across a queued successor
+   * (`SCHEDULED_SUCCESSOR_BLOCKS`) and the days stay sold.
+   *
+   * Refused, with nothing written, when a term to cancel carries a live add-on
+   * — the rule a plan change keeps (`rotateForPlanChangeInTransaction`): what
+   * rides on a queued period is paid goods, and unselling the period does not
+   * say what becomes of them. The caller hands the payment to an operator.
+   *
+   * Under the subscription row lock, which the caller already holds. Writes
+   * terms only.
+   */
+  public async cancelScheduledFromInTransaction(
+    tx: Prisma.TransactionClient,
+    input: { readonly subscriptionId: string; readonly newEnd: Date; readonly now?: Date },
+  ): Promise<
+    | { readonly outcome: 'CANCELED'; readonly termIds: readonly string[] }
+    | { readonly outcome: 'ADD_ONS_BLOCK'; readonly termIds: readonly string[]; readonly boundEntitlements: number }
+  > {
+    const now = input.now ?? new Date();
+    const scheduled = await tx.subscriptionTerm.findMany({
+      where: {
+        subscriptionId: input.subscriptionId,
+        status: SubscriptionTermStatus.SCHEDULED,
+        startsAt: { gte: input.newEnd },
+      },
+      orderBy: { generation: 'desc' },
+      select: { id: true },
+    });
+    const termIds = scheduled.map((term) => term.id);
+    if (termIds.length === 0) return { outcome: 'CANCELED', termIds };
+    const boundEntitlements = await tx.addOnEntitlement.count({
+      where: { termId: { in: termIds }, state: { in: [...LIVE_ENTITLEMENT_STATES] } },
+    });
+    if (boundEntitlements > 0) return { outcome: 'ADD_ONS_BLOCK', termIds, boundEntitlements };
+    await tx.subscriptionTerm.updateMany({
+      where: { id: { in: termIds }, status: SubscriptionTermStatus.SCHEDULED },
+      data: { status: SubscriptionTermStatus.CANCELED, endedAt: now },
+    });
+    return { outcome: 'CANCELED', termIds };
+  }
+
+  /**
    * Moves a subscription that is IN the term model onto another plan: ends the
    * ACTIVE term and activates one on `plan` that ends where the subscription
    * does. The shared form of what plan migration did privately

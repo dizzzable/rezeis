@@ -211,7 +211,7 @@ describe('«Отметить возврат» in the payment’s details', () =>
     if (!(consequences instanceof HTMLElement)) throw new Error('no consequences list')
     const items = within(consequences).getAllByRole('listitem').map((item) => item.textContent)
     expect(items).toEqual([
-      'the subscription this payment created is switched off, if nothing else paid for it;',
+      'the subscription this payment created is switched off; if it was renewed since, only this purchase’s days are taken off;',
       'the customer’s autopay ends: at Platega, RollyPay, Antilopay and AuraPay for the subscription this payment paid for, through YooKassa on every saved payment method;',
       // The panel files «Мой налог» receipts for YooKassa payments only, and a
       // refund can be recorded here only for the others: there is no receipt
@@ -222,14 +222,14 @@ describe('«Отметить возврат» in the payment’s details', () =>
     expect(post).not.toHaveBeenCalled()
   })
 
-  it('says a renewal’s subscription stays as it is, to be adjusted by hand', async () => {
+  it('says a renewal gives back the days it bought, and a plan change is adjusted by hand', async () => {
     grant([VIEW, REFUND])
     const user = renderSheet({ ...PLATEGA, purchaseType: 'RENEW' })
 
     await user.click(await screen.findByRole('button', { name: 'Record refund' }))
 
     const dialog = await screen.findByRole('alertdialog')
-    expect(within(dialog).getByText(/^the subscription does not change: adjust a renewal/)).toBeInTheDocument()
+    expect(within(dialog).getByText(/^a renewed subscription loses the days this payment bought .*adjust a plan change by hand/)).toBeInTheDocument()
     // An add-on's refund ends it at once: the dialog says so.
     expect(within(dialog).getByText(/an add-on this payment bought ends at once;$/)).toBeInTheDocument()
     expect(within(dialog).queryByText(/^the subscription this payment created is switched off/)).not.toBeInTheDocument()
@@ -405,6 +405,78 @@ describe('«Отметить возврат» beside «Вернуть» in the u
   it('points a Platega payment’s «Вернуть» at «Отметить возврат»', () => {
     expect(userDetailRu.userDetailPanel.refund.reasons.PAYMENT_REFUND_UNSUPPORTED_GATEWAY).toMatch(/«Отметить возврат»/)
     expect(userDetailEn.userDetailPanel.refund.reasons.PAYMENT_REFUND_UNSUPPORTED_GATEWAY).toMatch(/“Record refund”/)
+  })
+})
+
+describe('«Вернуть» for a Platega payment in the user card', () => {
+  const operation = {
+    id: PLATEGA.id,
+    kind: 'PAYMENT',
+    occurredAt: PLATEGA.createdAt,
+    payload: {
+      paymentId: PLATEGA.paymentId,
+      status: PLATEGA.status,
+      purchaseType: 'RENEW',
+      gatewayType: PLATEGA.gatewayType,
+      currency: PLATEGA.currency,
+      amount: String(PLATEGA.amount),
+      conversionWithheld: null,
+    },
+  }
+
+  function render(eligibility: Record<string, unknown>) {
+    vi.spyOn(api, 'get').mockImplementation(async (path: string) => {
+      if (path === '/admin/users/12345/operations') {
+        return { data: { items: [operation], total: 1, page: 1, limit: 25 } }
+      }
+      if (path.endsWith('/refund-eligibility')) return { data: eligibility }
+      return {
+        data: {
+          id: USER_ID, telegramId: '12345', username: 'alice', name: 'Alice', email: null, language: 'en',
+          role: 'USER', isBlocked: false, isPartner: false, points: 0, personalDiscount: 0, purchaseDiscount: 0,
+          maxSubscriptions: 1, createdAt: '2026-06-04T10:00:00.000Z', updatedAt: '2026-06-04T10:00:00.000Z',
+          subscriptions: [], transactions: [], referralsGiven: [], partner: null, webAccount: null,
+        },
+      }
+    })
+    const user = userEvent.setup()
+    renderWithProviders(<UserDetailPanel telegramId="12345" />)
+    return user
+  }
+
+  const ELIGIBLE = {
+    refundable: true, reason: null, refundableAmount: '799.00', currency: 'RUB', refundedAmount: '0.00',
+    partialSupported: true, providerFee: { amount: '50.00', currency: 'RUB' },
+  }
+
+  it('asks «Отменить покупку» for part of the sum, ticked, and sends the answer', async () => {
+    grant([{ resource: 'users', action: 'view' }, VIEW, REFUND])
+    const post = vi.spyOn(api, 'post').mockResolvedValue({ data: { transactionId: PLATEGA.id, purchaseCanceled: true } })
+    const user = render(ELIGIBLE)
+    await user.click(await screen.findByRole('tab', { name: 'Operations' }))
+    await user.click(await screen.findByRole('button', { name: 'Refund' }))
+
+    const dialog = await screen.findByRole('alertdialog')
+    expect(await within(dialog).findByText('Provider fee for the refund: 50.00 RUB')).toBeInTheDocument()
+    expect(within(dialog).getByText(/^A full refund cancels the purchase/)).toBeInTheDocument()
+    await user.type(within(dialog).getByRole('textbox'), '300')
+    const box = within(dialog).getByRole('checkbox', { name: /Cancel the purchase/ })
+    expect(box).toBeChecked()
+    await user.click(within(dialog).getByRole('button', { name: 'Refund' }))
+
+    await waitFor(() => expect(post).toHaveBeenCalledWith(`/admin/payments/transactions/${PLATEGA.id}/refund`, { amount: '300', cancelPurchase: true }))
+  })
+
+  it('takes no partial sum where the provider refunds only in full', async () => {
+    grant([{ resource: 'users', action: 'view' }, VIEW, REFUND])
+    const user = render({ ...ELIGIBLE, partialSupported: false, providerFee: null })
+    await user.click(await screen.findByRole('tab', { name: 'Operations' }))
+    await user.click(await screen.findByRole('button', { name: 'Refund' }))
+
+    const dialog = await screen.findByRole('alertdialog')
+    expect(await within(dialog).findByText('The provider refunds this payment only in full.')).toBeInTheDocument()
+    expect(within(dialog).getByRole('textbox')).toBeDisabled()
+    expect(within(dialog).queryByRole('checkbox')).not.toBeInTheDocument()
   })
 })
 
