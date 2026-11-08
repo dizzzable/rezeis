@@ -343,7 +343,12 @@ describe('Platega: the question before the expiry sweep cancels', () => {
       ['PENDING', false],
       ['CANCELED', true],
     ] as const) {
-      const h = createHarness({ rows: [stale()], reply: (id) => answer(id, 'pay-1', status) });
+      // The sweep reads the clock itself: the row is 31 minutes old by THAT
+      // clock, not by the fixed NOW the other cases pass in.
+      const h = createHarness({
+        rows: [stale({ createdAt: new Date(Date.now() - 31 * MINUTE) })],
+        reply: (id) => answer(id, 'pay-1', status),
+      });
       const cancels: unknown[] = [];
       const expiryPrisma = {
         transaction: {
