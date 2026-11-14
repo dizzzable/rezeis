@@ -704,3 +704,30 @@ describe('PlanForm points cashback', () => {
     expect(onSubmit).not.toHaveBeenCalled()
   })
 })
+
+// The owner, 14.11.2026: the merged subscription's device limit was set in TWO
+// places — the «Объединёнка» plan this form edits and the bundle's own card.
+// One product, one place: the card. The editor says where the field went
+// instead of silently dropping it, because an input that vanished with no word
+// reads as a bug.
+describe('PlanForm — the plan of a grouping', () => {
+  it('offers no device limit and points at the bundle card that owns it', async () => {
+    vi.spyOn(api, 'get').mockResolvedValue({ data: [] })
+
+    renderWithProviders(
+      <PlanForm
+        plan={editedPlan({ deviceLimit: 7, bundle: { id: 'bundle-1', name: 'Combined' } })}
+        onSubmit={vi.fn()}
+        isLoading={false}
+      />,
+    )
+
+    expect(
+      screen.getByText(/Set in the Combined plans card — one limit for the whole merged subscription/),
+    ).toBeInTheDocument()
+    // Neither limit is this form's: the traffic limit and the device limit are
+    // both re-derived from the grouping on every save.
+    expect(screen.queryByDisplayValue('7')).not.toBeInTheDocument()
+    expect(screen.queryByDisplayValue('50')).not.toBeInTheDocument()
+  })
+})

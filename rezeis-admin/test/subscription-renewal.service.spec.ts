@@ -34,6 +34,10 @@ interface SubFixture {
   readonly notRenewable?: boolean;
   /** When true, the subscription has no plan snapshot (panel-imported). */
   readonly planLess?: boolean;
+  /** The bundle this subscription was SOLD as one half of (`planSnapshot` marker). */
+  readonly bundleId?: string;
+  /** The bundle's own plan row, the product the renewal prices. */
+  readonly bundlePlanId?: string;
   /** Catalog plan ids offered for a plan-less subscription's renewal. */
   readonly catalogPlanIds?: readonly string[];
   /**
@@ -130,6 +134,38 @@ describe('SubscriptionRenewalService.priceRenewalItems', () => {
       () => service.priceRenewalItems({ identity: { userId: 'u' }, subscriptionIds: [], gatewayType: GATEWAY }),
       (e: unknown) => e instanceof BadRequestException && e.message === 'RENEWAL_NO_ITEMS',
     );
+  });
+
+  it('refuses both halves of ONE merged subscription in one renewal (RENEWAL_DUPLICATE_MERGED_SUBSCRIPTION)', async () => {
+    // Two subscriptions of one bundle are one product: one price buys both
+    // profiles, so a request naming both would charge for the product twice.
+    // The cabinet draws one row for the set (`subscriptionsShowingOneCard`),
+    // and the panel names what a stale client did instead of billing it.
+    const service = createService([
+      sub({ id: 'm1', bundleId: 'bundle-1' }),
+      sub({ id: 'm2', bundleId: 'bundle-1' }),
+      sub({ id: 'third', bundleId: 'bundle-2' }),
+    ]);
+
+    await assert.rejects(
+      () =>
+        service.priceRenewalItems({
+          identity: { userId: 'u' },
+          subscriptionIds: ['m1', 'm2'],
+          gatewayType: GATEWAY,
+        }),
+      (e: unknown) =>
+        e instanceof BadRequestException &&
+        (e.getResponse() as { readonly code?: unknown }).code === 'RENEWAL_DUPLICATE_MERGED_SUBSCRIPTION',
+    );
+
+    // One half of each of TWO products is a legitimate combined renewal.
+    const result = await service.priceRenewalItems({
+      identity: { userId: 'u' },
+      subscriptionIds: ['m1', 'third'],
+      gatewayType: GATEWAY,
+    });
+    assert.equal(result.items.length, 2);
   });
 
   it('rejects a mixed-currency selection (MIXED_CURRENCY)', async () => {
@@ -562,6 +598,8 @@ function sub(input: {
   readonly durations?: readonly number[];
   readonly notRenewable?: boolean;
   readonly planLess?: boolean;
+  readonly bundleId?: string;
+  readonly bundlePlanId?: string;
   readonly catalogPlanIds?: readonly string[];
   readonly planState?: 'live' | 'missing' | 'softDeleted';
   readonly replacementPlanIds?: readonly string[];
@@ -580,6 +618,8 @@ function sub(input: {
     durations: input.durations,
     notRenewable: input.notRenewable ?? false,
     planLess: input.planLess ?? false,
+    bundleId: input.bundleId,
+    bundlePlanId: input.bundlePlanId,
     catalogPlanIds: input.catalogPlanIds,
     planState: input.planState,
     replacementPlanIds: input.replacementPlanIds,
@@ -587,6 +627,25 @@ function sub(input: {
     replacementBackOnSaleMidQuote: input.replacementBackOnSaleMidQuote,
     lifetime: input.lifetime ?? false,
     queuedOpenEnded: input.queuedOpenEnded ?? false,
+  };
+}
+
+/**
+ * The stored snapshot of a fixture: the member plan, the bought duration, and —
+ * for a subscription SOLD as one half of a bundle — the marker the renewal
+ * prices the merged tariff from (`bundle-snapshot.util.ts`).
+ */
+function planSnapshotOf(fixture: SubFixture): Record<string, unknown> {
+  if (fixture.planLess === true) return {};
+  return {
+    id: fixture.planId,
+    selectedDurationDays: fixture.durationDays,
+    ...(fixture.bundleId === undefined
+      ? {}
+      : {
+          bundleId: fixture.bundleId,
+          bundlePlanId: fixture.bundlePlanId ?? `plan-${fixture.bundleId}`,
+        }),
   };
 }
 
@@ -602,7 +661,7 @@ function createService(fixtures: readonly SubFixture[]): SubscriptionRenewalServ
           .filter((f): f is SubFixture => f !== undefined)
           .map((f) => ({
             id: f.id,
-            planSnapshot: f.planLess ? {} : { id: f.planId, selectedDurationDays: f.durationDays },
+            planSnapshot: planSnapshotOf(f),
             // What `assertRenewalPolicy` and the lifetime refusal read.
             status: 'ACTIVE',
             isTrial: false,
@@ -614,7 +673,7 @@ function createService(fixtures: readonly SubFixture[]): SubscriptionRenewalServ
         if (f === undefined) return null;
         return {
           id: f.id,
-          planSnapshot: f.planLess ? {} : { id: f.planId, selectedDurationDays: f.durationDays },
+          planSnapshot: planSnapshotOf(f),
         };
       },
     },

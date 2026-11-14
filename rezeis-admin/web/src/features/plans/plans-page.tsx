@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Pencil, Archive, ArchiveRestore, Trash2, Package, BarChart3, List, GripVertical, AlertTriangle, CheckCircle2, Loader2 } from 'lucide-react'
+import { Plus, Pencil, Archive, ArchiveRestore, Trash2, Package, BarChart3, List, GripVertical, AlertTriangle, CheckCircle2, Loader2, Combine } from 'lucide-react'
 import { toast } from 'sonner'
 import {
   closestCenter,
@@ -26,6 +26,7 @@ import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { ButtonTip } from '@/components/ui/button-tip'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
@@ -46,6 +47,8 @@ import {
 } from './plans-api'
 import { isPlanAlreadyGone, planDeleteOutcomeOfError } from './plan-delete'
 import { PlanDeleteDialog } from './plan-delete-dialog'
+import { PlanBundleDialog, PlanBundlesSection } from './plan-bundles-section'
+import { usePlanBundles, type PlanBundle } from './plan-bundles-api'
 import { resolvePlanWriteRefusal } from './plan-write-refusals'
 import { PlansStatsTab } from './plans-stats-tab'
 
@@ -84,6 +87,10 @@ export default function PlansPage() {
 
   const [showCreate, setShowCreate] = useState(false)
   const [editingPlan, setEditingPlan] = useState<Plan | null>(null)
+  // The grouping dialog. `editingBundle` is kept while it closes so its content
+  // stays put through the animation, the same way the plan editor is kept.
+  const [showBundleDialog, setShowBundleDialog] = useState(false)
+  const [editingBundle, setEditingBundle] = useState<PlanBundle | null>(null)
   // Set when a save reports it queued a squad push, so the banner below can
   // follow it to completion. Editing a plan's squads rewrites every existing
   // subscriber in the background; without this the operator is told "saved" and
@@ -100,6 +107,25 @@ export default function PlansPage() {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
 
   const { data: plans, isLoading } = usePlans()
+
+  // «Объединить тарифы» needs two plans a grouping can actually take and the
+  // permission its route enforces. Both reasons are stated in the tip instead of
+  // leaving a dead button whose only explanation is that nothing happens.
+  //
+  // The count is over PICKABLE plans: a merged tariff («объединённый») carries
+  // no config of its own and a plan already in a grouping cannot be in a second
+  // one, so neither would give the dialog two halves to combine.
+  const { data: bundles } = usePlanBundles()
+  const canCreatePlanBundles = useHasPermission('plans', 'create')
+  const groupedPlanIds = new Set((bundles ?? []).flatMap((bundle) => bundle.planIds))
+  const plansReadyForBundle =
+    (plans ?? []).filter((plan) => plan.bundle == null && !groupedPlanIds.has(plan.id)).length >= 2
+  const bundleButtonDisabled = !plansReadyForBundle || !canCreatePlanBundles
+  const bundleButtonTip = !plansReadyForBundle
+    ? t('plansPage.bundles.needFreePlans')
+    : !canCreatePlanBundles
+      ? t('plansPage.bundles.noPermission')
+      : t('plansPage.bundles.createHint')
 
   const createMutation = useMutation({
     mutationFn: (data: PlanFormData) => api.post('/admin/plans', data),
@@ -263,9 +289,27 @@ export default function PlansPage() {
             </h1>
             <p className="text-muted-foreground">{t('plansPage.subtitle')}</p>
           </div>
-          <Button onClick={() => setShowCreate(true)}>
-            <Plus className="h-4 w-4 mr-2" /> {t('plansPage.createPlan')}
-          </Button>
+          <div className="flex items-center gap-2">
+            <ButtonTip disabled={bundleButtonDisabled} tip={bundleButtonTip}>
+              <Button
+                type="button"
+                // Once there is something to combine, the button reads like the
+                // page's own «Создать тариф» — a second way to start, not a
+                // lesser one (owner, 14.11.2026).
+                variant={bundleButtonDisabled ? 'outline' : 'default'}
+                disabled={bundleButtonDisabled}
+                onClick={() => {
+                  setEditingBundle(null)
+                  setShowBundleDialog(true)
+                }}
+              >
+                <Combine className="h-4 w-4 mr-2" /> {t('plansPage.bundles.create')}
+              </Button>
+            </ButtonTip>
+            <Button onClick={() => setShowCreate(true)}>
+              <Plus className="h-4 w-4 mr-2" /> {t('plansPage.createPlan')}
+            </Button>
+          </div>
         </div>
       </FadeIn>
 
@@ -357,6 +401,14 @@ export default function PlansPage() {
               </div>
             </SortableContext>
           </DndContext>
+
+          <PlanBundlesSection
+            plans={plans}
+            onEdit={(bundle) => {
+              setEditingBundle(bundle)
+              setShowBundleDialog(true)
+            }}
+          />
         </>
       )}
         </TabsContent>
@@ -396,6 +448,13 @@ export default function PlansPage() {
           )}
         </DialogContent>
       </Dialog>
+
+      <PlanBundleDialog
+        open={showBundleDialog}
+        onOpenChange={setShowBundleDialog}
+        bundle={editingBundle}
+        plans={plans ?? []}
+      />
 
       <PlanDeleteDialog
         plan={planToDelete}
@@ -546,6 +605,23 @@ function SortablePlanCard({
           {plan.tag && (
             <Badge variant="outline" className="text-[10px] px-1.5 py-0">
               {plan.tag}
+            </Badge>
+          )}
+          {/* The tariff a bundle is issued as: it exists in this list like any
+              plan, but its type/limit/squads come from the bundle, and the
+              operator edits those in «Объединённые тарифы». */}
+          {plan.bundle != null && (
+            <Badge
+              variant="outline"
+              className="text-[10px] px-1.5 py-0"
+              title={t('plansPage.bundleFaceHint', { name: plan.bundle.name })}
+            >
+              {t('plansPage.bundleFaceBadge')}
+            </Badge>
+          )}
+          {plan.bundle == null && plan.hiddenFromBuyer === true && (
+            <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
+              {t('plansPage.hiddenBadge')}
             </Badge>
           )}
           <Badge

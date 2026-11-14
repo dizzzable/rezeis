@@ -14,7 +14,7 @@ import { DuplicateSubscriptionMergeService } from '../src/modules/profile-sync/d
 import { removeDurableFixtures } from './helpers/durable-rows-cleanup';
 
 /**
- * «СЛИЯНИЕ ПОДПИСОК-ДУБЛИКАТОВ» RECORDS WHAT IT DELETED, on PostgreSQL,
+ * «СЛИЯНИЕ ПОДПИСОК-ДУБЛИКАТО» RECORDS WHAT IT DELETED, on PostgreSQL,
  * through the real controller and merge service.
  *
  * A duplicate whose only durable rows are the cutover's own term and

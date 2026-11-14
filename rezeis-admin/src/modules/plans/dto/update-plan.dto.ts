@@ -65,6 +65,11 @@ export class UpdatePlanDto {
   @IsBoolean()
   public isArchived?: boolean;
 
+  /** The operator's «Скрыть от покупателя» switch — see `CreatePlanDto`. */
+  @IsOptional()
+  @IsBoolean()
+  public hiddenFromBuyer?: boolean;
+
   @IsOptional()
   @IsEnum(ArchivedPlanRenewModeValue)
   public archivedRenewMode?: ArchivedPlanRenewModeValue;

@@ -3,6 +3,7 @@ import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module';
 import { DeviceIntelligenceModule } from '../device-intelligence/device-intelligence.module';
 import { EmailModule } from '../email/email.module';
+import { MergeLinksModule } from '../merge-links/merge-links.module';
 import { PaymentsModule } from '../payments/payments.module';
 import { PlansModule } from '../plans/plans.module';
 import { ReferralsModule } from '../referrals/referrals.module';
@@ -27,6 +28,9 @@ import { ExactlyOneUserIdentifierValidator } from './validators/exactly-one-user
     // address is noted, once per cabinet session.
     DeviceIntelligenceModule,
     EmailModule,
+    // For `MergeLinksService`: a card offers the operator's merged link instead
+    // of its own panel URL when the customer holds several plans of one bundle.
+    MergeLinksModule,
     PaymentsModule,
     PlansModule,
     ReferralsModule,

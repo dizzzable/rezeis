@@ -160,7 +160,10 @@ export class BulkPlanAssignmentService {
     // Load the plan with durations
     const plan = await this.prismaService.plan.findUnique({
       where: { id: input.planId },
-      include: { durations: { where: { isActive: true }, orderBy: { days: 'asc' } } },
+      include: {
+        durations: { where: { isActive: true }, orderBy: { days: 'asc' } },
+        bundleFace: { select: { id: true } },
+      },
     });
 
     if (!plan) {
@@ -169,6 +172,15 @@ export class BulkPlanAssignmentService {
 
     if (!plan.isActive) {
       throw new BadRequestException('Cannot assign an inactive plan');
+    }
+
+    // A merged subscription is several profiles under one link; a bulk
+    // assignment writes ONE profile per subscription. The bundle's grant dialog
+    // is where that product is issued.
+    if (plan.bundleFace !== null && plan.bundleFace !== undefined) {
+      throw new BadRequestException(
+        'A merged subscription cannot be assigned in bulk: issue it from the user card',
+      );
     }
 
     // Determine target user IDs

@@ -889,6 +889,12 @@ const DEFAULT_EMOJIS: readonly DefaultEmojiSeed[] = [
   { key: 'SUB_PROFILE', unicode: '👤', tgEmojiId: '5275979556308674886' },
   { key: 'SUB_DEVICES', unicode: '📱', tgEmojiId: '5278647306525108244' },
   { key: 'SUB_TRAFFIC', unicode: '📈', tgEmojiId: '5278778882848220741' },
+  // The additional-traffic line of a merged subscription (one block for a
+  // bundle instead of two). Its own slot, so an operator can put a different
+  // premium emoji beside «Обходы» than beside «Трафик» — the line the owner
+  // renames; falling back to the traffic glyph keeps them identical out of the
+  // box.
+  { key: 'SUB_TRAFFIC_EXTRA', unicode: '📈', tgEmojiId: '5278778882848220741' },
   { key: 'SUB_EXPIRY',  unicode: '📅', tgEmojiId: '5206222720416643915' },
   // Status indicators (subscription card / mini-profile)
   { key: 'STATUS_ACTIVE',   unicode: '🟢', tgEmojiId: null },
@@ -948,6 +954,14 @@ const DEFAULT_TEXTS: readonly DefaultTextSeed[] = [
   { key: 'profile.devices',            value: 'Устройств: {{count}} доступно' , valueEn: 'Devices: {{count}} available' },
   { key: 'profile.devices_unlimited',  value: 'Устройств: безлимит' , valueEn: 'Devices: unlimited' },
   { key: 'profile.traffic',            value: 'Трафик' , valueEn: 'Traffic' },
+  // The first extra traffic line of a merged subscription: the customer's plan
+  // grouping shows one block, and an unlimited plan leads it while each limited
+  // plan after it gets its own line. Its own key so an operator can call it
+  // «Обходы» (or anything else) without renaming the main line — and a merged
+  // subscription without a renamed line still reads sensibly («Трафик доп.»).
+  // Further lines use `profile.traffic_extra_2`, `_3`, … — windows the operator
+  // adds with «+» in «Карта бота»; a missing window falls back to this caption.
+  { key: 'profile.traffic_extra',      value: 'Трафик доп.' , valueEn: 'Extra traffic' },
   { key: 'profile.until',              value: 'До' , valueEn: 'Until' },
   { key: 'profile.unlimited',          value: 'Безлимит' , valueEn: 'Unlimited' },
   // Slash-command descriptions — the autocomplete bubble Telegram shows on /.

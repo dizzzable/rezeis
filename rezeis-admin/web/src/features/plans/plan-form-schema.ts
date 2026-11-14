@@ -47,6 +47,7 @@ export interface PlanFormDraft {
   readonly trafficLimitGB: string
   readonly deviceLimit: string
   readonly trafficLimitStrategy: string
+  readonly hiddenFromBuyer: boolean
   readonly isArchived: boolean
   readonly archivedRenewMode: string
   readonly internalSquads: string[]
@@ -84,6 +85,8 @@ export interface PlanFormData {
   readonly trafficLimit: number | null
   readonly deviceLimit: number
   readonly trafficLimitStrategy: string
+  /** «Скрыть от покупателя»: sent as-is; the server keeps its own for a bundle face. */
+  readonly hiddenFromBuyer: boolean
   readonly isArchived?: boolean
   readonly archivedRenewMode?: string
   readonly internalSquads?: string[]
@@ -167,6 +170,7 @@ export function createPlanFormSchema(messages: PlanFormValidationMessages) {
       trafficLimitGB: integerString({ min: 0, message: messages.trafficLimitInvalid }),
       deviceLimit: integerString({ min: 0, message: messages.deviceLimitInvalid }),
       trafficLimitStrategy: z.enum(PLAN_TRAFFIC_STRATEGIES, { error: messages.resetStrategyInvalid }),
+      hiddenFromBuyer: z.boolean(),
       isArchived: z.boolean(),
       archivedRenewMode: z.enum(['SELF_RENEW', 'REPLACE_ON_RENEW']),
       internalSquads: z.array(z.string()),
@@ -226,6 +230,7 @@ export function createPlanFormSchema(messages: PlanFormValidationMessages) {
         trafficLimit: trafficLimitGB === 0 ? null : trafficLimitGB,
         deviceLimit: parseInteger(values.deviceLimit),
         trafficLimitStrategy: values.trafficLimitStrategy,
+        hiddenFromBuyer: values.hiddenFromBuyer,
         isArchived: values.isArchived,
         archivedRenewMode: values.isArchived ? values.archivedRenewMode : undefined,
         internalSquads: optionalArray(internalSquads),

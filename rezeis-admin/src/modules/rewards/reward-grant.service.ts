@@ -329,6 +329,18 @@ export class RewardGrantService {
       if (plan === null) {
         throw new BadRequestException('Reward plan not found');
       }
+      // A promocode's subscription reward is ONE profile; a bundle's face plan
+      // is a merged subscription of several. Handing that plan out as a code
+      // would promise a product the activation cannot fulfil.
+      const bundleFace = await tx.planBundle.findFirst({
+        where: { planId: plan.id },
+        select: { name: true },
+      });
+      if (bundleFace !== null) {
+        throw new BadRequestException(
+          `The plan of bundle «${bundleFace.name}» is issued as a merged subscription and cannot be a prize plan`,
+        );
+      }
       const snapshot = {
         // A deleted plan keeps being given away; its name is shown without the
         // "(deleted …)" suffix a reuse of that name put on the hidden row.
@@ -387,11 +399,26 @@ async function resolveBoundedSubscriptionId(
   return sub?.id ?? null;
 }
 
-/** Most-recent ACTIVE subscription, bounded or unlimited. */
+/**
+ * The subscription a TRAFFIC prize can actually be added to, or `null`.
+ *
+ * Most-recent ACTIVE first, but a LIMITED one always wins over an UNLIMITED one:
+ * adding gigabytes to an unlimited allowance changes nothing, and a merged
+ * subscription («объединённая подписка») is exactly that case — the customer
+ * holds an unlimited plan and a limited one at the same time, and the wheel must
+ * top up the plan that has a limit (the owner, 14.11.2026: «даже если подписчик
+ * выиграл в колесе доп трафик ему в объединенных пополняло лимитный трафик»).
+ */
 async function resolveActiveSubscriptionId(
   tx: Prisma.TransactionClient,
   userId: string,
 ): Promise<string | null> {
+  const bounded = await tx.subscription.findFirst({
+    where: { userId, status: SubscriptionStatus.ACTIVE, trafficLimit: { not: null } },
+    orderBy: { createdAt: 'desc' },
+    select: { id: true },
+  });
+  if (bounded !== null) return bounded.id;
   const sub = await tx.subscription.findFirst({
     where: { userId, status: SubscriptionStatus.ACTIVE },
     orderBy: { createdAt: 'desc' },

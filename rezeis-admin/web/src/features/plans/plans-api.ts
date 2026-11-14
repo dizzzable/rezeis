@@ -106,6 +106,19 @@ export interface Plan {
   readonly trafficLimitStrategy: string
   readonly isActive: boolean
   readonly isArchived: boolean
+  /**
+   * The operator's «Скрыть от покупателя» switch. The plan keeps working and
+   * keeps being listed/grantable in the panel; only the buyer catalogue skips
+   * it. Optional because a response cached before the column existed has no
+   * key at all — absent reads as visible, the only behaviour that preceded it.
+   */
+  readonly hiddenFromBuyer?: boolean
+  /**
+   * Set when this row is the tariff a bundle is issued as («объединённая
+   * подписка»). The editor hides the fields the bundle owns — type, traffic
+   * limit and squads — and shows where its name and device limit live.
+   */
+  readonly bundle?: { readonly id: string; readonly name: string } | null
   readonly orderIndex: number
   readonly internalSquads: ReadonlyArray<string>
   readonly externalSquad: string | null

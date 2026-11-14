@@ -222,7 +222,7 @@ function harness(scenario: Scenario) {
     } as never,
     { findPreferredForCharge: async () => ({ id: 'method-1', gatewayType: PaymentGatewayType.YOOKASSA }) } as never,
     { build: async () => ({}) } as never,
-    { requiresPlanSelection: async () => false } as never,
+    { requiresPlanSelection: async () => false, isBundleRenewalPrimary: async () => true } as never,
     { info: () => undefined } as never,
   );
 

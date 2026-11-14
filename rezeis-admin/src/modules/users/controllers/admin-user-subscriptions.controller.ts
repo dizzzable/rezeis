@@ -33,10 +33,14 @@ import {
   ServiceUnavailableException,
   UseGuards,
 } from '@nestjs/common';
+
+import { PLAN_BUNDLE_MIN_PLANS } from '../../merge-links/dto/admin-plan-bundle.dto';
+import { MergeLinksService } from '../../merge-links/services/merge-links.service';
 import {
   AddOnEntitlementActorType,
   Plan,
   Prisma,
+  Subscription,
   SubscriptionStatus,
   SyncAction,
   SyncJobStatus,
@@ -100,6 +104,7 @@ import { SubscriptionDeletionService } from '../../subscriptions/services/subscr
 import { SubscriptionMutationsService } from '../../subscriptions/services/subscription-mutations.service';
 import { SystemEventsService, EVENT_TYPES } from '../../../common/services/system-events.service';
 import { planNamesMetadata } from '../../../common/utils/plan-snapshot.util';
+import { withBundleMarker } from '../../merge-links/utils/bundle-snapshot.util';
 import { buildPlanSnapshot } from '../utils/plan-snapshot.util';
 import { PLAN_ASSIGNMENT_REFUSAL_CODES } from './plan-assignment-refusals';
 import type { SubscriptionSyncPanelLimits, SubscriptionSyncReadback } from './subscription-sync-readback';
@@ -113,6 +118,14 @@ import { OPERATOR_LIMIT_SOURCE } from '../../anti-fraud/detectors/sharing-detect
  * panel URL.
  */
 const MAX_REMNAWAVE_ID_LENGTH = 20;
+
+/**
+ * Longest period a merged grant may hand out, in days — ten years. The single
+ * plan grant beside it has no ceiling, and that is not a precedent worth
+ * copying: a mistyped year in this dialog is a subscription that outlives the
+ * product, and the bundle grant writes SEVERAL of them at once.
+ */
+const MAX_GRANT_DURATION_DAYS = 3650;
 
 /**
  * Whether a string can name a panel profile on the panel this build speaks:
@@ -512,6 +525,7 @@ export class AdminUserSubscriptionsController {
     private readonly subscriptionDeletionService: SubscriptionDeletionService,
     private readonly subscriptionMutationsService: SubscriptionMutationsService,
     private readonly subscriptionTermHooks: SubscriptionTermHooksService,
+    private readonly mergeLinksService: MergeLinksService,
   ) {}
 
   // ── Subscription Mutations ─────────────────────────────────────────────
@@ -568,8 +582,21 @@ export class AdminUserSubscriptionsController {
       // A deleted plan is gone for the operator too: it is never offered in the
       // picker, and assigning one from a stale page would put a subscriber on a
       // plan nobody can renew.
-      const plan = await this.prismaService.plan.findUnique({ where: { id: planId, deletedAt: null } });
+      const plan = await this.prismaService.plan.findUnique({
+        where: { id: planId, deletedAt: null },
+        include: { bundleFace: { select: { id: true, name: true } } },
+      });
       if (!plan) throw new NotFoundException('Plan not found');
+      // A bundle's face plan describes a MERGED subscription — several profiles
+      // under one link. Moving ONE subscription onto it would leave a profile
+      // whose squads and traffic limit came from the bundle's visible member
+      // while the rest of the product was missing. The grant dialog is the way
+      // to issue it.
+      if (plan.bundleFace !== null && plan.bundleFace !== undefined) {
+        throw new BadRequestException(
+          `The plan of bundle «${plan.bundleFace.name}» is a merged subscription: issue it from «Give subscription», it cannot be assigned to a single subscription`,
+        );
+      }
       assignedPlanSnapshot = buildPlanSnapshot(plan);
       // Plans dictate the squads at the moment of assignment, and the limits
       // too — plus what the row held above its old plan, which is resolved in
@@ -1598,8 +1625,47 @@ export class AdminUserSubscriptionsController {
   ) {
     const user = await this.findUserByTelegramId(telegramId);
     // Not a deleted plan: the give-subscription picker never lists one.
-    const plan = await this.prismaService.plan.findUnique({ where: { id: body.planId, deletedAt: null } });
+    const plan = await this.prismaService.plan.findUnique({
+      where: { id: body.planId, deletedAt: null },
+      include: {
+        bundleFace: { select: { id: true, name: true, members: { select: { planId: true } } } },
+      },
+    });
     if (!plan) throw new NotFoundException('Plan not found');
+
+    // A bundle's face plan is ONE product: granting it issues the subscriptions
+    // of every member plan in one action, exactly as the dialog's «объединённая
+    // подписка» mode does. Granting the row as a single subscription would
+    // create one profile whose squads and traffic limit were copied from the
+    // bundle's visible member while the other half of the product was missing.
+    if (plan.bundleFace !== null) {
+      if (body.isTrial === true) {
+        throw new BadRequestException('A merged subscription cannot be granted as a trial');
+      }
+      const plans = await this.memberPlansOfBundle(
+        plan.bundleFace.members.map((member) => member.planId),
+      );
+      const granted = await this.grantMergedSubscription({
+        userId: user.id,
+        bundleId: plan.bundleFace.id,
+        bundleName: plan.bundleFace.name,
+        plans,
+        durationDays: body.durationDays,
+        deviceLimit: plan.deviceLimit,
+        // The plan the operator picked IS the bundle's own row: that is what the
+        // customer renews.
+        bundlePlanId: plan.id,
+        admin,
+        req,
+      });
+      const first = granted.subscriptions[0];
+      if (first === undefined) throw new BadRequestException('The plan bundle has no live plans');
+      // The merged link rides on the same answer the single-plan grant returns,
+      // so the dialog can show it exactly as the bundle mode does — the
+      // operator should not have to open the cabinet to learn the link they
+      // are about to send.
+      return { ...first, mergeUrl: granted.mergeUrl };
+    }
 
     if (body.isTrial === true) {
       const granted = await this.subscriptionMutationsService.grantTrial({
@@ -1658,6 +1724,229 @@ export class AdminUserSubscriptionsController {
     await this.enqueueSubscriptionSync(subscription.id, subscription.remnawaveId);
 
     return subscription;
+  }
+
+  /**
+   * Issues ONE merged subscription: every plan of a bundle, in a single action.
+   *
+   * Before this, handing a customer a merged subscription meant knowing which
+   * plans the bundle holds and calling the single-plan grant once per plan. The
+   * merged link then existed only because the customer happened to hold two
+   * live subscriptions, and the operator had no way to read it — the panel only
+   * ever printed the per-profile Remnawave URL. Here the operator names the
+   * bundle; the panel writes one ordinary subscription per member plan in one
+   * transaction and answers with the merged link, ready to send.
+   *
+   * Deliberately NOT a product: nothing is priced, charged or scheduled, the
+   * terms are the same `durationDays` for every plan, and the rows are exactly
+   * the subscriptions the cards, the cabinet and the merge service already
+   * understand.
+   */
+  @Post(':telegramId/give-bundle-subscription')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermission('subscriptions', 'create')
+  public async giveBundleSubscription(
+    @Param('telegramId') telegramId: string,
+    @Body() body: { bundleId?: unknown; durationDays?: unknown; isTrial?: unknown },
+    @CurrentAdmin() admin: CurrentAdminInterface,
+    @Req() req: Request,
+  ) {
+    const user = await this.findUserByTelegramId(telegramId);
+
+    if (typeof body.bundleId !== 'string' || body.bundleId.trim().length === 0) {
+      throw new BadRequestException('A plan bundle id is required');
+    }
+    // A bundle is granted as a period, never as a trial. The trial flag belongs
+    // to the one-off trial offer the cabinet shows, and marking the plans of a
+    // bundle as trials would let one customer claim that offer twice.
+    if (body.isTrial === true) {
+      throw new BadRequestException('A merged subscription cannot be granted as a trial');
+    }
+    const durationDays = Number(body.durationDays);
+    if (
+      !Number.isInteger(durationDays) ||
+      durationDays < 1 ||
+      durationDays > MAX_GRANT_DURATION_DAYS
+    ) {
+      throw new BadRequestException(
+        `Duration must be a whole number of days from 1 to ${MAX_GRANT_DURATION_DAYS}`,
+      );
+    }
+
+    const bundleId = body.bundleId.trim();
+    const bundle = await this.prismaService.planBundle.findUnique({
+      where: { id: bundleId },
+      select: {
+        id: true,
+        name: true,
+        isActive: true,
+        plan: { select: { id: true, deviceLimit: true } },
+        members: { select: { planId: true } },
+      },
+    });
+    if (bundle === null) throw new NotFoundException('Plan bundle not found');
+    if (!bundle.isActive) throw new BadRequestException('Plan bundle is switched off');
+
+    // Plans, in the order the plans page shows them — the created subscriptions
+    // then read the same way the bundle's chips do.
+    const memberPlanIds = [...new Set(bundle.members.map((member) => member.planId))];
+    const plans = await this.memberPlansOfBundle(memberPlanIds);
+
+    const granted = await this.grantMergedSubscription({
+      userId: user.id,
+      bundleId: bundle.id,
+      bundleName: bundle.name,
+      plans,
+      durationDays,
+      deviceLimit: bundle.plan?.deviceLimit ?? null,
+      bundlePlanId: bundle.plan?.id ?? null,
+      admin,
+      req,
+    });
+
+    return {
+      bundle: { id: bundle.id, name: bundle.name },
+      subscriptions: granted.subscriptions,
+      mergeUrl: granted.mergeUrl,
+    };
+  }
+
+  /**
+   * Loads the live member plans of a bundle, in display order, and refuses a
+   * bundle that has lost one of them: a deleted plan cannot be granted, and
+   * half a bundle is not a merge — saying WHICH one is missing beats quietly
+   * issuing the rest.
+   */
+  private async memberPlansOfBundle(memberPlanIds: readonly string[]): Promise<Plan[]> {
+    const plans = await this.prismaService.plan.findMany({
+      where: { id: { in: [...memberPlanIds] }, deletedAt: null },
+      orderBy: [{ orderIndex: 'asc' }, { name: 'asc' }],
+    });
+    const foundPlanIds = new Set(plans.map((plan) => plan.id));
+    const missingPlanIds = memberPlanIds.filter((planId) => !foundPlanIds.has(planId));
+    if (missingPlanIds.length > 0) {
+      throw new BadRequestException(
+        `The bundle names plan(s) that no longer exist: ${missingPlanIds.join(', ')}`,
+      );
+    }
+    if (plans.length < PLAN_BUNDLE_MIN_PLANS) {
+      throw new BadRequestException(
+        `A plan bundle needs at least ${PLAN_BUNDLE_MIN_PLANS} live plans`,
+      );
+    }
+    return plans;
+  }
+
+  /**
+   * One subscription per member plan, one transaction, one term — the single
+   * implementation behind both grant paths (the bundle dialog and a bundle's
+   * face plan picked in the ordinary plan picker).
+   *
+   * `deviceLimit` is the merged subscription's own number when the bundle has a
+   * plan row; `null` falls back to each member plan's limit, which is what a
+   * grouping that was never turned into a tariff has.
+   */
+  private async grantMergedSubscription(input: {
+    readonly userId: string;
+    readonly bundleId: string;
+    readonly bundleName: string;
+    readonly plans: readonly Plan[];
+    readonly durationDays: number;
+    readonly deviceLimit: number | null;
+    /**
+     * The bundle's own plan row: what the customer will RENEW the merged
+     * subscription as (`bundle-snapshot.util.ts`). `null` for a grouping that
+     * predates the merged tariff and has no plan row — the grant then writes an
+     * ordinary snapshot and the subscription renews as its member plan.
+     */
+    readonly bundlePlanId: string | null;
+    readonly admin: CurrentAdminInterface;
+    readonly req: Request;
+  }): Promise<{ readonly subscriptions: Subscription[]; readonly mergeUrl: string | null }> {
+    const startedAt = new Date();
+    const expiresAt = new Date(startedAt.getTime() + input.durationDays * 24 * 60 * 60 * 1000);
+    // The stage switches, read BEFORE the transaction opens (review R2b-07),
+    // exactly as the single-plan grant reads them.
+    const termFlags = await this.subscriptionTermHooks.readFlags();
+
+    const subscriptions: Subscription[] = await this.prismaService.$transaction(async (tx) => {
+      const created: Subscription[] = [];
+      for (const plan of input.plans) {
+        const row = await tx.subscription.create({
+          data: {
+            userId: input.userId,
+            status: SubscriptionStatus.ACTIVE,
+            isTrial: false,
+            planSnapshot:
+              input.bundlePlanId === null
+                ? buildPlanSnapshot(plan)
+                : (withBundleMarker(
+                    {
+                      ...(buildPlanSnapshot(plan) as Record<string, unknown>),
+                      // ONE device limit for the whole merged subscription: the
+                      // snapshot must agree with the column, or the row reads as
+                      // an operator override forever.
+                      deviceLimit: input.deviceLimit ?? plan.deviceLimit,
+                    },
+                    { bundleId: input.bundleId, bundlePlanId: input.bundlePlanId },
+                  ) as Prisma.InputJsonValue),
+            trafficLimit: plan.trafficLimit,
+            // ONE number for the whole merged subscription when the bundle has
+            // a plan row: setting it in «Объединённые тарифы» must change both
+            // profiles, not only the ones issued after the edit.
+            deviceLimit: input.deviceLimit ?? plan.deviceLimit,
+            internalSquads: plan.internalSquads,
+            externalSquad: plan.externalSquad,
+            startedAt,
+            expiresAt,
+          },
+        });
+        // Its first term, in the same transaction, while stage 1 is on: an add-on
+        // bought on it a minute later is then ledgered with an end date, not the
+        // permanent increment a subscription outside the model still gets.
+        await this.subscriptionTermHooks.enterNewSubscriptionInTransaction(tx, row.id, termFlags);
+        created.push(row);
+      }
+      return created;
+    });
+
+    for (const [index, subscription] of subscriptions.entries()) {
+      // One audit row per subscription, as the single-plan grant writes: the
+      // trail answers "what did this operator hand out", and a merged grant
+      // hands out two subscriptions, not one product the audit log knows.
+      await this.auditLog(input.admin, input.req, 'user.subscription.given', {
+        userId: input.userId,
+        subscriptionId: subscription.id,
+        planId: input.plans[index]?.id ?? null,
+        durationDays: input.durationDays,
+        bundleId: input.bundleId,
+        bundleName: input.bundleName,
+      });
+      // Enqueue sync-job so the worker creates the Remnawave profile.
+      await this.enqueueSubscriptionSync(subscription.id, subscription.remnawaveId);
+    }
+
+    // The link the operator sends, minted on the operator's action so the
+    // customer never has to open the cabinet for the operator to learn it. The
+    // merge service resolves the profiles live, so the URL starts answering as
+    // soon as the worker has created them — a few seconds, not immediately.
+    let mergeUrl: string | null = null;
+    try {
+      const mergedByPlan = await this.mergeLinksService.mergedUrlsByPlan(
+        input.userId,
+        input.plans.map((plan) => plan.id),
+      );
+      const firstPlanId = input.plans[0]?.id ?? null;
+      mergeUrl = firstPlanId === null ? null : mergedByPlan.get(firstPlanId) ?? null;
+    } catch (error) {
+      // Best-effort exactly as the cabinet's card: the subscriptions exist and
+      // are what matters; failing to name the link must not fail the grant.
+      this.logger.warn(
+        `Merged link lookup failed for user ${input.userId}: ${(error as Error).message}`,
+      );
+    }
+
+    return { subscriptions, mergeUrl };
   }
 
   @Post(':telegramId/grant-trial')

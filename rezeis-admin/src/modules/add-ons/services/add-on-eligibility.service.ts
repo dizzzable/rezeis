@@ -10,6 +10,7 @@ import {
 import { TrafficResetService } from './traffic-reset.service';
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { readJsonObject } from '../../../common/utils/read-json-object.util';
+import { readBundleMarker } from '../../merge-links/utils/bundle-snapshot.util';
 import {
   type AddOnRolloutFlags,
   readAddOnRolloutFlags,
@@ -42,6 +43,34 @@ export const RESET_SOON_WINDOW_MS = 24 * 60 * 60 * 1000;
 /** Whether a catalogue add-on is sold for `planId` (no plans listed = every plan). */
 function appliesToPlan(addOn: { readonly applicablePlanIds: readonly string[] }, planId: string): boolean {
   return addOn.applicablePlanIds.length === 0 || addOn.applicablePlanIds.includes(planId);
+}
+
+/**
+ * Every plan id an add-on may be pinned to for THIS subscription.
+ *
+ * A merged subscription is ONE product the operator prices as the bundle's own
+ * tariff («объединённая подписка»), but the row that carries the profile is a
+ * MEMBER plan. The operator configures an add-on against the tariff he sees on
+ * the plans page — the bundle's face plan — so matching only the member plan
+ * would never offer it (the owner, 14.11.2026: «не могу добавить опции доп
+ * трафик в объединённую подписку»).
+ *
+ * The pair comes from the sale marker (`bundle-snapshot.util.ts`), which is the
+ * same contract the renewal prices by: a customer who bought two plans
+ * SEPARATELY carries no marker and keeps matching only their own plans.
+ */
+function sellablePlanIds(planId: string, planSnapshot: unknown): readonly string[] {
+  const bundlePlanId = readBundleMarker(planSnapshot)?.bundlePlanId ?? null;
+  if (bundlePlanId === null || bundlePlanId === planId) return [planId];
+  return [planId, bundlePlanId];
+}
+
+/** `appliesToPlan` over every plan id the subscription may be sold as. */
+function appliesToSale(
+  addOn: { readonly applicablePlanIds: readonly string[] },
+  planIds: readonly string[],
+): boolean {
+  return planIds.some((planId) => appliesToPlan(addOn, planId));
 }
 
 /**
@@ -334,6 +363,11 @@ export class AddOnEligibilityService {
       orderBy: [{ orderIndex: 'asc' }],
     });
 
+    // A merged subscription answers to TWO plan ids: the member plan that owns
+    // the profile and the bundle's own tariff the operator priced. An add-on
+    // pinned to either is about this subscription.
+    const salePlanIds = sellablePlanIds(resolved.planId, subscription.planSnapshot);
+
     // ONE read of the stage switches for the whole listing: the capability map,
     // the Remnawave zone and the dating all come from it, so a switch flipped
     // mid-listing cannot make them disagree about one add-on.
@@ -354,7 +388,7 @@ export class AddOnEligibilityService {
       baseline.trafficResetStrategy === TrafficLimitStrategy.MONTH_ROLLING &&
       getResetCapability('MONTH_ROLLING', capabilities) === 'ENABLED' &&
       this.profileFacts !== undefined &&
-      catalog.some((addOn) => addOn.type === AddOnType.EXTRA_TRAFFIC && appliesToPlan(addOn, resolved.planId))
+      catalog.some((addOn) => addOn.type === AddOnType.EXTRA_TRAFFIC && appliesToSale(addOn, salePlanIds))
     ) {
       const createdAt = await this.profileFacts.readProfileCreatedAtOnce(subscriptionId, now);
       if (createdAt !== null) baseline = { ...baseline, resetAnchorAt: createdAt };
@@ -362,7 +396,7 @@ export class AddOnEligibilityService {
 
     const addOns: EligibleAddOn[] = [];
     for (const addOn of catalog) {
-      if (!appliesToPlan(addOn, resolved.planId)) continue;
+      if (!appliesToSale(addOn, salePlanIds)) continue;
 
       const evaluated = this.evaluate(
         addOn.type,

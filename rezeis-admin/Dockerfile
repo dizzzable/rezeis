@@ -29,6 +29,12 @@ FROM node:26-alpine AS build-backend
 WORKDIR /app
 # Same build tools as the `dependencies` stage, for the same optional addon.
 RUN apk add --no-cache python3 make g++
+# `tsc` on this tree needs well over the ~1 GB heap Node picks from a small
+# host's total memory, and dies with "Ineffective mark-compacts near heap limit"
+# on a 2 GB box — which is exactly the box an operator builds a custom image on.
+# The ceiling is a CEILING, not an allocation: a runner with more RAM simply
+# never reaches it.
+ENV NODE_OPTIONS=--max-old-space-size=2048
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY tsconfig.json tsconfig.build.json nest-cli.json ./
@@ -41,6 +47,9 @@ RUN npx prisma generate && npm run build
 FROM node:26-alpine AS build-frontend
 
 WORKDIR /app
+# `tsc -b` over the SPA needs the same headroom as the backend build above; the
+# default heap dies at ~985 MB on a 2 GB host.
+ENV NODE_OPTIONS=--max-old-space-size=2048
 COPY web/package.json web/package-lock.json web/.npmrc ./
 RUN npm ci
 COPY web/ .

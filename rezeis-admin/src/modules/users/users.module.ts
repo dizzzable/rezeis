@@ -5,6 +5,7 @@ import { AuthModule } from '../auth/auth.module';
 import { PointsModule } from '../points/points.module';
 import { InternalUserModule } from '../internal-user/internal-user.module';
 import { ImportsModule } from '../imports/imports.module';
+import { MergeLinksModule } from '../merge-links/merge-links.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { PartnersModule } from '../partners/partners.module';
 import { PlansModule } from '../plans/plans.module';
@@ -43,6 +44,11 @@ import { UserDeletionService } from './services/user-deletion.service';
     PointsModule,
     InternalUserModule,
     ImportsModule,
+    // Supply `MergeLinksService` to the «Выдать подписку» dialog's bundle mode:
+    // the grant writes several subscriptions at once and answers with the
+    // merged link the operator sends, which only the grouping's own service
+    // knows how to mint.
+    MergeLinksModule,
     NotificationsModule,
     PartnersModule,
     // Supplies `PlansAdminService` to the plan-access toggle on the user card,

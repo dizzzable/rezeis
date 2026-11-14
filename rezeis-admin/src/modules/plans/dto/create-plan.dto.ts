@@ -103,6 +103,16 @@ export class CreatePlanDto {
   @IsBoolean()
   public isArchived?: boolean;
 
+  /**
+   * The operator's «Скрыть от покупателя» switch: keep the plan out of the
+   * buyer catalogue while it stays visible, editable and issuable in the
+   * panel. Omitted means false — every plan created before the column behaves
+   * exactly as it did.
+   */
+  @IsOptional()
+  @IsBoolean()
+  public hiddenFromBuyer?: boolean;
+
   @IsOptional()
   @IsEnum(ArchivedPlanRenewModeValue)
   public archivedRenewMode?: ArchivedPlanRenewModeValue;

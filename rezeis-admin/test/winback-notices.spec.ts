@@ -48,7 +48,7 @@ function build(options: { readonly toggles?: unknown; readonly rows?: ReadonlyAr
     {} as never,
     { findPreferredForCharge: async () => null } as never,
     { build: async () => ({}) } as never,
-    { requiresPlanSelection: async () => false } as never,
+    { requiresPlanSelection: async () => false, isBundleRenewalPrimary: async () => true } as never,
     { info: () => undefined } as never,
   );
   return { service, created, queries };

@@ -29,8 +29,9 @@ import {
   ReleasedPlanName,
   releasePlanNameFromDeletedPlan,
 } from '../utils/plan-deletion.util';
-import { mapAdminPlan, PLAN_INCLUDE } from '../utils/plan-record.util';
+import { ADMIN_PLAN_INCLUDE, mapAdminPlan } from '../utils/plan-record.util';
 
+import { BundleFacePlanService } from './bundle-face-plan.service';
 import {
   PlanSquadPropagationService,
   PlanSquadPropagationStatus,
@@ -135,6 +136,12 @@ export class PlansAdminService implements OnModuleDestroy {
     private readonly plansAdminValidators: PlansAdminValidators,
     private readonly planSquadPropagationService: PlanSquadPropagationService,
     /**
+     * Owns the plan row a bundle is issued as: the fields the bundle owns on it
+     * and the device-limit fan-out to existing merged subscriptions. See
+     * `BundleFacePlanService`.
+     */
+    private readonly bundleFacePlanService: BundleFacePlanService,
+    /**
      * Pushes a subscriber's changed reset rule the moment its follow commits.
      * `@Optional()` at the tail for the specs that build this by hand: without
      * it the pushes stay PENDING for the profile-sync sweep.
@@ -188,7 +195,7 @@ export class PlansAdminService implements OnModuleDestroy {
       // A soft-deleted plan is gone for the operator: the row is kept only so
       // obligations already taken can resolve it by id (`PlanDeletionService`).
       where: LIVE_PLAN_WHERE,
-      include: PLAN_INCLUDE,
+      include: ADMIN_PLAN_INCLUDE,
       orderBy: [{ orderIndex: 'asc' }, { createdAt: 'asc' }],
     });
     return plans.map(mapAdminPlan);
@@ -240,7 +247,7 @@ export class PlansAdminService implements OnModuleDestroy {
             create: buildPlanDurationCreateInput(normalizedInput.durations),
           },
         },
-        include: PLAN_INCLUDE,
+        include: ADMIN_PLAN_INCLUDE,
       });
       await this.logAdminAction({
         transactionClient,
@@ -263,7 +270,18 @@ export class PlansAdminService implements OnModuleDestroy {
     context: AdminMutationContext,
   ): Promise<AdminPlanUpdateResultInterface> {
     const currentPlan = await this.getRequiredPlan(planId);
-    const normalizedInput = normalizeUpdatePlanInput(input, currentPlan);
+    // A bundle's face plan OWNS none of the fields the bundle decides: the
+    // operator edits its name in «Объединённые тарифы», and its traffic limit,
+    // type and squads live on the bundle's member plans. Its device limit is
+    // the bundle CARD's field too (the owner, 14.11.2026: «оставим только в
+    // карточке»): the card writes it, and this save must never move it, which
+    // is why the patch's own `deviceLimit` is dropped before normalisation.
+    // Prices and durations stay the plan's own.
+    const isBundleFace = currentPlan.bundleFace !== undefined && currentPlan.bundleFace !== null;
+    const normalizedInput = normalizeUpdatePlanInput(
+      isBundleFace ? { ...input, deviceLimit: undefined } : input,
+      currentPlan,
+    );
     await this.plansAdminValidators.assertPlanWriteIsValid({
       planId,
       input: normalizedInput,
@@ -275,9 +293,10 @@ export class PlansAdminService implements OnModuleDestroy {
       },
     });
     // Only a RENAME can collide with a deleted plan: the current name is this
-    // row's own, and the unique index guarantees no other row holds it.
+    // row's own, and the unique index guarantees no other row holds it. A face
+    // plan's name is not the operator's to type here, so it can never rename.
     const nameHolder =
-      normalizedInput.name === currentPlan.name
+      isBundleFace || normalizedInput.name === currentPlan.name
         ? null
         : await this.plansAdminValidators.findDeletedPlanHoldingName(planId, normalizedInput.name);
     const { updated, propagation, snapshots } = await this.prismaService.$transaction(
@@ -309,10 +328,19 @@ export class PlansAdminService implements OnModuleDestroy {
           nameHolder === null
             ? null
             : await releasePlanNameFromDeletedPlan(transactionClient, nameHolder);
+        // Re-derived under the lock: the bundle dialog may have moved the
+        // visible plan or edited a member while this form was open. The bundle
+        // owns name, description, type, traffic limit and squads — the save
+        // writes them, not whatever the (hidden) form fields still held.
+        const bundleFace =
+          isBundleFace
+            ? await this.bundleFacePlanService.deriveFaceWriteData(transactionClient, planId)
+            : null;
         const updatedPlan = await transactionClient.plan.update({
           where: { id: planId },
           data: {
             ...buildPlanWriteData(normalizedInput),
+            ...(bundleFace === null ? {} : bundleFace.data),
             durations:
               normalizedInput.durations === undefined
                 ? undefined
@@ -321,7 +349,7 @@ export class PlansAdminService implements OnModuleDestroy {
                     create: buildPlanDurationCreateInput(normalizedInput.durations),
                   },
           },
-          include: PLAN_INCLUDE,
+          include: ADMIN_PLAN_INCLUDE,
         });
         // The snapshots, in one statement whatever the plan's size. A changed
         // reset rule reaches the terms of the subscribers in the term model,
@@ -404,9 +432,18 @@ export class PlansAdminService implements OnModuleDestroy {
               ? { resetRuleChange: { subscriptions: snapshotSync.strategyChanged } }
               : {}),
             ...releasedNameMetadata(releasedName),
+            // Which tariff the save was about, so an auditor reading
+            // «plans.updated» knows a bundle's face was edited rather than an
+            // ordinary plan. Absent for ordinary plans — their audit rows keep
+            // the shape they always had.
+            ...(bundleFace === null ? {} : { bundleFaceOf: bundleFace.bundleId }),
           },
         });
-        return { updated: updatedPlan, propagation: squadPropagation, snapshots: snapshotSync };
+        return {
+          updated: updatedPlan,
+          propagation: squadPropagation,
+          snapshots: snapshotSync,
+        };
       },
       PLAN_SAVE_TRANSACTION_OPTIONS,
     );
@@ -414,6 +451,9 @@ export class PlansAdminService implements OnModuleDestroy {
     // see a job id whose row has not committed.
     await this.planSquadPropagationService.enqueueAfterCommit(propagation.syncJobIds);
     this.followResetRuleAfterCommit(updated.id, snapshots);
+    // No device-limit fan-out here any more: this save cannot change a face
+    // plan's limit (see the top of this method), and the place that CAN — the
+    // bundle card — propagates from `PlanBundlesService` itself.
     return { ...mapAdminPlan(updated), squadPropagation: propagation.summary };
   }
 
@@ -639,7 +679,7 @@ export class PlansAdminService implements OnModuleDestroy {
       if (targetIndex < 0 || targetIndex >= plans.length) {
         return transactionClient.plan.findUniqueOrThrow({
           where: { id: planId },
-          include: PLAN_INCLUDE,
+          include: ADMIN_PLAN_INCLUDE,
         });
       }
       const currentPlan = plans[currentIndex]!;
@@ -654,7 +694,7 @@ export class PlansAdminService implements OnModuleDestroy {
       });
       const updated = await transactionClient.plan.findUniqueOrThrow({
         where: { id: planId },
-        include: PLAN_INCLUDE,
+        include: ADMIN_PLAN_INCLUDE,
       });
       await this.logAdminAction({
         transactionClient,
@@ -720,7 +760,7 @@ export class PlansAdminService implements OnModuleDestroy {
   private async getRequiredPlan(planId: string) {
     const plan = await this.prismaService.plan.findUnique({
       where: { id: planId, deletedAt: null },
-      include: PLAN_INCLUDE,
+      include: ADMIN_PLAN_INCLUDE,
     });
     if (plan === null) {
       throw new NotFoundException('Plan not found');

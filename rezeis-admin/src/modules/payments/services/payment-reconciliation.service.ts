@@ -77,6 +77,7 @@ import { ProviderSubscriptionService, readProviderSubscriptionDispute } from './
 import { releasePaidTrialClaim } from '../../subscriptions/services/trial-claim-ledger.util';
 import { findDaysConvertedFromPayment } from '../../subscriptions/services/paid-remainder-conversion.util';
 import { type AddOnRefundOutcome, AddOnRefundService, readRefundedAddOnMarker } from './addon-refund.service';
+import { readBundleGrant } from '../../merge-links/utils/bundle-snapshot.util';
 import { RefundedDaysWithdrawalService } from './refunded-days-withdrawal.service';
 @Injectable()
 export class PaymentReconciliationService implements OnModuleDestroy {
@@ -2196,6 +2197,16 @@ export class PaymentReconciliationService implements OnModuleDestroy {
     if (transaction.purchaseType === 'RENEW') {
       return this.withdrawRefundedDays(transaction);
     }
+    // ── A MERGED PURCHASE CREATED SEVERAL PROFILES ────────────────────────
+    //
+    // One payment, one product, one profile per member plan: undoing it takes
+    // the days that payment bought off EVERY profile, exactly as a renewal's
+    // refund does. Expiring only the profile the transaction names would leave
+    // the other half of the product in the customer's hands.
+    const mergedGrant = readBundleGrant(transaction.gatewayData);
+    if (mergedGrant !== null) {
+      return this.withdrawMergedPurchaseDays(transaction, mergedGrant);
+    }
     if (transaction.purchaseType !== 'NEW' || transaction.subscriptionId === null) {
       return { revoked: false, needsManualReview: true, audit: {} };
     }
@@ -2352,6 +2363,51 @@ export class PaymentReconciliationService implements OnModuleDestroy {
    * ({@link RefundedDaysWithdrawalService}); an operator's, as before, when the
    * service is not there. Never throws.
    */
+  /**
+   * What a refunded MERGED purchase took: the days it bought come off every
+   * profile it created (`bundleGrant` on the payment), never just one of them.
+   *
+   * The days are the purchase's own (`planSnapshot.selectedDurationDays`), and
+   * the withdrawal is the same one a renewal's refund uses: the end moves back
+   * by them, a profile with fewer days left ends now, and a profile an operator
+   * disabled or made endless is handed to a human instead of being overwritten
+   * (`RefundedDaysWithdrawalService`). Never throws: the money side of the
+   * reversal is done and stays done.
+   */
+  private async withdrawMergedPurchaseDays(
+    transaction: Transaction,
+    grant: { readonly bundleId: string; readonly subscriptionIds: readonly string[] },
+  ): Promise<{ revoked: boolean; needsManualReview: boolean; audit: Record<string, unknown> }> {
+    if (this.refundedDays === undefined) {
+      return {
+        revoked: false,
+        needsManualReview: true,
+        audit: {
+          refundRevocationSkippedReason: 'DAYS_WITHDRAWAL_UNAVAILABLE',
+          refundRevokedBundleId: grant.bundleId,
+        },
+      };
+    }
+    const days = asRecord(transaction.planSnapshot)?.['selectedDurationDays'];
+    if (grant.subscriptionIds.length === 0 || typeof days !== 'number' || !Number.isInteger(days) || days <= 0) {
+      return {
+        revoked: false,
+        needsManualReview: true,
+        audit: { refundRevocationSkippedReason: 'PAID_DAYS_UNKNOWN', refundRevokedBundleId: grant.bundleId },
+      };
+    }
+    const outcome = await this.refundedDays.withdraw(
+      transaction,
+      new Date(),
+      grant.subscriptionIds.map((subscriptionId) => ({ subscriptionId, days })),
+    );
+    return {
+      revoked: outcome.withdrawn,
+      needsManualReview: outcome.needsManualReview,
+      audit: { ...outcome.audit, refundRevokedBundleId: grant.bundleId },
+    };
+  }
+
   private async withdrawRefundedDays(transaction: Transaction): Promise<{
     revoked: boolean;
     needsManualReview: boolean;

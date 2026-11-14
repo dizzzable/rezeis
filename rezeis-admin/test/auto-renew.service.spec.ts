@@ -113,7 +113,7 @@ function createHarness(opts: {
     // about is who gets notified and how often, not what the message says.
     { build: async () => ({}) } as never,
     // Renewal plan selection. Not reached by the warning emitters.
-    { requiresPlanSelection: async () => false } as never,
+    { requiresPlanSelection: async () => false, isBundleRenewalPrimary: async () => true } as never,
     { info: (type: string, _c: string, _m: string, metadata: Record<string, unknown>) => { raisedEvents.push({ type, metadata }) } } as never,
   );
   return { service, createdFor, counters };
@@ -322,7 +322,7 @@ describe('AutoRenewService.processAutopayCharges', () => {
       // about is who gets notified and how often, not what the message says.
       { build: async () => ({}) } as never,
       // A renewal that needs no plan choice: the case is about the attempt key.
-      { requiresPlanSelection: async () => false } as never,
+      { requiresPlanSelection: async () => false, isBundleRenewalPrimary: async () => true } as never,
       { info: (type: string, _c: string, _m: string, metadata: Record<string, unknown>) => { raisedEvents.push({ type, metadata }) } } as never,
     );
 
@@ -395,6 +395,9 @@ describe('autopay and a renewal that needs the subscriber’s choice', () => {
           asked.push(subscriptionId);
           return options.needsChoice.has(subscriptionId);
         },
+        // A merged subscription is charged through one of its profiles; nothing
+        // in these cases is one (isBundleRenewalPrimary is a separate spec).
+        isBundleRenewalPrimary: async () => true,
       } as never,
       { info: (type: string, _c: string, _m: string, metadata: Record<string, unknown>) => { raisedEvents.push({ type, metadata }) } } as never,
     );
@@ -550,7 +553,7 @@ describe('autopay and a renewal refused before any payment exists', () => {
       } as never,
       { build: async () => ({}) } as never,
       // Not a plan-choice case: every plan here still exists.
-      { requiresPlanSelection: async () => false } as never,
+      { requiresPlanSelection: async () => false, isBundleRenewalPrimary: async () => true } as never,
       { info: (type: string, _c: string, _m: string, metadata: Record<string, unknown>) => { raisedEvents.push({ type, metadata }) } } as never,
     );
     const statusOf = (id: string): SubscriptionStatus | undefined => rows.find((row) => row.id === id)?.status;

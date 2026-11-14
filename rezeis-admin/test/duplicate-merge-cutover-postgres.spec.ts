@@ -11,7 +11,7 @@ import { SubscriptionTermService } from '../src/modules/add-on-entitlements/serv
 import { DuplicateSubscriptionMergeService } from '../src/modules/profile-sync/duplicate-subscription-merge.service';
 
 /**
- * «СЛИЯНИЕ ПОДПИСОК-ДУБЛИКАТОВ» AFTER THE BACKGROUND CUTOVER — against
+ * «СЛИЯНИЕ ПОДПИСОК-ДУБЛИКАТО» AFTER THE BACKGROUND CUTOVER — against
  * PostgreSQL, because what decides it is the foreign-key graph: a term is
  * `Restrict` on its subscription, a projection on its term, an add-on on both.
  *

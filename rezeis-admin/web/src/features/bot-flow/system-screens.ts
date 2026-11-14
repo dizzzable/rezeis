@@ -69,6 +69,12 @@ export const MAIN_MENU_TEXT_KEYS: readonly string[] = [
   'profile.devices',
   'profile.devices_unlimited',
   'profile.traffic',
+  // The first extra traffic line of an объединённая подписка (a plan bundle):
+  // one block, one line per plan. Its own key, so «Обходы» renames only this
+  // line. Further lines take `profile.traffic_extra_2`, `_3`, … — windows the
+  // operator adds with «+» in the panel (`TrafficExtraLabelsPanel`), so they are
+  // not listed here: only one that exists has a row to edit.
+  'profile.traffic_extra',
   'profile.unlimited',
   'profile.until',
   'common.not_available',

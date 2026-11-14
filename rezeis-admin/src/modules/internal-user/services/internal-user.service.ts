@@ -29,6 +29,8 @@ import {
   type ConnectEvidence,
 } from '../../connect-signal/connect-evidence.util';
 import { EmailService } from '../../email/services/email.service';
+import { MergeLinkGroupInterface } from '../../merge-links/interfaces/plan-bundle.interface';
+import { MergeLinksService } from '../../merge-links/services/merge-links.service';
 import { PlanCatalogService } from '../../plans/services/plan-catalog.service';
 import {
   storedIdentityOf,
@@ -86,6 +88,7 @@ import {
   mapDateValue,
   mapInternalEmailVerificationChallenge,
   mapInternalUserSession,
+  mapMergeGroup,
   mapSubscriptionPlanSnapshot,
   readSubscriptionTrialFree,
   selectCurrentSubscription,
@@ -126,6 +129,16 @@ const PANEL_SUBSCRIPTION_STATUS_MAP: Readonly<Record<string, SubscriptionStatus>
 function mapPanelSubscriptionStatus(raw: string | null): SubscriptionStatus | undefined {
   if (raw === null) return undefined;
   return PANEL_SUBSCRIPTION_STATUS_MAP[raw.trim().toUpperCase()];
+}
+
+/**
+ * Does the panel still serve this subscription? `LIMITED` counts: the customer
+ * ran out of traffic, the card still shows 0 GB and a top-up brings it back.
+ * `EXPIRED` and `DELETED` do not — a merged link must not carry a profile that
+ * is over or gone.
+ */
+function isLiveSubscriptionStatus(status: SubscriptionStatus): boolean {
+  return status === SubscriptionStatus.ACTIVE || status === SubscriptionStatus.LIMITED;
 }
 
 /**
@@ -197,6 +210,14 @@ export class InternalUserService {
      */
     @Optional()
     private readonly systemEvents?: SystemEventsService,
+    /**
+     * Turns the operator's plan grouping into ONE `/merge/<token>` link for a
+     * customer who holds several of the grouped plans. Optional so the specs
+     * that build this service positionally keep compiling; without it every card
+     * keeps the panel's own URL, which is exactly the pre-grouping behaviour.
+     */
+    @Optional()
+    private readonly mergeLinksService?: MergeLinksService,
   ) {}
 
   /**
@@ -690,6 +711,16 @@ export class InternalUserService {
     const usages = await Promise.all(
       subscriptions.map((sub) => this.resolvePanelUsage(sub)),
     );
+    // Which cards offer the operator's merged link instead of their own URL.
+    // Computed from the plans of the LIVE subscriptions only, because both the
+    // merge and the link's meaning are about profiles the panel still serves.
+    const snapshotPlans = subscriptions.map((sub) => mapSubscriptionPlanSnapshot(sub.planSnapshot));
+    const mergeGroupByPlanId = await this.mergeGroupsByPlanId(
+      user.id,
+      subscriptions.map((sub, i) =>
+        isLiveSubscriptionStatus(sub.status) ? (snapshotPlans[i]?.id ?? null) : null,
+      ),
+    );
     // AFTER the reads, from them: a connection this very request just proved
     // clears `connectHelp` in this response, without waiting for a probe.
     const connectHelp = await this.resolveConnectHelp(
@@ -706,23 +737,28 @@ export class InternalUserService {
       subscriptions: subscriptions.map((sub, i) => {
         const u = usages[i];
         const o = u.overlay;
+        const plan = snapshotPlans[i] ?? null;
+        const mergeGroup = plan?.id == null ? undefined : mergeGroupByPlanId.get(plan.id);
         return {
           id: sub.id,
           status: o?.status ?? sub.status,
           isTrial: sub.isTrial,
           trialFree: readSubscriptionTrialFree(sub.isTrial, sub.planSnapshot),
-          plan: mapSubscriptionPlanSnapshot(sub.planSnapshot),
+          plan,
           trafficLimit: o?.trafficLimit !== undefined ? o.trafficLimit : sub.trafficLimit,
           trafficUsed: u.trafficUsedGb,
           deviceLimit: o?.deviceLimit ?? sub.deviceLimit,
           userRemnaId: sub.remnawaveId,
           profileName: u.profileName,
-          url: sub.configUrl,
-          configUrl: sub.configUrl,
+          // The merged link where the operator grouped this plan and the
+          // customer holds another of its plans; the panel's own URL otherwise.
+          url: mergeGroup?.url ?? sub.configUrl,
+          configUrl: mergeGroup?.url ?? sub.configUrl,
           startedAt: mapDateValue(sub.startedAt),
           expiresAt: mapDateValue(o?.expiresAt !== undefined ? o.expiresAt : sub.expiresAt),
           createdAt: sub.createdAt.toISOString(),
           updatedAt: sub.updatedAt.toISOString(),
+          merge: mapMergeGroup(mergeGroup, sub.planSnapshot),
           connectHelp: connectHelp[i] ?? null,
         };
       }),
@@ -761,6 +797,19 @@ export class InternalUserService {
     }
     const usage = await this.resolvePanelUsage(subscription);
     const o = usage.overlay;
+    // The "current" card is one of a possibly larger set: whether it offers the
+    // merged link depends on the customer's OTHER live subscriptions too, so the
+    // decision reads the whole list fetched above.
+    const mergeGroupByPlanId = await this.mergeGroupsByPlanId(
+      user.id,
+      subscriptions.map((candidate) =>
+        isLiveSubscriptionStatus(candidate.status)
+          ? (mapSubscriptionPlanSnapshot(candidate.planSnapshot)?.id ?? null)
+          : null,
+      ),
+    );
+    const plan = mapSubscriptionPlanSnapshot(subscription.planSnapshot);
+    const mergeGroup = plan?.id == null ? undefined : mergeGroupByPlanId.get(plan.id);
     const [connectHelp] = await this.resolveConnectHelp(
       user,
       [
@@ -778,22 +827,47 @@ export class InternalUserService {
       status: o?.status ?? subscription.status,
       isTrial: subscription.isTrial,
       trialFree: readSubscriptionTrialFree(subscription.isTrial, subscription.planSnapshot),
-      plan: mapSubscriptionPlanSnapshot(subscription.planSnapshot),
+      plan,
       trafficLimit: o?.trafficLimit !== undefined ? o.trafficLimit : subscription.trafficLimit,
       trafficUsed: usage.trafficUsedGb,
       deviceLimit: o?.deviceLimit ?? subscription.deviceLimit,
       userRemnaId: subscription.remnawaveId,
       profileName: usage.profileName,
-      url: subscription.configUrl,
-      configUrl: subscription.configUrl,
+      url: mergeGroup?.url ?? subscription.configUrl,
+      configUrl: mergeGroup?.url ?? subscription.configUrl,
       startedAt: mapDateValue(subscription.startedAt),
       expiresAt: mapDateValue(
         o?.expiresAt !== undefined ? o.expiresAt : subscription.expiresAt,
       ),
       createdAt: subscription.createdAt.toISOString(),
       updatedAt: subscription.updatedAt.toISOString(),
+      merge: mapMergeGroup(mergeGroup, subscription.planSnapshot),
       connectHelp: connectHelp ?? null,
     };
+  }
+
+  /**
+   * planId → merge group for this customer, or an empty map.
+   *
+   * Best-effort ON PURPOSE: the grouping lives in another service's tables and a
+   * lookup failure must never cost the customer their cards. Falling back to an
+   * empty map serves every card its own panel URL, which always works.
+   */
+  private async mergeGroupsByPlanId(
+    userId: string,
+    planIds: readonly (string | null)[],
+  ): Promise<ReadonlyMap<string, MergeLinkGroupInterface>> {
+    if (this.mergeLinksService === undefined) {
+      return new Map();
+    }
+    try {
+      return await this.mergeLinksService.mergedGroupsByPlan(userId, planIds);
+    } catch (error) {
+      this.logger.warn(
+        `Merged link lookup failed for user ${userId}: ${(error as Error).message}`,
+      );
+      return new Map();
+    }
   }
 
   /**

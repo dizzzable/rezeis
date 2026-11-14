@@ -23,6 +23,11 @@ import {
   isLifetimeSubscription,
   SUBSCRIPTION_IS_LIFETIME_CODE,
 } from '../../payments/utils/lifetime-renewal.util';
+import {
+  findBundleSoldForMarker,
+  liveBundleSubscriptions,
+  readBundleMarker,
+} from '../../merge-links/utils/bundle-snapshot.util';
 import { PlanCatalogService } from '../../plans/services/plan-catalog.service';
 import { PricingService } from '../../plans/services/pricing.service';
 import { isGatewayAvailableForChannel } from '../../plans/utils/purchase-gateway-policy.util';
@@ -292,6 +297,10 @@ export const TRANSITION_TARGET_WHERE = {
   isArchived: false,
   deletedAt: null,
   availability: { not: PlanAvailability.TRIAL },
+  // A bundle's own plan row is a PRODUCT, not a destination: «Сменить тариф»
+  // moves exactly one subscription, and a merged tariff is several. It is sold
+  // and renewed as itself only (`getSourceSelection`).
+  bundleFace: { is: null },
 } as const satisfies Prisma.PlanWhereInput;
 
 @Injectable()
@@ -943,6 +952,49 @@ export class SubscriptionQuoteService {
     ) {
       return { plans: [], warnings: [SUBSCRIPTION_DISABLED_NOT_RENEWABLE] };
     }
+    // ── A MERGED TARIFF RENEWS AS ITS OWN PRODUCT ───────────────────
+    //
+    // The subscription was SOLD as one half of a bundle (the marker is written
+    // by `bundle-snapshot.util.ts`), and the plan the customer bought, pays for
+    // and renews is the bundle's OWN row — not the member plan that happens to
+    // sit in its snapshot. Pricing the member plan here would sell one half of
+    // a product at that half's price and let the other half lapse: two payments
+    // for what the shop sells as one card.
+    //
+    // The bundle's row is offered only while the grouping is still on sale
+    // (`findBundleSoldForMarker`): a deleted bundle leaves its subscriptions
+    // behaving like ordinary ones, which is exactly what they have become.
+    const mergedMarker = readBundleMarker(input.sourceSubscription.planSnapshot);
+    if (input.purchaseType === PurchaseType.RENEW && mergedMarker !== null) {
+      const mergedBundle = await findBundleSoldForMarker(this.prismaService, mergedMarker);
+      // ONE PRODUCT ONLY WHILE IT IS STILL A SET. A merged subscription is the
+      // pair of profiles the app shows as one link; once the customer holds a
+      // single one (the other was upgraded away, deleted, or the grouping was
+      // cut down), the bundle's price no longer describes anything, and the
+      // remaining profile renews as its own member plan — the rule below.
+      const stillMerged =
+        mergedBundle === null
+          ? false
+          : input.userId === undefined ||
+            (await liveBundleSubscriptions(this.prismaService, input.userId, mergedBundle.id)).length >= 2;
+      if (mergedBundle !== null && stillMerged) {
+        const mergedPlan = await this.prismaService.plan.findUnique({
+          where: { id: mergedBundle.planId },
+          include: PLAN_INCLUDE,
+        });
+        // No durations (or a price list the operator has not set yet) means
+        // nothing can be PRICED as the merged tariff: the remaining rule of this
+        // method takes over and the renewal continues as its own member plan, so
+        // a customer is never left with a profile that cannot be renewed.
+        if (
+          mergedPlan !== null &&
+          !isPlanSoftDeleted(mergedPlan) &&
+          mergedPlan.durations.length > 0
+        ) {
+          return { plans: [mergedPlan], warnings: [] };
+        }
+      }
+    }
     const sourcePlanId = readSnapshotPlanId(input.sourceSubscription.planSnapshot);
     if (sourcePlanId === null) {
       // A panel-imported subscription carries no rezeis plan snapshot. For
@@ -952,6 +1004,7 @@ export class SubscriptionQuoteService {
         const catalog = await this.getCatalogOptionPlans({
           userId: input.userId,
           channel: input.channel ?? PurchaseChannel.WEB,
+          excludeMergedTariffs: true,
         });
         const targets = catalog.filter((plan) => plan.availability !== PlanAvailability.TRIAL);
         if (targets.length > 0) {
@@ -999,6 +1052,7 @@ export class SubscriptionQuoteService {
         const catalog = await this.getCatalogOptionPlans({
           userId: input.userId,
           channel: input.channel ?? PurchaseChannel.WEB,
+          excludeMergedTariffs: true,
         });
         const targets = catalog.filter((plan) => plan.availability !== PlanAvailability.TRIAL);
         if (targets.length > 0) return { plans: targets, warnings: [ARCHIVED_PLAN_REPLACEMENT] };
@@ -1026,6 +1080,7 @@ export class SubscriptionQuoteService {
         const catalog = await this.getCatalogOptionPlans({
           userId: input.userId,
           channel: input.channel ?? PurchaseChannel.WEB,
+          excludeMergedTariffs: true,
         });
         targets = catalog.filter(
           (plan) => plan.availability !== PlanAvailability.TRIAL && plan.id !== sourcePlan.id,
@@ -1067,6 +1122,7 @@ export class SubscriptionQuoteService {
       const catalog = await this.getCatalogOptionPlans({
         userId: input.userId,
         channel: input.channel ?? PurchaseChannel.WEB,
+        excludeMergedTariffs: true,
       });
       const targets = catalog.filter((plan) => plan.availability !== PlanAvailability.TRIAL);
       if (targets.length > 0) return { plans: targets, warnings: [ARCHIVED_PLAN_REPLACEMENT] };
@@ -1080,6 +1136,13 @@ export class SubscriptionQuoteService {
   private async getCatalogOptionPlans(input: {
     readonly userId: string;
     readonly channel: PurchaseChannel;
+    /**
+     * Drop every bundle's own plan row. A merged tariff is a PRODUCT sold and
+     * renewed as itself; it is never the plan another subscription renews onto
+     * or upgrades into (`TRANSITION_TARGET_WHERE` carries the same filter). The
+     * NEW purchase of the shop must NOT set this — that read IS the sale.
+     */
+    readonly excludeMergedTariffs?: boolean;
   }): Promise<readonly PlanRecord[]> {
     const catalogPlans = await this.planCatalogService.getCatalogPlans(input);
     if (catalogPlans.length === 0) {
@@ -1088,6 +1151,7 @@ export class SubscriptionQuoteService {
     return this.prismaService.plan.findMany({
       where: {
         id: { in: catalogPlans.map((plan) => plan.id) },
+        ...(input.excludeMergedTariffs === true ? { bundleFace: { is: null } } : {}),
       },
       include: PLAN_INCLUDE,
       orderBy: [{ orderIndex: 'asc' }, { createdAt: 'asc' }],

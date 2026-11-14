@@ -4,12 +4,13 @@ import { Prisma, SubscriptionStatus, SyncAction, SyncJobStatus, type Transaction
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import { SubscriptionTermService } from '../../add-on-entitlements/services/subscription-term.service';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
+import { readBundleRenewal } from '../../merge-links/utils/bundle-snapshot.util';
 import { RENEWAL_PRICED_BEFORE_UPGRADE_KEY } from '../../subscriptions/services/paid-remainder-conversion.util';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /** One subscription and the days the refunded payment bought for it. */
-interface PaidLine {
+export interface PaidLine {
   readonly subscriptionId: string;
   readonly days: number;
 }
@@ -80,12 +81,23 @@ export class RefundedDaysWithdrawalService {
     this.terms = terms ?? new SubscriptionTermService();
   }
 
-  public async withdraw(transaction: Transaction, now: Date = new Date()): Promise<DaysWithdrawalOutcome> {
+  /**
+   * @param linesOverride The lines a caller already knows the payment bought.
+   *   A NEW purchase of a merged tariff is undone this way: the payment created
+   *   one profile per member plan (`gatewayData.bundleGrant`) and bought each of
+   *   them the same days, while a combined renewal records its lines on the
+   *   transaction items (or in `bundleRenewal`, see {@link paidLines}).
+   */
+  public async withdraw(
+    transaction: Transaction,
+    now: Date = new Date(),
+    linesOverride?: readonly PaidLine[],
+  ): Promise<DaysWithdrawalOutcome> {
     try {
       if (asRecord(transaction.gatewayData)?.[RENEWAL_PRICED_BEFORE_UPGRADE_KEY] !== undefined) {
         return manual({ refundRevocationSkippedReason: 'RENEWAL_PRICED_BEFORE_UPGRADE' });
       }
-      const lines = await this.paidLines(transaction);
+      const lines = linesOverride === undefined ? await this.paidLines(transaction) : [...linesOverride];
       if (lines === null) {
         return manual({ refundRevocationSkippedReason: 'PAID_DAYS_UNKNOWN' });
       }
@@ -131,6 +143,21 @@ export class RefundedDaysWithdrawalService {
    * and its `selectedDurationDays`. Null when the payment does not say.
    */
   private async paidLines(transaction: Transaction): Promise<PaidLine[] | null> {
+    // ── A MERGED RENEWAL: ONE LINE, EVERY PROFILE ─────────────────────────
+    //
+    // The payment renewed the whole set for one price, and it recorded which
+    // profiles it extended (`bundleRenewal` on `gatewayData`). Taking the days
+    // off only the profile the item names would leave the other half a period
+    // the customer was refunded for.
+    const mergedRenewal = readBundleRenewal(transaction.gatewayData);
+    if (mergedRenewal !== null) {
+      const mergedLines = mergedRenewal.lines.flatMap((line) =>
+        line.subscriptionIds.map((subscriptionId) => ({ subscriptionId, days: line.days })),
+      );
+      return mergedLines.length > 0 && mergedLines.every((line) => isPositiveDays(line.days))
+        ? mergedLines
+        : null;
+    }
     const items = await this.prismaService.transactionItem.findMany({
       where: { transactionId: transaction.id, appliedAt: { not: null } },
       select: { subscriptionId: true, durationDays: true },

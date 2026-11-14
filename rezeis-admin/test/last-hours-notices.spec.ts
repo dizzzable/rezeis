@@ -57,7 +57,7 @@ function build(options: { readonly toggles?: unknown; readonly expiresInMs?: num
         return { ...(context as object) };
       },
     } as never,
-    { requiresPlanSelection: async () => false } as never,
+    { requiresPlanSelection: async () => false, isBundleRenewalPrimary: async () => true } as never,
     { info: () => undefined } as never,
   );
   return { service, created, queries, contexts };

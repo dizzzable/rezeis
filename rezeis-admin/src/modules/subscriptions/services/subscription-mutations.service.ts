@@ -161,14 +161,25 @@ export class SubscriptionMutationsService {
         trialSettings: true,
         // Read only to name the snapshot below; not copied into it.
         deletedAt: true,
+        // Read only to refuse a merged plan below; not copied into the snapshot.
+        bundleFace: { select: { id: true } },
       },
     });
     if (plan === null) {
       throw new NotFoundException('Plan not found');
     }
+    // A bundle's face plan is a MERGED subscription: several profiles under one
+    // link. This path creates ONE subscription, with a snapshot naming a plan
+    // that has no squads of its own — the customer would receive an empty
+    // profile while the other half of the product was missing.
+    if (plan.bundleFace !== null && plan.bundleFace !== undefined) {
+      throw new BadRequestException(
+        'A merged subscription is issued from the user card, not granted as a single plan',
+      );
+    }
     // A deleted plan keeps being granted (a quest, an ad placement); it is
     // shown without the "(deleted …)" suffix a reuse of its name put on the row.
-    const { deletedAt, ...planForSnapshot } = plan;
+    const { deletedAt, bundleFace: _bundleFace, ...planForSnapshot } = plan;
     const planSnapshot = {
       ...planForSnapshot,
       name: displayPlanName({ id: plan.id, name: plan.name, deletedAt }),

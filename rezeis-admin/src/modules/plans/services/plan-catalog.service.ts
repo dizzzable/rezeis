@@ -85,25 +85,81 @@ export class PlanCatalogService {
       // switches a plan off as it stamps it, so the flags alone already hide a
       // deleted plan — but a stamped row that is somehow still flagged on sale
       // must not be sold, and nothing else in the catalogue would stop it.
+      //
+      // `hiddenFromBuyer: false` is the operator's own «Скрыть от покупателя»
+      // switch: the plan keeps working, keeps being listed in the panel and
+      // keeps being grantable; only the shop stops offering it.
+      //
+      // A bundle's face plan is NOT filtered out: it is the tariff the customer
+      // buys («объединённая подписка»), and the checkout mints one subscription
+      // per member plan for it (`bundle-snapshot.util.ts`). What a face plan
+      // must never be is a RENEWAL or UPGRADE TARGET of something else — that
+      // is filtered where targets are chosen, not here.
       where:
         userContext === null
           ? {
               isActive: true,
               isArchived: false,
               deletedAt: null,
+              hiddenFromBuyer: false,
               availability: PlanAvailability.ALL,
             }
           : {
               isActive: true,
               isArchived: false,
               deletedAt: null,
+              hiddenFromBuyer: false,
             },
       include: PLAN_INCLUDE,
       orderBy: [{ orderIndex: 'asc' }, { createdAt: 'asc' }],
     });
+    const unlimitedMergedPlanIds = await this.unlimitedMergedPlanIds(
+      candidatePlans.map((plan) => plan.id),
+    );
     return candidatePlans
       .filter((plan) => this.isPlanAvailableForContext({ plan, userContext }))
-      .map((plan) => this.mapCatalogPlan({ plan, gateways, userContext, channel, cashback }));
+      .map((plan) =>
+        this.mapCatalogPlan({
+          plan,
+          gateways,
+          userContext,
+          channel,
+          cashback,
+          unlimitedAs: unlimitedMergedPlanIds.has(plan.id),
+        }),
+      );
+  }
+
+  /**
+   * The merged tariffs («объединённая подписка») whose bundle holds an UNLIMITED
+   * member plan.
+   *
+   * The face plan's own `trafficLimit` is copied from the bundle's VISIBLE
+   * member — deliberately a limited one, because the merge link reports that
+   * profile's counters. The shop, however, sells the PRODUCT: a bundle with an
+   * unlimited plan is an unlimited tariff, and the card must say «Безлимит» —
+   * on purchase and on renewal alike (the owner, 14.11.2026). So the catalog
+   * overrides the displayed limit and changes nothing in the database.
+   */
+  private async unlimitedMergedPlanIds(
+    planIds: readonly string[],
+  ): Promise<ReadonlySet<string>> {
+    if (planIds.length === 0) return new Set();
+    const bundles = await this.prismaService.planBundle.findMany({
+      where: { planId: { in: [...planIds] } },
+      select: {
+        planId: true,
+        members: { select: { plan: { select: { trafficLimit: true } } } },
+      },
+    });
+    const unlimited = new Set<string>();
+    for (const bundle of bundles) {
+      if (bundle.planId === null) continue;
+      if (bundle.members.some((member) => member.plan.trafficLimit === null)) {
+        unlimited.add(bundle.planId);
+      }
+    }
+    return unlimited;
   }
 
   private async getCatalogUserContext(userId: string): Promise<CatalogUserContext> {
@@ -236,6 +292,8 @@ export class PlanCatalogService {
     readonly userContext: CatalogUserContext | null;
     readonly channel: PurchaseChannel;
     readonly cashback: CashbackConfig;
+    /** The merged tariff's bundle holds an unlimited plan → the product is unlimited. */
+    readonly unlimitedAs?: boolean;
   }): PlanCatalogPlanInterface {
     const { plan, gateways, userContext } = input;
     // A free trial is claimed (not bought), so it must carry NO price in the
@@ -252,7 +310,7 @@ export class PlanCatalogService {
       icon: plan.icon,
       type: plan.type,
       availability: plan.availability,
-      trafficLimit: plan.trafficLimit,
+      trafficLimit: input.unlimitedAs === true ? null : plan.trafficLimit,
       deviceLimit: plan.deviceLimit,
       trafficLimitStrategy: plan.trafficLimitStrategy,
       // `plan.internalSquads` and `plan.externalSquad` are deliberately NOT

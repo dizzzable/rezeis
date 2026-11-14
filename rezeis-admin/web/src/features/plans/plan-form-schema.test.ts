@@ -226,6 +226,7 @@ function validDraft(): PlanFormDraft {
     trafficLimitGB: '50',
     deviceLimit: '1',
     trafficLimitStrategy: 'MONTH',
+    hiddenFromBuyer: false,
     isArchived: false,
     archivedRenewMode: 'SELF_RENEW',
     internalSquads: [],

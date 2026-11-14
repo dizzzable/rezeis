@@ -272,6 +272,25 @@ export const en = {
       markTrial: 'Mark as trial',
       cancel: 'Cancel',
       give: 'Give',
+      // «Выдать подписку» can now hand out a whole plan bundle: the merged
+      // subscription the cabinet shows one link for. Nothing here prices it.
+      giveMode: 'What to give',
+      giveModePlan: 'One plan',
+      planMergedSuffix: 'merged',
+      giveModeBundle: 'Merged subscription (plan bundle)',
+      bundle: 'Plan bundle',
+      bundlePlaceholder: 'Pick a bundle',
+      noBundles: 'No active bundles yet. Create one on the Plans page with «Merge plans».',
+      giveBundle: 'Give merged subscription',
+      bundleGranted: 'Merged subscription issued: one subscription per plan of the bundle.',
+      bundleNoLink:
+        'The subscriptions are created, but there is no merged link: check that the bundle is active and the panel has the merge service address (MERGE_LINK_BASE_URL).',
+      mergeLink: 'Customer link',
+      mergeLinkCopy: 'Copy',
+      mergeLinkCopied: 'Merged subscription link copied',
+      mergeLinkHint:
+        'The link starts working in a few seconds — the panel is creating the Remnawave profiles. Send this one: it carries the nodes of every plan in the bundle.',
+      done: 'Done',
       disableTitle: 'Disable',
       enableTitle: 'Enable',
       syncTitle: 'Sync',
