@@ -110,6 +110,15 @@ export const CABINET_CAPABILITY = {
   botConfigVersionPoll: 'bot.config-version-poll',
   /** A press on a button the bot no longer knows answers «Меню обновилось». */
   staleButtonMenu: 'bot.stale-button-menu',
+  /**
+   * Broadcast media rides the relay: the cabinet's `/notify` and
+   * `/notify-broadcast` take a `media { type: photo|video, fileId }` field and
+   * render the caption themselves — HTML, `<tg-emoji>` premium emoji and the
+   * promo `webAppPath` button. The panel sends a media broadcast's Telegram leg
+   * through the relay only for a cabinet that declares this; an older one keeps
+   * the panel's own direct Bot API send.
+   */
+  broadcastMediaNotify: 'bot.broadcast-media-notify',
 } as const;
 
 export type CabinetCapabilityKey = keyof typeof CABINET_CAPABILITY;
@@ -289,6 +298,22 @@ export const CABINET_CAPABILITY_REGISTRY: readonly CabinetCapabilityRow[] = [
       'на нажатие устаревшей кнопки бот не отвечает «Меню обновилось», как рисует «Карта бота», а молчит или пишет, что экран не найден',
     operatorTextEn:
       'a press on an outdated button is not answered with “Menu updated” as “Bot map” shows: the bot stays silent or says the screen was not found',
+  },
+  {
+    id: CABINET_CAPABILITY.broadcastMediaNotify,
+    surface: 'bot',
+    since: '0.9.7.64',
+    kind: 'gate',
+    // Reiwa 0.9.7.63 and older take no `media` field in `/notify`: the relay
+    // there would drop it and answer with a message id — the panel would record
+    // a text-only post as SENT while no image went out. The direct Bot API send
+    // is what those cabinets get instead (plain caption, menu button only)
+    // (reiwa `src/bot/listeners/internal-http-listener.ts`).
+    operatorText:
+      'рассылка с фото и видео уходит напрямую с панели: подпись без HTML-форматирования и премиум-эмодзи, без промо-кнопки',
+    operatorTextEn:
+      'a photo or video broadcast is sent directly by the panel: the caption carries no HTML formatting or premium emoji, and no promo button',
+    gatedIn: ['src/modules/broadcast/services/broadcast-delivery.service.ts'],
   },
 ];
 
