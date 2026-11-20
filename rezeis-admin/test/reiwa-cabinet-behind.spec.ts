@@ -5,7 +5,6 @@ import { _resetProcessRoleCacheForTests } from '../src/common/runtime/process-ro
 import { EVENT_PRESENTATION, EVENT_TYPES } from '../src/common/services/system-events.service';
 import {
   CABINET_CAPABILITY,
-  CABINET_CAPABILITY_REGISTRY,
   capabilityRowsHostedBy,
   compareCabinetVersions,
   IMPLIED_CEILING_VERSION,
@@ -33,10 +32,16 @@ import { memoryRawCache } from './helpers/memory-raw-cache';
 
 const T0 = Date.parse('2026-09-26T12:00:00.000Z');
 const MINUTE = 60_000;
-/** The ids registered after the frozen ceiling: what a silent 0.9.7.53 cabinet cannot have. */
-const AFTER_THE_CEILING = CABINET_CAPABILITY_REGISTRY.filter(
-  (row) => compareCabinetVersions(row.since, IMPLIED_CEILING_VERSION) > 0,
-).map((row) => row.id);
+/**
+ * The ids registered after the frozen ceiling: what a silent 0.9.7.53 cabinet
+ * cannot have. Scoped to the rows the API process hosts — the card is built
+ * from a surface's own missing rows (`capabilityRowsHostedBy('api')`, asserted
+ * in the card-shape test below), and a `bot.*` id above the ceiling is neither
+ * declared by the api process nor named in its card.
+ */
+const AFTER_THE_CEILING = capabilityRowsHostedBy('api')
+  .filter((row) => compareCabinetVersions(row.since, IMPLIED_CEILING_VERSION) > 0)
+  .map((row) => row.id);
 const BOT_054_ALL = {
   'x-reiwa-client': 'surface=bot; version=0.9.7.54; instance=reiwa-bot',
   'x-reiwa-capabilities': capabilityRowsHostedBy('bot').map((row) => row.id).join(','),
