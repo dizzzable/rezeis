@@ -13,6 +13,8 @@ import { ReiwaRelayQueueService } from '../../notifications/services/reiwa-relay
 import { markChannelPostNeverPublished } from '../../notifications/relay-channel-post';
 import { isRelayDelivered } from '../../notifications/reiwa-relay.policy';
 import { isRetryableRelayOutcome } from '../../backup/backup-delivery-retry.util';
+import { CABINET_CAPABILITY } from '../../reiwa-peers/cabinet-capabilities';
+import { ReiwaPeerRegistry } from '../../reiwa-peers/reiwa-peer-registry.service';
 import { SettingsService } from '../../settings/services/settings.service';
 import { CustomEmojiService } from '../../custom-emoji/services/custom-emoji.service';
 import { EmailDeliveryService } from '../../email/services/email-delivery.service';
@@ -75,6 +77,15 @@ export class BroadcastDeliveryService {
     private readonly customEmojiService?: CustomEmojiService,
     @Optional()
     private readonly emailDeliveryService?: EmailDeliveryService,
+    /**
+     * The cabinet's own declaration (`x-reiwa-capabilities`), read through the
+     * peer registry the settings poll and the version heartbeat keep alive.
+     * Absent in the unit tests, which build this service by hand: a missing
+     * registry answers `canRelayMedia() → false`, the fail-safe — media keeps
+     * the panel's direct Bot API send, exactly what pre-capability releases did.
+     */
+    @Optional()
+    private readonly reiwaPeers?: ReiwaPeerRegistry,
   ) {}
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -742,10 +753,25 @@ export class BroadcastDeliveryService {
     // line called it media and sent `sendPhoto` with an empty `photo`.
     const hasMedia = isMediaPayload(payload);
 
+    // Media rides the relay when the cabinet can take it. The bot then renders
+    // the caption itself — HTML, `<tg-emoji>` premium emoji and the promo
+    // `webAppPath` button, the way a text post has always been drawn — and the
+    // panel's own direct Bot API send is left for what the relay cannot serve:
+    // a deployment with no reiwa, or a cabinet older than
+    // `bot.broadcast-media-notify`, whose `/notify` would drop the media field
+    // and answer with a message id anyway (a text-only post recorded SENT).
+    // The relay flag is per broadcast, not per recipient, so one composition
+    // and one button list serve the whole batch.
+    const relayMedia =
+      hasMedia &&
+      this.botNotifier.isEnabled &&
+      (await this.canRelayMedia());
+
     // Telegram-bound text. Custom-emoji `:slug:` shortcodes become Telegram
     // premium custom-emoji via `<tg-emoji>` HTML tags when sent with parse_mode
-    // HTML (text broadcasts always are; media captions only when the operator
-    // chose HTML). Otherwise we fall back to the plain glyph.
+    // HTML (text broadcasts always are, and so is a relay-carried media caption;
+    // a direct media caption only when the operator chose HTML). Otherwise we
+    // fall back to the plain glyph.
     //
     // `useHtmlEmoji` decides the FORMAT only. Whether a tag is built at all is
     // decided inside `CustomEmojiService.substituteTelegramHtml`, which reads
@@ -758,7 +784,7 @@ export class BroadcastDeliveryService {
     // The operator title (when set) leads the message as a bold headline —
     // rendered through the same custom-emoji substitution so premium emoji in
     // the title show up in Telegram too (not just the cabinet).
-    const useHtmlEmoji = hasMedia ? parseMode === 'HTML' : true;
+    const useHtmlEmoji = hasMedia && !relayMedia ? parseMode === 'HTML' : true;
     const telegramText = await this.composeTelegram(title, text, useHtmlEmoji);
 
     // ── EMAIL GETS THE GLYPH, NEVER THE CUSTOM EMOJI ──────────────────────
@@ -790,16 +816,19 @@ export class BroadcastDeliveryService {
         ? await this.customEmojiService.substituteFallbacks(title)
         : title;
 
-    // The relay's buttons for a TEXT post (`recipientPostButtons`, shared with
-    // the test send): a promo-tagged broadcast's Mini App "activate promo"
-    // button — the reiwa bot resolves its `webAppPath` against its own
-    // miniAppUrl, deep-linking `/promo?code=…` — and «Кнопка «Меню» под
-    // постом» under it. A photo or a video carries the menu alone.
+    // The relay's buttons (`recipientPostButtons`, shared with the test send):
+    // a promo-tagged broadcast's Mini App "activate promo" button — the reiwa
+    // bot resolves its `webAppPath` against its own miniAppUrl, deep-linking
+    // `/promo?code=…` — and «Кнопка «Меню» под постом» under it. The promo
+    // button rides wherever the BOT renders the post, which is every text
+    // broadcast and now a relay-carried media one; a direct Bot API send
+    // cannot build it (`sendTelegramMessage` explains why), so that path
+    // carries the menu alone.
     const menuButton = readMenuButton(payload);
     const relayButtons = recipientPostButtons({
       promoCode: broadcast.promoCode,
       menuButton,
-      hasMedia: false,
+      hasMedia: hasMedia && !relayMedia,
     });
 
     const messages = await this.prismaService.broadcastMessage.findMany({
@@ -980,54 +1009,77 @@ export class BroadcastDeliveryService {
         }
       }
 
-      // Direct media Telegram delivery (needs a local BOT_TOKEN).
+      // Media Telegram delivery, in one of two shapes: the relay (a cabinet that
+      // renders media captions — the bot answers with the message id it proved)
+      // or the panel's own direct Bot API send (needs a local BOT_TOKEN).
       let mediaOk = false;
       let mediaMessageId: number | undefined;
       let mediaError: string | null = null;
-      // Text Telegram message id captured from the reiwa bot fanout, plus the
-      // outcome it came from — `messageId` alone collapses "the bot proved a
-      // delivery" and "the hop timed out" into the same `null`.
+      // Telegram message id captured from the reiwa bot fanout — the media
+      // relay's or a text broadcast's — plus the outcome it came from;
+      // `messageId` alone collapses "the bot proved a delivery" and "the hop
+      // timed out" into the same `null`.
       let textMessageId: number | null = null;
       let relayOutcome: NotifyDeliveryResult | null = null;
-      if (hasMedia && user.telegramId !== null && user.telegramId > 0n) {
-        if (botToken) {
-          const result = await this.sendTelegramMessage(botToken, {
-            chatId: user.telegramId.toString(),
-            text: telegramText,
-            mediaType: mediaType ?? 'none',
-            mediaFileId,
-            parseMode,
-            ...(menuButton ? { replyMarkup: buildMenuInlineKeyboard() } : {}),
+      if (user.telegramId !== null && user.telegramId > 0n) {
+        if (relayMedia) {
+          // `relayMedia` is only true when `hasMedia` is, and `hasMedia` is
+          // only true when the file id is a non-empty string — the locals
+          // narrow what the payload's `string | null` type cannot.
+          const relayFileId = mediaFileId ?? '';
+          // The same idempotency contract the text leg has: keyed on the
+          // BroadcastMessage id, which is stable across every attempt at this
+          // row, so a retry can never become a second photo.
+          relayOutcome = await this.botNotifier.notifyUser({
+            eventId: `broadcast:${message.id}`,
+            telegramId: user.telegramId.toString(),
+            text: telegramText || ' ',
+            parseMode: 'HTML',
+            buttons: relayButtons.length > 0 ? relayButtons : undefined,
+            media: { type: mediaType === 'video' ? 'video' : 'photo', fileId: relayFileId },
           });
-          mediaOk = result.ok;
-          mediaMessageId = result.messageId;
-          mediaError = result.ok ? null : (result.error ?? 'Unknown error');
+          textMessageId = relayOutcome.messageId;
           await sleep(TELEGRAM_RATE_LIMIT_MS);
-        } else {
-          mediaError = 'BOT_TOKEN not configured for media delivery';
+        } else if (hasMedia) {
+          if (botToken) {
+            const result = await this.sendTelegramMessage(botToken, {
+              chatId: user.telegramId.toString(),
+              text: telegramText,
+              mediaType: mediaType ?? 'none',
+              mediaFileId,
+              parseMode,
+              ...(menuButton ? { replyMarkup: buildMenuInlineKeyboard() } : {}),
+            });
+            mediaOk = result.ok;
+            mediaMessageId = result.messageId;
+            mediaError = result.ok ? null : (result.error ?? 'Unknown error');
+            await sleep(TELEGRAM_RATE_LIMIT_MS);
+          } else {
+            mediaError = 'BOT_TOKEN not configured for media delivery';
+          }
+        } else if (feedOk) {
+          // Text Telegram via the reiwa bot, keyed on the BroadcastMessage id
+          // rather than the cabinet event id.
+          //
+          // The cabinet event id used to be the natural key: one feed row, one
+          // notify, same CUID for both. It stops working the moment a batch can
+          // be retried, because a re-run mints a NEW feed row and therefore a new
+          // CUID — so the bot's idempotency cache, which is the only thing
+          // standing between a false-negative timeout and a duplicate Telegram
+          // message, would see an id it has never seen and deliver it again.
+          //
+          // `BroadcastMessage.id` is stable across every attempt at this row,
+          // which is exactly the property the key needs.
+          relayOutcome = await this.botNotifier.notifyUser({
+            eventId: `broadcast:${message.id}`,
+            telegramId: user.telegramId.toString(),
+            text: telegramText || ' ',
+            parseMode: 'HTML',
+            buttons: relayButtons.length > 0 ? relayButtons : undefined,
+          });
+          textMessageId = relayOutcome.messageId;
+          await sleep(TELEGRAM_RATE_LIMIT_MS);
         }
-      } else if (!hasMedia && user.telegramId !== null && user.telegramId > 0n && feedOk) {
-        // Text Telegram via the reiwa bot, keyed on the BroadcastMessage id
-        // rather than the cabinet event id.
-        //
-        // The cabinet event id used to be the natural key: one feed row, one
-        // notify, same CUID for both. It stops working the moment a batch can
-        // be retried, because a re-run mints a NEW feed row and therefore a new
-        // CUID — so the bot's idempotency cache, which is the only thing
-        // standing between a false-negative timeout and a duplicate Telegram
-        // message, would see an id it has never seen and deliver it again.
-        //
-        // `BroadcastMessage.id` is stable across every attempt at this row,
-        // which is exactly the property the key needs.
-        relayOutcome = await this.botNotifier.notifyUser({
-          eventId: `broadcast:${message.id}`,
-          telegramId: user.telegramId.toString(),
-          text: telegramText || ' ',
-          parseMode: 'HTML',
-          buttons: relayButtons.length > 0 ? relayButtons : undefined,
-        });
-        textMessageId = relayOutcome.messageId;
-        await sleep(TELEGRAM_RATE_LIMIT_MS);
       }
 
       // Verdict.
@@ -1038,7 +1090,11 @@ export class BroadcastDeliveryService {
       // guard against, and the cabinet feed is the delivery.
       const telegramAddressable = user.telegramId !== null && user.telegramId > 0n;
       const relayAttempted = relayOutcome !== null && relayOutcome.status !== 'disabled';
-      const telegramAttempted = hasMedia ? telegramAddressable && botToken !== null : relayAttempted;
+      const telegramAttempted = hasMedia
+        ? relayMedia
+          ? relayAttempted
+          : telegramAddressable && botToken !== null
+        : relayAttempted;
 
       if (relayOutcome !== null) {
         // Breaker bookkeeping, before the verdict — a run of timeouts is about
@@ -1110,7 +1166,11 @@ export class BroadcastDeliveryService {
       }
 
       // A Telegram delivery WAS attempted. From here SENT needs proof of it.
-      const telegramProven = hasMedia ? mediaOk : relayOutcome?.status === 'confirmed';
+      const telegramProven = relayMedia
+        ? relayOutcome?.status === 'confirmed'
+        : hasMedia
+          ? mediaOk
+          : relayOutcome?.status === 'confirmed';
       if (telegramProven) {
         const telegramMessageId =
           mediaMessageId !== undefined
@@ -1170,9 +1230,11 @@ export class BroadcastDeliveryService {
       // Re-read rather than selected with the recipient, because the bot sets
       // the flag DURING this delivery — a value read before the send is by
       // definition stale for exactly the recipients this is about. One extra
-      // query, only on the path that already failed.
+      // query, only on the path that already failed. A relay-carried media
+      // broadcast hits the same 204 for a blocked recipient a text one does,
+      // so it reads the flag back the same way.
       const blocked =
-        !hasMedia && relayOutcome?.status === 'unconfirmed'
+        relayOutcome?.status === 'unconfirmed'
           ? ((
               await this.prismaService.user.findUnique({
                 where: { id: message.userId },
@@ -1183,16 +1245,18 @@ export class BroadcastDeliveryService {
 
       // Attempted, not proven. Retryable failures stay PENDING so a re-run of
       // this batch picks them up (it re-reads PENDING rows, so a proven row is
-      // never re-sent); everything else is final now.
+      // never re-sent); everything else is final now. A relay-carried media
+      // failure speaks the relay's language (`relayFailureReason`), a direct
+      // one the Bot API's (`mediaError`).
       const reason = blocked
         ? BROADCAST_BLOCKED_REASON
-        : hasMedia
-          ? (mediaError ?? 'Media delivery failed')
-          : relayFailureReason(relayOutcome);
+        : relayMedia || !hasMedia
+          ? relayFailureReason(relayOutcome)
+          : (mediaError ?? 'Media delivery failed');
       // A blocked recipient is never retryable. Retrying is what made this
       // class invisible in the first place.
       const retryable =
-        !blocked && !hasMedia && relayOutcome !== null && isRetryableRelayOutcome(relayOutcome);
+        !blocked && relayOutcome !== null && isRetryableRelayOutcome(relayOutcome);
       if (retryable && options?.isFinalAttempt !== true) {
         await this.prismaService.broadcastMessage.update({
           where: { id: message.id },
@@ -1408,14 +1472,6 @@ export class BroadcastDeliveryService {
     const botToken = await this.getBotToken();
     if (!botToken) return 'failed';
 
-    // ── THE CHANNEL COPY IS ALWAYS A PLAIN TEXT MESSAGE ───────────────────
-    //
-    // `postToChannelIfConfigured` hands the relay `{ chatId, text, parseMode,
-    // buttons }` and the relay contract has no media field at all — the bot
-    // answers it with `sendMessage`. So even a photo broadcast's public copy is
-    // text, and deciding the edit endpoint from `payload.mediaType` sent
-    // `editMessageCaption` at a message that has no caption: Telegram refuses
-    // it every time, for exactly the broadcasts this sync matters most for.
     // ── COMPOSED THE WAY THE POST WAS COMPOSED ────────────────────────────
     //
     // `postToChannelIfConfigured` creates this post with
@@ -1424,31 +1480,47 @@ export class BroadcastDeliveryService {
     // silently deleted the headline from the one copy anyone can read, while
     // the handler reported `edited` and the panel showed a plain success. Same
     // defect that was fixed inside `editBatch`, left standing one method away.
+    //
+    // A media broadcast's channel copy is now a photo/video message (its
+    // `media` rides the relay beside the text), so it edits through
+    // `editMessageCaption`, not `editMessageText`. The endpoint follows the
+    // POST, not the payload alone: `postToChannelIfConfigured` sent media only
+    // for a cabinet that declares `bot.broadcast-media-notify`, and for any
+    // other one the copy up there is a plain text message — a caption edit
+    // aimed at it is refused by Telegram every time, which is the same defect
+    // the payload-only choice was meant to end.
     const broadcastPayload = await this.prismaService.broadcast.findUnique({
       where: { id: broadcastId },
       select: { payload: true },
     });
     const channelPayload = broadcastPayload?.payload as Record<string, unknown> | null;
     const channelTitle = typeof channelPayload?.title === 'string' ? channelPayload.title : null;
+    const channelIsMedia = isMediaPayload(channelPayload) && (await this.canRelayMedia());
     const telegramText = await this.composeTelegram(channelTitle, newText, true);
 
     try {
-      const response = await fetch(`https://api.telegram.org/bot${botToken}/editMessageText`, {
-        method: 'POST',
-        // BOUNDED, because unlike every other Telegram call in this file this
-        // one runs inside the admin's HTTP request. Unbounded, a hung
-        // api.telegram.org holds the panel's "save" spinning until undici's own
-        // default gives up.
-        signal: AbortSignal.timeout(CHANNEL_EDIT_TIMEOUT_MS),
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: chatId,
-          message_id: Number(messageId),
-          text: telegramText,
-          parse_mode: parseMode ?? undefined,
-          // No `reply_markup`, same reason as the per-recipient edit.
-        }),
-      });
+      const response = await fetch(
+        `https://api.telegram.org/bot${botToken}/${channelIsMedia ? 'editMessageCaption' : 'editMessageText'}`,
+        {
+          method: 'POST',
+          // BOUNDED, because unlike every other Telegram call in this file this
+          // one runs inside the admin's HTTP request. Unbounded, a hung
+          // api.telegram.org holds the panel's "save" spinning until undici's own
+          // default gives up.
+          signal: AbortSignal.timeout(CHANNEL_EDIT_TIMEOUT_MS),
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: chatId,
+            message_id: Number(messageId),
+            // The media endpoint takes the composed text as `caption`; the text
+            // endpoint takes it as `text`. The media itself stays — a caption
+            // edit never touches the attachment.
+            ...(channelIsMedia ? { caption: telegramText } : { text: telegramText }),
+            parse_mode: parseMode ?? undefined,
+            // No `reply_markup`, same reason as the per-recipient edit.
+          }),
+        },
+      );
       if (response.ok) return 'edited';
       this.logger.warn(
         `Broadcast ${broadcastId}: channel post edit refused: ${sanitizeTelegramDiagnostic(
@@ -2104,6 +2176,27 @@ export class BroadcastDeliveryService {
     return this.configService.get<string>('BOT_TOKEN') ?? null;
   }
 
+  /**
+   * Whether the connected cabinet takes a media field in `/notify` — the
+   * `bot.broadcast-media-notify` capability, declared by the cabinet's BOT
+   * process on its own polls (the api process cannot vouch for the bot's send
+   * path). Fail-safe by construction: a cabinet that says nothing, a registry
+   * with no bot record yet, and a deployment that never wired the registry all
+   * read as `false`, which keeps the direct Bot API send this service made
+   * before the capability existed.
+   */
+  private async canRelayMedia(): Promise<boolean> {
+    if (this.reiwaPeers === undefined) return false;
+    try {
+      const view = await this.reiwaPeers.view('bot');
+      return view.can(CABINET_CAPABILITY.broadcastMediaNotify);
+    } catch {
+      // An unreadable registry is an unknown cabinet, and unknown means the
+      // old path — never a broadcast half the recipients get and half do not.
+      return false;
+    }
+  }
+
   private async failBatch(messageIds: string[], reason: string): Promise<void> {
     await this.prismaService.broadcastMessage.updateMany({
       where: { id: { in: messageIds } },
@@ -2157,9 +2250,11 @@ export class BroadcastDeliveryService {
       // to nobody, broadcast FAILED", and made every edit of a promo-tagged
       // broadcast fail as well.
       //
-      // Closing it for real means routing media through the relay
-      // (`reiwa.user.notify` already supports `sendPhoto`) so the bot renders
-      // the button, not synthesising one here.
+      // The closure now exists: `deliverBatch` routes a media broadcast through
+      // the relay for a cabinet that declares `bot.broadcast-media-notify`, and
+      // that path's `notifyUser` carries the promo button for the bot to build.
+      // This direct send is the fallback for everything the relay cannot serve,
+      // and it keeps the menu button alone.
       /** Set on the one retry after a 429 pause, so it cannot recurse. */
       isRetryAfterWait?: boolean;
     },
@@ -2326,6 +2421,19 @@ export class BroadcastDeliveryService {
       const title = typeof payload?.title === 'string' ? payload.title : null;
       const text = typeof payload?.text === 'string' ? payload.text : '';
       const composed = await this.composeTelegram(title, text, true);
+      // The channel copy carries the broadcast's photo/video too, the way a
+      // recipient gets the post. Only for a cabinet that takes the media field:
+      // an older `/notify-broadcast` would reject the whole event (loud 400,
+      // one alert per attempt) rather than drop the image quietly — and a
+      // cabinet older than `bot.broadcast-media-notify` gets the plain text
+      // copy it has always shown.
+      const channelMedia =
+        isMediaPayload(payload) && (await this.canRelayMedia())
+          ? {
+              type: payload?.mediaType === 'video' ? ('video' as const) : ('photo' as const),
+              fileId: typeof payload?.mediaFileId === 'string' ? payload.mediaFileId : '',
+            }
+          : null;
       const promoButton =
         promoCode && promoCode.length > 0
           ? buildPromoButton(promoCode, BROADCAST_PROMO_BUTTON_LABEL)
@@ -2342,6 +2450,7 @@ export class BroadcastDeliveryService {
         text: composed || ' ',
         parseMode: 'HTML',
         ...(promoButton !== null ? { buttons: [promoButton] } : {}),
+        ...(channelMedia !== null ? { media: channelMedia } : {}),
       });
       switch (submission) {
         case 'queued':

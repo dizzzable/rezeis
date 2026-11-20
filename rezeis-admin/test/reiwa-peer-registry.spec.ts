@@ -13,7 +13,6 @@ import { RbacGuard } from '../src/modules/rbac/guards/rbac.guard';
 import { AdminReiwaPeersController } from '../src/modules/reiwa-peers/admin-reiwa-peers.controller';
 import {
   CABINET_CAPABILITY,
-  CABINET_CAPABILITY_REGISTRY,
   CABINET_FLOOR_VERSION,
   capabilityRowsHostedBy,
   compareCabinetVersions,
@@ -97,10 +96,16 @@ const RESET_END = CABINET_CAPABILITY.addonResetEnd;
  * a version never stands for an id introduced after the ceiling — only a cabinet
  * that declares it has it. So a 0.9.7.53 cabinet lacks nothing registered UP TO
  * 0.9.7.53, and exactly these.
+ *
+ * Scoped to the `api` surface, which is what the assertions below ask about:
+ * `surfaceStatus('api')` reports a process's own missing rows, and a process is
+ * only read for the surfaces it hosts — a `bot.*` id above the ceiling (the
+ * broadcast media relay) is missing from a silent cabinet too, but the api
+ * process neither declares it nor is asked about it.
  */
-const AFTER_THE_CEILING = CABINET_CAPABILITY_REGISTRY.filter(
-  (row) => compareCabinetVersions(row.since, IMPLIED_CEILING_VERSION) > 0,
-).map((row) => row.id);
+const AFTER_THE_CEILING = capabilityRowsHostedBy('api')
+  .filter((row) => compareCabinetVersions(row.since, IMPLIED_CEILING_VERSION) > 0)
+  .map((row) => row.id);
 
 describe('a silent cabinet, placed by the evidence it leaves', () => {
   it('a poll without headers is 0.9.7.53 — which can show «до сброса»', async () => {

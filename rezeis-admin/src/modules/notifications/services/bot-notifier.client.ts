@@ -164,6 +164,15 @@ export class BotNotifierClient {
      * `/uploads/...` URLs are fetched from rezeis. Omitted → text-only message.
      */
     readonly bannerUrl?: string;
+    /**
+     * A broadcast's photo or video, by Telegram `file_id`, sent with the text
+     * as its caption. Only a cabinet that declares
+     * `CABINET_CAPABILITY.broadcastMediaNotify` takes this field — for an
+     * older one the relay schema rejects the whole event (the panel records
+     * FAILED), so the caller must gate it on the capability first.
+     * Omitted → a text (or banner) message.
+     */
+    readonly media?: NotifyMedia;
   }): Promise<NotifyDeliveryResult> {
     return this.deliver('reiwa.user.notify', {
       eventId: input.eventId,
@@ -172,6 +181,7 @@ export class BotNotifierClient {
       parseMode: input.parseMode,
       buttons: input.buttons,
       bannerUrl: input.bannerUrl,
+      media: input.media,
     });
   }
 
@@ -502,6 +512,13 @@ async function readRefusalDetail(response: Response): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+/** A broadcast's media, sent by the bot with the message text as its caption. */
+export interface NotifyMedia {
+  readonly type: 'photo' | 'video';
+  /** A Telegram `file_id` minted by the panel's own upload (same-bot token). */
+  readonly fileId: string;
 }
 
 export interface NotifyButton {

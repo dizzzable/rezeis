@@ -57,8 +57,10 @@ function botNotifier(
       return {
         status,
         messageId,
-        httpStatus: status === 'confirmed' ? 200 : status === 'unconfirmed' ? 204 : null,
-        detail: null,
+        // `rejected` always names its HTTP status (the real client does), and
+        // the retry classifier reads a `rejected` with NO status as transient.
+        httpStatus: status === 'confirmed' ? 200 : status === 'unconfirmed' ? 204 : status === 'rejected' ? 400 : null,
+        detail: status === 'rejected' ? 'HTTP 400 Bad Request' : null,
       };
     },
     notifyBroadcast: async (input: unknown) => {
@@ -108,6 +110,22 @@ function relayQueue(options?: {
       options?.enqueued?.push({ event, metadata });
       return submission;
     },
+  } as never;
+}
+
+/**
+ * Minimal ReiwaPeerRegistry stub, for the media-relay gate. `can` answers the
+ * `bot.broadcast-media-notify` capability for the bot surface — the one
+ * `canRelayMedia()` consults. Absent (constructor position 10), the gate is
+ * fail-safe: every pre-capability test below runs media through the direct
+ * Bot API send exactly as it did before the capability existed.
+ */
+function reiwaPeers(canBroadcastMedia: boolean): never {
+  return {
+    view: async (surface: string) => ({
+      basis: `stub ${surface}`,
+      can: (id: string) => canBroadcastMedia && surface === 'bot' && id === 'bot.broadcast-media-notify',
+    }),
   } as never;
 }
 
@@ -1248,6 +1266,356 @@ describe('BroadcastDeliveryService', () => {
         (failed.data.errorMessage as string).length > 0,
       'with the media failure as the reason',
     );
+  });
+
+  it('delivers a media broadcast through the relay when the cabinet renders media captions', async () => {
+    const notifyCalls: unknown[] = [];
+    const fetchCalls: unknown[] = [];
+    const messageUpdates: unknown[] = [];
+    const service = new BroadcastDeliveryService(
+      {
+        broadcast: {
+          findUnique: async (args: { readonly select?: { readonly payload?: boolean } }) => {
+            if (args.select?.payload) {
+              return {
+                id: 'broadcast-1',
+                status: BroadcastStatus.PROCESSING,
+                payload: {
+                  title: 'Обновление',
+                  text: 'Hello',
+                  mediaType: 'photo',
+                  mediaFileId: 'file-1',
+                  menuButton: true,
+                },
+                // The row deliverBatch loads is the same call — `select.payload`
+                // is set on it, so the promo code rides here.
+                promoCode: 'SUMMER',
+              };
+            }
+            return { status: BroadcastStatus.PROCESSING };
+          },
+          update: async () => undefined,
+        },
+        broadcastMessage: {
+          findUnique: async () => ({ status: BroadcastMessageStatus.PENDING }),
+          findMany: async () => [{ id: 'message-1', userId: 'user-1' }],
+          updateMany: async (args: unknown) => {
+            messageUpdates.push(args);
+            return { count: 1 };
+          },
+          update: async (args: unknown) => {
+            messageUpdates.push(args);
+          },
+          count: async () => 0,
+        },
+        userNotificationEvent: { findMany: async () => [] },
+        user: {
+          findUnique: async () => ({ telegramId: 12345n }),
+        },
+      } as never,
+      // NO token on the panel: the relay path is what makes media deliverable
+      // here at all — the pre-capability behaviour would have failed every row.
+      configService(null),
+      { info: () => undefined } as never,
+      { create: async () => 'event-1' } as never,
+      { getDecryptedBotToken: async () => null } as never,
+      botNotifier(777, notifyCalls),
+      relayQueue(),
+      { checkPromoCodeDispatchable: async () => ({ ok: true }) } as never,
+      undefined,
+      undefined,
+      reiwaPeers(true),
+    );
+
+    await withFetch(async (...args: unknown[]) => {
+      fetchCalls.push(args);
+      return { ok: true, json: async () => ({}), text: async () => '' } as Response;
+    }, async () => {
+      assert.deepStrictEqual(await service.deliverBatch('broadcast-1', ['message-1']), {
+        sent: 1,
+        failed: 0,
+        unresolved: 0,
+        emailAttempted: 0,
+        emailSent: 0,
+      });
+    });
+
+    // No direct Bot API call — the photo went through the bot, not the panel.
+    assert.equal(fetchCalls.length, 0);
+    assert.equal(notifyCalls.length, 1);
+    const notify = notifyCalls[0] as {
+      readonly eventId: string;
+      readonly telegramId: string;
+      readonly text: string;
+      readonly parseMode: string;
+      readonly media?: { readonly type: string; readonly fileId: string };
+      readonly buttons?: ReadonlyArray<{ readonly text: string; readonly webAppPath?: string; readonly callbackData?: string }>;
+    };
+    assert.equal(notify.eventId, 'broadcast:message-1');
+    assert.equal(notify.telegramId, '12345');
+    // The relay caption is composed the way a text post is: HTML with the bold
+    // headline, so the operator's formatting and premium emoji survive.
+    assert.equal(notify.text, '<b>Обновление</b>\n\nHello');
+    assert.equal(notify.parseMode, 'HTML');
+    assert.deepStrictEqual(notify.media, { type: 'photo', fileId: 'file-1' });
+    // The promo button the direct Bot API path cannot build rides along now.
+    assert.deepStrictEqual(notify.buttons, [
+      { text: '🎁 Активировать промокод', webAppPath: '/promo?code=SUMMER' },
+      { text: '🏠 Главное меню', callbackData: 'menu:new' },
+    ]);
+    const update = messageUpdates[0] as { readonly data: { readonly status: BroadcastMessageStatus; readonly telegramMessageId: bigint } };
+    assert.equal(update.data.status, BroadcastMessageStatus.SENT);
+    assert.equal(update.data.telegramMessageId, 777n);
+  });
+
+  it('keeps the direct Bot API media send when the cabinet does not declare the capability', async () => {
+    const notifyCalls: unknown[] = [];
+    const service = new BroadcastDeliveryService(
+      {
+        broadcast: {
+          findUnique: async (args: { readonly select?: { readonly payload?: boolean } }) => {
+            if (args.select?.payload) {
+              return {
+                id: 'broadcast-1',
+                status: BroadcastStatus.PROCESSING,
+                payload: { text: 'Hello', mediaType: 'photo', mediaFileId: 'file-1' },
+              };
+            }
+            return { status: BroadcastStatus.PROCESSING };
+          },
+          update: async () => undefined,
+        },
+        broadcastMessage: {
+          findUnique: async () => ({ status: BroadcastMessageStatus.PENDING }),
+          findMany: async () => [{ id: 'message-1', userId: 'user-1' }],
+          updateMany: async () => ({ count: 1 }),
+          update: async () => undefined,
+          count: async () => 0,
+        },
+        userNotificationEvent: { findMany: async () => [] },
+        user: {
+          findUnique: async () => ({ telegramId: 12345n }),
+        },
+      } as never,
+      configService('bot-token'),
+      { info: () => undefined } as never,
+      { create: async () => 'event-1' } as never,
+      { getDecryptedBotToken: async () => null } as never,
+      botNotifier(777, notifyCalls),
+      relayQueue(),
+      { checkPromoCodeDispatchable: async () => ({ ok: true }) } as never,
+      undefined,
+      undefined,
+      reiwaPeers(false),
+    );
+
+    let fetchBody = '';
+    await withFetch(async (_input, init) => {
+      fetchBody = String(init?.body ?? '');
+      return { ok: true, json: async () => ({ result: { message_id: 5 } }), text: async () => '' } as Response;
+    }, async () => {
+      assert.deepStrictEqual(await service.deliverBatch('broadcast-1', ['message-1']), {
+        sent: 1,
+        failed: 0,
+        unresolved: 0,
+        emailAttempted: 0,
+        emailSent: 0,
+      });
+    });
+
+    // The direct send happened, and the relay was never asked for the media.
+    assert.ok(fetchBody.includes('"photo"'), 'sendPhoto with the file id');
+    assert.ok(fetchBody.includes('file-1'));
+    assert.equal(notifyCalls.length, 0);
+  });
+
+  it('marks a relay-carried media recipient FAILED when the relay refuses the send', async () => {
+    const notifyCalls: unknown[] = [];
+    const messageUpdates: Array<{ data: Record<string, unknown> }> = [];
+    const service = new BroadcastDeliveryService(
+      {
+        broadcast: {
+          findUnique: async (args: { readonly select?: { readonly payload?: boolean } }) => {
+            if (args.select?.payload) {
+              return {
+                id: 'broadcast-1',
+                status: BroadcastStatus.PROCESSING,
+                payload: { text: 'Hello', mediaType: 'video', mediaFileId: 'file-1' },
+              };
+            }
+            return { status: BroadcastStatus.PROCESSING };
+          },
+          update: async () => undefined,
+        },
+        broadcastMessage: {
+          findUnique: async () => ({ status: BroadcastMessageStatus.PENDING }),
+          findMany: async () => [{ id: 'message-1', userId: 'user-1' }],
+          updateMany: async (args: { data: Record<string, unknown> }) => {
+            messageUpdates.push(args);
+            return { count: 1 };
+          },
+          update: async (args: { data: Record<string, unknown> }) => {
+            messageUpdates.push(args);
+          },
+          count: async () => 0,
+        },
+        userNotificationEvent: { findMany: async () => [] },
+        user: {
+          findUnique: async () => ({ telegramId: 12345n, isBotBlocked: false }),
+        },
+      } as never,
+      configService(null),
+      { info: () => undefined } as never,
+      { create: async () => 'event-1' } as never,
+      { getDecryptedBotToken: async () => null } as never,
+      botNotifier(null, notifyCalls, { relayStatus: 'rejected' }),
+      relayQueue(),
+      { checkPromoCodeDispatchable: async () => ({ ok: true }) } as never,
+      undefined,
+      undefined,
+      reiwaPeers(true),
+    );
+
+    await service.deliverBatch('broadcast-1', ['message-1']);
+
+    // No text fallback, no SENT: a media broadcast's Telegram leg IS the
+    // delivery, so the refusal is the recipient's outcome, named by the relay.
+    const failed = messageUpdates.find((u) => u.data.status === BroadcastMessageStatus.FAILED);
+    assert.ok(failed, 'a refused media relay is FAILED');
+    assert.ok(
+      String(failed.data.errorMessage).startsWith('telegram_relay_rejected'),
+      `with the relay refusal as the reason, got ${String(failed.data.errorMessage)}`,
+    );
+  });
+
+  it('reads isBotBlocked back for a relay-carried media recipient the bot answered 204 for', async () => {
+    const notifyCalls: unknown[] = [];
+    const messageUpdates: Array<{ data: Record<string, unknown> }> = [];
+    const service = new BroadcastDeliveryService(
+      {
+        broadcast: {
+          findUnique: async (args: { readonly select?: { readonly payload?: boolean } }) => {
+            if (args.select?.payload) {
+              return {
+                id: 'broadcast-1',
+                status: BroadcastStatus.PROCESSING,
+                payload: { text: 'Hello', mediaType: 'photo', mediaFileId: 'file-1' },
+              };
+            }
+            return { status: BroadcastStatus.PROCESSING };
+          },
+          update: async () => undefined,
+        },
+        broadcastMessage: {
+          findUnique: async () => ({ status: BroadcastMessageStatus.PENDING }),
+          findMany: async () => [{ id: 'message-1', userId: 'user-1' }],
+          updateMany: async (args: { data: Record<string, unknown> }) => {
+            messageUpdates.push(args);
+            return { count: 1 };
+          },
+          update: async (args: { data: Record<string, unknown> }) => {
+            messageUpdates.push(args);
+          },
+          count: async () => 0,
+        },
+        userNotificationEvent: { findMany: async () => [] },
+        user: {
+          findUnique: async () => ({ telegramId: 12345n, isBotBlocked: true }),
+        },
+      } as never,
+      configService(null),
+      { info: () => undefined } as never,
+      { create: async () => 'event-1' } as never,
+      { getDecryptedBotToken: async () => null } as never,
+      botNotifier(null, notifyCalls, { relayStatus: 'unconfirmed' }),
+      relayQueue(),
+      { checkPromoCodeDispatchable: async () => ({ ok: true }) } as never,
+      undefined,
+      undefined,
+      reiwaPeers(true),
+    );
+
+    await service.deliverBatch('broadcast-1', ['message-1']);
+
+    const failed = messageUpdates.find((u) => u.data.status === BroadcastMessageStatus.FAILED);
+    assert.ok(failed, 'a blocked recipient is FAILED');
+    assert.equal(failed.data.errorMessage, 'telegram_blocked_by_user');
+  });
+
+  /** A service whose only Prisma need is a broadcast row: an addressable post, and a media payload. */
+  function channelEditService(canBroadcastMedia: boolean): BroadcastDeliveryService {
+    return new BroadcastDeliveryService(
+      {
+        broadcast: {
+          findUnique: async (args: { readonly select?: Record<string, boolean> }) => {
+            // `channelPostAddress` selects three columns; `syncChannelPost`
+            // selects the payload alone — that is the discriminator.
+            if (args.select?.payload === true && Object.keys(args.select).length === 1) {
+              return {
+                payload: {
+                  title: 'Обновление',
+                  text: 'Hello',
+                  mediaType: 'photo',
+                  mediaFileId: 'file-1',
+                },
+              };
+            }
+            return {
+              channelChatId: '-100123',
+              channelMessageId: 55n,
+              payload: { telegramChannelChatId: '-100123' },
+            };
+          },
+          update: async () => undefined,
+        },
+      } as never,
+      configService('bot-token'),
+      { info: () => undefined } as never,
+      { create: async () => 'event-1' } as never,
+      { getDecryptedBotToken: async () => null } as never,
+      botNotifier(777, []),
+      relayQueue(),
+      { checkPromoCodeDispatchable: async () => ({ ok: true }) } as never,
+      undefined,
+      undefined,
+      reiwaPeers(canBroadcastMedia),
+    );
+  }
+
+  it('edits a media broadcast’s channel copy as a caption when the cabinet takes media', async () => {
+    const calls: Array<{ readonly url: string; readonly body: string }> = [];
+    const service = channelEditService(true);
+
+    await withFetch(async (input, init) => {
+      calls.push({ url: String(input), body: String(init?.body ?? '') });
+      return { ok: true, json: async () => ({}), text: async () => '' } as Response;
+    }, async () => {
+      assert.equal(await service.syncChannelPost('broadcast-1', 'Fixed', 'HTML'), 'edited');
+    });
+
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0].url.endsWith('/editMessageCaption'), calls[0].url);
+    // The caption is the composed text — headline included — and the photo
+    // itself is untouched.
+    assert.ok(calls[0].body.includes('"caption":"<b>Обновление</b>\\n\\nFixed"'), calls[0].body);
+  });
+
+  it('edits that same channel copy as text when the cabinet takes no media', async () => {
+    const calls: Array<{ readonly url: string; readonly body: string }> = [];
+    // The post went up as a plain text message (the capability was absent at
+    // post time), so a caption edit would be refused — the edit follows the post.
+    const service = channelEditService(false);
+
+    await withFetch(async (input, init) => {
+      calls.push({ url: String(input), body: String(init?.body ?? '') });
+      return { ok: true, json: async () => ({}), text: async () => '' } as Response;
+    }, async () => {
+      assert.equal(await service.syncChannelPost('broadcast-1', 'Fixed', 'HTML'), 'edited');
+    });
+
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0].url.endsWith('/editMessageText'), calls[0].url);
+    assert.ok(calls[0].body.includes('"text":"<b>Обновление</b>\\n\\nFixed"'), calls[0].body);
   });
 
   it('delivers to web-only users via the cabinet feed without Telegram', async () => {
