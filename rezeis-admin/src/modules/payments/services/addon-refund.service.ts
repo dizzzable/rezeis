@@ -22,6 +22,7 @@ import { DeviceReductionPlanService } from '../../add-on-entitlements/services/d
 import { EffectiveProjectionService } from '../../add-on-entitlements/services/effective-projection.service';
 import { SubscriptionTermService } from '../../add-on-entitlements/services/subscription-term.service';
 import { AddOnSwitchesService } from '../../add-on-entitlements/switches/add-on-switches.service';
+import { liveBundleSubscriptions, readBundleMarker } from '../../merge-links/utils/bundle-snapshot.util';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { writeTransactionGatewayData } from '../utils/transaction-gateway-data.util';
 import {
@@ -330,6 +331,11 @@ export class AddOnRefundService {
       const touched = new Set<string>();
       const now = new Date();
       let reduceDevicesOf: string | null = null;
+      // EVERY half whose devices come off. On a merged subscription a device
+      // add-on has a line per profile (`companionOfBundleSibling`), and the
+      // operator's card must not name only the one it happened to read first:
+      // with stage 6 off the reduction waits for them, one plan per profile.
+      const deviceHalves = new Set<string>();
       let ended = true;
       for (const row of rows) {
         if (!locked.has(row.subscriptionId)) {
@@ -373,6 +379,7 @@ export class AddOnRefundService {
           expiring.push(row.id);
           lines.push(`Докупка «${name}» отключена.`);
           reduceDevicesOf = row.subscriptionId;
+          deviceHalves.add(row.subscriptionId);
           continue;
         }
         const reversal = await this.entitlements.transitionInTransaction(tx, {
@@ -398,15 +405,22 @@ export class AddOnRefundService {
           [ADDON_REFUND_ENDED_AT_KEY]: now.toISOString(),
           addOnRefundReversedEntitlements: reversed,
           ...(expiring.length === 0 ? {} : { addOnRefundDeviceReductionQueued: expiring }),
+          ...(deviceHalves.size < 2 ? {} : { addOnRefundDeviceHalves: [...deviceHalves].sort() }),
         },
         syncJobIds,
         reduceDevicesOf,
         devicesLine:
           reduceDevicesOf === null
             ? null
-            : deviceCleanupAuto === null
-              ? MANUAL_DEVICES_LINE
-              : predictedDevicesLine(reduceDevicesOf, deviceCleanupAuto),
+            : (deviceCleanupAuto === null
+                ? MANUAL_DEVICES_LINE
+                : predictedDevicesLine(reduceDevicesOf, deviceCleanupAuto)) +
+              // Stage 6 ON needs no note: the queue reduces every profile on its
+              // own. Off (or unknown) the operator does it by hand, and the card
+              // must say the merged subscription's other half needs it too.
+              (deviceCleanupAuto === true || deviceHalves.size < 2
+                ? ''
+                : ` ${describeOtherDeviceHalves([...deviceHalves].sort())}`),
         addOnType: marker?.addOnType ?? rows[0]?.type ?? null,
         addOnValue: marker?.addOnValue ?? (rows[0] === undefined ? null : entitlementValue(rows[0].type, rows[0].totalValue)),
       };
@@ -645,7 +659,14 @@ export class AddOnRefundService {
         locked.length === 1
           ? await tx.subscription.findUnique({
               where: { id: subscriptionId },
-              select: { status: true, trafficLimit: true, deviceLimit: true, planSnapshot: true, remnawaveId: true },
+              select: {
+                userId: true,
+                status: true,
+                trafficLimit: true,
+                deviceLimit: true,
+                planSnapshot: true,
+                remnawaveId: true,
+              },
             })
           : null;
       if (subscription === null || subscription.status === SubscriptionStatus.DELETED) {
@@ -670,17 +691,48 @@ export class AddOnRefundService {
       }
       // In the term model the projection decides what the subscription holds,
       // and the add-on may be inside the ACTIVE term's base.
+      // ONE PRODUCT, TWO PROFILES — the fan-out the CAPTURE made, undone.
+      //
+      // A «+1 устройство» bought on a merged subscription was raised on every
+      // live profile of the same sold bundle, not only on the one the customer
+      // bought it on (`PaymentSubscriptionMutationService`
+      // `extendDeviceAddOnToBundleSiblings`). With the ledger on, each half has
+      // its own line and `endDurable` reverses them all — the payment is the
+      // source there. In THIS branch there are no lines at all: the capture
+      // raised raw columns, and a refund that lowered only the target's would
+      // leave the half the customer does not see with the devices for good.
+      const halves = await this.lowerBundleSiblingDeviceLimits(tx, transaction, marker, {
+        id: subscriptionId,
+        userId: subscription.userId,
+        planSnapshot: subscription.planSnapshot,
+      });
+      const halvesAudit =
+        halves.lowered.length === 0 ? {} : { addOnRefundBundleDeviceHalvesLowered: halves.lowered };
+
       const terms = await tx.subscriptionTerm.count({
         where: { subscriptionId, status: SubscriptionTermStatus.ACTIVE },
       });
       if (terms === 1) {
-        return this.endLegacyInTermModel(tx, { transaction, marker, name, subscriptionId, subscription, base });
+        const outcome = await this.endLegacyInTermModel(tx, {
+          transaction,
+          marker,
+          name,
+          subscriptionId,
+          subscription,
+          base,
+        });
+        return {
+          ...outcome,
+          syncJobIds: [...outcome.syncJobIds, ...halves.jobIds],
+          audit: { ...outcome.audit, ...halvesAudit },
+        };
       }
 
       const column = marker.addOnType === AddOnType.EXTRA_TRAFFIC ? 'trafficLimit' : 'deviceLimit';
       const audit: Record<string, unknown> = {
         [ADDON_REFUND_ENDED_AT_KEY]: new Date().toISOString(),
         addOnRefundLimit: { column, from: lowered.from, to: lowered.to },
+        ...halvesAudit,
       };
       if (lowered.to === lowered.from) {
         await writeTransactionGatewayData(tx, transaction.id, { merge: audit });
@@ -689,8 +741,59 @@ export class AddOnRefundService {
       await tx.subscription.update({ where: { id: subscriptionId }, data: { [column]: lowered.to } });
       const jobId = await this.createSyncJob(tx, subscriptionId, subscription.remnawaveId, transaction.paymentId, null);
       await writeTransactionGatewayData(tx, transaction.id, { merge: audit });
-      return { ...base, syncJobIds: jobId === null ? [] : [jobId], ended: true, note: `Докупка «${name}» отключена.`, audit };
+      return {
+        ...base,
+        syncJobIds: [...(jobId === null ? [] : [jobId]), ...halves.jobIds],
+        ended: true,
+        note: `Докупка «${name}» отключена.`,
+        audit,
+      };
     });
+  }
+
+  /**
+   * The other halves of a merged subscription, lowered by the same value the
+   * legacy increment raised them by (see the call in {@link endLegacy}).
+   *
+   * The raise's two rules, applied backwards: a half whose column is `<= 0` is
+   * UNLIMITED and must stay that way, and no half goes below its own plan's
+   * value — the floor `lowerByAddOn` reads from that half's snapshot. A half
+   * whose floor cannot be read is left alone: guessing it could take away
+   * devices the customer owns, and the operator's card already says the add-on
+   * needs a hand. Never anything but devices: traffic and expiry stay on the
+   * half they were sold for.
+   *
+   * Written in id order, the order every other term writer takes, so a refund
+   * and the boundary sweep cannot deadlock on the two halves.
+   */
+  private async lowerBundleSiblingDeviceLimits(
+    tx: Prisma.TransactionClient,
+    transaction: Transaction,
+    marker: RefundedAddOnMarker,
+    target: { readonly id: string; readonly userId: string; readonly planSnapshot: unknown },
+  ): Promise<{ readonly jobIds: readonly string[]; readonly lowered: readonly string[] }> {
+    if (marker.addOnType !== AddOnType.EXTRA_DEVICES) return { jobIds: [], lowered: [] };
+    const bundle = readBundleMarker(target.planSnapshot);
+    if (bundle === null) return { jobIds: [], lowered: [] };
+    const siblings = (await liveBundleSubscriptions(tx, target.userId, bundle.bundleId))
+      .filter((row) => row.id !== target.id && row.status !== SubscriptionStatus.DELETED)
+      .sort((left, right) => left.id.localeCompare(right.id));
+    const jobIds: string[] = [];
+    const lowered: string[] = [];
+    for (const sibling of siblings) {
+      const row = await tx.subscription.findUnique({
+        where: { id: sibling.id },
+        select: { id: true, trafficLimit: true, deviceLimit: true, planSnapshot: true, remnawaveId: true },
+      });
+      if (row === null) continue;
+      const lowering = lowerByAddOn(marker, row);
+      if (lowering.kind !== 'LOWER' || lowering.to === lowering.from) continue;
+      await tx.subscription.update({ where: { id: row.id }, data: { deviceLimit: lowering.to } });
+      const jobId = await this.createSyncJob(tx, row.id, row.remnawaveId, transaction.paymentId, null);
+      if (jobId !== null) jobIds.push(jobId);
+      lowered.push(row.id);
+    }
+    return { jobIds, lowered };
   }
 
   /**
@@ -923,6 +1026,18 @@ export function predictedDevicesLine(subscriptionId: string, deviceCleanupAuto: 
     '(«Доп. услуги» → вкладка «Настройки»). Чтобы удалить их, утвердите план: ' +
     '«Доп. услуги» → вкладка «Доставка» → «Открыть инспектор подписки» → «ID подписки»: ' +
     `${subscriptionId} → «Открыть» → впишите «Причина» → «Планы сокращения устройств» → «Утвердить» → «Утвердить и выполнить».`
+  );
+}
+
+/**
+ * The merged subscription's OTHER profiles, for the card's manual devices line
+ * (see `endDurable`): a refunded device add-on sits on one line per profile, and
+ * a reduction the operator approves by hand is approved per profile.
+ */
+function describeOtherDeviceHalves(halves: readonly string[]): string {
+  return (
+    'Это объединённая подписка — то же самое нужно и для остальных её половин: ' +
+    `«ID подписки»: ${halves.join(', ')}.`
   );
 }
 

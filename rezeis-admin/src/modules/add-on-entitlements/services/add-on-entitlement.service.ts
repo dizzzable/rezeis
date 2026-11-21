@@ -10,6 +10,7 @@ import {
   Prisma,
 } from '@prisma/client';
 
+import { readBundleMarker } from '../../merge-links/utils/bundle-snapshot.util';
 import {
   EntitlementCommand,
   EntitlementState,
@@ -61,6 +62,19 @@ export interface CreatePendingEntitlementInput {
   readonly expiresAt: Date | null;
   readonly expiryEpochId: string | null;
   readonly correlationId: string;
+  /**
+   * THE COMPANION LINE OF A MERGED SUBSCRIPTION — see
+   * {@link AddOnEntitlementService.assertCompanionBundleSiblingInTransaction}.
+   *
+   * One payment for «+1 устройство» on an «объединённая подписка» is one
+   * product with TWO Remnawave profiles, and a device limit lives on a profile.
+   * The capture raises the profile the customer bought on and mirrors the same
+   * line onto the other half of the same SOLD bundle, so the number cannot be
+   * 3 on one profile and 2 on the other. `subscriptionId` therefore names a
+   * SIBLING of the subscription the paying transaction is bound to, which the
+   * default guard refuses — this flag is that one, narrow exception.
+   */
+  readonly companionOfBundleSibling?: boolean;
 }
 
 export interface CreatePendingEntitlementResult {
@@ -224,8 +238,22 @@ export class AddOnEntitlementService {
     // checkout's fulfilment binds it first. (A combined renewal, which names no
     // subscription of its own, once proved the link by a matching renewal
     // line; renewal add-ons were deleted with their code on 24.09.2026.)
+    //
+    // The ONE exception is a merged subscription's companion line
+    // (`companionOfBundleSibling`): the payment is bound to the half the
+    // customer bought on, and the same device limit has to reach the other
+    // profile of the same sold bundle — the pair is ONE product and the panel
+    // keeps a device limit per profile. Everything else — same customer, same
+    // bundle marker, both live — is still asserted, in
+    // `assertCompanionBundleSiblingInTransaction`.
     if (source[0]?.subscriptionId !== input.subscriptionId) {
-      throw new ConflictException('Source transaction is not bound to the target subscription');
+      if (input.companionOfBundleSibling !== true) {
+        throw new ConflictException('Source transaction is not bound to the target subscription');
+      }
+      await this.assertCompanionBundleSiblingInTransaction(tx, {
+        sourceSubscriptionId: source[0]?.subscriptionId ?? null,
+        targetSubscriptionId: input.subscriptionId,
+      });
     }
     const subscription = await tx.$queryRaw<Array<{ id: string; status: string }>>(Prisma.sql`
       SELECT "id", "status"::text AS "status"
@@ -496,6 +524,61 @@ export class AddOnEntitlementService {
     }
 
     return rows.length;
+  }
+
+  /**
+   * A COMPANION LINE: ONE PAYMENT, TWO PROFILES OF ONE SOLD BUNDLE
+   * ───────────────────────────────────────────────────────────────
+   * «Объединённая подписка» is ONE product delivered as one Remnawave profile
+   * per member plan, and this panel keeps a device limit PER PROFILE. A «+1
+   * устройство» add-on bought on the merged subscription therefore has to land
+   * on both profiles, or the customer's third device is accepted by one half
+   * and refused by the other, while the cabinet's card (which faces the visible
+   * member) counts only one of them.
+   *
+   * The primary line is bound to the profile the payment names. Every other
+   * line of the same payment is a COMPANION: same customer, same SOLD bundle
+   * (`bundleId` marker, `bundle-snapshot.util.ts`), both live. `bundlePlanId` is
+   * deliberately not compared — a bundle re-pointed at another face plan must
+   * not orphan devices the customer already paid for.
+   *
+   * Anything else is refused exactly as before: a payment bound to one
+   * subscription cannot grant an entitlement on another.
+   */
+  private async assertCompanionBundleSiblingInTransaction(
+    tx: Prisma.TransactionClient,
+    input: {
+      readonly sourceSubscriptionId: string | null;
+      readonly targetSubscriptionId: string;
+    },
+  ): Promise<void> {
+    const refused = new ConflictException(
+      'Source transaction is not bound to the target subscription',
+    );
+    if (input.sourceSubscriptionId === null || input.sourceSubscriptionId === input.targetSubscriptionId) {
+      throw refused;
+    }
+    const rows = await tx.subscription.findMany({
+      where: { id: { in: [input.sourceSubscriptionId, input.targetSubscriptionId] } },
+      select: { id: true, userId: true, status: true, planSnapshot: true },
+    });
+    if (rows.length !== 2) throw refused;
+    const source = rows.find((row) => row.id === input.sourceSubscriptionId);
+    const target = rows.find((row) => row.id === input.targetSubscriptionId);
+    if (source === undefined || target === undefined) throw refused;
+    const live = (status: string): boolean => status === 'ACTIVE' || status === 'LIMITED';
+    const sourceBundle = readBundleMarker(source.planSnapshot);
+    const targetBundle = readBundleMarker(target.planSnapshot);
+    if (
+      source.userId !== target.userId ||
+      !live(source.status) ||
+      !live(target.status) ||
+      sourceBundle === null ||
+      targetBundle === null ||
+      sourceBundle.bundleId !== targetBundle.bundleId
+    ) {
+      throw refused;
+    }
   }
 
   private assertImmutableSnapshot(

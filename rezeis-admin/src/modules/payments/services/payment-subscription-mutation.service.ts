@@ -5,6 +5,7 @@ import {
   AddOnType,
   AddOnEntitlementActorType,
   AddOnEntitlementState,
+  Currency,
   DeviceType,
   PaymentGatewayType,
   Plan,
@@ -77,7 +78,6 @@ import {
   BUNDLE_GRANT_KEY,
   BUNDLE_RENEWAL_KEY,
   bundleVisiblePlanId,
-  findBundleMemberPlan,
   findBundleSoldAs,
   findBundleSoldForMarker,
   liveBundleSubscriptions,
@@ -400,7 +400,12 @@ export class PaymentSubscriptionMutationService {
     // NOT consume the user's one-time purchase discount.
     if (isAddOnTransaction(transaction)) {
       const addOnResult = await this.applyAddOnTopUp(transaction, flags);
-      return { syncJobs: [addOnResult.syncJob] };
+      return {
+        syncJobs: [
+          addOnResult.syncJob,
+          ...(addOnResult.extraSyncJobs ?? []),
+        ],
+      };
     }
 
     const purchasedPlan = await this.getRequiredPlan(transaction);
@@ -1791,7 +1796,17 @@ export class PaymentSubscriptionMutationService {
      * before the transaction, only by a direct caller.
      */
     passedFlags?: AddOnRolloutFlags,
-  ): Promise<{ readonly subscription: Subscription; readonly syncJob: ProfileSyncJob }> {
+  ): Promise<{
+    readonly subscription: Subscription;
+    readonly syncJob: ProfileSyncJob;
+    /**
+     * A merged subscription's OTHER profiles, when the add-on is «+устройства»:
+     * see {@link extendDeviceAddOnToBundleSiblings}. They are the same purchase
+     * on the other half of one product, so the caller enqueues them with the
+     * same weight as the primary job.
+     */
+    readonly extraSyncJobs?: readonly ProfileSyncJob[];
+  }> {
     const marker = readAddOnMarker(transaction);
     if (marker === null) {
       throw new NotFoundException('Add-on marker not found on transaction');
@@ -1920,7 +1935,21 @@ export class PaymentSubscriptionMutationService {
         const ledgered = await this.applyAddOnViaLedger(tx, transaction, ledgerMarker, subscription, flags);
         if (ledgered !== null) {
           quoteNote = ledgered.quoteNote;
-          return { subscription: ledgered.subscription, syncJob: ledgered.syncJob };
+          // ONE PRODUCT, TWO PROFILES: the merged subscription's other halves
+          // get the same devices, with their own ledger lines.
+          const companions = await this.extendDeviceAddOnToBundleSiblings(
+            tx,
+            transaction,
+            ledgerMarker,
+            ledgered.subscription,
+            flags,
+            'LEDGER',
+          );
+          return {
+            subscription: ledgered.subscription,
+            syncJob: ledgered.syncJob,
+            ...(companions.length === 0 ? {} : { extraSyncJobs: companions }),
+          };
         }
       }
       if (resetQuoted) {
@@ -2029,7 +2058,27 @@ export class PaymentSubscriptionMutationService {
         await writeTransactionGatewayData(tx, transaction.id, { merge: addOnNotAppliedStamp(addedNothing, new Date()) });
       }
 
-      return { subscription: updatedSubscription, syncJob };
+      // The same devices on the merged subscription's OTHER profiles — under
+      // this deployment's own rules: a row with no entitlement (the ledger is
+      // off or the row cannot carry one) raises their columns the legacy way,
+      // exactly as this branch just did for the target.
+      const companions =
+        addedNothing === null
+          ? await this.extendDeviceAddOnToBundleSiblings(
+              tx,
+              transaction,
+              marker,
+              updatedSubscription,
+              flags,
+              'LEGACY',
+            )
+          : [];
+
+      return {
+        subscription: updatedSubscription,
+        syncJob,
+        ...(companions.length === 0 ? {} : { extraSyncJobs: companions }),
+      };
     });
 
     // ── The reset happens HERE, after the transaction has committed ──────
@@ -2056,6 +2105,271 @@ export class PaymentSubscriptionMutationService {
     await this.announceAddOnCapture(transaction, marker, result.subscription, quoteNote as AddOnQuoteNote | null);
 
     return result;
+  }
+
+  /**
+   * ONE PAYMENT, EVERY PROFILE — EXTRA DEVICES FOLLOW THE MERGED SUBSCRIPTION
+   * ─────────────────────────────────────────────────────────────────────────
+   * «Объединённая подписка» is ONE product sold once, delivered as one
+   * Remnawave profile per member plan. This panel keeps a device limit PER
+   * PROFILE, so a «+1 устройство» bought on the merged subscription has to
+   * reach BOTH halves: otherwise the customer's third device connects through
+   * one profile and is refused by the other, while the cabinet's single card
+   * (which faces the visible member) counts only one of them.
+   *
+   * The owner's rule (21.11.2026): as with an ordinary plan — but for THIS
+   * customer's subscriptions only, never for the plan's other buyers. So the
+   * fan-out is here, at the capture, and not on the bundle's plan row: editing
+   * the card's number is a different decision, and it is the operator's.
+   *
+   * Devices ONLY. Traffic is the member plan the profile really is («25 ГБ +
+   * безлимит» is not two halves of one budget), and the cabinet prints the
+   * visible member's counter — a traffic top-up stays on the half it was bought
+   * for. Squads and expiry are the member plan's for the same reason.
+   *
+   * Which subscriptions: the live halves of the SAME SOLD bundle this customer
+   * holds — `bundleId` marker and all, the same set a merged renewal extends.
+   * A customer who owns one plan of a bundle that happens to be grouped with
+   * another bought separately is not a merged subscription: the target carries
+   * no marker then, and this returns nothing.
+   *
+   * Under the ledger the sibling gets its own entitlement line, quoted exactly
+   * as the primary one (same lifetime, same end), so a refund of the payment —
+   * which reads the payment, not the primary line — takes BOTH halves back, and
+   * each half's own boundary sweep ends its line. Without the ledger (an
+   * environment with the stage off, or a row that cannot carry a term) the
+   * sibling's column is raised the same legacy way the target's was.
+   */
+  private async extendDeviceAddOnToBundleSiblings(
+    tx: Prisma.TransactionClient,
+    transaction: Transaction,
+    marker: AddOnMarker,
+    target: Subscription,
+    flags: AddOnRolloutFlags,
+    /**
+     * HOW the target was just granted. Under `LEDGER` the sibling's line is a
+     * copy of the primary one, and a payment the ledger recorded as a NO-OP
+     * (the target's baseline turned unlimited between quote and capture) grants
+     * nothing here either — there is no primary line to mirror. Under `LEGACY`
+     * the target's column was raised a moment ago in this same transaction, so
+     * the sibling's is raised the same way.
+     */
+    mode: 'LEDGER' | 'LEGACY',
+  ): Promise<readonly ProfileSyncJob[]> {
+    if (marker.addOnType !== AddOnType.EXTRA_DEVICES) return [];
+    const bundle = readBundleMarker(target.planSnapshot);
+    if (bundle === null) return [];
+    const siblings = (await liveBundleSubscriptions(tx, target.userId, bundle.bundleId)).filter(
+      (row) => row.id !== target.id,
+    );
+    if (siblings.length === 0) return [];
+    // The primary line's quote, copied verbatim: both halves must end together,
+    // and a «до сброса» line never reaches here (devices are «до конца
+    // подписки», `withLedgerMarkerDefaults`).
+    const primary =
+      mode === 'LEGACY' || marker.sourceLineKey === undefined
+        ? null
+        : await tx.addOnEntitlement.findUnique({
+            where: {
+              sourceTransactionId_sourceLineKey: {
+                sourceTransactionId: transaction.id,
+                sourceLineKey: marker.sourceLineKey,
+              },
+            },
+            select: {
+              id: true,
+              addOnId: true,
+              catalogRevision: true,
+              receiptName: true,
+              currency: true,
+              lifetime: true,
+              expiresAt: true,
+              totalValue: true,
+            },
+          });
+    // A ledger capture that recorded no line gave the target nothing: the
+    // sibling must not receive the product instead.
+    if (mode === 'LEDGER' && primary === null) return [];
+    const jobs: ProfileSyncJob[] = [];
+    for (const sibling of siblings) {
+      if (sibling.status !== SubscriptionStatus.ACTIVE && sibling.status !== SubscriptionStatus.LIMITED) {
+        continue;
+      }
+      const job =
+        primary === null
+          ? await this.raiseSiblingDeviceLimitInTransaction(tx, transaction, marker, sibling.id)
+          : await this.grantSiblingDeviceEntitlementInTransaction(
+              tx,
+              transaction,
+              marker,
+              sibling.id,
+              primary,
+              flags,
+            );
+      if (job !== null) jobs.push(job);
+    }
+    // Said out loud, because the half the customer does NOT see is exactly the
+    // one nobody would notice: a sibling that is unlimited, has no term, or was
+    // deleted keeps its own number, and the operator has to know which.
+    if (jobs.length < siblings.length) {
+      this.logger.warn(
+        `Add-on ${marker.addOnId} (payment ${transaction.paymentId}) reached ${jobs.length} of ` +
+          `${siblings.length} other profiles of bundle ${bundle.bundleId}: the rest cannot carry a device add-on`,
+      );
+    }
+    return jobs;
+  }
+
+  /**
+   * The sibling's own ledger line for a device add-on the primary profile was
+   * granted (see {@link extendDeviceAddOnToBundleSiblings}).
+   *
+   * The line is marked as a COMPANION in `applicabilitySnapshot`: the cabinet's
+   * «Мои опции» hides it (one purchase, one row) and the money is left at zero,
+   * because the payment was charged once, on the primary line.
+   */
+  private async grantSiblingDeviceEntitlementInTransaction(
+    tx: Prisma.TransactionClient,
+    transaction: Transaction,
+    marker: AddOnMarker,
+    siblingId: string,
+    primary: {
+      readonly id: string;
+      readonly addOnId: string | null;
+      readonly catalogRevision: number;
+      readonly receiptName: string;
+      readonly currency: Currency;
+      readonly lifetime: AddOnLifetime;
+      readonly expiresAt: Date | null;
+      readonly totalValue: bigint;
+    },
+    flags: AddOnRolloutFlags,
+  ): Promise<ProfileSyncJob | null> {
+    const correlationId = `payment:${transaction.paymentId}:companion:${siblingId}`;
+    await this.enterTermModelInTransaction(tx, siblingId, flags);
+    await this.subscriptionTermService.alignTailToExpiryInTransaction(tx, siblingId, { correlationId });
+    const sibling = await tx.subscription.findUnique({ where: { id: siblingId } });
+    if (sibling === null) return null;
+    const term = await tx.subscriptionTerm.findFirst({
+      where: { subscriptionId: sibling.id, status: SubscriptionTermStatus.ACTIVE },
+      select: {
+        id: true,
+        planId: true,
+        startsAt: true,
+        endsAt: true,
+        baseTrafficLimitBytes: true,
+        baseDeviceLimit: true,
+        trafficResetStrategy: true,
+        resetAnchorAt: true,
+      },
+    });
+    if (term === null) return null;
+    // The same reader the target's capture and the offer use: an unlimited
+    // baseline absorbs the add-on, and a line recording it would be a promise
+    // nothing delivers.
+    const baseline = await resolveConfiguredEntitlementBaseline(tx, {
+      subscriptionId: sibling.id,
+      term,
+      subscription: sibling,
+    });
+    if (!isBaselineExtendable(AddOnType.EXTRA_DEVICES, baseline)) return null;
+
+    const created = await this.addOnEntitlementService.createPendingInTransaction(tx, {
+      subscriptionId: sibling.id,
+      termId: term.id,
+      sourceTransactionId: transaction.id,
+      sourceLineKey: companionSourceLineKey(marker.sourceLineKey ?? marker.addOnId, sibling.id),
+      addOnId: primary.addOnId,
+      catalogRevision: primary.catalogRevision,
+      receiptName: primary.receiptName,
+      type: AddOnType.EXTRA_DEVICES,
+      valuePerUnit: marker.addOnValue,
+      totalValue: primary.totalValue,
+      lifetime: primary.lifetime,
+      applicabilitySnapshot: { companion: true, primaryEntitlementId: primary.id },
+      unitAmount: '0',
+      totalAmount: '0',
+      currency: primary.currency,
+      purchasedAt: transaction.createdAt,
+      scheduledActivationAt: transaction.createdAt,
+      expiresAt: primary.expiresAt,
+      expiryEpochId: null,
+      correlationId,
+      companionOfBundleSibling: true,
+    });
+    await this.addOnEntitlementService.transitionInTransaction(tx, {
+      entitlementId: created.entitlementId,
+      command: 'ACTIVATE',
+      commandKey: `activate:${created.entitlementId}`,
+      correlationId,
+      actorType: AddOnEntitlementActorType.SYSTEM,
+      reason: 'DIRECT_PURCHASE_ACTIVATION_COMPANION',
+    });
+    const projection = await this.effectiveProjectionService.recomputeInTransaction(tx, {
+      subscriptionId: sibling.id,
+      mode: 'ACTIVE',
+    });
+    const mirroredTraffic =
+      projection.desiredTrafficLimitBytes === null
+        ? null
+        : Number(projection.desiredTrafficLimitBytes / GIB_BYTES);
+    const mirroredDevice = projection.desiredDeviceLimit === null ? 0 : projection.desiredDeviceLimit;
+    const updated = await tx.subscription.update({
+      where: { id: sibling.id },
+      data: { trafficLimit: mirroredTraffic, deviceLimit: mirroredDevice },
+    });
+    return tx.profileSyncJob.create({
+      data: {
+        subscriptionId: updated.id,
+        action: updated.remnawaveId === null ? SyncAction.CREATE : SyncAction.UPDATE,
+        status: SyncJobStatus.PENDING,
+        aggregateKey: updated.id,
+        desiredRevision: projection.desiredRevision,
+        payload: {
+          source: 'ADDON_PURCHASE_LEDGER_COMPANION',
+          paymentId: transaction.paymentId,
+          entitlementId: created.entitlementId,
+          primaryEntitlementId: primary.id,
+          addOnType: marker.addOnType,
+          addOnValue: marker.addOnValue,
+        } as Prisma.InputJsonObject,
+      },
+    });
+  }
+
+  /**
+   * The sibling's device limit without the ledger: the target's own legacy
+   * increment, repeated on the other half of the same merged subscription.
+   * Same two rules as there — an incoherent value adds nothing, and an
+   * unlimited baseline (`<= 0`) must not be turned finite by `0 + N`.
+   */
+  private async raiseSiblingDeviceLimitInTransaction(
+    tx: Prisma.TransactionClient,
+    transaction: Transaction,
+    marker: AddOnMarker,
+    siblingId: string,
+  ): Promise<ProfileSyncJob | null> {
+    if (!isCoherentAddOnValue(marker.addOnValue)) return null;
+    const sibling = await tx.subscription.findUnique({ where: { id: siblingId } });
+    if (sibling === null || sibling.deviceLimit <= 0) return null;
+    const updated = await tx.subscription.update({
+      where: { id: sibling.id },
+      data: { deviceLimit: { increment: marker.addOnValue } },
+    });
+    return tx.profileSyncJob.create({
+      data: {
+        subscriptionId: updated.id,
+        action: updated.remnawaveId === null ? SyncAction.CREATE : SyncAction.UPDATE,
+        status: SyncJobStatus.PENDING,
+        payload: {
+          source: 'ADDON_PURCHASE',
+          paymentId: transaction.paymentId,
+          addOnType: marker.addOnType,
+          addOnValue: marker.addOnValue,
+          companion: true,
+        } as Prisma.InputJsonObject,
+      },
+    });
   }
 
   /**
@@ -5113,6 +5427,18 @@ interface AddOnMarker {
 
 export function isAddOnTransaction(transaction: Transaction): boolean {
   return readAddOnMarker(transaction) !== null;
+}
+
+/**
+ * The `sourceLineKey` of a COMPANION line of a merged subscription — the
+ * primary line's own key, plus the profile it mirrors onto.
+ *
+ * `(sourceTransactionId, sourceLineKey)` is unique per entitlement, so one
+ * payment can carry one line per profile of the product while a replay of the
+ * same capture computes exactly the same string.
+ */
+function companionSourceLineKey(primaryLineKey: string, subscriptionId: string): string {
+  return `${primaryLineKey}@${subscriptionId}`;
 }
 
 function readAddOnMarker(transaction: Transaction): AddOnMarker | null {
