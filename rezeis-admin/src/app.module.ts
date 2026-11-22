@@ -14,6 +14,7 @@ import { databaseConfig } from './common/config/database.config';
 import { emailConfig } from './common/config/email.config';
 import { validateEnvironment } from './common/config/env.schema';
 import { advertisingConfig } from './common/config/advertising.config';
+import { mergeLinksConfig } from './common/config/merge-links.config';
 import { paymentsConfig } from './common/config/payments.config';
 import { remnawaveConfig } from './common/config/remnawave.config';
 import { redisConfig } from './common/config/redis.config';
@@ -60,6 +61,7 @@ import { FaqModule } from './modules/faq/faq.module';
 import { HealthModule } from './modules/health/health.module';
 import { ImportsModule } from './modules/imports/imports.module';
 import { InternalUserModule } from './modules/internal-user/internal-user.module';
+import { MergeLinksModule } from './modules/merge-links/merge-links.module';
 import { LegalDocumentsModule } from './modules/legal-documents/legal-documents.module';
 import { LinkingModule } from './modules/linking/linking.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
@@ -115,6 +117,7 @@ import { WebhooksModule } from './modules/webhooks/webhooks.module';
         authConfig,
         databaseConfig,
         emailConfig,
+        mergeLinksConfig,
         paymentsConfig,
         redisConfig,
         remnawaveConfig,
@@ -227,6 +230,7 @@ import { WebhooksModule } from './modules/webhooks/webhooks.module';
     PaymentsModule,
     PaymentAnalyticsModule,
     InternalUserModule,
+    MergeLinksModule,
     LegalDocumentsModule,
     LinkingModule,
     LandingConfigModule,

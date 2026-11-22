@@ -18,6 +18,7 @@ import { Separator } from '@/components/ui/separator'
 import { MAIN_MENU_SYSTEM_BUTTONS, MAIN_MENU_TEXT_KEYS } from '../system-screens'
 import { SystemButtonCard } from './SystemButtonCard'
 import { BotTextKeysSection } from './SystemScreenTexts'
+import { TrafficExtraLabelsPanel } from './TrafficExtraLabelsPanel'
 
 export function MainMenuSystemPanel() {
   const { t } = useTranslation()
@@ -44,7 +45,15 @@ export function MainMenuSystemPanel() {
           />
         ))}
       </div>
-      <BotTextKeysSection keys={MAIN_MENU_TEXT_KEYS} titleKey="botFlow.mainMenu.textsTitle" />
+      <BotTextKeysSection
+        keys={MAIN_MENU_TEXT_KEYS}
+        titleKey="botFlow.mainMenu.textsTitle"
+        // «Трафик доп.» is the caption of the 2nd tariff's line AND the base of
+        // the windows for the 3rd, 4th, … — one text field cannot do both.
+        renderKey={(key) =>
+          key === 'profile.traffic_extra' ? <TrafficExtraLabelsPanel /> : undefined
+        }
+      />
     </section>
   )
 }

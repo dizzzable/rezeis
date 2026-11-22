@@ -31,6 +31,20 @@ export interface AdminPlanInterface {
   readonly icon: string | null;
   readonly isActive: boolean;
   readonly isArchived: boolean;
+  /**
+   * The operator's «Скрыть от покупателя» switch: the plan stays in every panel
+   * listing and grant picker, and the BUYER catalogue skips it. Independent of
+   * `isActive` (which also stops grants and renewals) and of `isArchived`
+   * (which is about transitions).
+   */
+  readonly hiddenFromBuyer: boolean;
+  /**
+   * Set when this row is the plan a bundle is issued as («объединённая
+   * подписка»). Its type, traffic limit and squads are owned by the bundle's
+   * visible member and its name by the bundle dialog; the plan editor does not
+   * render those fields.
+   */
+  readonly bundle: { readonly id: string; readonly name: string } | null;
   readonly archivedRenewMode: ArchivedPlanRenewModeValue;
   readonly type: PlanType;
   readonly availability: PlanAvailability;

@@ -51,6 +51,7 @@ import {
   enqueueSyncJobsDeferringFailure,
   releaseFulfillmentClaim,
 } from './payment-fulfillment-claim.util';
+import { readBundleMarker } from '../../merge-links/utils/bundle-snapshot.util';
 import { PaymentSubscriptionMutationService } from './payment-subscription-mutation.service';
 import { SavedPaymentMethodService } from './saved-payment-method.service';
 import { PaymentReconciliationService } from './payment-reconciliation.service';
@@ -756,7 +757,15 @@ export class PaymentsRenewalCheckoutService {
       where: { id: terms.subscriptionId },
       select: { planSnapshot: true },
     });
-    if (subscription !== null && renewsOntoAnotherPlan(subscription.planSnapshot, terms.planId)) {
+    // A merged tariff renews onto the bundle's OWN plan row while the
+    // subscription's snapshot keeps its member plan: the two ids disagree by
+    // design, and the sweep tolerates the same disagreement
+    // (`strandedReason`). Not a plan change.
+    if (
+      subscription !== null &&
+      renewsOntoAnotherPlan(subscription.planSnapshot, terms.planId) &&
+      readBundleMarker(subscription.planSnapshot)?.bundlePlanId !== terms.planId
+    ) {
       throw autopayNotAvailable('PLAN_CHANGE');
     }
   }

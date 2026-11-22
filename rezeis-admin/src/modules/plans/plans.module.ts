@@ -10,6 +10,7 @@ import { AdminPlansStatsController } from './controllers/admin-plans-stats.contr
 import { InternalPlanCatalogController } from './controllers/internal-plan-catalog.controller';
 import { PlanMigrationsModule } from './migrations/plan-migrations.module';
 import { PlanCatalogService } from './services/plan-catalog.service';
+import { BundleFacePlanService } from './services/bundle-face-plan.service';
 import { PlanDeletionService } from './services/plan-deletion.service';
 import { PlanReferenceGuardService } from './services/plan-reference-guard.service';
 import { PlanSquadPropagationService } from './services/plan-squad-propagation.service';
@@ -60,6 +61,10 @@ import { PricingService } from './services/pricing.service';
     PlanReferenceGuardService,
     PlanDeletionService,
     PlanSquadPropagationService,
+    // The plan a bundle is issued as. Exported because `PlanBundlesService`
+    // (MergeLinksModule) creates and keeps that row in step with the grouping,
+    // and both writers must use ONE rule (`BundleFacePlanService`).
+    BundleFacePlanService,
     PlansAdminService,
     PlansAdminValidators,
     PlanSnapshotSyncService,
@@ -71,6 +76,6 @@ import { PricingService } from './services/pricing.service';
   // the user card (`AdminUserManagementController`), which used to write
   // `Plan.allowedUserIds` itself — untransacted, unvalidated and unaudited,
   // behind the wrong permission. Both writers of that column now live here.
-  exports: [PlanCatalogService, PlansAdminService, PricingService, PlanSnapshotSyncService],
+  exports: [PlanCatalogService, PlansAdminService, PricingService, PlanSnapshotSyncService, BundleFacePlanService],
 })
 export class PlansModule {}

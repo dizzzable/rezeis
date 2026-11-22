@@ -463,6 +463,17 @@ function AddOnDialog({
   /* eslint-enable react-hooks/set-state-in-effect */
 
   const { data: plans } = usePlans()
+  // «Доп. трафик» is only sellable on a plan with a finite limit: the gigabytes
+  // are added to that limit, and an unlimited plan has none to add to (the offer
+  // is refused per subscription as well — `isBaselineExtendable`). A plan that is
+  // already selected stays visible even when it no longer qualifies, so editing
+  // an older add-on cannot silently drop it from the list and rewrite the row.
+  const selectablePlans = (plans ?? []).filter(
+    (plan) =>
+      type !== 'EXTRA_TRAFFIC' ||
+      plan.trafficLimit !== null ||
+      selectedPlanIds.includes(String(plan.id)),
+  )
 
   const createMutation = useMutation({
     mutationFn: (input: AddOnFormData) => api.post('/admin/add-ons', input),
@@ -660,10 +671,12 @@ function AddOnDialog({
           <div className="space-y-2">
             <Label>{t('addOnsPage.form.plans')}</Label>
             <p className="text-[11px] text-muted-foreground">
-              {t('addOnsPage.form.plansHint')}
+              {type === 'EXTRA_TRAFFIC'
+                ? t('addOnsPage.form.plansHintTraffic')
+                : t('addOnsPage.form.plansHint')}
             </p>
             <div className="flex flex-wrap gap-2 max-h-32 overflow-y-auto">
-              {plans?.map((plan) => {
+              {selectablePlans.map((plan) => {
                 const planId = String(plan.id)
                 const isSelected = selectedPlanIds.includes(planId)
                 return (
@@ -681,7 +694,7 @@ function AddOnDialog({
                   </button>
                 )
               })}
-              {!plans?.length && (
+              {selectablePlans.length === 0 && (
                 <p className="text-xs text-muted-foreground">
                   {t('addOnsPage.form.noPlans')}
                 </p>

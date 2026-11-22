@@ -26,6 +26,7 @@ export type Row = Record<string, unknown>;
 
 type ModelName =
   | 'plan'
+  | 'planBundle'
   | 'subscription'
   | 'subscriptionTerm'
   | 'transaction'
@@ -44,13 +45,24 @@ type ModelName =
 
 interface RelationSpec {
   readonly model: ModelName;
-  readonly kind: 'one' | 'many';
-  /** `one`: the foreign key on THIS row. `many`: the foreign key on the related rows. */
+  /**
+   * `one`: the foreign key lives on THIS row.
+   * `one-from-related`: the foreign key lives on the RELATED row and points
+   * here (Prisma's optional one-to-one seen from the side without the column —
+   * a plan's `bundleFace`).
+   * `many`: the foreign key lives on the related rows.
+   */
+  readonly kind: 'one' | 'one-from-related' | 'many';
   readonly key: string;
 }
 
 const RELATIONS: Partial<Record<ModelName, Record<string, RelationSpec>>> = {
   transactionItem: { transaction: { model: 'transaction', kind: 'one', key: 'transactionId' } },
+  // A bundle's own plan row (`PlanBundle.planId`). The renewal-target filters ask
+  // `bundleFace: { is: null }` — a merged tariff is never a renewal or upgrade
+  // destination — so the fixture must answer it, and answer it the way the empty
+  // table does: every plan here is an ordinary one.
+  plan: { bundleFace: { model: 'planBundle', kind: 'one-from-related', key: 'planId' } },
   promocode: { actions: { model: 'promocodeAction', kind: 'many', key: 'promocodeId' } },
   contestPrize: { contest: { model: 'contest', kind: 'one', key: 'contestId' } },
 };
@@ -137,6 +149,11 @@ export function buildPlanReferenceDb(seed: PlanReferenceDbSeed = {}) {
   const nextId = (model: string): string => `${model}-gen-${++generated}`;
   const tables: Record<ModelName, Row[]> = {
     plan: (seed.plans ?? []).map((row) => planRow(row)),
+    // Read by `PlanDeletionService` only to refuse deleting a bundle's face
+    // plan. The fixture has no bundle seed yet — an empty table means "this
+    // plan is not a bundle's face", which is the case every deletion spec here
+    // exercises.
+    planBundle: [],
     subscription: copyRows(seed.subscriptions),
     subscriptionTerm: copyRows(seed.subscriptionTerms),
     transaction: copyRows(seed.transactions),
@@ -199,10 +216,23 @@ export function buildPlanReferenceDb(seed: PlanReferenceDbSeed = {}) {
 
   function matchesRelation(row: Row, relation: RelationSpec, condition: unknown): boolean {
     const spec = condition as Record<string, unknown>;
-    if (relation.kind === 'one') {
-      const related = tables[relation.model].find((candidate) => candidate.id === row[relation.key]);
-      if ('is' in spec) return related !== undefined && matchesWhere(relation.model, related, spec.is);
-      if ('isNot' in spec) return related === undefined || !matchesWhere(relation.model, related, spec.isNot);
+    if (relation.kind === 'one' || relation.kind === 'one-from-related') {
+      const related =
+        relation.kind === 'one'
+          ? tables[relation.model].find((candidate) => candidate.id === row[relation.key])
+          : tables[relation.model].find((candidate) => candidate[relation.key] === row.id);
+      // `is: null` / `isNot: null` are how Prisma spells "no related row"; any
+      // other value is a filter on the related row itself.
+      if ('is' in spec) {
+        return spec.is === null
+          ? related === undefined
+          : related !== undefined && matchesWhere(relation.model, related, spec.is);
+      }
+      if ('isNot' in spec) {
+        return spec.isNot === null
+          ? related !== undefined
+          : related === undefined || !matchesWhere(relation.model, related, spec.isNot);
+      }
       return related !== undefined && matchesWhere(relation.model, related, spec);
     }
     const related = tables[relation.model].filter((candidate) => candidate[relation.key] === row.id);
@@ -213,6 +243,30 @@ export function buildPlanReferenceDb(seed: PlanReferenceDbSeed = {}) {
     if (mode === 'every') return related.every((candidate) => matchesWhere(relation.model, candidate, spec.every));
     if (mode === 'none') return !related.some((candidate) => matchesWhere(relation.model, candidate, spec.none));
     throw new Error(`plan-reference-db: unsupported to-many filter "${String(mode)}"`);
+  }
+
+  /**
+   * `include` as the readers ask it. The fixture has no bundle seeds, so a plan's
+   * `bundleFace` (the plan row a grouping is sold as) answers `null` — every plan
+   * here is an ordinary one, which is what the specs using this table describe.
+   */
+  function withIncludes(model: ModelName, row: Row, include: unknown): Row {
+    if (include === undefined || typeof include !== 'object' || include === null) return row;
+    const result: Row = { ...row };
+    for (const key of Object.keys(include as Record<string, unknown>)) {
+      const relation = RELATIONS[model]?.[key];
+      if (relation === undefined) continue;
+      if (relation.kind === 'one') {
+        result[key] =
+          tables[relation.model].find((candidate) => candidate.id === row[relation.key]) ?? null;
+      } else if (relation.kind === 'one-from-related') {
+        result[key] =
+          tables[relation.model].find((candidate) => candidate[relation.key] === row.id) ?? null;
+      } else {
+        result[key] = tables[relation.model].filter((candidate) => candidate[relation.key] === row.id);
+      }
+    }
+    return result;
   }
 
   function matchesField(model: ModelName, field: string, actual: unknown, condition: unknown): boolean {
@@ -347,25 +401,25 @@ export function buildPlanReferenceDb(seed: PlanReferenceDbSeed = {}) {
         if (args.take !== undefined) rows = rows.slice(0, args.take);
         return rows.map((row) => project(row, args.select));
       },
-      findFirst: async (args: { where?: unknown; select?: unknown; orderBy?: unknown } = {}) => {
+      findFirst: async (args: { where?: unknown; select?: unknown; orderBy?: unknown; include?: unknown } = {}) => {
         calls.push(`${model}.findFirst`);
         fail(`${model}.findFirst`);
         const row = sortRows(table().filter((candidate) => matchesWhere(model, candidate, args.where)), args.orderBy)[0];
-        return row === undefined ? null : project(row, args.select);
+        return row === undefined ? null : project(withIncludes(model, row, args.include), args.select);
       },
-      findUnique: async (args: { where: unknown; select?: unknown }) => {
+      findUnique: async (args: { where: unknown; select?: unknown; include?: unknown }) => {
         calls.push(`${model}.findUnique`);
         fail(`${model}.findUnique`);
         const matched = table().filter((candidate) => matchesWhere(model, candidate, args.where));
         if (matched.length > 1) throw new Error(`plan-reference-db: findUnique on ${model} matched ${matched.length} rows`);
-        return matched[0] === undefined ? null : project(matched[0], args.select);
+        return matched[0] === undefined ? null : project(withIncludes(model, matched[0], args.include), args.select);
       },
-      findUniqueOrThrow: async (args: { where: unknown; select?: unknown }) => {
+      findUniqueOrThrow: async (args: { where: unknown; select?: unknown; include?: unknown }) => {
         calls.push(`${model}.findUniqueOrThrow`);
         fail(`${model}.findUniqueOrThrow`);
         const matched = table().filter((candidate) => matchesWhere(model, candidate, args.where));
         if (matched.length !== 1) throw new Error(`plan-reference-db: findUniqueOrThrow on ${model} matched ${matched.length} rows`);
-        return project(matched[0]!, args.select);
+        return project(withIncludes(model, matched[0]!, args.include), args.select);
       },
       count: async (args: { where?: unknown } = {}) => {
         calls.push(`${model}.count`);
@@ -477,6 +531,8 @@ export function buildPlanReferenceDb(seed: PlanReferenceDbSeed = {}) {
 
   const client = {
     plan: delegate('plan'),
+    // Read by `PlanDeletionService` to refuse deleting a bundle's face plan.
+    planBundle: delegate('planBundle'),
     subscription: delegate('subscription'),
     subscriptionTerm: delegate('subscriptionTerm'),
     transaction: delegate('transaction'),

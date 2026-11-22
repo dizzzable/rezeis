@@ -15,14 +15,19 @@ export const CODE_SLOT_USAGE: Readonly<Record<string, readonly string[]>> = {
   SUB_PROFILE: ['welcome.mini-profile'],
   SUB_DEVICES: ['welcome.mini-profile'],
   SUB_TRAFFIC: ['welcome.mini-profile'],
+  SUB_TRAFFIC_EXTRA: ['welcome.mini-profile'],
   SUB_EXPIRY: ['welcome.mini-profile'],
   STATUS_ACTIVE: ['welcome.subscription-card'],
   STATUS_LIMITED: ['welcome.subscription-card'],
   STATUS_EXPIRED: ['welcome.subscription-card'],
   STATUS_DISABLED: ['welcome.subscription-card'],
-  TRAFFIC_OK: ['welcome.traffic-bar'],
-  TRAFFIC_WARN: ['welcome.traffic-bar'],
-  TRAFFIC_FULL: ['welcome.traffic-bar'],
+  // The status dot of a traffic line — the single-plan line and every «Трафик
+  // доп.» line of a merged tariff use the same three slots. The label names the
+  // dot, not the whole bar: the emoji is rendered as its own entity inside the
+  // line (the leading 📈 is a separate slot, SUB_TRAFFIC / SUB_TRAFFIC_EXTRA).
+  TRAFFIC_OK: ['welcome.traffic-dot'],
+  TRAFFIC_WARN: ['welcome.traffic-dot'],
+  TRAFFIC_FULL: ['welcome.traffic-dot'],
   TRIAL: ['menu.trial-button'],
 };
 

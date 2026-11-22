@@ -11,7 +11,7 @@
  * (`createText` / `updateText`, which carry the reiwa cache-bust interceptor),
  * with an optional EN sibling (`<key>@en`). RU + EN both get an emoji picker.
  */
-import { useEffect, useRef, useState, type RefObject } from 'react'
+import { Fragment, useEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Languages, Save as SaveIcon } from 'lucide-react'
@@ -79,6 +79,7 @@ const KEY_CAPTIONS: Readonly<Record<string, string>> = {
   'profile.devices': 'botFlow.screenTexts.captions.subscriptionLine',
   'profile.devices_unlimited': 'botFlow.screenTexts.captions.subscriptionLine',
   'profile.traffic': 'botFlow.screenTexts.captions.subscriptionLine',
+  'profile.traffic_extra': 'botFlow.screenTexts.captions.subscriptionLine',
   'profile.unlimited': 'botFlow.screenTexts.captions.subscriptionLine',
   'profile.until': 'botFlow.screenTexts.captions.subscriptionLine',
   'common.not_available': 'botFlow.screenTexts.captions.subscriptionLine',
@@ -162,6 +163,13 @@ interface BotTextKeysSectionProps {
   readonly titleKey?: string
   /** A caption (i18n key) per text key, over `KEY_CAPTIONS`. */
   readonly captions?: Readonly<Record<string, string>>
+  /**
+   * Replaces the editor of one key with a caller-rendered block. The main menu
+   * uses it for `profile.traffic_extra`: that caption comes with a «+» that adds
+   * a window per further tariff of an объединённая подписка
+   * (`TrafficExtraLabelsPanel`), which a single text field cannot hold.
+   */
+  readonly renderKey?: (key: string) => ReactNode | undefined
 }
 
 /**
@@ -173,6 +181,7 @@ export function BotTextKeysSection({
   keys,
   titleKey = 'botFlow.screenTexts.title',
   captions,
+  renderKey,
 }: BotTextKeysSectionProps) {
   const { t } = useTranslation()
 
@@ -196,9 +205,13 @@ export function BotTextKeysSection({
           (with a caption above it on the share texts and the conditional ones,
           `KEY_CAPTIONS`) is what tells them apart.
         */}
-        {keys.map((key) => (
-          <TextKeyEditor key={key} textKey={key} captionKey={captions?.[key]} />
-        ))}
+        {keys.map((key) => {
+          const replacement = renderKey?.(key)
+          if (replacement !== undefined) {
+            return <Fragment key={key}>{replacement}</Fragment>
+          }
+          return <TextKeyEditor key={key} textKey={key} captionKey={captions?.[key]} />
+        })}
       </div>
     </>
   )

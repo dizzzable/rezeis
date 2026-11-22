@@ -216,6 +216,23 @@ export class AutoRenewService {
       // the subscription ACTIVE past its date waiting for a retry that cannot
       // succeed. It lapses normally, and the ordinary expiry notice — with its
       // "renew" button — is what tells the customer to choose.
+      // ── ONE CHARGE PER MERGED SUBSCRIPTION ───────────────────────────
+      //
+      // A merged subscription is two or more subscriptions and ONE product: its
+      // profiles fall due on the same tick, and a charge extends the WHOLE set.
+      // Charging every profile would bill the customer twice for one product, so
+      // only the profile that carries it is charged (`isBundleRenewalPrimary` —
+      // the member the merged link faces, else the oldest). The other half
+      // lapses with nothing charged, and the charge taken on the primary renews
+      // them all at once (`renewMergedTariffInTransaction`).
+      if (!(await this.subscriptionRenewalService.isBundleRenewalPrimary(sub.id))) {
+        skipped += 1;
+        this.logger.log(
+          `Autopay skipped for subscription ${sub.id}: it is a second half of a merged subscription, charged through its primary profile`,
+        );
+        continue;
+      }
+
       if (await this.subscriptionRenewalService.requiresPlanSelection(sub.id)) {
         skipped += 1;
         this.logger.log(

@@ -28,6 +28,7 @@ import {
   AUTOPAY_FIRST_CHARGE_FAILED_NOTICE_TYPE,
 } from '../../notifications/catalog/default-templates.catalog';
 import { UserNotificationsService } from '../../notifications/services/user-notifications.service';
+import { readBundleMarker } from '../../merge-links/utils/bundle-snapshot.util';
 import { releasePaidTrialClaim } from '../../subscriptions/services/trial-claim-ledger.util';
 import { CHECKOUT_LIFETIME_MS } from '../constants/checkout-lifetime.constant';
 import type { CabinetView } from '../../reiwa-peers/cabinet-capabilities';
@@ -2377,6 +2378,7 @@ export class ProviderSubscriptionService {
               : {
                   status: subscription.status,
                   planId: readSnapshotPlanId(subscription.planSnapshot),
+                  equivalentPlanIds: bundleEquivalentPlanIds(subscription.planSnapshot),
                   lifetime: isLifetimeSubscription(subscription),
                   ...trialConversionOf(conversions.get(row.firstTransactionId), row.subscriptionId, subscription.isTrial),
                   ...planChangeOf(conversions.get(row.firstTransactionId), row.subscriptionId, subscription.isTrial, now),
@@ -3303,6 +3305,13 @@ export function strandedReason(input: {
          * for nothing, to be handed back by hand. Absent reads as dated.
          */
         readonly lifetime?: boolean;
+        /**
+         * Plan ids THE ROW may name for this subscription without being a move:
+         * a merged tariff's own plan row (`planSnapshot.bundlePlanId`) while the
+         * subscription is one of its halves. A merged renewal prices and renews
+         * that row, while the profile's snapshot keeps its member plan.
+         */
+        readonly equivalentPlanIds?: readonly string[];
       };
   readonly planId: string;
 }): string | null {
@@ -3319,9 +3328,20 @@ export function strandedReason(input: {
   if (input.subscription.planChange === 'LOST') return 'plan change without its first charge';
   if (input.subscription.planChange === 'PENDING') return null;
   if (input.subscription.planId !== null && input.subscription.planId !== input.planId) {
-    return 'subscription moved to another plan';
+    if (!(input.subscription.equivalentPlanIds ?? []).includes(input.planId)) {
+      return 'subscription moved to another plan';
+    }
   }
   return null;
+}
+
+/**
+ * The plan ids a provider row may name for a subscription sold as a merged
+ * tariff: the bundle's own row. Empty for every ordinary subscription.
+ */
+function bundleEquivalentPlanIds(planSnapshot: Prisma.JsonValue): readonly string[] {
+  const marker = readBundleMarker(planSnapshot);
+  return marker === null ? [] : [marker.bundlePlanId];
 }
 
 /** The checkout of a row whose first charge is a trial's UPGRADE, as the sweep reads it. */

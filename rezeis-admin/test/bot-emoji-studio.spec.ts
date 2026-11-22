@@ -26,6 +26,12 @@ describe('slot-usage util', () => {
     assert.ok(usage.CARD.includes('text:welcome'));
     // Code-only slot still present without any text reference.
     assert.deepEqual(usage.SUB_PROFILE, [...CODE_SLOT_USAGE.SUB_PROFILE]);
+    // The traffic-status slots are the DOT of every traffic line (single plan
+    // and each «Трафик доп.» line of a merged bundle), so they no longer claim
+    // the whole bar as their site.
+    assert.deepEqual(usage.TRAFFIC_OK, ['welcome.traffic-dot']);
+    assert.deepEqual(usage.TRAFFIC_WARN, ['welcome.traffic-dot']);
+    assert.deepEqual(usage.TRAFFIC_FULL, ['welcome.traffic-dot']);
   });
 });
 

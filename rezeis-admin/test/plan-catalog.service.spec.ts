@@ -10,6 +10,9 @@ describe('PlanCatalogService', () => {
   it('returns only ALL plans for anonymous web catalog reads and excludes Telegram Stars on WEB', async () => {
     let actualPlanWhere: unknown;
     const prismaService = {
+      // The catalog asks which merged tariffs hold an unlimited plan; these
+      // fixtures carry no grouping, so the answer is "none".
+      planBundle: { findMany: async () => [] as const },
       paymentGateway: {
         findMany: async () => [
           { id: 'gateway-1', type: PaymentGatewayType.YOOKASSA, currency: Currency.USD, isActive: true, orderIndex: 1 },
@@ -48,6 +51,10 @@ describe('PlanCatalogService', () => {
       // A deleted plan is never sold, whatever its flags say — defence in depth
       // behind the delete, which switches them off.
       deletedAt: null,
+      // The operator's «Скрыть от покупателя» switch. A bundle's own plan row is
+      // NOT filtered out any more: it is the tariff the shop sells, and the
+      // checkout mints one subscription per member plan for it.
+      hiddenFromBuyer: false,
       availability: PlanAvailability.ALL,
     });
     assert.equal(actual.length, 1);
@@ -74,6 +81,9 @@ describe('PlanCatalogService', () => {
   it('filters plans by authenticated user context and applies discounts to gateway-aware prices', async () => {
     let actualPlanWhere: unknown;
     const prismaService = {
+      // The catalog asks which merged tariffs hold an unlimited plan; these
+      // fixtures carry no grouping, so the answer is "none".
+      planBundle: { findMany: async () => [] as const },
       paymentGateway: {
         findMany: async () => [
           { id: 'gateway-1', type: PaymentGatewayType.YOOKASSA, currency: Currency.USD, isActive: true, orderIndex: 1 },
@@ -123,7 +133,12 @@ describe('PlanCatalogService', () => {
       userId: 'user-1',
     });
 
-    assert.deepStrictEqual(actualPlanWhere, { isActive: true, isArchived: false, deletedAt: null });
+    assert.deepStrictEqual(actualPlanWhere, {
+      isActive: true,
+      isArchived: false,
+      deletedAt: null,
+      hiddenFromBuyer: false,
+    });
     assert.deepStrictEqual(
       actual.map((plan) => plan.id),
       ['plan-all', 'plan-new', 'plan-invited', 'plan-allowed', 'plan-trial'],
@@ -180,6 +195,9 @@ describe('PlanCatalogService', () => {
   ]) {
     it(scenario.name, async () => {
       const prismaService = {
+      // The catalog asks which merged tariffs hold an unlimited plan; these
+      // fixtures carry no grouping, so the answer is "none".
+      planBundle: { findMany: async () => [] as const },
         paymentGateway: {
           findMany: async () => [
             {
@@ -255,6 +273,9 @@ describe('PlanCatalogService', () => {
     const squads = ['8f1c0a3e-0000-4000-8000-000000000001', '8f1c0a3e-0000-4000-8000-000000000002'];
     const external = '8f1c0a3e-0000-4000-8000-0000000000ff';
     const prismaService = {
+      // The catalog asks which merged tariffs hold an unlimited plan; these
+      // fixtures carry no grouping, so the answer is "none".
+      planBundle: { findMany: async () => [] as const },
       paymentGateway: { findMany: async () => [] },
       plan: {
         findMany: async () => [

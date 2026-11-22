@@ -51,6 +51,7 @@ import { api } from '@/lib/api'
 import { expectArray, isRecord } from '@/lib/api-utils'
 import { activeLocale, cn, truncate } from '@/lib/utils'
 import { plansQueryKeys, usePlans } from '@/features/plans/plans-api'
+import { planBundlesListOptions } from '@/features/plans/plan-bundles-api'
 import { getErrorMessage } from '@/lib/http-errors'
 import { RemnawaveIcon } from '@/features/remnawave/remnawave-icon'
 import type {
@@ -2146,7 +2147,12 @@ function SubscriptionsTab({ user, telegramId, queryKey }: { user: UserDetail; te
   // Operators can assign ANY plan by hand — including archived ones (e.g. to
   // grandfather a user onto a retired tariff). Archived plans are kept but
   // labelled so they're distinguishable in the picker.
-  const assignablePlans = plans ?? []
+  //
+  // A bundle's face plan is NOT offered: it describes a merged subscription
+  // (several profiles in one link), while this picker moves ONE subscription
+  // onto it. The server refuses it too; keeping it out of the list is what
+  // stops the operator from finding that out by trying.
+  const assignablePlans = (plans ?? []).filter((plan) => plan.bundle == null)
 
   const subs = user.subscriptions ?? []
 
@@ -3319,44 +3325,192 @@ function PlanAccessSection({
 function GiveSubForm({ telegramId, queryKey, onClose }: { telegramId: string; queryKey: string[]; onClose: () => void }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
+  const { data: plans } = usePlans()
+  // A bundle is a property of the catalogue, so its list asks the plans
+  // permission — and it is only asked for in the mode that needs it. An
+  // operator who may grant subscriptions but not see plans keeps the single
+  // plan mode and never sees a 403 behind an option they could have picked.
+  const canViewPlans = useHasPermission('plans', 'view')
+  // What kind of grant this dialog is for. The bundle mode picks no plan at
+  // all: the grouping already names them, and the panel writes one ordinary
+  // subscription per member plan — that is what makes the merged link appear.
+  // Before this, an operator who wanted a merged subscription had to remember
+  // the bundle and grant its plans one by one, and could not read the link.
+  const [mode, setMode] = useState<'plan' | 'bundle'>('plan')
   const [planId, setPlanId] = useState('')
+  const [bundleId, setBundleId] = useState('')
   const [days, setDays] = useState('30')
   const [isTrial, setIsTrial] = useState(false)
+  // Set by a bundle grant: the dialog stays open and shows the link to send.
+  const [bundleResult, setBundleResult] = useState<{ mergeUrl: string | null } | null>(null)
+  const { data: bundles } = useQuery({
+    ...planBundlesListOptions(),
+    enabled: mode === 'bundle' && canViewPlans,
+  })
 
-  const { data: plans } = usePlans()
+  const planNameById = new Map((plans ?? []).map((plan) => [String(plan.id), plan.name]))
+  const activeBundles = (bundles ?? []).filter((bundle) => bundle.isActive)
 
   const mutation = useMutation({
-    mutationFn: () => api.post(`/admin/users/${telegramId}/give-subscription`, { planId, durationDays: parseInt(days), isTrial }),
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey }); toast.success(t('userDetailPanel.toasts.subGranted')); onClose() },
+    mutationFn: async (): Promise<{ mergeUrl: string | null }> => {
+      if (mode === 'bundle') {
+        const response = await api.post<{ mergeUrl?: string | null }>(
+          `/admin/users/${telegramId}/give-bundle-subscription`,
+          { bundleId, durationDays: parseInt(days) },
+        )
+        return { mergeUrl: response.data?.mergeUrl ?? null }
+      }
+      const response = await api.post<{ mergeUrl?: string | null }>(
+        `/admin/users/${telegramId}/give-subscription`,
+        {
+          planId,
+          durationDays: parseInt(days),
+          isTrial,
+        },
+      )
+      // A bundle's face plan issues the whole merged subscription, and its
+      // answer carries the link — show it the way the bundle mode does instead
+      // of a toast that the operator must not lose.
+      return { mergeUrl: response.data?.mergeUrl ?? null }
+    },
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey })
+      if (mode === 'bundle' || result.mergeUrl !== null) {
+        // NOT closed here: the merged link is the one thing the operator needs
+        // from this screen, and a toast that the customer must not lose is a
+        // worse place for it than the dialog in front of them.
+        setBundleResult(result)
+        return
+      }
+      toast.success(t('userDetailPanel.toasts.subGranted'))
+      onClose()
+    },
     onError: (err) => toast.error(getErrorMessage(err, t('userDetailPage.subscriptionUpdateFailed'))),
   })
+
+  if (bundleResult !== null) {
+    return (
+      <div className="space-y-4">
+        <p className="text-sm">{t('userDetailPanel.subscriptions.bundleGranted')}</p>
+        {bundleResult.mergeUrl === null ? (
+          <p className="text-sm text-destructive">{t('userDetailPanel.subscriptions.bundleNoLink')}</p>
+        ) : (
+          <div className="space-y-1.5">
+            <Label htmlFor="give-bundle-link">{t('userDetailPanel.subscriptions.mergeLink')}</Label>
+            <div className="flex gap-2">
+              <Input
+                id="give-bundle-link"
+                readOnly
+                value={bundleResult.mergeUrl}
+                onFocus={(event) => event.currentTarget.select()}
+              />
+              <Button
+                variant="outline"
+                onClick={() => {
+                  const link = bundleResult.mergeUrl ?? ''
+                  void copyTextToClipboard(link).then((copied) => {
+                    if (copied) toast.success(t('userDetailPanel.subscriptions.mergeLinkCopied'))
+                    else
+                      toast.error(
+                        t('copyableId.copyFailed', { label: t('userDetailPanel.subscriptions.mergeLink') }),
+                        { description: link },
+                      )
+                  })
+                }}
+              >
+                <Copy className="mr-1 h-4 w-4" />
+                {t('userDetailPanel.subscriptions.mergeLinkCopy')}
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground">{t('userDetailPanel.subscriptions.mergeLinkHint')}</p>
+          </div>
+        )}
+        <div className="flex justify-end">
+          <Button onClick={onClose}>{t('userDetailPanel.subscriptions.done')}</Button>
+        </div>
+      </div>
+    )
+  }
+
+  const submitting = mutation.isPending
+  const canSubmit = mode === 'bundle' ? bundleId !== '' : planId !== ''
 
   return (
     <div className="space-y-4">
       <div className="space-y-1.5">
-        <Label>{t('userDetailPanel.subscriptions.plan')}</Label>
-        <Select value={planId} onValueChange={setPlanId}>
-          <SelectTrigger><SelectValue placeholder={t('userDetailPanel.subscriptions.planPlaceholder')} /></SelectTrigger>
+        <Label htmlFor="give-sub-mode">{t('userDetailPanel.subscriptions.giveMode')}</Label>
+        <Select value={mode} onValueChange={(value) => setMode(value === 'bundle' ? 'bundle' : 'plan')}>
+          <SelectTrigger id="give-sub-mode" aria-label={t('userDetailPanel.subscriptions.giveMode')}>
+            <SelectValue />
+          </SelectTrigger>
           <SelectContent>
-            {(plans ?? []).filter((p) => !p.isArchived).map((p) => (
-              <SelectItem key={p.id} value={String(p.id)}>{p.name}</SelectItem>
-            ))}
+            <SelectItem value="plan">{t('userDetailPanel.subscriptions.giveModePlan')}</SelectItem>
+            {canViewPlans && (
+              <SelectItem value="bundle">{t('userDetailPanel.subscriptions.giveModeBundle')}</SelectItem>
+            )}
           </SelectContent>
         </Select>
       </div>
+      {mode === 'plan' ? (
+        <div className="space-y-1.5">
+          <Label>{t('userDetailPanel.subscriptions.plan')}</Label>
+          <Select value={planId} onValueChange={setPlanId}>
+            <SelectTrigger aria-label={t('userDetailPanel.subscriptions.plan')}>
+              <SelectValue placeholder={t('userDetailPanel.subscriptions.planPlaceholder')} />
+            </SelectTrigger>
+            <SelectContent>
+              {(plans ?? []).filter((p) => !p.isArchived).map((p) => (
+                <SelectItem key={p.id} value={String(p.id)}>
+                  {p.bundle != null
+                    ? `${p.name} — ${t('userDetailPanel.subscriptions.planMergedSuffix')}`
+                    : p.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      ) : (
+        <div className="space-y-1.5">
+          <Label>{t('userDetailPanel.subscriptions.bundle')}</Label>
+          {activeBundles.length === 0 ? (
+            <p className="text-xs text-muted-foreground">{t('userDetailPanel.subscriptions.noBundles')}</p>
+          ) : (
+            <Select value={bundleId} onValueChange={setBundleId}>
+              <SelectTrigger aria-label={t('userDetailPanel.subscriptions.bundle')}>
+                <SelectValue placeholder={t('userDetailPanel.subscriptions.bundlePlaceholder')} />
+              </SelectTrigger>
+              <SelectContent>
+                {activeBundles.map((bundle) => {
+                  const names = bundle.planIds
+                    .map((id) => planNameById.get(id))
+                    .filter((name): name is string => typeof name === 'string')
+                    .join(' + ')
+                  return (
+                    <SelectItem key={bundle.id} value={bundle.id}>
+                      {names.length > 0 ? `${bundle.name} — ${names}` : bundle.name}
+                    </SelectItem>
+                  )
+                })}
+              </SelectContent>
+            </Select>
+          )}
+        </div>
+      )}
       <div className="space-y-1.5">
         <Label>{t('userDetailPanel.subscriptions.duration')}</Label>
         <Input type="number" min="1" value={days} onChange={(e) => setDays(e.target.value)} />
       </div>
-      <div className="flex items-center gap-2">
-        <Switch checked={isTrial} onCheckedChange={setIsTrial} id="trial-toggle" />
-        <Label htmlFor="trial-toggle">{t('userDetailPanel.subscriptions.markTrial')}</Label>
-      </div>
+      {mode === 'plan' && (
+        <div className="flex items-center gap-2">
+          <Switch checked={isTrial} onCheckedChange={setIsTrial} id="trial-toggle" />
+          <Label htmlFor="trial-toggle">{t('userDetailPanel.subscriptions.markTrial')}</Label>
+        </div>
+      )}
       <div className="flex justify-end gap-2">
         <Button variant="outline" onClick={onClose}>{t('userDetailPanel.subscriptions.cancel')}</Button>
-        <Button onClick={() => mutation.mutate()} disabled={!planId || mutation.isPending}>
-          {mutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Plus className="mr-2 h-4 w-4" />}
-          {t('userDetailPanel.subscriptions.give')}
+        <Button onClick={() => mutation.mutate()} disabled={!canSubmit || submitting}>
+          {submitting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Plus className="mr-2 h-4 w-4" />}
+          {mode === 'bundle' ? t('userDetailPanel.subscriptions.giveBundle') : t('userDetailPanel.subscriptions.give')}
         </Button>
       </div>
     </div>

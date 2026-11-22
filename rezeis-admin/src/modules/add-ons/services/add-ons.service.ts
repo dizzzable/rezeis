@@ -108,7 +108,7 @@ export class AddOnsService {
     const lifetime = input.lifetime ?? AddOnLifetime.UNTIL_SUBSCRIPTION_END;
     assertLifetimeFitsType(input.type, lifetime);
     const applicablePlanIds = normalizePlanIds(input.applicablePlanIds);
-    await this.assertPlansExist(applicablePlanIds);
+    await this.assertPlansExist(applicablePlanIds, input.type);
     const cashback = resolveCashback(
       input.cashbackMode ?? PointsCashbackMode.INHERIT,
       input.cashbackPercent,
@@ -225,9 +225,14 @@ export class AddOnsService {
     if (input.isActive !== undefined) updateData.isActive = input.isActive;
     if (input.applicablePlanIds !== undefined) {
       const applicablePlanIds = normalizePlanIds(input.applicablePlanIds);
-      await this.assertPlansExist(applicablePlanIds);
+      await this.assertPlansExist(applicablePlanIds, nextType);
       updateData.applicablePlanIds = applicablePlanIds;
       if (!sameStringSet(applicablePlanIds, existing.applicablePlanIds)) commercialChanged = true;
+    } else if (nextType === AddOnType.EXTRA_TRAFFIC && existing.type !== AddOnType.EXTRA_TRAFFIC) {
+      // The type moved TO extra traffic with the stored plan list untouched: the
+      // list has to be re-checked, or a row that was coherent as another type
+      // becomes an extra-traffic offer pinned to an unlimited plan.
+      await this.assertPlansExist(existing.applicablePlanIds, nextType);
     }
     if (input.prices !== undefined) {
       updateData.prices = {
@@ -311,17 +316,38 @@ export class AddOnsService {
     await this.prismaService.addOn.delete({ where: { id } });
   }
 
-  /** Rejects any plan id that does not exist so the catalog cannot store orphans. */
-  private async assertPlansExist(planIds: readonly string[]): Promise<void> {
+  /**
+   * Rejects any plan id that does not exist so the catalog cannot store orphans.
+   *
+   * For `EXTRA_TRAFFIC` it additionally refuses UNLIMITED plans (`trafficLimit`
+   * NULL, the product's encoding for "no limit"). Gigabytes sold against an
+   * unlimited plan add nothing: the offer itself is refused per subscription by
+   * `isBaselineExtendable` in the purchase path, so an add-on pinned to such a
+   * plan would sit on a shelf the cabinet never shows — a configuration that
+   * looks like it sells something and cannot.
+   */
+  private async assertPlansExist(
+    planIds: readonly string[],
+    type?: AddOnType,
+  ): Promise<void> {
     if (planIds.length === 0) return;
     const found = await this.prismaService.plan.findMany({
       where: { id: { in: [...planIds] } },
-      select: { id: true },
+      select: { id: true, name: true, trafficLimit: true },
     });
     const foundIds = new Set(found.map((p) => p.id));
     const missing = planIds.filter((planId) => !foundIds.has(planId));
     if (missing.length > 0) {
       throw new BadRequestException(`Unknown plan id(s): ${missing.join(', ')}`);
+    }
+    if (type !== AddOnType.EXTRA_TRAFFIC) return;
+    const unlimited = found
+      .filter((plan) => plan.trafficLimit === null)
+      .map((plan) => plan.name);
+    if (unlimited.length > 0) {
+      throw new BadRequestException(
+        `An extra-traffic add-on cannot apply to unlimited plan(s): ${unlimited.join(', ')}`,
+      );
     }
   }
 }

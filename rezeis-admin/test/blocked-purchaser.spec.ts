@@ -118,7 +118,7 @@ describe('autopay never attempts a blocked owner', () => {
       // about is who gets notified and how often, not what the message says.
       { build: async () => ({}) } as never,
       // Renewal plan selection — never reached: no candidate comes back.
-      { requiresPlanSelection: async () => false } as never,
+      { requiresPlanSelection: async () => false, isBundleRenewalPrimary: async () => true } as never,
       { info: () => undefined } as never,
     );
 

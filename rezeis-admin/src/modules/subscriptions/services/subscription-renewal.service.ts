@@ -11,6 +11,13 @@ import {
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
 import {
+  bundleVisiblePlanId,
+  findBundleSoldForMarker,
+  liveBundleSubscriptions,
+  readBundleMarker,
+  readSnapshotPlanId,
+} from '../../merge-links/utils/bundle-snapshot.util';
+import {
   findOpenEndedQueuedTerm,
   isLifetimeSubscription,
   SUBSCRIPTION_IS_LIFETIME_CODE,
@@ -255,6 +262,26 @@ export class SubscriptionRenewalService {
       throw subscriptionIsLifetime();
     }
 
+    // ── ONE MERGED SUBSCRIPTION, ONE LINE ─────────────────────────────────
+    //
+    // Two subscriptions of one bundle are ONE product: the checkout charges the
+    // bundle's own price once and fulfilment extends both profiles. A request
+    // that names both would charge for the product twice, so it is refused by
+    // name instead — the cabinet draws one row for the set, and a client that
+    // still lists both is told what it did rather than billed for it.
+    const bundlesInRequest = new Map<string, string>();
+    for (const subscription of subscriptions) {
+      const marker = readBundleMarker(subscription.planSnapshot);
+      if (marker === null) continue;
+      const firstId = bundlesInRequest.get(marker.bundleId);
+      if (firstId !== undefined) {
+        throw new BadRequestException({
+          code: 'RENEWAL_DUPLICATE_MERGED_SUBSCRIPTION',
+          message: 'RENEWAL_DUPLICATE_MERGED_SUBSCRIPTION',
+        });
+      }
+      bundlesInRequest.set(marker.bundleId, subscription.id);
+    }
     const items: PricedRenewalItemInterface[] = [];
     for (const subscription of subscriptions) {
       const quote = await this.quoteSubscriptionRenewal({
@@ -398,7 +425,12 @@ export class SubscriptionRenewalService {
 
     const targetPlan = selectionRequired
       ? (discovery.availablePlans.find((plan) => plan.id === chosenPlanId) ?? null)
-      : pickTargetPlan(discovery.availablePlans, original.planId, source.replacementPlanIds);
+      : pickTargetPlan(
+          discovery.availablePlans,
+          original.planId,
+          source.replacementPlanIds,
+          original.bundlePlanId,
+        );
     if (targetPlan === null) {
       return {
         subscriptionId: input.subscriptionId,
@@ -501,6 +533,46 @@ export class SubscriptionRenewalService {
    * cannot disagree about which subscriptions need a choice. A subscription
    * that is not there answers `false`: the charge path reports that itself.
    */
+  /**
+   * Whether a merged subscription is charged through THIS profile — the one
+   * autopay may charge on its own.
+   *
+   * A merged subscription is several subscriptions and ONE payment. The saved
+   * card sweep walks every subscription, so without this it would charge the
+   * set twice on the same tick (both halves expire together, both are in its
+   * window) — and the second charge would extend the set a second time for
+   * money nobody meant to spend. One profile carries the product: the member the
+   * merged link faces, else the oldest live one — the same primary the cabinet's
+   * card and the bot's block show.
+   *
+   * Every other subscription answers `true`: an ordinary subscription is its own
+   * product, and a bundle that is gone (deleted, or its face row removed) is not
+   * a set any more.
+   */
+  public async isBundleRenewalPrimary(subscriptionId: string): Promise<boolean> {
+    const subscription = await this.prismaService.subscription.findUnique({
+      where: { id: subscriptionId },
+      select: { id: true, userId: true, planSnapshot: true },
+    });
+    if (subscription === null) return true;
+    const marker = readBundleMarker(subscription.planSnapshot);
+    if (marker === null) return true;
+    const bundle = await findBundleSoldForMarker(this.prismaService, marker);
+    if (bundle === null) return true;
+    const group = await liveBundleSubscriptions(
+      this.prismaService,
+      subscription.userId,
+      marker.bundleId,
+    );
+    if (group.length < 2) return true;
+    const visiblePlanId = bundleVisiblePlanId(bundle);
+    const primary =
+      (visiblePlanId === null
+        ? undefined
+        : group.find((row) => readSnapshotPlanId(row.planSnapshot) === visiblePlanId)) ?? group[0];
+    return primary === undefined || primary.id === subscriptionId;
+  }
+
   public async requiresPlanSelection(subscriptionId: string): Promise<boolean> {
     const subscription = await this.prismaService.subscription.findUnique({
       where: { id: subscriptionId },
@@ -597,6 +669,8 @@ export class SubscriptionRenewalService {
 function readSnapshotSelection(planSnapshot: Prisma.JsonValue): {
   readonly planId: string | null;
   readonly durationDays: number | null;
+  /** The bundle's own plan row, for a subscription sold as a merged tariff. */
+  readonly bundlePlanId: string | null;
 } {
   const snapshot =
     typeof planSnapshot === 'object' && planSnapshot !== null && !Array.isArray(planSnapshot)
@@ -607,7 +681,10 @@ function readSnapshotSelection(planSnapshot: Prisma.JsonValue): {
     typeof snapshot['selectedDurationDays'] === 'number'
       ? (snapshot['selectedDurationDays'] as number)
       : null;
-  return { planId, durationDays };
+  // `planId` stays the MEMBER plan (the VPN profile's own); the marker names the
+  // product that profile is one half of.
+  const bundlePlanId = readBundleMarker(planSnapshot)?.bundlePlanId ?? null;
+  return { planId, durationDays, bundlePlanId };
 }
 
 /**
@@ -629,7 +706,19 @@ function pickTargetPlan(
   availablePlans: readonly SubscriptionQuotePlanInterface[],
   originalPlanId: string | null,
   replacementPlanIds: readonly string[],
+  /**
+   * The bundle's own plan row when this subscription was sold as a merged
+   * tariff (`planSnapshot.bundlePlanId`). The quote offers that row instead of
+   * the member plan, and it is what the renewal must price: the customer bought
+   * one product at one price, and a merged renewal extends every profile of the
+   * set (`renewMergedTariffInTransaction`).
+   */
+  bundlePlanId: string | null = null,
 ): SubscriptionQuotePlanInterface | null {
+  if (bundlePlanId !== null) {
+    const merged = availablePlans.find((plan) => plan.id === bundlePlanId);
+    if (merged !== undefined) return merged;
+  }
   if (originalPlanId !== null) {
     const exact = availablePlans.find((plan) => plan.id === originalPlanId);
     if (exact !== undefined) {

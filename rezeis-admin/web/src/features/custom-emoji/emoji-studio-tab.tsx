@@ -52,6 +52,64 @@ interface PackLite {
 
 const PACKS_KEY = ['admin', 'custom-emoji', 'packs'] as const
 
+/**
+ * The three status-dot slots of the traffic line.
+ *
+ * The bot picks exactly one per traffic line from how close usage is to the
+ * plan limit, and EVERY traffic line uses that same pick — the leading «Трафик»
+ * line of a plan and each «Трафик доп.» line of a merged tariff. So an emoji
+ * bound to one of these changes every traffic indicator at once, which the bare
+ * registry keys (`TRAFFIC_WARN`) do not say. They are grouped and named here
+ * instead of being left as three anonymous rows in registry order.
+ */
+const TRAFFIC_SLOT_KEYS = ['TRAFFIC_OK', 'TRAFFIC_WARN', 'TRAFFIC_FULL'] as const
+type TrafficSlotKey = (typeof TRAFFIC_SLOT_KEYS)[number]
+
+/** Owner-facing name per traffic slot; null for every other slot. */
+const TRAFFIC_SLOT_LABEL_KEYS: Readonly<Record<TrafficSlotKey, string>> = {
+  TRAFFIC_OK: 'emojiPacksPage.studio.slotLabels.TRAFFIC_OK',
+  TRAFFIC_WARN: 'emojiPacksPage.studio.slotLabels.TRAFFIC_WARN',
+  TRAFFIC_FULL: 'emojiPacksPage.studio.slotLabels.TRAFFIC_FULL',
+}
+
+function isTrafficSlotKey(key: string): key is TrafficSlotKey {
+  return (TRAFFIC_SLOT_KEYS as readonly string[]).includes(key)
+}
+
+/**
+ * Slot rows in the registry's order, with the three `TRAFFIC_*` slots pulled
+ * into one block under their shared hint — at the position of the first traffic
+ * slot, so the rest of the registry keeps its server order. The group is
+ * rendered once even if the three rows are not adjacent in the payload.
+ */
+function SlotRows({ slots }: { readonly slots: readonly EmojiStudioSlot[] }): JSX.Element {
+  const { t } = useTranslation()
+  const trafficSlots = slots.filter((slot) => isTrafficSlotKey(slot.key))
+  const rows: JSX.Element[] = []
+  let trafficGroupDrawn = false
+
+  for (const slot of slots) {
+    if (!isTrafficSlotKey(slot.key)) {
+      rows.push(<SlotRow key={slot.id} slot={slot} />)
+      continue
+    }
+    if (trafficGroupDrawn) continue
+    trafficGroupDrawn = true
+    rows.push(
+      <TableRow key="traffic-group" data-emoji-traffic-group="hint" className="hover:bg-transparent">
+        <TableCell colSpan={4} className="bg-muted/40 py-2 text-xs text-muted-foreground">
+          {t('emojiPacksPage.studio.trafficGroupHint')}
+        </TableCell>
+      </TableRow>,
+    )
+    for (const trafficSlot of trafficSlots) {
+      rows.push(<SlotRow key={trafficSlot.id} slot={trafficSlot} />)
+    }
+  }
+
+  return <>{rows}</>
+}
+
 export function EmojiStudioTab(): JSX.Element {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
@@ -127,9 +185,7 @@ export function EmojiStudioTab(): JSX.Element {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {slots.map((slot) => (
-                <SlotRow key={slot.id} slot={slot} />
-              ))}
+              <SlotRows slots={slots} />
             </TableBody>
           </Table>
         )}
@@ -142,6 +198,7 @@ function SlotRow({ slot }: { readonly slot: EmojiStudioSlot }): JSX.Element {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const [fallback, setFallback] = useState(slot.unicode)
+  const trafficLabelKey = isTrafficSlotKey(slot.key) ? TRAFFIC_SLOT_LABEL_KEYS[slot.key] : null
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- sync local edit buffer when the server row changes
@@ -181,8 +238,19 @@ function SlotRow({ slot }: { readonly slot: EmojiStudioSlot }): JSX.Element {
   }
 
   return (
-    <TableRow>
-      <TableCell className="font-mono text-xs">{slot.key}</TableCell>
+    <TableRow data-emoji-traffic-group={trafficLabelKey === null ? undefined : 'slot'}>
+      <TableCell className="text-xs">
+        {trafficLabelKey === null ? (
+          <span className="font-mono">{slot.key}</span>
+        ) : (
+          // The name says WHAT the emoji means; the raw key stays visible so an
+          // operator can still match the row to logs and to the other editors.
+          <>
+            <span className="block text-[13px] font-medium">{t(trafficLabelKey)}</span>
+            <span className="block font-mono text-[10px] text-muted-foreground">{slot.key}</span>
+          </>
+        )}
+      </TableCell>
       <TableCell>
         {slot.usedIn.length === 0 ? (
           <span className="text-xs text-muted-foreground">{t('emojiPacksPage.studio.notUsed')}</span>

@@ -278,6 +278,9 @@ describe('InternalUserService', () => {
       expiresAt: new Date(now + 60_000).toISOString(),
       createdAt: new Date(now - 60_000).toISOString(),
       updatedAt: new Date(now - 1_000).toISOString(),
+      // No plan grouping is behind this card (the service was built without a
+      // merge-links service), so it serves its own panel URL.
+      merge: null,
       // No help was given on this subscription (this mock has no connection
       // state at all), so there is nothing for the cabinet to show.
       connectHelp: null,

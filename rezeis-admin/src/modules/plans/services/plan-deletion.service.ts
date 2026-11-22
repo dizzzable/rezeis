@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
@@ -98,6 +98,20 @@ export class PlanDeletionService {
     planId: string,
     context: PlanDeletionContext,
   ): Promise<PlanDeleteResultInterface> {
+    // A bundle's face plan is retired WITH its grouping: deleting the plan
+    // alone would leave «Объединённые тарифы» holding a dangling id and an
+    // operator with a merged link and nothing to grant. The bundle dialog's own
+    // delete soft-deletes the plan in the same transaction that removes the
+    // grouping.
+    const bundle = await this.prismaService.planBundle.findFirst({
+      where: { planId },
+      select: { name: true },
+    });
+    if (bundle !== null) {
+      throw new BadRequestException(
+        `This plan is the tariff of the bundle «${bundle.name}»: delete the bundle to retire both`,
+      );
+    }
     return this.prismaService.$transaction(
       async (tx) => {
         // Locked FIRST, and re-read under the lock: two operators deleting the

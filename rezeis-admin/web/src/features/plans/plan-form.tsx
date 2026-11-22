@@ -128,6 +128,16 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
 
   // Archive & transition state
   const [isArchived, setIsArchived] = useState(initialDraft.isArchived)
+  const [hiddenFromBuyer, setHiddenFromBuyer] = useState(initialDraft.hiddenFromBuyer)
+  /**
+   * A bundle's face plan is a real `Plan` row, but it does not own its type,
+   * traffic limit, Remnawave squads or name — the bundle does, because the
+   * profiles the customer receives belong to the MEMBER plans. The editor hides
+   * exactly those fields and says where they live; its device limit and prices
+   * stay here, they are the plan's own.
+   */
+  const bundleFace = plan?.bundle ?? null
+  const isBundleFace = bundleFace !== null
   const [archivedRenewMode, setArchivedRenewMode] = useState(initialDraft.archivedRenewMode)
   const [upgradeToPlanIds, setUpgradeToPlanIds] = useState<string[]>(
     [...initialDraft.upgradeToPlanIds],
@@ -346,6 +356,7 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
       trafficLimitGB,
       deviceLimit,
       trafficLimitStrategy: trafficStrategy,
+      hiddenFromBuyer,
       isArchived,
       archivedRenewMode,
       internalSquads: selectedInternalSquads,
@@ -384,19 +395,37 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
 
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
+      {isBundleFace && (
+        <div className="flex gap-3 rounded-md border border-dashed p-3" role="status">
+          <Info className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+          <div className="space-y-1">
+            <p className="text-sm font-medium">
+              {t('planForm.bundleFace.title', { name: bundleFace.name })}
+            </p>
+            <p className="text-xs text-muted-foreground">{t('planForm.bundleFace.hint')}</p>
+          </div>
+        </div>
+      )}
       {/* Basic Info */}
       <div className="space-y-4">
         <div className="grid gap-4 md:grid-cols-2">
           <div className="space-y-2">
             <Label>{t('planForm.name')} *</Label>
-            <EmojiTextInput
-              value={name}
-              onChange={setName}
-              placeholder={t('planForm.namePlaceholder')}
-              required
-              aria-invalid={!!formErrors.name}
-              emojiAriaLabel={t('emojiPicker.trigger')}
-            />
+            {isBundleFace ? (
+              <>
+                <Input value={name} readOnly disabled />
+                <p className="text-xs text-muted-foreground">{t('planForm.bundleFace.nameHint')}</p>
+              </>
+            ) : (
+              <EmojiTextInput
+                value={name}
+                onChange={setName}
+                placeholder={t('planForm.namePlaceholder')}
+                required
+                aria-invalid={!!formErrors.name}
+                emojiAriaLabel={t('emojiPicker.trigger')}
+              />
+            )}
             <FieldError message={formErrors.name} />
           </div>
           <div className="space-y-2">
@@ -421,12 +450,19 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
         </div>
         <div className="space-y-2">
           <Label>{t('planForm.description')}</Label>
-          <EmojiTextInput
-            value={description}
-            onChange={setDescription}
-            placeholder={t('planForm.descriptionPlaceholder')}
-            emojiAriaLabel={t('emojiPicker.trigger')}
-          />
+          {isBundleFace ? (
+            <>
+              <Input value={description} readOnly disabled />
+              <p className="text-xs text-muted-foreground">{t('planForm.bundleFace.descriptionHint')}</p>
+            </>
+          ) : (
+            <EmojiTextInput
+              value={description}
+              onChange={setDescription}
+              placeholder={t('planForm.descriptionPlaceholder')}
+              emojiAriaLabel={t('emojiPicker.trigger')}
+            />
+          )}
         </div>
 
         {/* Plan icon — shown on the cabinet plan card */}
@@ -469,18 +505,27 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
       <div className="grid gap-4 md:grid-cols-2">
         <div className="space-y-2">
           <Label>{t('planForm.planType')}</Label>
-          <Select value={type} onValueChange={setType}>
-            <SelectTrigger>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {PLAN_TYPES.map((tt) => (
-                <SelectItem key={tt} value={tt}>
-                  {t(`planForm.types.${tt}`)}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          {isBundleFace ? (
+            <>
+              <p className="rounded-md border bg-muted/40 px-3 py-2 text-sm">
+                {t('planForm.types.BOTH')}
+              </p>
+              <p className="text-xs text-muted-foreground">{t('planForm.bundleFace.typeHint')}</p>
+            </>
+          ) : (
+            <Select value={type} onValueChange={setType}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {PLAN_TYPES.map((tt) => (
+                  <SelectItem key={tt} value={tt}>
+                    {t(`planForm.types.${tt}`)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
         </div>
         <div className="space-y-2">
           <Label>{t('planForm.availability')}</Label>
@@ -497,6 +542,25 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
             </SelectContent>
           </Select>
         </div>
+      </div>
+
+      {/* The operator's own shop switch, separate from isActive (which also
+          stops grants and renewals) and from isArchived (transitions). A merged
+          tariff is a product the shop sells, so this switch is an ordinary one
+          for it too — the hint only says what hiding it means. */}
+      <div className="flex items-center justify-between rounded-lg border p-3">
+        <div className="space-y-0.5 pr-3">
+          <Label htmlFor="plan-hidden-from-buyer">{t('planForm.hiddenFromBuyer')}</Label>
+          <p className="text-xs text-muted-foreground">
+            {t(isBundleFace ? 'planForm.bundleFace.hiddenHint' : 'planForm.hiddenFromBuyerHint')}
+          </p>
+        </div>
+        <Switch
+          id="plan-hidden-from-buyer"
+          checked={hiddenFromBuyer}
+          onCheckedChange={setHiddenFromBuyer}
+          aria-label={t('planForm.hiddenFromBuyer')}
+        />
       </div>
 
       {/* Trial configuration — only when availability = TRIAL */}
@@ -596,8 +660,21 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
 
       {/* Limits — hidden entirely for the UNLIMITED plan type, where traffic,
           devices and the reset strategy are all meaningless (the backend
-          normalizer forces traffic=∞ / devices=∞ for this type anyway). */}
-      {type !== 'UNLIMITED' && (
+          normalizer forces traffic=∞ / devices=∞ for this type anyway).
+
+          A bundle's face plan keeps NO limit field here: its traffic limit and
+          reset strategy are the visible member plan's, and its device limit is
+          set in the bundle card («Объединённые тарифы»), which is the only place
+          that may write it (the owner, 14.11.2026). The hint stands where the
+          input used to be, so the absence reads as a rule rather than a bug. */}
+      {isBundleFace ? (
+        <div className="rounded-md border border-dashed p-3" role="status">
+          <p className="text-sm font-medium">{t('planForm.deviceLimit')}</p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {t('planForm.bundleFace.deviceHint')}
+          </p>
+        </div>
+      ) : type !== 'UNLIMITED' && (
       <div className="grid gap-4 md:grid-cols-3">
         <div className="space-y-2">
           <Label>{t('planForm.trafficLimit')}</Label>
@@ -649,6 +726,12 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
         <LimitScopeNotice changes={limitChanges} direction={limitDirection} />
       )}
 
+      {/* A bundle's face plan has no squads of its own: the profiles the
+          customer receives are the member plans', and their squads are what
+          the sync pushes. Editing them here would describe a config nobody
+          holds. */}
+      {!isBundleFace && (
+        <>
       <Separator />
 
       {/* Squads */}
@@ -689,6 +772,8 @@ export function PlanForm({ plan, onSubmit, isLoading }: Props) {
           </div>
         </div>
       </div>
+        </>
+      )}
 
       <Separator />
 
@@ -1222,6 +1307,7 @@ function createInitialPlanDraft(plan?: PlanInput): PlanFormDraft {
     trafficLimitGB: plan ? String(plan.trafficLimit ?? 0) : '50',
     deviceLimit: plan ? String(planDeviceLimit !== undefined && planDeviceLimit > 0 ? planDeviceLimit : 0) : '1',
     trafficLimitStrategy: plan?.trafficLimitStrategy ?? 'MONTH',
+    hiddenFromBuyer: plan?.hiddenFromBuyer ?? false,
     isArchived: plan?.isArchived ?? false,
     archivedRenewMode: plan?.archivedRenewMode ?? 'SELF_RENEW',
     internalSquads: plan?.internalSquads ? [...plan.internalSquads] : [],

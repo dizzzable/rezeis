@@ -13,8 +13,11 @@ import { readTrialSettings } from '../../plans/utils/trial-settings.util';
 
 import { InternalWebAccountEmailVerificationChallengeInterface } from '../interfaces/internal-web-account-email-verification-challenge.interface';
 import { InternalUserSessionInterface } from '../interfaces/internal-user-session.interface';
+import { InternalUserSubscriptionMergeInterface } from '../interfaces/internal-user-subscription.interface';
 import { PlanCatalogPriceInterface } from '../../plans/interfaces/plan-catalog.interface';
 import { InternalUserPlanInterface } from '../interfaces/internal-user-plan.interface';
+import { MergeLinkGroupInterface } from '../../merge-links/interfaces/plan-bundle.interface';
+import { readBundleMarker } from '../../merge-links/utils/bundle-snapshot.util';
 
 export type InternalUserRecord = User & { readonly webAccount: WebAccount | null };
 
@@ -84,6 +87,41 @@ export function mapInternalEmailVerificationChallenge(
 
 export function mapDateValue(value: Date | null): string | null {
   return value === null ? null : value.toISOString();
+}
+
+/**
+ * The `merge` block of a card: which plan grouping its merged URL stands for.
+ *
+ * `null` when the card serves its own panel URL — the group object exists only
+ * while the customer holds two or more live plans of the bundle.
+ */
+export function mapMergeGroup(
+  group: MergeLinkGroupInterface | undefined,
+  /**
+   * The subscription's own snapshot. It says whether THIS profile was sold as
+   * the bundle's tariff (`bundleId`/`bundlePlanId` marker) rather than merely
+   * grouped with another plan the customer bought separately.
+   */
+  planSnapshot: Prisma.JsonValue,
+): InternalUserSubscriptionMergeInterface | null {
+  if (group === undefined) {
+    return null;
+  }
+  const marker = readBundleMarker(planSnapshot);
+  // The caption belongs to the MEMBER plan this subscription is on — the
+  // snapshot's `id`. It is deliberately not the group's `visiblePlanId`: that is
+  // the plan the app faces, while the bot captions each plan's own line.
+  const snapshotPlanId = isJsonObject(planSnapshot) ? readOptionalString(planSnapshot, 'id') : null;
+  return {
+    bundleId: group.bundleId,
+    bundleName: group.bundleName,
+    visiblePlanId: group.visiblePlanId,
+    secondaryPlanId: group.secondaryPlanId,
+    trafficLabel:
+      snapshotPlanId === null ? null : (group.trafficLabelByPlanId[snapshotPlanId] ?? null),
+    bundlePlanId: marker !== null && marker.bundleId === group.bundleId ? marker.bundlePlanId : null,
+    bundleRenewal: group.renewalAsOneProduct && marker !== null && marker.bundleId === group.bundleId,
+  };
 }
 
 /**

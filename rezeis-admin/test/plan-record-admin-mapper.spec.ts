@@ -96,6 +96,7 @@ function planRecord(overrides: Partial<PlanRecord> = {}): PlanRecord {
     orderIndex: 1,
     isActive: true,
     isArchived: false,
+    hiddenFromBuyer: false,
     type: PlanType.BOTH,
     availability: PlanAvailability.ALL,
     archivedRenewMode: 'SELF_RENEW',

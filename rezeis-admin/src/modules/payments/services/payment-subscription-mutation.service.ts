@@ -5,6 +5,7 @@ import {
   AddOnType,
   AddOnEntitlementActorType,
   AddOnEntitlementState,
+  Currency,
   DeviceType,
   PaymentGatewayType,
   Plan,
@@ -73,6 +74,19 @@ import {
   ADD_ON_NOT_APPLIED_OTHER_NOTICE_TYPE,
 } from '../../notifications/catalog/default-templates.catalog';
 import { UserNotificationsService } from '../../notifications/services/user-notifications.service';
+import {
+  BUNDLE_GRANT_KEY,
+  BUNDLE_RENEWAL_KEY,
+  bundleVisiblePlanId,
+  findBundleSoldAs,
+  findBundleSoldForMarker,
+  liveBundleSubscriptions,
+  readBundleMarker,
+  readSnapshotPlanId,
+  withBundleMarker,
+  type BundleMemberPlanRow,
+  type SoldBundle,
+} from '../../merge-links/utils/bundle-snapshot.util';
 import { displayPlanName } from '../../plans/utils/plan-deletion.util';
 import { readTrialSettings } from '../../plans/utils/trial-settings.util';
 import {
@@ -209,10 +223,30 @@ type RenewalOutcome =
       readonly kind: 'RENEWED';
       readonly subscription: Subscription;
       readonly syncJob: ProfileSyncJob;
+      /**
+       * The other profiles of a MERGED subscription this payment renewed: one
+       * payment buys one product, but that product is several VPN profiles, and
+       * each of them needs its own push to the panel. Empty for every ordinary
+       * renewal.
+       */
+      readonly extraSyncJobs?: readonly ProfileSyncJob[];
+      /**
+       * The same profiles, for their own «Подписка продлена» cards after the
+       * commit — the primary one is announced by the caller. Empty for every
+       * ordinary renewal.
+       */
+      readonly mergedRenewedLines?: readonly MergedRenewedLine[];
       readonly latePlanMigrationRenewal: LatePlanMigrationRenewal | null;
       readonly renewalPricedBeforeUpgrade: RenewalPricedBeforeUpgrade | null;
     }
   | LifetimeWithheld;
+
+/** One profile a merged renewal extended, as the lifecycle announcement reads it. */
+interface MergedRenewedLine {
+  readonly subscription: Subscription;
+  readonly planName: string;
+  readonly durationDays: number;
+}
 
 /**
  * The payment that converted a trial, when a payment did: another UPGRADE on
@@ -366,7 +400,12 @@ export class PaymentSubscriptionMutationService {
     // NOT consume the user's one-time purchase discount.
     if (isAddOnTransaction(transaction)) {
       const addOnResult = await this.applyAddOnTopUp(transaction, flags);
-      return { syncJobs: [addOnResult.syncJob] };
+      return {
+        syncJobs: [
+          addOnResult.syncJob,
+          ...(addOnResult.extraSyncJobs ?? []),
+        ],
+      };
     }
 
     const purchasedPlan = await this.getRequiredPlan(transaction);
@@ -375,6 +414,9 @@ export class PaymentSubscriptionMutationService {
     let result: {
       readonly subscription: Subscription;
       readonly syncJob: ProfileSyncJob;
+      /** A merged subscription's other profiles; see {@link RenewalOutcome}. */
+      readonly extraSyncJobs?: readonly ProfileSyncJob[];
+      readonly mergedRenewedLines?: readonly MergedRenewedLine[];
       /** Set by the RENEW path only; see {@link findLatePlanMigrationRenewal}. */
       readonly latePlanMigrationRenewal?: LatePlanMigrationRenewal | null;
       /** Set by the RENEW path only; see `readRenewalPricedBeforeUpgrade`. */
@@ -505,6 +547,11 @@ export class PaymentSubscriptionMutationService {
     // payment's plan above, and where its money went in the keys and the note.
     const latePlanMigrationRenewal = result.latePlanMigrationRenewal ?? null;
     const renewalPricedBeforeUpgrade = result.renewalPricedBeforeUpgrade ?? null;
+    // A purchase of a bundle's own plan row is ONE product over several
+    // profiles, and the operator's card has to say so: otherwise «Платёж
+    // получен: NEW» names one subscription and hides the other half of what the
+    // customer bought.
+    const mergedTariff = await findBundleSoldAs(this.prismaService, purchasedPlan.id);
     const completedMetadata = {
       userId: transaction.userId,
       paymentId: transaction.paymentId,
@@ -521,6 +568,14 @@ export class PaymentSubscriptionMutationService {
       channel: transaction.channel,
       subscriptionId: result.subscription.id,
       remnawaveId: result.subscription.remnawaveId ?? undefined,
+      ...(mergedTariff === null
+        ? {}
+        : {
+            bundleId: mergedTariff.id,
+            bundleName: mergedTariff.name,
+            bundlePlanId: mergedTariff.planId,
+            subscriptionCount: 1 + (result.extraSyncJobs?.length ?? 0),
+          }),
       // The plan granted for the delay of a first SBP charge is no payment: the
       // card says so (`delayGrant`), instead of a receipt for 0.
       ...delayGrantMetadata(transaction.gatewayData),
@@ -601,12 +656,25 @@ export class PaymentSubscriptionMutationService {
       });
     }
 
+    // And the OTHER profiles of a merged subscription this payment renewed.
+    // One payment, one product — but each profile really did get a new period
+    // and a new end date, and the operator's feed is a record of subscriptions.
+    for (const line of result.mergedRenewedLines ?? []) {
+      this.announceSubscriptionLifecycle(PurchaseType.RENEW, {
+        subscription: line.subscription,
+        paymentId: transaction.paymentId,
+        planName: line.planName,
+        durationDays: line.durationDays,
+        renewalPricedBeforeUpgrade: null,
+      });
+    }
+
     // Consume the one-time "next purchase" discount (PURCHASE_DISCOUNT promo
     // reward) now that a plan purchase has completed. Without this it kept
     // applying to every future purchase. The permanent personalDiscount stays.
     await this.consumePurchaseDiscount(transaction.userId, purchasedPlan.id);
 
-    return { syncJobs: [result.syncJob] };
+    return { syncJobs: [result.syncJob, ...(result.extraSyncJobs ?? [])] };
   }
 
   /**
@@ -1115,6 +1183,15 @@ export class PaymentSubscriptionMutationService {
       // And for the lines that met a subscription with no end date, which
       // change nothing and are to be refunded.
       const lifetimeRenewals: LifetimeRenewalNotApplied[] = [];
+      // What each merged-tariff line renewed: its profiles and the days they
+      // all got, written onto the payment as the provenance a refund reads to
+      // take the SAME days back off every profile (`refunded-days-withdrawal`).
+      const mergedRenewals: Array<{
+        readonly bundleId: string;
+        readonly bundleName: string;
+        readonly days: number;
+        readonly subscriptionIds: readonly string[];
+      }> = [];
       // What the operator's card calls this renewal. Collected from the plan
       // each line actually renewed on, not from the line's stored snapshot: an
       // autopay charge deliberately carries no snapshot so that it renews on
@@ -1211,6 +1288,59 @@ export class PaymentSubscriptionMutationService {
             currency: item.currency,
             ...(openEndedTerm === null ? {} : { openEndedTerm }),
           });
+          continue;
+        }
+        // ── ONE PRICE, EVERY PROFILE ───────────────────────────────────────
+        //
+        // The line names the bundle's own plan row and its subscription carries
+        // the bundle marker: the customer renewed ONE product, so every live
+        // profile of the set gets the period. The plan-change rules below
+        // describe a single subscription trading plans and do not apply to a set
+        // that keeps its plans. A provider's recurring charge arrives here too —
+        // it is delivered as a combined renewal of one line whose plan is the
+        // plan the payer signed up for.
+        const mergedMarker = readBundleMarker(currentSubscription.planSnapshot);
+        const mergedBundle =
+          mergedMarker === null || mergedMarker.bundlePlanId !== plan.id
+            ? null
+            : await findBundleSoldForMarker(transactionClient, mergedMarker);
+        if (mergedBundle !== null) {
+          const merged = await this.renewMergedTariffInTransaction(transactionClient, {
+            transaction,
+            bundle: mergedBundle,
+            purchasedPlan: plan,
+            durationDays: item.durationDays,
+            correlationId: `payment:${transaction.paymentId}`,
+            flags,
+          });
+          if (merged.lifetimeSubscriptionIds.length > 0) {
+            this.logger.warn(
+              `Merged renewal line ${item.id} (${mergedBundle.name}) left profile(s) with no ` +
+                `end date unrenewed: ${merged.lifetimeSubscriptionIds.join(', ')}`,
+            );
+          }
+          if (merged.renewedLines.length === 0) {
+            // Every profile has no end date: the line bought nothing, and it is
+            // told as such — the payment is withheld below when every line did.
+            lifetimeRenewals.push({
+              subscriptionId: currentSubscription.id,
+              paidPlanName: displayPlanName(plan),
+              paidDays: item.durationDays,
+              amount: item.amount.toString(),
+              currency: item.currency,
+            });
+            continue;
+          }
+          mergedRenewals.push({
+            bundleId: mergedBundle.id,
+            bundleName: mergedBundle.name,
+            days: item.durationDays,
+            subscriptionIds: merged.renewedLines.map((entry) => entry.subscription.id),
+          });
+          jobs.push(...merged.syncJobs);
+          for (const entry of merged.renewedLines) {
+            renewedLines.push({ ...entry, renewalPricedBeforeUpgrade: null });
+          }
           continue;
         }
         // Moved by a plan migration after the checkout priced it? Then
@@ -1472,6 +1602,16 @@ export class PaymentSubscriptionMutationService {
           },
         });
       }
+      // What the merged-tariff lines renewed: a refund of this payment takes the
+      // same days off every profile they extended (`paidLines` in
+      // `refunded-days-withdrawal.service.ts`).
+      if (mergedRenewals.length > 0) {
+        await writeTransactionGatewayData(transactionClient, transaction.id, {
+          merge: {
+            [BUNDLE_RENEWAL_KEY]: { lines: mergedRenewals, at: now.toISOString() },
+          },
+        });
+      }
       // And which lines met a subscription with no end date and were not
       // applied. When every line did, nothing was bought: the payment is
       // withheld for refund, as a single renewal of one is. When some lines
@@ -1656,7 +1796,17 @@ export class PaymentSubscriptionMutationService {
      * before the transaction, only by a direct caller.
      */
     passedFlags?: AddOnRolloutFlags,
-  ): Promise<{ readonly subscription: Subscription; readonly syncJob: ProfileSyncJob }> {
+  ): Promise<{
+    readonly subscription: Subscription;
+    readonly syncJob: ProfileSyncJob;
+    /**
+     * A merged subscription's OTHER profiles, when the add-on is «+устройства»:
+     * see {@link extendDeviceAddOnToBundleSiblings}. They are the same purchase
+     * on the other half of one product, so the caller enqueues them with the
+     * same weight as the primary job.
+     */
+    readonly extraSyncJobs?: readonly ProfileSyncJob[];
+  }> {
     const marker = readAddOnMarker(transaction);
     if (marker === null) {
       throw new NotFoundException('Add-on marker not found on transaction');
@@ -1785,7 +1935,21 @@ export class PaymentSubscriptionMutationService {
         const ledgered = await this.applyAddOnViaLedger(tx, transaction, ledgerMarker, subscription, flags);
         if (ledgered !== null) {
           quoteNote = ledgered.quoteNote;
-          return { subscription: ledgered.subscription, syncJob: ledgered.syncJob };
+          // ONE PRODUCT, TWO PROFILES: the merged subscription's other halves
+          // get the same devices, with their own ledger lines.
+          const companions = await this.extendDeviceAddOnToBundleSiblings(
+            tx,
+            transaction,
+            ledgerMarker,
+            ledgered.subscription,
+            flags,
+            'LEDGER',
+          );
+          return {
+            subscription: ledgered.subscription,
+            syncJob: ledgered.syncJob,
+            ...(companions.length === 0 ? {} : { extraSyncJobs: companions }),
+          };
         }
       }
       if (resetQuoted) {
@@ -1894,7 +2058,27 @@ export class PaymentSubscriptionMutationService {
         await writeTransactionGatewayData(tx, transaction.id, { merge: addOnNotAppliedStamp(addedNothing, new Date()) });
       }
 
-      return { subscription: updatedSubscription, syncJob };
+      // The same devices on the merged subscription's OTHER profiles — under
+      // this deployment's own rules: a row with no entitlement (the ledger is
+      // off or the row cannot carry one) raises their columns the legacy way,
+      // exactly as this branch just did for the target.
+      const companions =
+        addedNothing === null
+          ? await this.extendDeviceAddOnToBundleSiblings(
+              tx,
+              transaction,
+              marker,
+              updatedSubscription,
+              flags,
+              'LEGACY',
+            )
+          : [];
+
+      return {
+        subscription: updatedSubscription,
+        syncJob,
+        ...(companions.length === 0 ? {} : { extraSyncJobs: companions }),
+      };
     });
 
     // ── The reset happens HERE, after the transaction has committed ──────
@@ -1921,6 +2105,271 @@ export class PaymentSubscriptionMutationService {
     await this.announceAddOnCapture(transaction, marker, result.subscription, quoteNote as AddOnQuoteNote | null);
 
     return result;
+  }
+
+  /**
+   * ONE PAYMENT, EVERY PROFILE — EXTRA DEVICES FOLLOW THE MERGED SUBSCRIPTION
+   * ─────────────────────────────────────────────────────────────────────────
+   * «Объединённая подписка» is ONE product sold once, delivered as one
+   * Remnawave profile per member plan. This panel keeps a device limit PER
+   * PROFILE, so a «+1 устройство» bought on the merged subscription has to
+   * reach BOTH halves: otherwise the customer's third device connects through
+   * one profile and is refused by the other, while the cabinet's single card
+   * (which faces the visible member) counts only one of them.
+   *
+   * The owner's rule (21.11.2026): as with an ordinary plan — but for THIS
+   * customer's subscriptions only, never for the plan's other buyers. So the
+   * fan-out is here, at the capture, and not on the bundle's plan row: editing
+   * the card's number is a different decision, and it is the operator's.
+   *
+   * Devices ONLY. Traffic is the member plan the profile really is («25 ГБ +
+   * безлимит» is not two halves of one budget), and the cabinet prints the
+   * visible member's counter — a traffic top-up stays on the half it was bought
+   * for. Squads and expiry are the member plan's for the same reason.
+   *
+   * Which subscriptions: the live halves of the SAME SOLD bundle this customer
+   * holds — `bundleId` marker and all, the same set a merged renewal extends.
+   * A customer who owns one plan of a bundle that happens to be grouped with
+   * another bought separately is not a merged subscription: the target carries
+   * no marker then, and this returns nothing.
+   *
+   * Under the ledger the sibling gets its own entitlement line, quoted exactly
+   * as the primary one (same lifetime, same end), so a refund of the payment —
+   * which reads the payment, not the primary line — takes BOTH halves back, and
+   * each half's own boundary sweep ends its line. Without the ledger (an
+   * environment with the stage off, or a row that cannot carry a term) the
+   * sibling's column is raised the same legacy way the target's was.
+   */
+  private async extendDeviceAddOnToBundleSiblings(
+    tx: Prisma.TransactionClient,
+    transaction: Transaction,
+    marker: AddOnMarker,
+    target: Subscription,
+    flags: AddOnRolloutFlags,
+    /**
+     * HOW the target was just granted. Under `LEDGER` the sibling's line is a
+     * copy of the primary one, and a payment the ledger recorded as a NO-OP
+     * (the target's baseline turned unlimited between quote and capture) grants
+     * nothing here either — there is no primary line to mirror. Under `LEGACY`
+     * the target's column was raised a moment ago in this same transaction, so
+     * the sibling's is raised the same way.
+     */
+    mode: 'LEDGER' | 'LEGACY',
+  ): Promise<readonly ProfileSyncJob[]> {
+    if (marker.addOnType !== AddOnType.EXTRA_DEVICES) return [];
+    const bundle = readBundleMarker(target.planSnapshot);
+    if (bundle === null) return [];
+    const siblings = (await liveBundleSubscriptions(tx, target.userId, bundle.bundleId)).filter(
+      (row) => row.id !== target.id,
+    );
+    if (siblings.length === 0) return [];
+    // The primary line's quote, copied verbatim: both halves must end together,
+    // and a «до сброса» line never reaches here (devices are «до конца
+    // подписки», `withLedgerMarkerDefaults`).
+    const primary =
+      mode === 'LEGACY' || marker.sourceLineKey === undefined
+        ? null
+        : await tx.addOnEntitlement.findUnique({
+            where: {
+              sourceTransactionId_sourceLineKey: {
+                sourceTransactionId: transaction.id,
+                sourceLineKey: marker.sourceLineKey,
+              },
+            },
+            select: {
+              id: true,
+              addOnId: true,
+              catalogRevision: true,
+              receiptName: true,
+              currency: true,
+              lifetime: true,
+              expiresAt: true,
+              totalValue: true,
+            },
+          });
+    // A ledger capture that recorded no line gave the target nothing: the
+    // sibling must not receive the product instead.
+    if (mode === 'LEDGER' && primary === null) return [];
+    const jobs: ProfileSyncJob[] = [];
+    for (const sibling of siblings) {
+      if (sibling.status !== SubscriptionStatus.ACTIVE && sibling.status !== SubscriptionStatus.LIMITED) {
+        continue;
+      }
+      const job =
+        primary === null
+          ? await this.raiseSiblingDeviceLimitInTransaction(tx, transaction, marker, sibling.id)
+          : await this.grantSiblingDeviceEntitlementInTransaction(
+              tx,
+              transaction,
+              marker,
+              sibling.id,
+              primary,
+              flags,
+            );
+      if (job !== null) jobs.push(job);
+    }
+    // Said out loud, because the half the customer does NOT see is exactly the
+    // one nobody would notice: a sibling that is unlimited, has no term, or was
+    // deleted keeps its own number, and the operator has to know which.
+    if (jobs.length < siblings.length) {
+      this.logger.warn(
+        `Add-on ${marker.addOnId} (payment ${transaction.paymentId}) reached ${jobs.length} of ` +
+          `${siblings.length} other profiles of bundle ${bundle.bundleId}: the rest cannot carry a device add-on`,
+      );
+    }
+    return jobs;
+  }
+
+  /**
+   * The sibling's own ledger line for a device add-on the primary profile was
+   * granted (see {@link extendDeviceAddOnToBundleSiblings}).
+   *
+   * The line is marked as a COMPANION in `applicabilitySnapshot`: the cabinet's
+   * «Мои опции» hides it (one purchase, one row) and the money is left at zero,
+   * because the payment was charged once, on the primary line.
+   */
+  private async grantSiblingDeviceEntitlementInTransaction(
+    tx: Prisma.TransactionClient,
+    transaction: Transaction,
+    marker: AddOnMarker,
+    siblingId: string,
+    primary: {
+      readonly id: string;
+      readonly addOnId: string | null;
+      readonly catalogRevision: number;
+      readonly receiptName: string;
+      readonly currency: Currency;
+      readonly lifetime: AddOnLifetime;
+      readonly expiresAt: Date | null;
+      readonly totalValue: bigint;
+    },
+    flags: AddOnRolloutFlags,
+  ): Promise<ProfileSyncJob | null> {
+    const correlationId = `payment:${transaction.paymentId}:companion:${siblingId}`;
+    await this.enterTermModelInTransaction(tx, siblingId, flags);
+    await this.subscriptionTermService.alignTailToExpiryInTransaction(tx, siblingId, { correlationId });
+    const sibling = await tx.subscription.findUnique({ where: { id: siblingId } });
+    if (sibling === null) return null;
+    const term = await tx.subscriptionTerm.findFirst({
+      where: { subscriptionId: sibling.id, status: SubscriptionTermStatus.ACTIVE },
+      select: {
+        id: true,
+        planId: true,
+        startsAt: true,
+        endsAt: true,
+        baseTrafficLimitBytes: true,
+        baseDeviceLimit: true,
+        trafficResetStrategy: true,
+        resetAnchorAt: true,
+      },
+    });
+    if (term === null) return null;
+    // The same reader the target's capture and the offer use: an unlimited
+    // baseline absorbs the add-on, and a line recording it would be a promise
+    // nothing delivers.
+    const baseline = await resolveConfiguredEntitlementBaseline(tx, {
+      subscriptionId: sibling.id,
+      term,
+      subscription: sibling,
+    });
+    if (!isBaselineExtendable(AddOnType.EXTRA_DEVICES, baseline)) return null;
+
+    const created = await this.addOnEntitlementService.createPendingInTransaction(tx, {
+      subscriptionId: sibling.id,
+      termId: term.id,
+      sourceTransactionId: transaction.id,
+      sourceLineKey: companionSourceLineKey(marker.sourceLineKey ?? marker.addOnId, sibling.id),
+      addOnId: primary.addOnId,
+      catalogRevision: primary.catalogRevision,
+      receiptName: primary.receiptName,
+      type: AddOnType.EXTRA_DEVICES,
+      valuePerUnit: marker.addOnValue,
+      totalValue: primary.totalValue,
+      lifetime: primary.lifetime,
+      applicabilitySnapshot: { companion: true, primaryEntitlementId: primary.id },
+      unitAmount: '0',
+      totalAmount: '0',
+      currency: primary.currency,
+      purchasedAt: transaction.createdAt,
+      scheduledActivationAt: transaction.createdAt,
+      expiresAt: primary.expiresAt,
+      expiryEpochId: null,
+      correlationId,
+      companionOfBundleSibling: true,
+    });
+    await this.addOnEntitlementService.transitionInTransaction(tx, {
+      entitlementId: created.entitlementId,
+      command: 'ACTIVATE',
+      commandKey: `activate:${created.entitlementId}`,
+      correlationId,
+      actorType: AddOnEntitlementActorType.SYSTEM,
+      reason: 'DIRECT_PURCHASE_ACTIVATION_COMPANION',
+    });
+    const projection = await this.effectiveProjectionService.recomputeInTransaction(tx, {
+      subscriptionId: sibling.id,
+      mode: 'ACTIVE',
+    });
+    const mirroredTraffic =
+      projection.desiredTrafficLimitBytes === null
+        ? null
+        : Number(projection.desiredTrafficLimitBytes / GIB_BYTES);
+    const mirroredDevice = projection.desiredDeviceLimit === null ? 0 : projection.desiredDeviceLimit;
+    const updated = await tx.subscription.update({
+      where: { id: sibling.id },
+      data: { trafficLimit: mirroredTraffic, deviceLimit: mirroredDevice },
+    });
+    return tx.profileSyncJob.create({
+      data: {
+        subscriptionId: updated.id,
+        action: updated.remnawaveId === null ? SyncAction.CREATE : SyncAction.UPDATE,
+        status: SyncJobStatus.PENDING,
+        aggregateKey: updated.id,
+        desiredRevision: projection.desiredRevision,
+        payload: {
+          source: 'ADDON_PURCHASE_LEDGER_COMPANION',
+          paymentId: transaction.paymentId,
+          entitlementId: created.entitlementId,
+          primaryEntitlementId: primary.id,
+          addOnType: marker.addOnType,
+          addOnValue: marker.addOnValue,
+        } as Prisma.InputJsonObject,
+      },
+    });
+  }
+
+  /**
+   * The sibling's device limit without the ledger: the target's own legacy
+   * increment, repeated on the other half of the same merged subscription.
+   * Same two rules as there — an incoherent value adds nothing, and an
+   * unlimited baseline (`<= 0`) must not be turned finite by `0 + N`.
+   */
+  private async raiseSiblingDeviceLimitInTransaction(
+    tx: Prisma.TransactionClient,
+    transaction: Transaction,
+    marker: AddOnMarker,
+    siblingId: string,
+  ): Promise<ProfileSyncJob | null> {
+    if (!isCoherentAddOnValue(marker.addOnValue)) return null;
+    const sibling = await tx.subscription.findUnique({ where: { id: siblingId } });
+    if (sibling === null || sibling.deviceLimit <= 0) return null;
+    const updated = await tx.subscription.update({
+      where: { id: sibling.id },
+      data: { deviceLimit: { increment: marker.addOnValue } },
+    });
+    return tx.profileSyncJob.create({
+      data: {
+        subscriptionId: updated.id,
+        action: updated.remnawaveId === null ? SyncAction.CREATE : SyncAction.UPDATE,
+        status: SyncJobStatus.PENDING,
+        payload: {
+          source: 'ADDON_PURCHASE',
+          paymentId: transaction.paymentId,
+          addOnType: marker.addOnType,
+          addOnValue: marker.addOnValue,
+          companion: true,
+        } as Prisma.InputJsonObject,
+      },
+    });
   }
 
   /**
@@ -3051,7 +3500,11 @@ export class PaymentSubscriptionMutationService {
      * read here, still before this one, only by a direct caller.
      */
     readonly flags?: AddOnRolloutFlags;
-  }): Promise<{ readonly subscription: Subscription; readonly syncJob: ProfileSyncJob }> {
+  }): Promise<{
+    readonly subscription: Subscription;
+    readonly syncJob: ProfileSyncJob;
+    readonly extraSyncJobs?: readonly ProfileSyncJob[];
+  }> {
     const flags = input.flags ?? (await readAddOnRolloutFlags(this.addOnSwitches));
     // A paid trial is a NEW purchase whose checkout-time plan availability was
     // TRIAL. Prefer the persisted snapshot so a later catalog edit cannot turn
@@ -3060,33 +3513,63 @@ export class PaymentSubscriptionMutationService {
     const checkoutAvailability = readPersistedPlanAvailability(input.transaction.planSnapshot);
     const isTrialPurchase =
       (checkoutAvailability ?? input.purchasedPlan.availability) === PlanAvailability.TRIAL;
+    // ── ONE PAYMENT, ONE PRODUCT, SEVERAL PROFILES ───────────────────────────
+    //
+    // The plan sold is a bundle's own row («объединённая подписка»): the
+    // customer bought ONE tariff, and the merge service needs one VPN profile
+    // per member plan to build the one link they bought. A trial can never be
+    // one (the face plan is forced to availability ALL, and the checkout refuses
+    // a merged target that is not the buyer's own), so nothing here touches the
+    // trial machinery below.
+    const bundle = await findBundleSoldAs(this.prismaService, input.purchasedPlan.id);
+    if (bundle !== null && isTrialPurchase) {
+      throw new ConflictException('A merged tariff cannot be sold as a trial');
+    }
     const result = await this.prismaService.$transaction(async (transactionClient) => {
       const now = new Date();
-      const createdSubscription = await transactionClient.subscription.create({
-        data: {
-          userId: input.transaction.userId,
-          status: SubscriptionStatus.ACTIVE,
-          isTrial: isTrialPurchase,
-          planSnapshot: buildPlanSnapshot({
-            transaction: input.transaction,
-            purchasedPlan: input.purchasedPlan,
-            selectedDurationDays: input.selectedDurationDays,
-          }) as Prisma.InputJsonValue,
-          trafficLimit: input.purchasedPlan.trafficLimit,
-          deviceLimit: input.purchasedPlan.deviceLimit,
-          internalSquads: input.purchasedPlan.internalSquads,
-          externalSquad: input.purchasedPlan.externalSquad,
-          deviceType: resolveDeviceType(input.transaction.deviceTypes),
-          startedAt: now,
-          expiresAt: calculateExpiry(now, input.selectedDurationDays),
-        },
-      });
+      const createdSubscriptions =
+        bundle === null
+          ? [
+              await transactionClient.subscription.create({
+                data: {
+                  userId: input.transaction.userId,
+                  status: SubscriptionStatus.ACTIVE,
+                  isTrial: isTrialPurchase,
+                  planSnapshot: buildPlanSnapshot({
+                    transaction: input.transaction,
+                    purchasedPlan: input.purchasedPlan,
+                    selectedDurationDays: input.selectedDurationDays,
+                  }) as Prisma.InputJsonValue,
+                  trafficLimit: input.purchasedPlan.trafficLimit,
+                  deviceLimit: input.purchasedPlan.deviceLimit,
+                  internalSquads: input.purchasedPlan.internalSquads,
+                  externalSquad: input.purchasedPlan.externalSquad,
+                  deviceType: resolveDeviceType(input.transaction.deviceTypes),
+                  startedAt: now,
+                  expiresAt: calculateExpiry(now, input.selectedDurationDays),
+                },
+              }),
+            ]
+          : await this.createMergedTariffSubscriptionsInTransaction(transactionClient, {
+              transaction: input.transaction,
+              bundle,
+              purchasedPlan: input.purchasedPlan,
+              selectedDurationDays: input.selectedDurationDays,
+              now,
+              flags,
+            });
+      // The subscription THE PAYMENT is about: the member whose plan the merged
+      // link faces, so the payment card, the cabinet's one card and the autopay
+      // sign-up all name the same profile.
+      const createdSubscription = createdSubscriptions[0]!;
       // Its first term, in this transaction, while stage 1 is on: the columns
       // are the plan's, so the baseline is MATCHED and the SHADOW projection
       // equals them, and an add-on bought a minute later is ledgered with an
       // end date rather than falling back to the permanent increment. A paid
       // trial is the same NEW purchase and gets one too.
-      await this.enterTermModelInTransaction(transactionClient, createdSubscription.id, flags);
+      for (const row of createdSubscriptions) {
+        await this.enterTermModelInTransaction(transactionClient, row.id, flags);
+      }
       if (isTrialPurchase) {
         // `TrialGrant.userId` is unique — upsert so a paid trial records the
         // claim without colliding with a prior (free or paid) grant. The
@@ -3119,17 +3602,23 @@ export class PaymentSubscriptionMutationService {
           }
         }
       }
-      const syncJob = await transactionClient.profileSyncJob.create({
-        data: {
-          subscriptionId: createdSubscription.id,
-          action: SyncAction.CREATE,
-          status: SyncJobStatus.PENDING,
-          payload: {
-            source: 'PAYMENT_COMPLETION',
-            paymentId: input.transaction.paymentId,
-          },
-        },
-      });
+      const syncJobs: ProfileSyncJob[] = [];
+      for (const row of createdSubscriptions) {
+        syncJobs.push(
+          await transactionClient.profileSyncJob.create({
+            data: {
+              subscriptionId: row.id,
+              action: SyncAction.CREATE,
+              status: SyncJobStatus.PENDING,
+              payload: {
+                source: 'PAYMENT_COMPLETION',
+                paymentId: input.transaction.paymentId,
+              },
+            },
+          }),
+        );
+      }
+      const syncJob = syncJobs[0]!;
       await transactionClient.transaction.update({
         where: { id: input.transaction.id },
         data: {
@@ -3138,6 +3627,22 @@ export class PaymentSubscriptionMutationService {
           status: TransactionStatus.COMPLETED,
         },
       });
+      // What a merged purchase CREATED, on the payment itself: a refund reads
+      // these ids to take the whole product back, because refunding one profile
+      // of two would leave the customer holding half of what they returned.
+      if (bundle !== null) {
+        await writeTransactionGatewayData(transactionClient, input.transaction.id, {
+          merge: {
+            [BUNDLE_GRANT_KEY]: {
+              bundleId: bundle.id,
+              bundleName: bundle.name,
+              bundlePlanId: bundle.planId,
+              subscriptionIds: createdSubscriptions.map((row) => row.id),
+              at: now.toISOString(),
+            },
+          },
+        });
+      }
       // A provider subscription (Platega, RollyPay) this payment signed up for
       // renews the subscription it has just created, and is named in this very
       // write: nothing reads the row without it. The checkout guard refuses a
@@ -3163,6 +3668,7 @@ export class PaymentSubscriptionMutationService {
       return {
         subscription: createdSubscription,
         syncJob,
+        extraSyncJobs: syncJobs.slice(1),
         lateSuccessOverCap,
       };
     });
@@ -3191,7 +3697,245 @@ export class PaymentSubscriptionMutationService {
       );
     }
 
-    return { subscription: result.subscription, syncJob: result.syncJob };
+    return {
+      subscription: result.subscription,
+      syncJob: result.syncJob,
+      extraSyncJobs: result.extraSyncJobs,
+    };
+  }
+
+  /**
+   * ── A MERGED TARIFF IS ONE PAYMENT OVER SEVERAL PROFILES ────────────────
+   *
+   * Creates the subscription of every member plan of the bundle the customer
+   * bought, in the caller's transaction, and returns them in the order the
+   * bundle displays its members.
+   *
+   * The rules that make the set ONE product:
+   *
+   *  - **One device limit.** The bundle's own plan row owns the number
+   *    (14.11.2026): every profile gets it, whatever its member plan says, and a
+   *    later edit in «Объединённые тарифы» carries it to both
+   *    (`BundleFacePlanService.propagateDeviceLimit`).
+   *  - **One expiry.** Same `startedAt` and the same `expiresAt` for all of
+   *    them, so neither half lapses before the other and the merged link never
+   *    silently loses a source.
+   *  - **One marker.** Every snapshot carries `bundleId` + `bundlePlanId`
+   *    (`bundle-snapshot.util.ts`): what makes a renewal extend the whole set,
+   *    what keeps autopay from charging it twice, and what a refund reads to
+   *    take the whole product back.
+   *  - **Its OWN plan for everything else.** Squads, traffic limit and the limit
+   *    strategy are the member plan's — they describe the profile the customer
+   *    actually receives.
+   *
+   * The FIRST returned subscription is the bundle's visible member: the one the
+   * merged link faces, the one the payment names, and the one autopay binds to.
+   */
+  private async createMergedTariffSubscriptionsInTransaction(
+    transactionClient: Prisma.TransactionClient,
+    input: {
+      readonly transaction: Transaction;
+      readonly bundle: SoldBundle;
+      readonly purchasedPlan: Plan;
+      readonly selectedDurationDays: number;
+      readonly now: Date;
+      readonly flags: AddOnRolloutFlags;
+    },
+  ): Promise<Subscription[]> {
+    const marker = { bundleId: input.bundle.id, bundlePlanId: input.bundle.planId };
+    const expiresAt = calculateExpiry(input.now, input.selectedDurationDays);
+    const deviceType = resolveDeviceType(input.transaction.deviceTypes);
+    const created: Subscription[] = [];
+    for (const member of input.bundle.members) {
+      const row = await transactionClient.subscription.create({
+        data: {
+          userId: input.transaction.userId,
+          status: SubscriptionStatus.ACTIVE,
+          isTrial: false,
+          planSnapshot: withBundleMarker(
+            buildMemberPlanSnapshot({
+              transaction: input.transaction,
+              memberPlan: member.plan,
+              selectedDurationDays: input.selectedDurationDays,
+              deviceLimit: input.purchasedPlan.deviceLimit,
+            }),
+            marker,
+          ) as Prisma.InputJsonValue,
+          trafficLimit: member.plan.trafficLimit,
+          deviceLimit: input.purchasedPlan.deviceLimit,
+          internalSquads: [...member.plan.internalSquads],
+          externalSquad: member.plan.externalSquad,
+          deviceType,
+          startedAt: input.now,
+          expiresAt,
+        },
+      });
+      created.push(row);
+    }
+    if (created.length < 2) {
+      // A bundle is a merge: one member is not a merged subscription, and the
+      // grouping editor refuses to save one.
+      throw new ConflictException('The plan bundle has no member plans');
+    }
+    const visiblePlanId = bundleVisiblePlanId(input.bundle);
+    const primaryIndex = created.findIndex(
+      (row) => visiblePlanId !== null && readSnapshotPlanId(row.planSnapshot) === visiblePlanId,
+    );
+    if (primaryIndex <= 0) {
+      return created;
+    }
+    const [primary] = created.splice(primaryIndex, 1);
+    return [primary!, ...created];
+  }
+
+  /**
+   * ── A MERGED SUBSCRIPTION IS RENEWED AS ONE PRODUCT ─────────────────────
+   *
+   * Extends EVERY live profile of the bundle by the days the customer paid for,
+   * whichever half the checkout priced: the cabinet draws one row and charges
+   * one price (the bundle's own), so the payment must not leave the other half
+   * a period behind. Each profile keeps its own plan, limits and squads — this
+   * is a renewal of the same product, not a plan change.
+   *
+   * Per profile, in this transaction: the row lock, the term the add-on model
+   * needs (`scheduleRenewalTermInTransaction`, the same call an ordinary
+   * renewal makes, so "until the end" add-ons follow the new end), the new
+   * expiry counted from the LATER of now and what was left, and one sync job
+   * that resets the period's traffic exactly as an ordinary renewal does.
+   *
+   * A profile with no end date is NOT renewed and is reported back: the caller
+   * withholds the payment when that is the one it priced, and names the rest in
+   * its log — silently granting days to a lifetime profile is money for
+   * nothing.
+   */
+  private async renewMergedTariffInTransaction(
+    transactionClient: Prisma.TransactionClient,
+    input: {
+      readonly transaction: Transaction;
+      readonly bundle: SoldBundle;
+      readonly purchasedPlan: Plan;
+      readonly durationDays: number;
+      readonly correlationId: string;
+      readonly flags: AddOnRolloutFlags;
+    },
+  ): Promise<{
+    readonly primary: Subscription | null;
+    readonly syncJobs: readonly ProfileSyncJob[];
+    readonly renewedLines: readonly MergedRenewedLine[];
+    readonly lifetimeSubscriptionIds: readonly string[];
+  }> {
+    const members = await liveBundleSubscriptions(
+      transactionClient,
+      input.transaction.userId,
+      input.bundle.id,
+    );
+    const memberPlanIds = [...new Set(input.bundle.members.map((member) => member.planId))];
+    // The full rows: a renewal's term is minted FROM the plan (`scheduleRenewal
+    // TermInTransaction`), so the sale's subset is not enough here.
+    const planRows =
+      memberPlanIds.length === 0
+        ? []
+        : await transactionClient.plan.findMany({ where: { id: { in: memberPlanIds } } });
+    const planById = new Map(planRows.map((plan) => [plan.id, plan]));
+    const visiblePlanId = bundleVisiblePlanId(input.bundle);
+    const renewed: { subscription: Subscription; planName: string; syncJobId: string }[] = [];
+    const lifetimeSubscriptionIds: string[] = [];
+    const syncJobIds: string[] = [];
+    let primary: Subscription | null = null;
+    for (const candidate of [...members].sort((left, right) => left.id.localeCompare(right.id))) {
+      // Locked one at a time, in id order: two payments for the same merged
+      // subscription cannot interleave, and the order is total, so they cannot
+      // deadlock each other either.
+      const subscription = await this.lockRenewalSubscriptionInTransaction(
+        transactionClient,
+        candidate.id,
+      );
+      const openEndedTerm = isLifetimeSubscription(subscription)
+        ? null
+        : await findOpenEndedQueuedTerm(transactionClient, subscription);
+      if (isLifetimeSubscription(subscription) || openEndedTerm !== null) {
+        lifetimeSubscriptionIds.push(subscription.id);
+        continue;
+      }
+      const memberPlanId = readSnapshotPlanId(subscription.planSnapshot);
+      const planRow = memberPlanId === null ? undefined : planById.get(memberPlanId);
+      const term =
+        planRow === undefined
+          ? null
+          : await this.scheduleRenewalTermInTransaction(transactionClient, {
+              subscriptionId: subscription.id,
+              plan: planRow,
+              durationDays: input.durationDays,
+              correlationId: input.correlationId,
+              flags: input.flags,
+            });
+      const locked =
+        term === null
+          ? subscription
+          : await transactionClient.subscription.findUnique({ where: { id: subscription.id } });
+      if (locked === null) {
+        throw new NotFoundException(`Renewal subscription not found: ${subscription.id}`);
+      }
+      const now = new Date();
+      const renewalBase =
+        locked.expiresAt !== null && locked.expiresAt.getTime() > now.getTime()
+          ? locked.expiresAt
+          : now;
+      const renewedSubscription = await transactionClient.subscription.update({
+        where: { id: locked.id },
+        data: {
+          status: SubscriptionStatus.ACTIVE,
+          expiresAt: calculateExpiry(renewalBase, input.durationDays),
+          // The plan does not change, so neither do its limits, squads or
+          // strategy; only the bought period is recorded — where an ordinary
+          // on-column renewal records it (`withPaidRenewalDuration`).
+          ...(term === null
+            ? {
+                planSnapshot: withPaidRenewalDuration(
+                  locked.planSnapshot,
+                  input.durationDays,
+                ) as Prisma.InputJsonValue,
+              }
+            : {}),
+        },
+      });
+      const syncJob = await transactionClient.profileSyncJob.create({
+        data: {
+          subscriptionId: renewedSubscription.id,
+          action: renewedSubscription.remnawaveId === null ? SyncAction.CREATE : SyncAction.UPDATE,
+          status: SyncJobStatus.PENDING,
+          payload: {
+            source: 'PAYMENT_COMPLETION',
+            paymentId: input.transaction.paymentId,
+            combined: true,
+            bundle: true,
+            ...(renewedSubscription.remnawaveId === null ? {} : { resetTraffic: true }),
+          } as Prisma.InputJsonObject,
+        },
+      });
+      syncJobIds.push(syncJob.id);
+      renewed.push({
+        subscription: renewedSubscription,
+        planName: displayPlanName(input.purchasedPlan),
+        syncJobId: syncJob.id,
+      });
+      if (primary === null && visiblePlanId !== null && memberPlanId === visiblePlanId) {
+        primary = renewedSubscription;
+      }
+    }
+    const syncJobs = await transactionClient.profileSyncJob.findMany({
+      where: { id: { in: syncJobIds } },
+    });
+    return {
+      primary: primary ?? renewed[0]?.subscription ?? null,
+      syncJobs,
+      renewedLines: renewed.map((line) => ({
+        subscription: line.subscription,
+        planName: line.planName,
+        durationDays: input.durationDays,
+      })),
+      lifetimeSubscriptionIds,
+    };
   }
 
   private async renewSubscriptionFromPayment(input: {
@@ -3214,6 +3958,92 @@ export class PaymentSubscriptionMutationService {
         currentSubscription,
         readPersistedPlanAvailability(input.transaction.planSnapshot),
       );
+      // ── A MERGED TARIFF RENEWS AS ONE PRODUCT ────────────────────────────
+      //
+      // This subscription was SOLD as one half of a bundle (its snapshot carries
+      // the marker) and the payment names that bundle's own plan row: the
+      // customer bought one tariff and paid one price, so every live profile of
+      // the set gets the period — otherwise the half that was not named lapses
+      // alone and the merged link silently loses a source.
+      //
+      // Asked here, before the single-subscription rules below: those assume ONE
+      // subscription per payment (a plan change, a paid remainder, a migration
+      // that keeps the line on its current plan), and none of them applies to a
+      // renewal that renews a set.
+      const mergedMarker = readBundleMarker(currentSubscription.planSnapshot);
+      const mergedBundle =
+        mergedMarker === null || mergedMarker.bundlePlanId !== input.purchasedPlan.id
+          ? null
+          : await findBundleSoldForMarker(transactionClient, mergedMarker);
+      if (mergedBundle !== null) {
+        const merged = await this.renewMergedTariffInTransaction(transactionClient, {
+          transaction: input.transaction,
+          bundle: mergedBundle,
+          purchasedPlan: input.purchasedPlan,
+          durationDays: input.selectedDurationDays,
+          correlationId: `payment:${input.transaction.paymentId}`,
+          flags,
+        });
+        if (merged.lifetimeSubscriptionIds.length > 0) {
+          this.logger.warn(
+            `Merged renewal ${input.transaction.id} ({mergedBundle.name}) left ` +
+              `profile(s) with no end date unrenewed: ${merged.lifetimeSubscriptionIds.join(', ')}`,
+          );
+        }
+        const primary = merged.primary;
+        if (primary === null || merged.renewedLines.length === 0) {
+          // Every profile of the set has no end date: nothing was renewed, and
+          // the money is to go back — the same outcome a single renewal of such
+          // a subscription gives, told for the profile the payment names.
+          const line: LifetimeRenewalNotApplied = {
+            subscriptionId: currentSubscription.id,
+            paidPlanName: displayPlanName(input.purchasedPlan),
+            paidDays: input.selectedDurationDays,
+          };
+          const announce = await this.withholdForLifetimeSubscriptionInTransaction(
+            transactionClient,
+            input.transaction.id,
+            { [LIFETIME_RENEWAL_NOT_APPLIED_KEY]: lifetimeRenewalNotAppliedProvenance([line], new Date()) },
+          );
+          return { kind: 'WITHHELD_LIFETIME', line, announce };
+        }
+        const now = new Date();
+        await writeTransactionGatewayData(transactionClient, input.transaction.id, {
+          merge: {
+            [BUNDLE_RENEWAL_KEY]: {
+              lines: [
+                {
+                  bundleId: mergedBundle.id,
+                  bundleName: mergedBundle.name,
+                  days: input.selectedDurationDays,
+                  subscriptionIds: merged.renewedLines.map((entry) => entry.subscription.id),
+                },
+              ],
+              at: now.toISOString(),
+            },
+          },
+        });
+        const primaryJob =
+          merged.syncJobs.find((job) => job.subscriptionId === primary.id) ?? merged.syncJobs[0];
+        if (primaryJob === undefined) {
+          throw new ConflictException('A merged renewal wrote no sync job');
+        }
+        await transactionClient.transaction.update({
+          where: { id: input.transaction.id },
+          data: { fulfilledAt: now, status: TransactionStatus.COMPLETED },
+        });
+        return {
+          kind: 'RENEWED',
+          subscription: primary,
+          syncJob: primaryJob,
+          extraSyncJobs: merged.syncJobs.filter((job) => job.id !== primaryJob.id),
+          mergedRenewedLines: merged.renewedLines.filter(
+            (entry) => entry.subscription.id !== primary.id,
+          ),
+          latePlanMigrationRenewal: null,
+          renewalPricedBeforeUpgrade: null,
+        };
+      }
       // ── A SUBSCRIPTION WITH NO END DATE IS NOT RENEWED ────────────────────
       //
       // The checkout refuses it (`SUBSCRIPTION_IS_LIFETIME`). A payment that
@@ -4487,6 +5317,45 @@ function buildPlanSnapshot(input: {
 }
 
 /**
+ * The `planSnapshot` of ONE profile of a merged tariff: the member plan's own
+ * squads, traffic limit and strategy — what the VPN profile really is — with
+ * the purchase's duration, amount and gateway, exactly as
+ * {@link buildPlanSnapshot} writes them, and the bundle marker added by the
+ * caller (`withBundleMarker`).
+ *
+ * `deviceLimit` is the ONE number of the merged subscription (the bundle's own,
+ * the caller passes it), not the member plan's, and the COLUMN gets the same
+ * value: a snapshot disagreeing with the column would read as an operator
+ * override forever (`resolveInheritedPlanLimitUpdate`).
+ */
+function buildMemberPlanSnapshot(input: {
+  readonly transaction: Transaction;
+  readonly memberPlan: BundleMemberPlanRow;
+  readonly selectedDurationDays: number;
+  readonly deviceLimit: number;
+}): Record<string, unknown> {
+  return {
+    id: input.memberPlan.id,
+    name: input.memberPlan.name,
+    description: input.memberPlan.description,
+    tag: input.memberPlan.tag,
+    type: input.memberPlan.type,
+    icon: input.memberPlan.icon ?? null,
+    trafficLimit: input.memberPlan.trafficLimit,
+    deviceLimit: input.deviceLimit,
+    trafficLimitStrategy: input.memberPlan.trafficLimitStrategy,
+    internalSquads: [...input.memberPlan.internalSquads],
+    externalSquad: input.memberPlan.externalSquad,
+    selectedDurationDays: input.selectedDurationDays,
+    purchaseType: input.transaction.purchaseType,
+    gatewayType: input.transaction.gatewayType,
+    amount: input.transaction.amount.toString(),
+    currency: input.transaction.currency,
+    snapshotSource: 'PAYMENT_COMPLETION',
+  };
+}
+
+/**
  * Builds a subscription `planSnapshot` for one combined-renewal line item.
  * Mirrors {@link buildPlanSnapshot} but draws the duration/amount/currency
  * from the per-item record rather than the parent transaction (whose amount
@@ -4558,6 +5427,18 @@ interface AddOnMarker {
 
 export function isAddOnTransaction(transaction: Transaction): boolean {
   return readAddOnMarker(transaction) !== null;
+}
+
+/**
+ * The `sourceLineKey` of a COMPANION line of a merged subscription — the
+ * primary line's own key, plus the profile it mirrors onto.
+ *
+ * `(sourceTransactionId, sourceLineKey)` is unique per entitlement, so one
+ * payment can carry one line per profile of the product while a replay of the
+ * same capture computes exactly the same string.
+ */
+function companionSourceLineKey(primaryLineKey: string, subscriptionId: string): string {
+  return `${primaryLineKey}@${subscriptionId}`;
 }
 
 function readAddOnMarker(transaction: Transaction): AddOnMarker | null {

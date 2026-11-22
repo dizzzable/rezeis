@@ -1674,6 +1674,7 @@ model User {
   reviewFlags             UserReviewFlag[]         @relation("UserReviewFlags")
   hintDeliveries          UserHintDelivery[]       @relation("UserHintDeliveries")
   ipObservations          UserIpObservation[]      @relation("UserIpObservations")
+  mergeLinks              SubscriptionMergeLink[]  @relation("UserMergeLinks")
 
   @@index([telegramId])
   @@index([role])
@@ -2358,6 +2359,12 @@ model Plan {
   orderIndex           Int                   @default(0) @map("order_index")
   isActive             Boolean               @default(true) @map("is_active")
   isArchived           Boolean               @default(false) @map("is_archived")
+  /// Hidden from the buyer catalog while still visible to the operator. The
+  /// operator's own «Скрыть от покупателя» switch, independent of `isActive`
+  /// (which also stops renewals/grants) and of `isArchived` (which is about
+  /// transitions). Set on every plan created as the face of a bundle: that
+  /// tariff is issued by an operator, not sold by the checkout.
+  hiddenFromBuyer      Boolean               @default(false) @map("hidden_from_buyer")
   type                 PlanType              @default(BOTH) @map("type")
   availability         PlanAvailability      @default(ALL) @map("availability")
   archivedRenewMode    ArchivedPlanRenewMode @default(SELF_RENEW) @map("archived_renew_mode")
@@ -2408,10 +2415,19 @@ model Plan {
   updatedAt            DateTime              @updatedAt @map("updated_at") @db.Timestamptz(3)
 
   durations PlanDuration[]
+  bundleMembers PlanBundleMember[]
+  /// Set iff this row is the sellable/issued face of a bundle: the one plan an
+  /// operator grants as «объединённая подписка». Its traffic limit, type and
+  /// Remnawave squads are kept in step with the bundle's visible member plan,
+  /// and its device limit is the bundle's own.
+  bundleFace PlanBundle? @relation("BundleFace")
+  /// Bundles that print THIS plan's traffic as the cabinet card's second line.
+  bundleSecondaryOf PlanBundle[] @relation("BundleSecondary")
 
   @@index([isActive])
   @@index([isArchived])
   @@index([availability])
+  @@index([hiddenFromBuyer])
   @@index([orderIndex])
   @@map("plans")
 }
@@ -2444,6 +2460,119 @@ model PlanPrice {
   @@index([planDurationId])
   @@index([currency])
   @@map("plan_prices")
+}
+
+// =============================================================================
+//  MERGED SUBSCRIPTIONS (plan bundles)
+// =============================================================================
+
+/// Two or more plans a subscriber may hold together and receive ONE config link
+/// for.
+///
+/// GROUPING FIRST, PRODUCT SECOND. A bundle starts as a grouping: no price, no
+/// duration, no checkout; buying anything creates subscriptions exactly as
+/// before. What it changes is the LINK the cabinet shows — when the subscriber
+/// holds two or more live subscriptions whose plans are members of the same
+/// bundle, every one of those cards offers the same `/merge/<token>` URL, which
+/// fans out to the individual profiles. `remnawave-subscription-merge` does the
+/// merging; it asks this service which profiles a token stands for and caches
+/// the answer for a minute, so nothing here is mirrored anywhere.
+///
+/// `planId` is what makes it a tariff too (owner, 14.11.2026): the operator can
+/// issue the whole group as ONE plan — «объединённая подписка» — named like a
+/// plan, granted from the user card, and visible in the plans catalogue with its
+/// own device limit. That plan is a normal `Plan` row (`Plan.bundleFace`); its
+/// traffic limit, type and squads are read from the bundle's visible member and
+/// are not editable on the plan form. It is never sold by the checkout: a
+/// single payment creates one subscription, and one profile cannot carry the
+/// several profiles a merge needs.
+model PlanBundle {
+  id          String   @id @default(cuid()) @map("id")
+  name        String   @unique @map("name")
+  description String?  @map("description")
+  /// An inactive bundle resolves no links — the cards fall back to their own
+  /// subscription URLs on the next refresh, without touching the links.
+  isActive    Boolean  @default(true) @map("is_active")
+  orderIndex  Int      @default(0) @map("order_index")
+  /// The `Plan` row this grouping is issued as. NULL for a grouping that was
+  /// never turned into a tariff, and for one whose tariff was deleted.
+  planId      String?  @unique @map("plan_id")
+  /// The member plan whose traffic the CABINET CARD prints on its second line,
+  /// under the card's own traffic row — «0.01/50 ГБ». NULL means the card shows
+  /// no second line at all. Always a LIMITED member of this grouping: an
+  /// unlimited plan has no used/limit pair to print, so the picker offers only
+  /// the limited ones (the owner, 14.11.2026: «выбрать какой тариф будет
+  /// отображаться снизу основного, или вообще не будет отражаться»).
+  secondaryPlanId String? @map("secondary_plan_id")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  plan          Plan?                @relation("BundleFace", fields: [planId], references: [id], onDelete: SetNull)
+  secondaryPlan Plan?                @relation("BundleSecondary", fields: [secondaryPlanId], references: [id], onDelete: SetNull)
+  members       PlanBundleMember[]
+  links         SubscriptionMergeLink[]
+
+  @@index([isActive])
+  @@index([orderIndex])
+  @@map("plan_bundles")
+}
+
+/// One plan in a bundle. A plan belongs to at most ONE bundle, because two
+/// bundles overlapping on a plan would make "which link does this card show"
+/// ambiguous — the unique index below says so in the database rather than in a
+/// comment.
+model PlanBundleMember {
+  id       String @id @default(cuid()) @map("id")
+  bundleId String @map("bundle_id")
+  planId   String @unique @map("plan_id")
+
+  /// The plan whose face the VPN app shows on the merged link: its
+  /// `profile-title` and its `subscription-userinfo` (used / limit / expiry) are
+  /// the ones the client reads. At most one member per bundle carries it —
+  /// `PlanBundlesService` keeps that true, and an unset flag resolves to the
+  /// first LIMITED member of the bundle, so the default needs no operator
+  /// decision (the owner, 14.11.2026: a merged link shows the plan with the
+  /// traffic limit, not the unlimited one).
+  isVisibleInApp Boolean @default(false) @map("is_visible_in_app")
+
+  /// The operator's own caption for THIS plan's «Трафик доп.» line in the bot's
+  /// greeting (and the one the cabinet can draw): a bundle of three or more
+  /// limited plans needs a name per further line, and `profile.traffic_extra`
+  /// can only name one of them. NULL — the default caption of every row written
+  /// before this column existed — means "use the bot's `profile.traffic_extra`".
+  /// At most `members - 2` rows carry one: the first line is the main plan and
+  /// the second is the default «Трафик доп.» row, both named by bot texts.
+  trafficLabel String? @map("traffic_label")
+
+  bundle PlanBundle @relation(fields: [bundleId], references: [id], onDelete: Cascade)
+  plan   Plan       @relation(fields: [planId], references: [id], onDelete: Cascade)
+
+  @@index([bundleId])
+  @@map("plan_bundle_members")
+}
+
+/// The `/merge/<token>` link a single subscriber has for a single bundle: one
+/// row per (user, bundle), created the first time the cabinet needs it and kept
+/// afterwards, so the customer's saved URL survives renewals.
+///
+/// The token is the whole secret — anyone holding it can fetch the merged
+/// config — which is the same exposure the panel's own subscription URL has.
+/// `revokedAt` retires a link without losing the history of who had it.
+model SubscriptionMergeLink {
+  id        String    @id @default(cuid()) @map("id")
+  token     String    @unique @map("token")
+  userId    String    @map("user_id")
+  bundleId  String    @map("bundle_id")
+  revokedAt DateTime? @map("revoked_at") @db.Timestamptz(3)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user   User       @relation("UserMergeLinks", fields: [userId], references: [id], onDelete: Cascade)
+  bundle PlanBundle @relation(fields: [bundleId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, bundleId])
+  @@index([bundleId])
+  @@map("subscription_merge_links")
 }
 
 // =============================================================================

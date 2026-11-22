@@ -231,7 +231,8 @@ export const en = {
         rulesUnavailable: 'The rules text when there is no link to them — likewise only without a «rules» screen',
         welcomeMessage: 'The greeting — when the start screen has no text (otherwise the bot shows the start screen’s text)',
         chooseAction: 'Instead of the greeting when it is empty (hidden), and the answer to the old «Back to menu» button',
-        subscriptionLine: 'The subscription lines under the greeting — for subscribers (except in the minimal format)',
+        subscriptionLine:
+          'A subscription line under the greeting — for subscribers (except in the minimal format). A merged subscription has two traffic lines: the second one belongs to the bundle’s other plan and is renamed on its own (to «Bypasses», for example)',
         menuUpdated:
           'An old button pressed — the pop-up over the main menu the bot draws in place of that message',
       },
@@ -303,6 +304,14 @@ export const en = {
       title: 'What the bot adds to the menu itself',
       hint: 'These buttons and texts are not in the button list above — the bot builds them itself, but their captions and texts can be changed here. The trial button’s icon is the TRIAL slot (or GIFT, PROMO) on the «Emoji packs» page, «Emoji slots» tab.',
       textsTitle: 'Texts around the greeting',
+      // A merged subscription: «Extra traffic» captions the second traffic line,
+      // and «+» adds caption windows for the 3rd, 4th tariff of the bundle.
+      trafficExtra: {
+        title: '«Extra traffic» line caption',
+        hint: 'The first traffic line is «Traffic» and is edited above. This is the caption of the FIRST extra line (the 2nd tariff), «Extra traffic» by default. It is also the caption of every further line that has none of its own.',
+        perTariffHint:
+          'Captions for the 3rd and later tariffs are set in the merged-tariff card: «Tariffs» → «Combine tariffs». The first two lines always have a caption (the main one and this one), so there can be no more of them than tariffs minus two.',
+      },
     },
     // Screens the bot builds itself that have no block on the canvas
     // (`SYSTEM_SCREENS` in `features/bot-flow/system-screens.ts`).

@@ -644,6 +644,13 @@ export class InternalUserEdgeService {
     }
     const subscriptionIds = subscriptions.map((subscription) => subscription.id);
     const liveStates = ['ACTIVE', 'EXPIRING'] as const;
+    // A COMPANION line is the same purchase as its primary one, mirrored onto
+    // the other profile of a merged subscription
+    // (`PaymentSubscriptionMutationService.extendDeviceAddOnToBundleSiblings`):
+    // the customer bought ONE add-on and must not read it as two.
+    const notCompanion = {
+      NOT: { applicabilitySnapshot: { path: ['companion'], equals: true } },
+    } as const;
     // The epoch's reset instant comes along: it is the date a reset-bound
     // add-on is shown with, and what tells the two bounds apart.
     const include = { expiryEpoch: { select: { plannedEndsAt: true } } } as const;
@@ -651,6 +658,7 @@ export class InternalUserEdgeService {
       where: {
         subscriptionId: { in: subscriptionIds },
         state: { in: [...liveStates] },
+        ...notCompanion,
       },
       include,
       orderBy: { purchasedAt: 'desc' },
@@ -662,6 +670,7 @@ export class InternalUserEdgeService {
           where: {
             subscriptionId: { in: subscriptionIds },
             state: { notIn: [...liveStates] },
+            ...notCompanion,
           },
           include,
           orderBy: { purchasedAt: 'desc' },

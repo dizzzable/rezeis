@@ -14,6 +14,54 @@ interface InternalUserSubscriptionPlanInterface {
 }
 
 /**
+ * The operator's grouping a subscription belongs to, when the customer holds two
+ * or more of its plans at once.
+ *
+ * Every subscription of the group carries the SAME merged `url`, so a client that
+ * only looked at URLs could not tell whether two cards are "one link" or a copy.
+ * This says it: `bundleId` groups them, `visiblePlanId` is the plan whose name,
+ * limits and expiry the VPN app shows (the merge link reports that profile's
+ * `profile-title` and traffic counters).
+ */
+export interface InternalUserSubscriptionMergeInterface {
+  readonly bundleId: string;
+  readonly bundleName: string;
+  readonly visiblePlanId: string | null;
+  /**
+   * The LIMITED member plan whose traffic the cabinet card prints on its second
+   * line («0.01/50 ГБ»), or `null` for "no second line". Already checked
+   * against the plans this customer holds.
+   */
+  readonly secondaryPlanId: string | null;
+  /**
+   * The operator's own caption for THIS subscription's «Трафик доп.» line — the
+   * words the bundle card set for this very plan, so reordering the bundle's
+   * plans cannot move a caption onto another plan's line. `null` when the
+   * bundle has none for it: the bot then prints its `profile.traffic_extra`
+   * text.
+   */
+  readonly trafficLabel: string | null;
+  /**
+   * The bundle's OWN plan row — the tariff the customer bought and renews. The
+   * cabinet compares it with the plan a renewal option prices onto: same id
+   * means "renewing the same product", which is what autopay needs to know
+   * before offering a card to save. `null` for a subscription that carries no
+   * sale marker (grouped by accident, not sold as one product).
+   */
+  readonly bundlePlanId: string | null;
+  /**
+   * This subscription was SOLD as the bundle's own tariff (`bundle-snapshot
+   * .util.ts` writes the marker), so the whole set is ONE product: one price in
+   * the shop, one renewal, one refund. The cabinet draws a single renewal row
+   * for it instead of one row per profile.
+   *
+   * `false` for a customer who happens to hold two plans of one bundle bought (or
+   * granted) separately: those are still two products and renew one by one.
+   */
+  readonly bundleRenewal: boolean;
+}
+
+/**
  * Describes the current read-only subscription payload exposed to internal user clients.
  *
  * Used by reiwa SPA to render the subscription card (bank-card style):
@@ -61,6 +109,12 @@ export interface InternalUserSubscriptionInterface {
   readonly expiresAt: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
+  /**
+   * The plan grouping behind this card's merged `url`, or `null` when the card
+   * serves its own panel URL. Present only while the customer holds two or more
+   * of the bundle's live plans.
+   */
+  readonly merge: InternalUserSubscriptionMergeInterface | null;
   /**
    * «Не получилось подключиться?» for this subscription, or `null` when no help
    * is pending on it.

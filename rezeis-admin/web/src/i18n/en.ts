@@ -555,6 +555,77 @@ export const en = {
     reorderFailed: 'Failed to change plan order',
     orderHint:
       'The card order here sets how tariffs appear to users in their cabinet. Drag a card by the grip on the left to reorder.',
+    // «Combine plans»: a grouping whose cards share ONE subscription link — and
+    // the plan it is issued as. The checkout never sells that plan.
+    bundles: {
+      create: 'Combine plans',
+      createHint:
+        'A grouping becomes a plan: it appears in Plans and is issued from the customer card as one merged subscription. The checkout does not sell it — an operator issues it; prices and durations are set in the ordinary plan form.',
+      needTwoPlans: 'Pick exactly two plans to combine',
+      needFreePlans:
+        'Two free plans are needed: a combined plan and a plan from another grouping do not count',
+      needName: 'Enter a name for the grouping',
+      noPermission: 'No permission to create plans',
+      title: 'Combined plans',
+      subtitle:
+        'A grouping issues ONE subscription to the customer: one shared link for every plan in it and one device limit.',
+      active: 'Active',
+      inactive: 'Off',
+      activeLabel: 'Grouping is active',
+      activeHint:
+        'A switched-off grouping hands out no shared link: cards show their own subscription URLs. The grouping plan stays in Plans, and the links themselves are not deleted.',
+      createTitle: 'Combine plans',
+      editTitle: 'Edit grouping',
+      formHint:
+        'Only operators see the name — it also becomes the plan name. A grouping holds exactly two plans.',
+      name: 'Name',
+      namePlaceholder: 'For example: Unlimited + top-up',
+      description: 'Description',
+      plans: 'Plans in the grouping',
+      plansHint:
+        'Exactly two. A plan from another grouping and an already-combined plan cannot be picked.',
+      planGroupedElsewhere: 'This plan already belongs to another grouping',
+      planAlreadyMerged:
+        'This is the combined plan of the «{{name}}» grouping — it cannot be combined again',
+      planLimitReached: 'A grouping can hold only two plans',
+      visiblePlan: 'The plan the VPN app shows',
+      visibleHint:
+        'The app shows one plan: its name, traffic and expiry. By default that is the plan with a traffic limit. An unlimited plan cannot be picked: the customer would not see the other plan’s remaining traffic.',
+      visibleUnlimited:
+        'An unlimited plan cannot be picked: the app would not show the other plan’s remaining traffic',
+      visibleUnlimitedShort: 'cannot be picked',
+      visibleBadge: 'shown in the app',
+      deviceLimit: 'Device limit',
+      deviceLimitPlaceholder: 'Same as the plan',
+      deviceLimitHint:
+        'The only place the limit is set: applies to both plans of the grouping and to subscriptions already issued to this customer. 0 — unlimited. Empty — same as the plan shown in the app.',
+      devices: 'Devices',
+      devicesAsPlan: 'same as the plan shown in the app',
+      devicesUpTo: 'up to {{count}}',
+      devicesUnlimited: '0 — unlimited',
+      issuedAs: 'Plan: {{plan}}',
+      noPlanYet: 'No plan yet — save the grouping to create it',
+      save: 'Save',
+      cancel: 'Cancel',
+      delete: 'Delete',
+      deleteTitle: 'Delete this grouping?',
+      deleteHint:
+        'Grouping "{{name}}" will be deleted together with its plan, its shared link stops working, and the cards fall back to their own subscription URLs. The subscriptions themselves are untouched.',
+      created: 'Grouping created',
+      createFailed: 'Failed to create the grouping',
+      updated: 'Grouping updated',
+      updateFailed: 'Failed to update the grouping',
+      deleted: 'Grouping deleted',
+      deleteFailed: 'Failed to delete the grouping',
+      aria: {
+        edit: 'Edit grouping',
+        delete: 'Delete grouping',
+      },
+    },
+    bundleFaceBadge: 'merged',
+    bundleFaceHint:
+      'The plan of grouping "{{name}}": its type, traffic, device limit and Remnawave squads come from Combined plans',
+    hiddenBadge: 'hidden from buyers',
     squadPropagation: {
       queued_one: 'Squad change queued for {{count}} existing subscription',
       queued_other: 'Squad change queued for {{count}} existing subscriptions',
@@ -1142,6 +1213,18 @@ export const en = {
     studio: {
       subtitle:
         'Each slot: a fallback glyph + a premium emoji from your packs. Premium renders only when the bot owner has Telegram Premium — otherwise the fallback shows.',
+      // The three traffic-status slots: the bot picks one per traffic line from
+      // how close usage is to the plan limit, and that same pick is drawn in
+      // EVERY traffic line — the leading "Traffic" line and each "Extra
+      // traffic" line of a merged tariff. The label says "changes everything at
+      // once", or the owner expects an effect in one place.
+      trafficGroupHint:
+        'These three change EVERY traffic indicator at once — the first "Traffic" line and every "Extra traffic" line of a merged tariff. A premium emoji can be bound to each of them.',
+      slotLabels: {
+        TRAFFIC_OK: 'Traffic: fine / unlimited',
+        TRAFFIC_WARN: 'Traffic: running low',
+        TRAFFIC_FULL: 'Traffic: exhausted',
+      },
       empty: 'No emoji slots configured.',
       colSlot: 'Slot',
       colUsedIn: 'Used in',
@@ -3147,6 +3230,21 @@ export const en = {
       WEEK: 'Weekly',
     },
     unlimitedHint: '0 = unlimited',
+    hiddenFromBuyer: 'Hide from buyers',
+    hiddenFromBuyerHint:
+      'The plan stays in the panel and remains grantable, but disappears from the purchase catalogue.',
+    bundleFace: {
+      title: 'The plan of grouping "{{name}}"',
+      hint:
+        'This plan is sold and issued as a merged subscription. Its type, traffic, device limit, Remnawave squads and name come from Combined plans; only durations and prices are set here.',
+      typeHint: 'The grouping sets the type: traffic and devices.',
+      deviceHint:
+        'Set in the Combined plans card — one limit for the whole merged subscription, applied to both plans and to subscriptions already issued to this customer. 0 — unlimited.',
+      nameHint: 'The name is set in Combined plans and matches the plan name.',
+      descriptionHint: 'The description is set in Combined plans.',
+      hiddenHint:
+        'One plan in the catalogue: buying it issues every profile of the grouping, and renewing it extends them together. Hidden, it stays with those who bought it but disappears from the catalogue.',
+    },
     limitScope: {
       title: 'Limit changes reach existing subscribers on renewal',
       unlimited: 'unlimited',
@@ -4884,6 +4982,8 @@ export const en = {
         'Shown on the add-on card in the cabinet. "Auto" uses a type-derived icon. You can also pick an emoji (including custom animated ones).',
       plans: 'Applicable plans',
       plansHint: 'Empty = available for all plans',
+      plansHintTraffic:
+        'Only plans with a finite limit are listed: an unlimited plan has nothing to top up. Empty means the add-on is available on every plan.',
       noPlans: 'No plans found',
       prices: 'Prices',
       addPrice: 'Add currency',

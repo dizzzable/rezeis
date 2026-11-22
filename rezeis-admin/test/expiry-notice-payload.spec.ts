@@ -126,7 +126,7 @@ function buildService(options: {
     { findPreferredForCharge: async () => null } as never,
     noticePayload,
     // Renewal plan selection — not reached by the notice emitters.
-    { requiresPlanSelection: async () => false } as never,
+    { requiresPlanSelection: async () => false, isBundleRenewalPrimary: async () => true } as never,
     { info: () => undefined } as never,
   );
   return { service, created, queries };

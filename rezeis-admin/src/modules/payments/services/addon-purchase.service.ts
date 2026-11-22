@@ -43,6 +43,7 @@ import {
 } from '../../add-on-entitlements/services/configured-baseline.util';
 import { SubscriptionTermService } from '../../add-on-entitlements/services/subscription-term.service';
 import { PricingService } from '../../plans/services/pricing.service';
+import { readBundleMarker } from '../../merge-links/utils/bundle-snapshot.util';
 import { ProfileSyncQueueService } from '../../profile-sync/profile-sync-queue.service';
 import { CABINET_CAPABILITY, type CabinetView } from '../../reiwa-peers/cabinet-capabilities';
 import { AccessModeGuard } from '../../settings/services/access-mode-guard.service';
@@ -216,9 +217,18 @@ export class AddOnPurchaseService {
       throw new NotFoundException('Add-on not found');
     }
     const subscriptionPlanId = readPlanId(subscription.planSnapshot);
+    // The same pair the OFFER matches: a merged subscription is sold as the
+    // bundle's own tariff, so an add-on pinned to that tariff is about this
+    // subscription even though the row carries a member plan.
+    const bundlePlanId = readBundleMarker(subscription.planSnapshot)?.bundlePlanId ?? null;
+    const salePlanIds = [
+      ...(subscriptionPlanId === null ? [] : [subscriptionPlanId]),
+      ...(bundlePlanId === null ? [] : [bundlePlanId]),
+    ];
     if (
       addOn.applicablePlanIds.length > 0 &&
-      (subscriptionPlanId === null || !addOn.applicablePlanIds.includes(subscriptionPlanId))
+      (salePlanIds.length === 0 ||
+        !salePlanIds.some((planId) => addOn.applicablePlanIds.includes(planId)))
     ) {
       throw new BadRequestException('Add-on is not available for this subscription plan');
     }

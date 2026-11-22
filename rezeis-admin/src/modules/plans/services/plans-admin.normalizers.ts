@@ -21,6 +21,12 @@ export interface NormalizedPlanWriteInput {
   readonly icon: string | null;
   readonly isActive: boolean;
   readonly isArchived: boolean;
+  /**
+   * The operator's «Скрыть от покупателя» switch. Not an availability rule: the
+   * plan stays in every panel listing and every grant picker, and only the buyer
+   * catalogue (`PlanCatalogService`) skips it.
+   */
+  readonly hiddenFromBuyer: boolean;
   readonly archivedRenewMode: ArchivedPlanRenewModeValue;
   readonly type: PlanRecord['type'];
   readonly availability: PlanAvailability;
@@ -82,6 +88,7 @@ export function normalizeCreatePlanInput(input: CreatePlanDto): NormalizedPlanWr
     icon: normalizeNullableString(input.icon),
     isActive: input.isActive ?? true,
     isArchived: input.isArchived ?? false,
+    hiddenFromBuyer: input.hiddenFromBuyer ?? false,
     archivedRenewMode: input.archivedRenewMode ?? ArchivedPlanRenewModeValue.SELF_RENEW,
     type: input.type,
     availability: input.availability,
@@ -119,6 +126,7 @@ export function normalizeUpdatePlanInput(
     icon: input.icon === undefined ? currentPlan.icon : normalizeNullableString(input.icon),
     isActive: input.isActive ?? currentPlan.isActive,
     isArchived: input.isArchived ?? currentPlan.isArchived,
+    hiddenFromBuyer: input.hiddenFromBuyer ?? currentPlan.hiddenFromBuyer,
     archivedRenewMode: input.archivedRenewMode ?? currentPlan.archivedRenewMode,
     type: input.type ?? currentPlan.type,
     availability: input.availability ?? currentPlan.availability,
@@ -179,6 +187,7 @@ export function buildPlanWriteData(input: NormalizedPlanWriteInput): Prisma.Plan
     icon: input.icon,
     isActive: input.isActive,
     isArchived: input.isArchived,
+    hiddenFromBuyer: input.hiddenFromBuyer,
     archivedRenewMode: input.archivedRenewMode,
     type: input.type,
     availability: input.availability,

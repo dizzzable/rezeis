@@ -120,6 +120,7 @@ export class PromocodeLifecycleService {
     const actions = resolvePromocodeActions(dto);
     const primary = actions[0];
     this.assertPlanSnapshotConsistency(primary.type, primary.plan ?? null);
+    await this.assertRewardPlanIsNotMerged(primary.plan ?? null);
 
     try {
       const record = await this.prismaService.promocode.create({
@@ -196,6 +197,9 @@ export class PromocodeLifecycleService {
     if (dto.rewardType !== undefined || dto.plan !== undefined) {
       this.assertPlanSnapshotConsistency(
         dto.rewardType ?? existing.rewardType,
+        dto.plan !== undefined ? dto.plan : existing.plan,
+      );
+      await this.assertRewardPlanIsNotMerged(
         dto.plan !== undefined ? dto.plan : existing.plan,
       );
     }
@@ -280,6 +284,7 @@ export class PromocodeLifecycleService {
       // of a live promocode and leaving every later activation to fail on
       // "requires a plan snapshot", with a 200 on the way out.
       this.assertPlanSnapshotConsistency(primary.type, primary.plan ?? null);
+      await this.assertRewardPlanIsNotMerged(primary.plan ?? null);
       updateData.rewardType = primary.type;
       updateData.reward = primary.value ?? null;
       updateData.plan =
@@ -647,6 +652,29 @@ export class PromocodeLifecycleService {
     const candidate = plan as Record<string, unknown>;
     if (typeof candidate.id !== 'string' || candidate.id.length === 0) {
       throw new BadRequestException('Plan snapshot must include a non-empty id');
+    }
+  }
+
+  /**
+   * A bundle's face plan is issued as a merged subscription — several profiles
+   * under one link — and a promocode redemption creates ONE subscription. A
+   * code promising that plan would hand out a profile whose squads and traffic
+   * limit were copied from the bundle's visible member while the other half of
+   * the product was missing, so the choice is refused where it is made.
+   */
+  private async assertRewardPlanIsNotMerged(plan: unknown): Promise<void> {
+    if (plan === null || typeof plan !== 'object' || Array.isArray(plan)) return;
+    const candidate = plan as Record<string, unknown>;
+    if (candidate.id === undefined) return;
+    if (typeof candidate.id !== 'string' || candidate.id.length === 0) return;
+    const bundle = await this.prismaService.planBundle.findFirst({
+      where: { planId: candidate.id },
+      select: { name: true },
+    });
+    if (bundle !== null) {
+      throw new BadRequestException(
+        `The plan of bundle «${bundle.name}» is issued as a merged subscription and cannot be a promocode reward`,
+      );
     }
   }
 }

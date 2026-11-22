@@ -12,6 +12,7 @@ import {
 } from '@prisma/client';
 
 import { PrismaService } from '../../../common/prisma/prisma.service';
+import { findBundleSoldAs, readBundleMarker } from '../../merge-links/utils/bundle-snapshot.util';
 import { readTrialSettings, TrialSettings } from '../../plans/utils/trial-settings.util';
 import {
   isConvertibleTrial,
@@ -356,6 +357,18 @@ export class PaymentsTransactionsService {
     // property does not cross that function boundary — the compiler must be able
     // to see the proof at the point of use, not only where it was made.
     const selectedPlan = quote.selectedPlan;
+    // A bundle's face plan is ISSUED or SOLD as ONE product: the checkout mints
+    // one subscription per member plan (`createSubscriptionFromPayment`), and a
+    // renewal extends the whole set. What that means for a DRAFT:
+    //
+    //   NEW / ADDITIONAL — allowed: this is the purchase of the merged plan.
+    //   RENEW           — allowed only for a subscription that BOUGHT it (the
+    //                     marker in its snapshot names this bundle); the renewal
+    //                     then extends all of its halves. Anything else renewing
+    //                     onto it would be a plan change onto a product that
+    //                     needs several subscriptions.
+    //   UPGRADE         — never: «Сменить тариф» moves exactly one subscription.
+    const faceBundle = await findBundleSoldAs(this.prismaService, selectedPlan.id);
     const price = quote.price;
     if (selectedPlan.availability === PlanAvailability.TRIAL && !allowPaidTrialReservation) {
       throw trialDraftRequiresCheckout();
@@ -373,12 +386,28 @@ export class PaymentsTransactionsService {
     // Read for every UPGRADE: whether it converts the buyer's trial is marked on
     // the draft, and fulfilment refuses a second conversion of one trial
     // (`isTrialConversionSnapshot`). A RENEW needs it only to be a provider
-    // subscription.
+    // subscription — or to prove it renews the merged tariff it bought.
     const source =
       input.purchaseType === PurchaseType.UPGRADE ||
-      (providerSubscription && input.purchaseType === PurchaseType.RENEW)
+      (providerSubscription && input.purchaseType === PurchaseType.RENEW) ||
+      (faceBundle !== null && input.purchaseType === PurchaseType.RENEW)
         ? await this.readSourceSubscription(input.userId, sourceSubscriptionId)
         : null;
+    // The two doors the comment above closes. A merged tariff is one product
+    // over several subscriptions, so it cannot be the target of «Сменить
+    // тариф», which moves exactly one, nor the plan a DIFFERENT subscription
+    // renews onto.
+    if (faceBundle !== null) {
+      if (input.purchaseType === PurchaseType.UPGRADE) {
+        throw mergedPlanRefusal('A merged tariff cannot be an upgrade target.');
+      }
+      if (input.purchaseType === PurchaseType.RENEW) {
+        const marker = readBundleMarker(source?.planSnapshot);
+        if (marker === null || marker.bundleId !== faceBundle.id) {
+          throw mergedPlanRefusal('Only the subscription that bought a merged tariff can renew it.');
+        }
+      }
+    }
     const convertsTrial =
       input.purchaseType === PurchaseType.UPGRADE && source !== null && isConvertibleTrial(source);
     let providerSubscriptionTerms: ProviderSubscriptionTerms | null = null;
@@ -429,10 +458,17 @@ export class PaymentsTransactionsService {
       // new plan's term begins, which is the end of the current one when terms
       // are durable. The sweep would read that as a move and cancel the
       // sign-up, silently. Refused here instead, where the buyer is told.
+      //
+      // EXCEPT for a merged tariff: renewing it names the bundle's own plan row
+      // while the subscription's snapshot keeps its MEMBER plan (`planSnapshot.
+      // bundlePlanId` is the product), so the two ids disagree by design. The
+      // sweep compares the same two and tolerates it the same way
+      // (`strandedReason`).
       if (
         input.purchaseType === PurchaseType.RENEW &&
         source !== null &&
-        renewsOntoAnotherPlan(source.planSnapshot, selectedPlan.id)
+        renewsOntoAnotherPlan(source.planSnapshot, selectedPlan.id) &&
+        readBundleMarker(source.planSnapshot)?.bundlePlanId !== selectedPlan.id
       ) {
         throw autopayNotAvailable('PLAN_CHANGE');
       }
@@ -777,8 +813,21 @@ function readSnapshotPlanId(value: Prisma.JsonValue): string | null {
   return typeof id === 'string' && id.length > 0 ? id : null;
 }
 
-function trialDraftRequiresCheckout(): BadRequestException {
+/**
+ * A merged tariff cannot go where one subscription does: it is ONE product over
+ * several subscriptions, so it is neither an upgrade target nor a plan another
+ * subscription renews onto. The code is the one the cabinet already knows for "a
+ * plan that cannot be bought here"; the message names the real reason.
+ */
+function mergedPlanRefusal(message: string): BadRequestException {
   return new BadRequestException({
+    code: 'PAYMENT_DRAFT_PLAN_NOT_AVAILABLE',
+    message,
+    warnings: [],
+  });
+}
+
+function trialDraftRequiresCheckout(): BadRequestException {  return new BadRequestException({
     code: 'TRIAL_DRAFT_REQUIRES_CHECKOUT',
     message: 'Paid trial drafts must be created by a checkout that reserves trial capacity.',
   });

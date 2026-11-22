@@ -76,7 +76,7 @@ function harness(rows: Array<{ id: string; userId: string; planSnapshot: unknown
     // No saved card, so the row expires rather than waiting for a retry.
     { findPreferredForCharge: async () => null } as never,
     {} as never,
-    { requiresPlanSelection: async () => false } as never,
+    { requiresPlanSelection: async () => false, isBundleRenewalPrimary: async () => true } as never,
     {
       info: (type: string, _category: string, _message: string, metadata: Record<string, unknown>) => {
         raised.push({ type, metadata });

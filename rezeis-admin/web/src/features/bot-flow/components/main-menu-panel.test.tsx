@@ -11,7 +11,7 @@
  * under it.
  */
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
-import { screen, within } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 
 import { api } from '@/lib/api'
 import { i18n, loadFeatureBundle } from '@/i18n/i18n'
@@ -75,6 +75,9 @@ describe('the texts the bot writes around the greeting', () => {
     'profile.devices',
     'profile.devices_unlimited',
     'profile.traffic',
+    // The second traffic line of an объединённая подписка — its own key, so it
+    // can be renamed («Обходы») without touching the line above it.
+    'profile.traffic_extra',
     'profile.unlimited',
     'profile.until',
     'common.not_available',
@@ -93,11 +96,29 @@ describe('the texts the bot writes around the greeting', () => {
 
     expect(await screen.findByText(i18n.t('botFlow.screenTexts.captions.welcomeMessage'))).toBeInTheDocument()
     expect(screen.getByText(i18n.t('botFlow.screenTexts.captions.chooseAction'))).toBeInTheDocument()
-    // One caption for the whole block of subscription lines, above each of them.
-    expect(screen.getAllByText(i18n.t('botFlow.screenTexts.captions.subscriptionLine'))).toHaveLength(7)
+    // One caption for the whole block of subscription lines, above each of them
+    // (eight now: the merged subscription's extra traffic line is one of them).
+    expect(screen.getAllByText(i18n.t('botFlow.screenTexts.captions.subscriptionLine'))).toHaveLength(8)
     // The pop-up an old button gets says when it is shown: its key says nothing.
     const staleCaption = i18n.t('botFlow.screenTexts.captions.menuUpdated')
     expect(staleCaption).not.toBe('botFlow.screenTexts.captions.menuUpdated')
     expect(screen.getByText(staleCaption)).toBeInTheDocument()
+  })
+})
+
+describe('the extra «Трафик доп.» caption of a merged subscription', () => {
+  it('edits the caption of the first extra line and offers no «+» windows', async () => {
+    mockTextsApi({ 'profile.traffic_extra': 'Обходы' })
+    renderWithProviders(<MainMenuSystemPanel />)
+
+    // The 2nd tariff's line is captioned by the base key, which is always shown.
+    expect(await screen.findByText('profile.traffic_extra')).toBeInTheDocument()
+    expect(await screen.findByDisplayValue('Обходы')).toBeInTheDocument()
+    // Per-tariff captions from the third tariff on moved to the merged-tariff
+    // card, so the bot map holds no «+» window machinery any more.
+    expect(screen.queryByText('profile.traffic_extra_2')).toBeNull()
+    expect(
+      screen.queryByRole('button', { name: /Добавить подпись|Add a caption/ }),
+    ).toBeNull()
   })
 })

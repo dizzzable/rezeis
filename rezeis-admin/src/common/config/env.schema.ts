@@ -224,6 +224,19 @@ const environmentSchema = z
      */
     QUEST_PARTNER_SECRETS: z.preprocess(normalizeOptionalString, z.string().optional()),
 
+    // ── Merged subscription links ────────────────────────────────────────────
+    /**
+     * Public base of the merging service, WITHOUT a trailing slash — the
+     * cabinet receives `<base>/<token>` in `url`/`configUrl` for every card
+     * whose plan belongs to an active plan bundle.
+     *
+     * Unset switches the whole feature off: no bundles are listed to the
+     * cabinet, no tokens are minted, and every card keeps the panel's own
+     * subscription URL. Setting it is what turns a grouping the operator made
+     * in the admin panel into a link a customer can actually use.
+     */
+    MERGE_LINK_BASE_URL: z.preprocess(normalizeOptionalString, z.string().url().optional()),
+
     // ── Update checker ───────────────────────────────────────────────────────
     /** Optional override for the panel `<owner>/<repo>` GitHub slug whose
      * `releases/latest` is compared against the running version. The upstream
