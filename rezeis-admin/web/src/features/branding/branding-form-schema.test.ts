@@ -13,6 +13,8 @@ const messages = {
   gradientInvalid: 'gradient invalid',
   qrDarkTooLight: 'qr dark too light',
   qrLogoInvalid: 'qr logo invalid',
+  authBackgroundUrlRequired: 'auth background url required',
+  authBackgroundUrlInvalid: 'auth background url invalid',
 } as const
 
 describe('branding form schema', () => {

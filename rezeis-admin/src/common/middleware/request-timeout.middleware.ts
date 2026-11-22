@@ -32,6 +32,12 @@ const LONG_TIMEOUT_PATTERNS = [
   /\/admin\/imports\//,
   /\/admin\/broadcast\/upload-media/,
   /\/admin\/faq\/uploads(?:[/?]|$)/,
+  // THE ENTRY-SCREEN BACKGROUND. A wallpaper is a few megabytes and a
+  // background video up to 128 MB travelling from the operator's machine over
+  // their own uplink; at the 30 s default the panel answered 408 mid-upload and
+  // read as "не работает". 120 s is the same courtesy the other upload slots
+  // already get.
+  /\/admin\/settings\/branding\/auth-background-upload(?:[?]|$)/,
   /\/admin\/backup\/download\//,
   // Both restore routes, and the reason the shapes differ: `restore/:filename`
   // ends in a slash, `restore-upload` ends at the path end. The pattern used to

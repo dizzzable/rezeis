@@ -16,6 +16,9 @@ import {
   AppBackgroundTexture,
   APP_BACKGROUND_TEXTURES,
   AppBackgroundTextureSettings,
+  AUTH_BACKGROUND_KINDS,
+  AuthBackgroundKind,
+  AuthBackgroundSettings,
   BG_EFFECTS,
   BgEffect,
   BORDER_RADIUS_CLASSES,
@@ -83,6 +86,62 @@ const IMAGE_URL_PATTERN =
   /^(?:data:image\/[a-z0-9+.-]+;base64,[A-Za-z0-9+/=]+|https?:\/\/(?![^/\s]+@)[^\s]+|\/uploads\/branding\/(?![A-Za-z0-9._-]*\.\.)[A-Za-z0-9][A-Za-z0-9._-]*)$/i;
 
 /**
+ * Entry-screen background URL rules — ONE pair of predicates for the write
+ * guard (`UpdateBrandingSettingsDto`) and the reader (`readAuthBackground`).
+ *
+ * A value the DTO accepts and the reader then drops is answered `200 OK` and
+ * reverts on the next read, with nothing anywhere to point at; a value the
+ * reader keeps and the DTO refuses is one a restored backup can put in front of
+ * subscribers while no operator could ever save it. `isSafeBrandingGradient`
+ * and `isQrLogoSrc` are shared for the same reason.
+ *
+ * The image rules are the branding-image rules the DTO applies to `logoUrl` /
+ * `pwaIconUrl`, minus inline data: the cabinet's `resolveAuthBackground`
+ * refuses a `data:` URL for this field, so accepting one here would show the
+ * operator a wallpaper in the panel and nothing on the entry screen. An image
+ * is therefore an absolute HTTPS URL (no userinfo, no whitespace) or a safe
+ * `/uploads/branding/<file>` path. Video follows the same two shapes, with one
+ * difference that is the point of the pair: the upload path must END in a
+ * video extension the relay can type (`mp4`, `webm`), so a video slot can never
+ * be pointed at a logo file and a fresh upload URL can never be saved as an
+ * image.
+ */
+export const AUTH_BACKGROUND_URL_MAX_LENGTH = 2048;
+const AUTH_BACKGROUND_UPLOAD_PATH_PATTERN =
+  /^\/uploads\/branding\/(?![A-Za-z0-9._-]*\.\.)[A-Za-z0-9][A-Za-z0-9._-]*$/;
+/** An upload of this panel's, ending in a video extension the relay types. */
+const AUTH_BACKGROUND_VIDEO_UPLOAD_PATH_PATTERN =
+  /^\/uploads\/branding\/(?![A-Za-z0-9._-]*\.\.)[A-Za-z0-9][A-Za-z0-9._-]*\.(?:mp4|webm)$/i;
+/** Absolute HTTPS URL with no userinfo and no whitespace. */
+const AUTH_BACKGROUND_HTTPS_URL_PATTERN = /^https:\/\/(?![^/\s]+@)[^\s]+$/i;
+
+function isBoundedAuthBackgroundUrl(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= AUTH_BACKGROUND_URL_MAX_LENGTH
+  );
+}
+
+/** `authBackground.kind === 'image'`: an HTTPS URL or a branded upload path. */
+export function isSafeAuthBackgroundImageUrl(value: unknown): boolean {
+  return (
+    isBoundedAuthBackgroundUrl(value) &&
+    (AUTH_BACKGROUND_UPLOAD_PATH_PATTERN.test(value) ||
+      AUTH_BACKGROUND_HTTPS_URL_PATTERN.test(value))
+  );
+}
+
+/** `authBackground.kind === 'video'`: an HTTPS URL, or a video upload's path. */
+export function isSafeAuthBackgroundVideoUrl(value: unknown): boolean {
+  return (
+    isBoundedAuthBackgroundUrl(value) &&
+    (AUTH_BACKGROUND_VIDEO_UPLOAD_PATH_PATTERN.test(value) ||
+      AUTH_BACKGROUND_HTTPS_URL_PATTERN.test(value))
+  );
+}
+
+/**
  * Anything that is not an explicit `custom` reads as `concept`.
  *
  * The default has to be `concept` rather than `custom`: every install that
@@ -145,6 +204,7 @@ export function readBrandingSettings(value: unknown): BrandingSettingsInterface 
     cardEffectsByIndex: readCardEffectSlots(record, 'cardEffectsByIndex'),
     bgEffect: readBgEffect(record, DEFAULT_BRANDING.bgEffect),
     appBackground: readAppBackground(record),
+    authBackground: readAuthBackground(record),
     iconColorMode: readIconColorMode(record, DEFAULT_BRANDING.iconColorMode),
     iconColors: readHexMap(record, 'iconColors'),
     iconDecor: readIconDecorMap(record, 'iconDecor'),
@@ -222,6 +282,14 @@ export function mergeBrandingSettings(input: {
             ...texturePatch,
           },
         };
+      } else if (key === 'authBackground') {
+        // ONE BLOCK, REPLACED WHOLE — never merged over the stored pair. `kind`
+        // selects what `url` means and the other way round, so keeping either
+        // half from the previous decision on a partial patch would pair an
+        // image address with a video kind (or a stale URL with `none`). The
+        // reader then normalizes the whole block, so an unusable value leaves
+        // the default instead of durable garbage.
+        merged[key] = readAuthBackground({ authBackground: value });
       } else if (key === 'cornerRadii') {
         merged[key] = readCornerRadii({
           cornerRadii: {
@@ -963,6 +1031,56 @@ function readAppBackgroundTexture(
     scale: Math.round(readClampedNumber(slot, 'scale', 8, 256, fallback.scale)),
     opacity: readClampedNumber(slot, 'opacity', 0.05, 1, fallback.opacity),
   };
+}
+
+/**
+ * Reads the WEB cabinet's entry-screen background block.
+ *
+ * THE WHOLE BLOCK FALLS BACK, not just the broken half. `kind` and `url` are
+ * one decision: a URL whose kind is `none` renders nothing, and a kind whose
+ * URL is unusable is a media request the cabinet must not issue. Every failure
+ * below — a non-object, an unknown `kind`, a missing/non-string/wrong-protocol
+ * URL — therefore returns `{ kind: 'none', url: null }`. It never throws and
+ * never partially applies: this field is served through
+ * `/api/internal/branding/public-config`, whose consumer refuses the whole
+ * branding snapshot on a malformed value, so repairing here is what keeps one
+ * bad URL from costing the operator every colour, logo and font they set.
+ *
+ * `https:` only. The image branch also accepts the one relative address an
+ * upload can produce (`/uploads/branding/<file>`, mirrored durably by Reiwa).
+ * Inline `data:` URIs are deliberately NOT accepted here even though the other
+ * branding image fields allow them: the cabinet's `resolveAuthBackground`
+ * refuses them, and a value the panel shows but the cabinet drops is a
+ * wallpaper that exists only in the admin.
+ */
+function readAuthBackground(record: Record<string, unknown>): AuthBackgroundSettings {
+  const value = record['authBackground'];
+  const fallback = DEFAULT_BRANDING.authBackground;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return fallback;
+  }
+  const slot = value as Record<string, unknown>;
+  const kindRaw = slot['kind'];
+  if (
+    typeof kindRaw !== 'string' ||
+    !(AUTH_BACKGROUND_KINDS as readonly string[]).includes(kindRaw)
+  ) {
+    return fallback;
+  }
+  const kind = kindRaw as AuthBackgroundKind;
+  if (kind === 'none') {
+    return fallback;
+  }
+  const urlRaw = slot['url'];
+  if (typeof urlRaw !== 'string') {
+    return fallback;
+  }
+  const url = urlRaw.trim();
+  const safe =
+    kind === 'image'
+      ? isSafeAuthBackgroundImageUrl(url)
+      : isSafeAuthBackgroundVideoUrl(url);
+  return safe ? { kind, url } : fallback;
 }
 
 function readIconColorMode(

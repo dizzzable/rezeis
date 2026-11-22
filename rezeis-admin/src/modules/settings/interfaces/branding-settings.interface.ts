@@ -488,6 +488,38 @@ export interface AppBackgroundSettings {
 }
 
 /**
+ * Entry-screen background modes for the WEB cabinet's auth pages (sign in,
+ * sign up, "forgot password"): `none` keeps the shipped look, `image` and
+ * `video` draw an operator-supplied media URL behind the form.
+ *
+ * ROOT-ONLY. Unlike `appBackground` it is deliberately NOT part of
+ * `BrandingThemeVariant`: the light/dark snapshots describe the colours and the
+ * app background of the signed-in cabinet, and an entry screen never consults
+ * them. Keeping it off the variant list also keeps `mergeBrandingSettings`'s
+ * brightness synchronisation from copying one decision onto both snapshots.
+ *
+ * DEFAULT `{ kind: 'none', url: null }` — a URL without a kind means nothing,
+ * and a kind without a URL is what the reader repairs (see `readAuthBackground`
+ * in `branding-settings.util.ts`), so the whole block falls back to this pair
+ * whenever either half is unusable. Never throws: the public config endpoint
+ * serves this field to the cabinet, and one bad value must not cost the
+ * operator every other branding setting.
+ */
+export const AUTH_BACKGROUND_KINDS = ['none', 'image', 'video'] as const;
+export type AuthBackgroundKind = (typeof AUTH_BACKGROUND_KINDS)[number];
+
+export interface AuthBackgroundSettings {
+  /** `none` keeps the shipped entry-screen look and forces `url: null`. */
+  readonly kind: AuthBackgroundKind;
+  /**
+   * Absolute `https://` media URL, or a `/uploads/branding/<file>` path (image
+   * kind only) — `null` when `none`. Inline `data:` URIs are not accepted: the
+   * cabinet's own reader rejects them, so the panel must not offer one.
+   */
+  readonly url: string | null;
+}
+
+/**
  * Per-plan tariff-card visual style (keyed by `planId` in
  * `BrandingSettingsInterface.planCardStyles`). All fields optional — an absent
  * style (or absent map entry) means the reiwa cabinet derives a deterministic
@@ -1010,6 +1042,15 @@ export interface BrandingSettingsInterface {
   readonly appBackground: AppBackgroundSettings;
 
   /**
+   * Background media for the WEB cabinet's entry screens (sign in, sign up,
+   * "forgot password"). Root-only and independent of `appBackground`: it is
+   * painted behind the auth forms only, and the support page deliberately stays
+   * plain. `none` (the default, and the state of every installation predating
+   * this field) keeps the shipped look. See `AuthBackgroundSettings`.
+   */
+  readonly authBackground: AuthBackgroundSettings;
+
+  /**
    * Colouring strategy for the cabinet's menu/section icons.
    * `default` keeps each icon's own accent, `theme` paints them all in the
    * brand primary, `custom` uses per-icon colours from `iconColors`.
@@ -1186,6 +1227,9 @@ export const DEFAULT_BRANDING: BrandingSettingsInterface = {
       opacity: 0.15,
     },
   },
+  // Shipped entry screens have no operator media behind the form; `none` is
+  // what every installation predating this field already draws.
+  authBackground: { kind: 'none', url: null },
   iconColorMode: 'default',
   iconColors: {},
   iconDecor: {},

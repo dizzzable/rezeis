@@ -35,7 +35,9 @@ import { IconUploadService, ICON_MAX_FILE_SIZE, IconUploadedInterface } from '..
 import {
   BrandingAssetUploadService,
   BRANDING_ASSET_MAX_FILE_SIZE,
+  BRANDING_AUTH_BACKGROUND_MAX_UPLOAD_BYTES,
   BrandingAssetUploadedInterface,
+  BrandingAuthBackgroundUploadedInterface,
 } from '../services/branding-asset-upload.service';
 import {
   SettingsService,
@@ -554,6 +556,60 @@ export class SettingsController {
       mimeType: file.mimetype,
       purpose: 'qr-logo',
     });
+  }
+
+  /**
+   * Uploads the WEB cabinet's entry-screen background — a photograph (PNG,
+   * JPEG, WebP) or a video (MP4, WebM) — and answers its public
+   * `/uploads/branding/<file>` URL together with the `authBackground.kind` the
+   * SPA must save it under.
+   *
+   * The two media share ONE slot and ONE picker, so the answer says what the
+   * bytes are instead of making the operator declare it: a clip picked under a
+   * "photo" control is stored as a video, and vice versa. The size ceiling is
+   * the slot's widest (a background video); the per-kind ceiling is enforced in
+   * the service, against the sniffed kind.
+   */
+  @Post('branding/auth-background-upload')
+  @RequirePermission('settings', 'edit')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      limits: { fileSize: BRANDING_AUTH_BACKGROUND_MAX_UPLOAD_BYTES },
+    }),
+  )
+  @ApiConsumes('multipart/form-data')
+  @ApiOperation({
+    summary: 'Upload the entry-screen background (image or video) and return its public URL',
+  })
+  public async uploadBrandingAuthBackground(
+    @UploadedFile() file: Express.Multer.File | undefined,
+    @Body() body?: { readonly previous?: unknown },
+  ): Promise<BrandingAuthBackgroundUploadedInterface> {
+    if (!file) {
+      throw new BadRequestException('No file uploaded');
+    }
+    const uploaded = await this.brandingAssetUploadService.persistAuthBackground({
+      buffer: file.buffer,
+      originalName: file.originalname,
+      mimeType: file.mimetype,
+    });
+    // The panel names the address this upload REPLACES inside the form — the
+    // file picked a minute ago and then replaced by a video, still unsaved.
+    // Deleting it is safe only while the saved row does not point at it; if it
+    // does, the live entry screen is drawing that very file and the save that
+    // follows is what retires it (`updateBrandingSettings`).
+    const previous = typeof body?.previous === 'string' ? body.previous.trim() : '';
+    if (previous.length > 0 && previous !== uploaded.url) {
+      try {
+        const stored = await this.settingsService.getBrandingSettings();
+        if (stored.authBackground.url !== previous) {
+          await this.brandingAssetUploadService.remove(previous);
+        }
+      } catch {
+        // Best-effort: a file that cannot be read back is not a failed upload.
+      }
+    }
+    return uploaded;
   }
 }
 

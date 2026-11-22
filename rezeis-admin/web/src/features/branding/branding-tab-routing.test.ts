@@ -69,6 +69,13 @@ describe('branding tab routing', () => {
     expect(tabForBrandingField('qrStyle')).toBe('qr')
   })
 
+  it('routes the entry-screen background to the tab that renders it', () => {
+    // The API refuses a `kind`/`url` disagreement and the page sets the error at
+    // `authBackground.url`; the URL box lives on the authbg tab only, so a
+    // fallback route would land the operator on 'brand' with nothing marked.
+    expect(tabForBrandingField('authBackground')).toBe('authbg')
+  })
+
   it('keeps the tabs it already routed to', () => {
     // A spot check that the chain still means what it says, so a refactor that
     // reorders the `if`s cannot pass on the fallback test alone.

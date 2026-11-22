@@ -49,6 +49,7 @@ import {
   type StoredAddOnSwitches,
 } from '../../add-on-entitlements/add-on-rollout.config';
 import { mergeBrandingSettings, readBrandingSettings } from '../utils/branding-settings.util';
+import { BrandingAssetUploadService } from './branding-asset-upload.service';
 import { PlatformBrandingInterface } from '../interfaces/platform-branding.interface';
 import { mergePlatformBranding, readPlatformBranding } from '../utils/platform-branding.util';
 import { describePlatformTimezoneRefusal, resolvePlatformTimezone } from '../utils/platform-timezone.util';
@@ -297,6 +298,14 @@ export class SettingsService {
      */
     @Optional()
     private readonly moduleRef?: ModuleRef,
+    /**
+     * Removes the entry-screen background an operator replaced or cleared, so a
+     * 40 MB clip does not sit on the server forever. `@Optional()` and last, so
+     * the positional constructions in the specs keep working; absent, the save
+     * simply leaves the file (the old behaviour).
+     */
+    @Optional()
+    private readonly brandingAssetUploadService?: BrandingAssetUploadService,
   ) {}
 
   /**
@@ -520,12 +529,20 @@ export class SettingsService {
       return this.getBrandingSettings();
     }
 
+    // Read before the write: the row that lands holds the NEW block, and the
+    // file it replaced is only knowable from the old one.
+    let replacedBackgroundUrl: string | null = null;
+
     const settings = await mutateSettingsRow(
       this.prismaService,
       async ({ tx: transactionClient, row: existing, write }): Promise<Settings> => {
         const merged = mergeBrandingSettings({
           existing: existing.brandingSettings,
           patch: input.updateBrandingSettingsDto,
+        });
+        replacedBackgroundUrl = readReplacedAuthBackgroundUrl({
+          previousRaw: existing.brandingSettings,
+          mergedRaw: merged,
         });
         const updated = await write({
           brandingSettings: merged as Prisma.InputJsonValue,
@@ -554,6 +571,38 @@ export class SettingsService {
     // here, so that re-read cannot be served the pre-save row.
     if (this.reiwaCacheInvalidator !== undefined) {
       void this.reiwaCacheInvalidator.invalidateBranding(`branding.${updatedFields.join(',')}`);
+    }
+    // After the commit, never before: the row is the only reference that keeps
+    // the file meaning something. Best-effort and awaited — the save has
+    // already shipped, and a file that cannot be removed must not turn it into
+    // an error the operator sees.
+    if (replacedBackgroundUrl !== null && this.brandingAssetUploadService !== undefined) {
+      await this.brandingAssetUploadService.remove(replacedBackgroundUrl).catch((err: unknown) => {
+        this.logger.warn(
+          `Could not remove replaced auth background ${replacedBackgroundUrl}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      });
+    }
+    // …and the files nobody names at all. The replaced one above is exact; this
+    // sweep catches what a closed tab leaves behind (picked a clip, previewed
+    // it, never saved), which no block ever references again. The whole row is
+    // the reference list and only files older than a day qualify — see
+    // `removeUnreferenced`.
+    if (this.brandingAssetUploadService !== undefined) {
+      try {
+        const swept = await this.brandingAssetUploadService.removeUnreferenced({
+          referenced: JSON.stringify(settings),
+        });
+        if (swept > 0) {
+          this.logger.log(`Swept ${swept} abandoned branding upload(s)`);
+        }
+      } catch (err: unknown) {
+        this.logger.warn(
+          `Branding upload sweep failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
     return readBrandingSettings(settings.brandingSettings);
   }
@@ -1978,6 +2027,7 @@ export function extractUpdatedBrandingFields(dto: UpdateBrandingSettingsDto): re
     'cardEffectsByIndex',
     'bgEffect',
     'appBackground',
+    'authBackground',
     'iconColorMode',
     'iconColors',
     'iconDecor',
@@ -2264,4 +2314,40 @@ function mergePartnerSettings(
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The branded file the new row no longer points at, or `null`.
+ *
+ * Only an upload of this panel's can be removed (`/uploads/branding/<file>`),
+ * only when the saved block actually names a different background, and only
+ * when that address is not still used by ANY other branding slot — an operator
+ * who pasted the same upload into `planCardStyles` would otherwise lose it
+ * while the card still drew it. `mergeBrandingSettings` replaces the
+ * `authBackground` block whole, so a leftover occurrence in the serialised row
+ * is, by construction, a reference from somewhere else.
+ */
+export function readReplacedAuthBackgroundUrl(input: {
+  readonly previousRaw: unknown;
+  readonly mergedRaw: unknown;
+}): string | null {
+  const previous = readBrandingSettings(input.previousRaw).authBackground;
+  const previousUrl = previous.kind === 'none' ? null : previous.url;
+  if (previousUrl === null || !previousUrl.startsWith('/uploads/branding/')) {
+    return null;
+  }
+  const merged = readBrandingSettings(input.mergedRaw);
+  const next = merged.authBackground;
+  if (next.kind !== 'none' && next.url === previousUrl) {
+    return null;
+  }
+  // The row is the reference list. Anything but the block that was just
+  // replaced (which no longer carries this address) means the file is live.
+  let serialised: string;
+  try {
+    serialised = JSON.stringify(input.mergedRaw);
+  } catch {
+    return null;
+  }
+  return serialised.includes(previousUrl) ? null : previousUrl;
 }
