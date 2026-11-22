@@ -5116,6 +5116,7 @@ export const en = {
       nav: 'Navigation',
       servers: 'Servers',
       qr: 'QR codes',
+      authbg: 'Background (HTTPS)',
     },
     servers: {
       title: 'Server map',
@@ -5144,6 +5145,30 @@ export const en = {
           note: 'Drawn without WebGL — the lightest on weak phones.',
         },
       },
+    },
+    authBackground: {
+      title: 'Entry-screen background',
+      description:
+        'An image or video behind the sign-in, sign-up and password-reset forms in the web cabinet. Only the URL is stored; the file is served over https.',
+      kindLabel: 'Background type',
+      kindNone: 'None',
+      kindImage: 'Image',
+      kindVideo: 'Video',
+      urlLabel: 'File URL (https)',
+      urlHint:
+        'Paste an https:// address or upload a file with the buttons below: photo up to 8 MB (png, jpg, webp), video up to 128 MB (mp4, webm). Replacing or clearing the background deletes the uploaded file from the server.',
+      urlPlaceholder: 'https://cdn.example.com/login.jpg',
+      upload: 'Upload photo',
+      uploadVideo: 'Upload video',
+      uploading: 'Uploading…',
+      uploadFailed: 'Could not upload the file',
+      clear: 'Remove background',
+      preview: 'Preview',
+      appliesTo:
+        'The background appears on the sign-in, sign-up and “Forgot password” pages. The support page stays plain.',
+      required: 'A file URL is required for the image or video background.',
+      invalid:
+        'Check the URL: it must be https:// or an uploaded file path (for video — .mp4 or .webm), with no spaces and no credentials in the address.',
     },
     qr: {
       title: 'QR code style',

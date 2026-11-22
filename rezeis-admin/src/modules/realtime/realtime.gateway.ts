@@ -4,10 +4,12 @@ import {
   Logger,
   OnModuleDestroy,
   Optional,
+  UseFilters,
 } from '@nestjs/common';
 import { ConfigType } from '@nestjs/config';
 import { ModuleRef } from '@nestjs/core';
 import { JwtService } from '@nestjs/jwt';
+import { SkipThrottle } from '@nestjs/throttler';
 import {
   ConnectedSocket,
   MessageBody,
@@ -27,6 +29,7 @@ import { buildTrustedProxyValue } from '../../common/http/trusted-proxy';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { AdminJwtPayloadInterface } from '../auth/interfaces/admin-jwt-payload.interface';
 import { RbacService } from '../rbac/services/rbac.service';
+import { LoggingWsExceptionFilter } from './logging-ws-exception.filter';
 import {
   REALTIME_CLOSE,
   REALTIME_EVENT,
@@ -104,6 +107,16 @@ interface AuthenticatedSocket extends Socket {
  *   push without coupling to the gateway constructor surface.
  */
 @Injectable()
+// The global `ThrottlerGuard` (common/throttle) is registered as `APP_GUARD`
+// and DOES run for WebSocket message handlers in this Nest version — measured,
+// not assumed: every `subscribe` frame reached `ThrottlerGuard.handleRequest`,
+// which calls `res.header('Retry-After', …)` for HTTP and threw
+// `TypeError: res.header is not a function` here, so the handler never ran and
+// the panel's topic subscription silently did nothing. Per-message throttling
+// has no HTTP response to answer with, so this surface is exempt; the handshake
+// is still gated by the address guard above (`refuseByAddress`).
+@SkipThrottle()
+@UseFilters(LoggingWsExceptionFilter)
 @WebSocketGateway({
   namespace: REALTIME_NAMESPACE,
   // The frontend connects to `/api/socket.io` because the rest of the
@@ -176,6 +189,22 @@ export class RealtimeGateway
   // ── Connection ─────────────────────────────────────────────────────────
 
   public async handleConnection(client: Socket): Promise<void> {
+    // Why the wrapper: Nest's default WS exceptions handler logs the thrown
+    // exception with `logger.error(exception)`, which for an Error instance is
+    // an object with no enumerable properties — the operator's log said
+    // `ERROR [WsExceptionsHandler] {}` and nothing else, every minute, with no
+    // way to tell a Prisma hiccup from a bad token. Logging the name, message
+    // and stack HERE names the cause; the rethrow keeps the handler's own
+    // behaviour unchanged.
+    try {
+      await this.acceptConnection(client);
+    } catch (err: unknown) {
+      this.logger.error(`Realtime handshake failed: ${describeHandshakeError(err)}`);
+      throw err;
+    }
+  }
+
+  private async acceptConnection(client: Socket): Promise<void> {
     // Address gate BEFORE the token, mirroring the ordering the HTTP side
     // already chose for the same two lists (`app.module.ts`: the allowlist
     // guard "sits BEFORE the JWT guard so we never even consult the auth
@@ -617,5 +646,17 @@ export class RealtimeGateway
       // duplicated in the disconnect packet's `data`.
       socket.disconnect(true);
     }
+  }
+}
+
+/** A thrown handshake error, rendered so it survives a log line. */
+function describeHandshakeError(err: unknown): string {
+  if (err instanceof Error) {
+    return `${err.name}: ${err.message}${err.stack ? `\n${err.stack}` : ''}`;
+  }
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
   }
 }

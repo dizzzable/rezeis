@@ -277,6 +277,17 @@ export interface BrandingFormDraft {
    */
   readonly bgEffect: (typeof BRANDING_BG_EFFECTS)[number]
   readonly appBackground?: BrandingAppBackgroundDraft
+  /**
+   * Entry-screen background for the WEB cabinet (sign in, sign up, "forgot
+   * password"). ROOT-ONLY: it is deliberately absent from
+   * `BrandingThemeVariantDraft`, because a brightness snapshot describes the
+   * signed-in cabinet's colours and an entry screen never consults those.
+   *
+   * REQUIRED, unlike `appBackground` above and for the reason spelled out on
+   * `qrStyle` below: a field missing from `DEFAULT_BRANDING_DRAFT` is never
+   * compared, so its edits never leave the page ("No changes to save").
+   */
+  readonly authBackground: BrandingAuthBackgroundDraft
   readonly iconColorMode: (typeof BRANDING_ICON_COLOR_MODES)[number]
   readonly iconColors?: Record<string, string>
   readonly iconDecor?: Record<string, BrandingIconDecorDraft>
@@ -432,6 +443,21 @@ export const DEFAULT_APP_BACKGROUND_DRAFT: BrandingAppBackgroundDraft = {
   texture: { pattern: 'dots', color: '#22c55e', background: '#0a0a0a', scale: 24, opacity: 0.15 },
 }
 
+/** Entry-screen background modes — mirrors `AUTH_BACKGROUND_KINDS` on the API. */
+export const BRANDING_AUTH_BACKGROUND_KINDS = ['none', 'image', 'video'] as const
+
+export interface BrandingAuthBackgroundDraft {
+  readonly kind: (typeof BRANDING_AUTH_BACKGROUND_KINDS)[number]
+  /** Absolute `https://` URL, or an `/uploads/branding/<file>` path (image). */
+  readonly url: string | null
+}
+
+/** Mirrors `DEFAULT_BRANDING.authBackground`: no operator media behind the form. */
+export const DEFAULT_AUTH_BACKGROUND_DRAFT: BrandingAuthBackgroundDraft = {
+  kind: 'none',
+  url: null,
+}
+
 export const DEFAULT_SURFACE_THEME_DRAFT: BrandingSurfaceThemeDraft = {
   foreground: '#fafafa',
   mutedForeground: '#a1a1a1',
@@ -547,6 +573,10 @@ export interface BrandingFormValidationMessages {
   readonly qrDarkTooLight: string
   /** A QR logo that is not an image uploaded on the branding page — see `qrStyle.logo` in the schema. */
   readonly qrLogoInvalid: string
+  /** An entry-screen background URL absent while a kind is selected. */
+  readonly authBackgroundUrlRequired: string
+  /** An entry-screen background URL the cabinet would not render. */
+  readonly authBackgroundUrlInvalid: string
 }
 
 const HEX_PATTERN = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/
@@ -556,6 +586,9 @@ const OPAQUE_HEX_PATTERN = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/
 const DATA_IMAGE_BASE64_PATTERN = /^data:image\/[a-z0-9+.-]+;base64,[A-Za-z0-9+/=]+$/i
 const BRANDING_UPLOAD_PATH_PATTERN =
   /^\/uploads\/branding\/(?![A-Za-z0-9._-]*\.\.)[A-Za-z0-9][A-Za-z0-9._-]*$/
+/** An upload of this panel's that the relay can type as a video. */
+const AUTH_BACKGROUND_VIDEO_UPLOAD_PATH_PATTERN =
+  /^\/uploads\/branding\/(?![A-Za-z0-9._-]*\.\.)[A-Za-z0-9][A-Za-z0-9._-]*\.(?:mp4|webm)$/i
 /**
  * Max length for image-bearing fields (`logoUrl`, `cardLogoUrl`). Generous
  * enough to hold an inline `data:image` base64
@@ -608,6 +641,7 @@ export const DEFAULT_BRANDING_DRAFT: BrandingFormDraft = {
     gradient: 'linear-gradient(135deg, #0a0a0a 0%, #171717 100%)',
     texture: { pattern: 'dots', color: '#22c55e', background: '#0a0a0a', scale: 24, opacity: 0.15 },
   },
+  authBackground: DEFAULT_AUTH_BACKGROUND_DRAFT,
   iconColorMode: 'default',
   iconColors: {},
   iconDecor: {},
@@ -649,6 +683,51 @@ export function createBrandingFormSchema(messages: BrandingFormValidationMessage
     itemPx: z.number().min(0).max(32),
     pillPx: z.number().min(0).max(9999),
   })
+  /**
+   * Entry-screen background. The block is replaced WHOLE by the API, so both
+   * members are always sent and both are judged together: `none` carries no
+   * URL, `image` / `video` require one, and the URL rules mirror the API's
+   * (`AUTH_BACKGROUND_URL_MAX_LENGTH`, https-only video).
+   */
+  const authBackgroundSchema = z
+    .object({
+      kind: z.enum(BRANDING_AUTH_BACKGROUND_KINDS),
+      url: optionalNullableString(AUTH_BACKGROUND_URL_MAX),
+    })
+    .superRefine((value, ctx) => {
+      if (value.kind === 'none') {
+        // The API refuses a URL alongside `none` rather than silently dropping
+        // it, and the section nulls the URL when the operator picks `none` —
+        // so a non-null value here means the two controls disagreed.
+        if (value.url !== null) {
+          ctx.addIssue({
+            code: 'custom',
+            path: ['url'],
+            message: messages.authBackgroundUrlInvalid,
+          })
+        }
+        return
+      }
+      if (value.url === null) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['url'],
+          message: messages.authBackgroundUrlRequired,
+        })
+        return
+      }
+      const valid =
+        value.kind === 'image'
+          ? isAllowedAuthBackgroundImageUrl(value.url)
+          : isAllowedAuthBackgroundVideoUrl(value.url)
+      if (!valid) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['url'],
+          message: messages.authBackgroundUrlInvalid,
+        })
+      }
+    })
   const surfaceThemeSchema = z.object({
     foreground: z.string().regex(HEX_PATTERN, messages.hexInvalid),
     mutedForeground: z.string().regex(HEX_PATTERN, messages.hexInvalid),
@@ -805,6 +884,10 @@ export function createBrandingFormSchema(messages: BrandingFormValidationMessage
         .optional(),
       bgEffect: z.enum(BRANDING_BG_EFFECTS),
       appBackground: appBackgroundSchema.optional(),
+      // No `.optional()`: required in `BrandingFormDraft` for the reason on
+      // `qrStyle` below — a key the schema can drop is a key whose edits never
+      // leave the page.
+      authBackground: authBackgroundSchema,
       iconColorMode: z.enum(BRANDING_ICON_COLOR_MODES),
       iconColors: z
         .record(
@@ -1034,6 +1117,7 @@ export function createInitialBrandingDraft(input?: Partial<BrandingFormDraft> | 
     cardEffectProps: isPlainRecord(input?.cardEffectProps) ? input.cardEffectProps : {},
     cardEffectsByIndex: Array.isArray(input?.cardEffectsByIndex) ? input.cardEffectsByIndex : [],
     appBackground: normalizeAppBackgroundDraft(input?.appBackground),
+    authBackground: normalizeAuthBackgroundDraft(input?.authBackground),
     iconColors: isPlainRecord(input?.iconColors) ? input.iconColors : {},
     iconDecor: normalizeIconDecorDraft(input?.iconDecor),
     serversGlobe: normalizeServersGlobeDraft(input?.serversGlobe),
@@ -1332,6 +1416,34 @@ function normalizeAppBackgroundDraft(
 }
 
 /**
+ * Reads a stored entry-screen background back into the form.
+ *
+ * Repairs exactly what the API's `readAuthBackground` repairs, for the reason
+ * that one exists: a stored pair whose halves disagree is not a partial
+ * setting, it is a block that renders nothing. An unknown kind, a missing URL
+ * or a URL the cabinet would refuse all fall back to the shipped
+ * `{ kind: 'none', url: null }`, so the form shows what subscribers see and a
+ * save of an untouched tab sends nothing new.
+ */
+function normalizeAuthBackgroundDraft(
+  value: Partial<BrandingAuthBackgroundDraft> | undefined,
+): BrandingAuthBackgroundDraft {
+  if (typeof value !== 'object' || value === null) {
+    return { ...DEFAULT_AUTH_BACKGROUND_DRAFT }
+  }
+  const kind = (BRANDING_AUTH_BACKGROUND_KINDS as readonly string[]).includes(value.kind ?? '')
+    ? (value.kind as BrandingAuthBackgroundDraft['kind'])
+    : 'none'
+  if (kind === 'none') return { kind: 'none', url: null }
+  const url = typeof value.url === 'string' ? value.url.trim() : ''
+  const safe =
+    kind === 'image'
+      ? isAllowedAuthBackgroundImageUrl(url)
+      : isAllowedAuthBackgroundVideoUrl(url)
+  return safe ? { kind, url } : { ...DEFAULT_AUTH_BACKGROUND_DRAFT }
+}
+
+/**
  * An image field that may be absent, null, or empty — all three meaning "no
  * image", all three normalized to `null`.
  *
@@ -1508,6 +1620,43 @@ function hasControlCharacter(value: string): boolean {
     const codePoint = character.codePointAt(0) ?? 0
     return codePoint <= 0x1f || codePoint === 0x7f
   })
+}
+
+/** Mirrors the API's `AUTH_BACKGROUND_URL_MAX_LENGTH` for `authBackground.url`. */
+const AUTH_BACKGROUND_URL_MAX = 2048
+
+/**
+ * The entry-screen background URL rules — the same ones the API applies
+ * (`isSafeAuthBackgroundImageUrl` / `isSafeAuthBackgroundVideoUrl` in
+ * `branding-settings.util.ts`), so the page refuses exactly what the API would
+ * answer 400 to. Image: an absolute https URL or an upload path. Video: an
+ * absolute https URL, or an upload path that ENDS in a video extension the
+ * relay types (`.mp4` / `.webm`) — the video slot accepts the operator's own
+ * uploaded clip, not only a pasted address. Inline `data:` URIs are refused for
+ * BOTH: the cabinet's `resolveAuthBackground` does not render them, and the
+ * panel must not preview a wallpaper the entry screen will not draw.
+ */
+function isAllowedAuthBackgroundImageUrl(value: string): boolean {
+  if (value.length === 0 || value.length > AUTH_BACKGROUND_URL_MAX || /\s/.test(value)) {
+    return false
+  }
+  return BRANDING_UPLOAD_PATH_PATTERN.test(value) || isAllowedAbsoluteHttpsUrl(value)
+}
+
+function isAllowedAuthBackgroundVideoUrl(value: string): boolean {
+  if (value.length === 0 || value.length > AUTH_BACKGROUND_URL_MAX || /\s/.test(value)) {
+    return false
+  }
+  return AUTH_BACKGROUND_VIDEO_UPLOAD_PATH_PATTERN.test(value) || isAllowedAbsoluteHttpsUrl(value)
+}
+
+function isAllowedAbsoluteHttpsUrl(value: string): boolean {
+  try {
+    const url = new URL(value)
+    return url.protocol === 'https:' && url.username.length === 0 && url.password.length === 0
+  } catch {
+    return false
+  }
 }
 
 function isAllowedImageUrl(value: string): boolean {

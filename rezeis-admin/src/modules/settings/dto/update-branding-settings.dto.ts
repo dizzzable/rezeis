@@ -28,6 +28,8 @@ import {
   APP_BACKGROUND_TEXTURES,
   AppBackgroundKind,
   AppBackgroundTexture,
+  AUTH_BACKGROUND_KINDS,
+  AuthBackgroundKind,
   BG_EFFECTS,
   BgEffect,
   BORDER_RADIUS_CLASSES,
@@ -63,6 +65,11 @@ import {
   isSafeBrandingGradient,
   isSafeBrandingGradientOrNone,
 } from '../utils/branding-css.util';
+import {
+  AUTH_BACKGROUND_URL_MAX_LENGTH,
+  isSafeAuthBackgroundImageUrl,
+  isSafeAuthBackgroundVideoUrl,
+} from '../utils/branding-settings.util';
 import {
   QR_DARK_HEX_PATTERN,
   QR_LOGO_SRC_MAX_LENGTH,
@@ -600,6 +607,87 @@ export class AppBackgroundDto {
   @ValidateNested()
   @Type(() => AppBackgroundTextureDto)
   public texture?: AppBackgroundTextureDto;
+}
+
+/**
+ * `authBackground.kind` must agree with `authBackground.url`.
+ *
+ * ONE BLOCK, ONE DECISION. `kind` says what `url` means and `mergeBrandingSettings`
+ * replaces the pair whole, so a block whose halves disagree is not a partial
+ * patch — it is a block that renders nothing. The reader would quietly drop it
+ * to `{ kind: 'none', url: null }`, which would answer `200 OK` for a
+ * background the operator believed they had just saved, so the disagreement is
+ * refused here, while there is still an operator to tell.
+ *
+ * The URL rules themselves live in `branding-settings.util.ts`
+ * (`isSafeAuthBackgroundImageUrl` / `isSafeAuthBackgroundVideoUrl`) and are the
+ * same functions `readAuthBackground` applies, so the write guard and the
+ * reader cannot drift apart. `@IsIn()` above reports an unknown kind; this
+ * validator then answers `true` for it, so each one judges one thing.
+ */
+function IsAuthBackgroundKind(
+  validationOptions?: ValidationOptions,
+): PropertyDecorator {
+  return ValidateBy(
+    {
+      name: 'isAuthBackgroundKind',
+      validator: {
+        validate: (value: unknown, args?: ValidationArguments): boolean => {
+          if (
+            typeof value !== 'string' ||
+            !(AUTH_BACKGROUND_KINDS as readonly string[]).includes(value)
+          ) {
+            return true;
+          }
+          const url = (args?.object as { url?: unknown } | undefined)?.url;
+          if (value === 'none') {
+            return url === null || url === undefined;
+          }
+          if (typeof url !== 'string' || url.length === 0) {
+            return false;
+          }
+          return value === 'image'
+            ? isSafeAuthBackgroundImageUrl(url)
+            : isSafeAuthBackgroundVideoUrl(url);
+        },
+        defaultMessage: (args?: ValidationArguments): string => {
+          const kind = args?.value;
+          const url = (args?.object as { url?: unknown } | undefined)?.url;
+          if (kind === 'none') {
+            return `$property is "none", so url must be null — an entry-screen background needs kind "image" or "video"; received ${describeRejectedValue(url)}`;
+          }
+          const allowed =
+            kind === 'video'
+              ? 'an absolute https:// URL with no credentials and no spaces, or a video uploaded on the branding page (/uploads/branding/<file>.mp4 or .webm)'
+              : 'an absolute https:// URL with no credentials and no spaces, or a safe /uploads/branding/ path';
+          return `$property is "${String(kind)}", so url must be ${allowed} of at most ${AUTH_BACKGROUND_URL_MAX_LENGTH} characters; received ${describeRejectedValue(url)}`;
+        },
+      },
+    },
+    validationOptions,
+  );
+}
+
+/**
+ * Background media for the WEB cabinet's entry screens (sign in, sign up,
+ * "forgot password") — root-only, never part of a brightness variant.
+ *
+ * The block is replaced WHOLE by `mergeBrandingSettings`, so the request must
+ * describe it completely: `kind` is required, `none` must carry no URL, and
+ * `image` / `video` must carry one. `url` may be `null` only alongside `none`
+ * (that is the shipped default the panel sends), hence the `@ValidateIf`
+ * instead of `@IsOptional()`, which would let a `url` through on `none`.
+ */
+export class AuthBackgroundDto {
+  @IsIn(AUTH_BACKGROUND_KINDS as readonly string[])
+  @IsAuthBackgroundKind()
+  public kind!: AuthBackgroundKind;
+
+  @ValidateIf((_, value: unknown) => value !== null && value !== undefined)
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
+  @IsString()
+  @MaxLength(AUTH_BACKGROUND_URL_MAX_LENGTH)
+  public url?: string | null;
 }
 
 export class CornerRadiiDto {
@@ -1293,6 +1381,18 @@ export class UpdateBrandingSettingsDto {
   @ValidateNested()
   @Type(() => AppBackgroundDto)
   public appBackground?: AppBackgroundDto;
+
+  /**
+   * Background media for the WEB cabinet's entry screens. Root-only: it is
+   * deliberately absent from `BrandingThemeVariantDto`, exactly as it is absent
+   * from `BrandingThemeVariant` in the interface — brightness snapshots carry
+   * the signed-in cabinet's colours, never the sign-in wallpaper.
+   */
+  @IsOptional()
+  @IsObject()
+  @ValidateNested()
+  @Type(() => AuthBackgroundDto)
+  public authBackground?: AuthBackgroundDto;
 
   @IsOptional()
   @IsIn(ICON_COLOR_MODES as readonly string[])

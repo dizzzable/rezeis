@@ -78,6 +78,7 @@ import { createQrLogoCheckStore, qrLogoSaveRefusal } from "./qr-logo-check";
 import { createBrowserQrLogoChecker } from "./qr-logo-check-browser";
 import { createQrLogoUploadStore } from "./qr-logo-upload";
 import { AppBackgroundSection } from "./app-background-section";
+import { AuthBackgroundSection } from "./auth-background-section";
 import { CardEffectSlotsSection, type CardEffectSlot } from "./card-effect-slots-section";
 import { GradientBuilder } from "./gradient-builder";
 import { useCustomGradients } from "./use-custom-gradients";
@@ -123,6 +124,7 @@ const BRANDING_TABS = [
   'nav',
   'servers',
   'qr',
+  'authbg',
 ] as const;
 type BrandingTab = (typeof BRANDING_TABS)[number];
 
@@ -212,6 +214,7 @@ export function tabForBrandingField(field: string): BrandingTab {
   if (field.startsWith('nav')) return 'nav';
   if (field === 'serversGlobe') return 'servers';
   if (field === 'qrStyle') return 'qr';
+  if (field === 'authBackground') return 'authbg';
   return 'brand';
 }
 
@@ -235,6 +238,32 @@ async function uploadBrandingAsset(file: File): Promise<string> {
     headers: { "Content-Type": "multipart/form-data" },
   });
   return data.url;
+}
+
+/**
+ * Upload the entry-screen background — a photo or a video, one picker each —
+ * → the URL plus the kind the API sniffed from the bytes. Its own endpoint
+ * because its ceilings are the slot's (8 MB image / 128 MB video), not the
+ * branding assets'.
+ */
+async function uploadAuthBackground(
+  file: File,
+  previousUrl: string | null,
+): Promise<{ kind: "image" | "video"; url: string }> {
+  const form = new FormData();
+  form.append("file", file);
+  // The address this pick replaces. The API removes it only when the saved row
+  // does not name it — a file staged and then dropped in this session, which
+  // nothing would ever point at again.
+  if (previousUrl !== null && previousUrl.length > 0) {
+    form.append("previous", previousUrl);
+  }
+  const { data } = await api.post<{ kind: "image" | "video"; url: string }>(
+    "/admin/settings/branding/auth-background-upload",
+    form,
+    { headers: { "Content-Type": "multipart/form-data" } },
+  );
+  return { kind: data.kind, url: data.url };
 }
 
 /**
@@ -275,6 +304,8 @@ export default function WebReiwaPage() {
     gradientInvalid: t('brandingPage.invalidGradient'),
     qrDarkTooLight: t('brandingPage.qr.tooLight'),
     qrLogoInvalid: t('brandingPage.qr.logo.invalid'),
+    authBackgroundUrlRequired: t('brandingPage.authBackground.required'),
+    authBackgroundUrlInvalid: t('brandingPage.authBackground.invalid'),
   }), [t]);
   // One store for the page's life: the QR tab starts checks and shows their
   // verdicts, and the save below refuses a logo whose check has not passed.
@@ -2318,6 +2349,37 @@ export default function WebReiwaPage() {
                     brandLogoUrl={watchedValues.logoUrl}
                     logoUpload={qrLogoUpload}
                     logoCheck={qrLogoCheck}
+                  />
+                ) : (
+                  <></>
+                )
+              }
+            />
+          </div>
+
+          {/* ── Entry-screen background tab ─────────────────────────────── */}
+          <div className={gate('authbg')}>
+            <Controller
+              name="authBackground"
+              control={form.control}
+              render={({ field }) =>
+                // Mounted only while its own tab is showing, like the globe and
+                // the QR samples: the section renders a real <img>/<video>, and
+                // an address typed here must not be requested from every other
+                // tab. A refused save switches here first
+                // (`tabForBrandingField`), so the error is read by a mounted
+                // section.
+                tab === 'authbg' ? (
+                  <AuthBackgroundSection
+                    value={field.value}
+                    onChange={(next) => {
+                      // A refusal about the address the operator has since
+                      // changed would only contradict the preview.
+                      form.clearErrors('authBackground');
+                      field.onChange(next);
+                    }}
+                    upload={uploadAuthBackground}
+                    error={form.formState.errors.authBackground?.url?.message}
                   />
                 ) : (
                   <></>
